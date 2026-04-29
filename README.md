@@ -12,7 +12,7 @@ once Phase 1D wires up the PyO3 binding.
 
 ```
 crates/
-  sase_core/      # pure-Rust core (wire types now; parser in 1B/1C)
+  sase_core/      # pure-Rust core: wire types + full-file parser
   sase_core_py/   # PyO3 binding placeholder (filled in in Phase 1D)
 ```
 
@@ -73,26 +73,41 @@ pub fn parse_project_bytes(
 ) -> Result<Vec<ChangeSpecWire>, ParseErrorWire>;
 ```
 
-Phase 1B handles ChangeSpec boundaries (`## ChangeSpec` headers, direct
-`NAME:` starts, two-blank-line / new-NAME terminators) and the scalar
+Phase 1C handles ChangeSpec boundaries (`## ChangeSpec` headers, direct
+`NAME:` starts, two-blank-line / new-NAME terminators), the scalar
 fields `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`, `STATUS`,
-`TEST TARGETS`, and `KICKSTART`. Section bodies (`COMMITS`, `HOOKS`,
-`COMMENTS`, `MENTORS`, `TIMESTAMPS`, `DELTAS`) are recognized so they
-don't leak into scalar parsing, but their entries stay empty until
-Phase 1C.
+`TEST TARGETS`, and `KICKSTART`, **and** structured section parsing for
+`COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, and `DELTAS`.
+Suffix-prefix parsing matches `sase.ace.changespec.suffix_utils`
+(including `~!:`, `~@:`, `~$:`, `?$:`, `!:`, `@:`, `$:`, `%:`, `^:`,
+the legacy `~:` plain form, the standalone `@`/`%`/`^` markers, and the
+`!: metahook | ...` → `metahook_complete` promotion).
 
 `source_span.start_line` / `end_line` are inclusive 1-based and reflect
 the real last non-blank line of the spec, which improves on Phase 0's
 Python placeholder (`end_line == start_line`).
 
+### Documented incompatibility: `source_span.end_line`
+
+Python's `changespec_to_wire` writes `end_line == start_line` because
+the Python parser does not track end positions. Rust tracks real end
+lines (a deliberate Phase 1 improvement, per
+`sase_100/plans/202604/rust_backend_phase1.md`).
+
+`crates/sase_core/tests/golden_corpus_parity.rs` normalizes Rust's
+`end_line` down to `start_line` before comparing against the Python
+golden snapshot, so the rest of the wire is checked byte-for-byte. The
+real end-line behavior is exercised by parser unit tests instead.
+Phase 1F decides whether to backfill end-line tracking in Python or
+keep this normalization at the parity boundary.
+
 ## Phase status
 
-Currently complete: **Phase 1A** (workspace + wire types) and
-**Phase 1B** (scalar parser skeleton) of
-`sase_100/plans/202604/rust_backend_phase1.md`. Subsequent phases:
+Currently complete: **Phase 1A** (workspace + wire types),
+**Phase 1B** (scalar parser skeleton), and **Phase 1C** (section parser
+parity) of `sase_100/plans/202604/rust_backend_phase1.md`. Subsequent
+phases:
 
-- **1C** — section parser parity (commits, hooks, comments, mentors,
-  timestamps, deltas, suffixes).
 - **1D** — PyO3 binding + Python adapter in `sase_100`.
 - **1E** — dev workflow, benchmarks, packaging decision.
 - **1F** — cross-repo parity gate and handoff.
