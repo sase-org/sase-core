@@ -9,6 +9,7 @@
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod agent_scan;
+pub mod git_query;
 pub mod parser;
 pub mod query;
 pub mod sections;
@@ -24,6 +25,12 @@ pub use agent_scan::{
     WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use git_query::{
+    derive_git_workspace_name, parse_git_branch_name,
+    parse_git_conflicted_files, parse_git_local_changes,
+    parse_git_name_status_z, GitNameStatusEntryWire,
+    GIT_QUERY_WIRE_SCHEMA_VERSION,
 };
 pub use parser::parse_project_bytes;
 pub use query::{

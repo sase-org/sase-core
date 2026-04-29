@@ -15,6 +15,11 @@
 //! - `read_status_from_lines(lines: list[str], changespec_name: str) -> str | None`
 //! - `apply_status_update(lines: list[str], changespec_name: str, new_status: str) -> str`
 //! - `plan_status_transition(request: dict) -> dict`
+//! - `parse_git_name_status_z(stdout: str) -> list[dict]`
+//! - `parse_git_branch_name(stdout: str) -> str | None`
+//! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
+//! - `parse_git_conflicted_files(stdout: str) -> list[str]`
+//! - `parse_git_local_changes(stdout: str) -> str | None`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -41,6 +46,13 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
     AgentArtifactScanOptionsWire,
+};
+use sase_core::git_query::{
+    derive_git_workspace_name as core_derive_git_workspace_name,
+    parse_git_branch_name as core_parse_git_branch_name,
+    parse_git_conflicted_files as core_parse_git_conflicted_files,
+    parse_git_local_changes as core_parse_git_local_changes,
+    parse_git_name_status_z as core_parse_git_name_status_z,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::status::{
@@ -300,6 +312,99 @@ fn py_plan_status_transition<'py>(
     json_value_to_py(py, &value)
 }
 
+// --- Phase 5C Git query parser bindings -----------------------------------
+
+/// Parse the NUL-delimited output of `git diff --name-status -z` into a
+/// `list[dict]` mirroring `GitNameStatusEntryWire` JSON shape.
+///
+/// Mirrors `sase.core.git_query_facade._parse_git_name_status_z_python`.
+/// The Python facade rehydrates each dict into a
+/// `GitNameStatusEntryWire` via `git_name_status_entry_from_dict` and
+/// flattens to `list[tuple[str, str]]` for legacy callers. The dict
+/// shape (`{"status": str, "path": str}`) is the same one
+/// `git_query_wire_to_json_dict` produces, so no extra translation is
+/// required.
+#[pyfunction]
+#[pyo3(name = "parse_git_name_status_z")]
+fn py_parse_git_name_status_z<'py>(
+    py: Python<'py>,
+    stdout: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let entries = core_parse_git_name_status_z(stdout);
+    let list = PyList::empty_bound(py);
+    for entry in &entries {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("status", &entry.status)?;
+        dict.set_item("path", &entry.path)?;
+        list.append(dict)?;
+    }
+    Ok(list)
+}
+
+/// Normalize `git rev-parse --abbrev-ref HEAD` stdout into a branch
+/// name. Returns `None` for empty stdout or the detached-HEAD sentinel.
+///
+/// Mirrors `sase.core.git_query_facade.parse_git_branch_name`.
+#[pyfunction]
+#[pyo3(name = "parse_git_branch_name")]
+fn py_parse_git_branch_name(py: Python<'_>, stdout: &str) -> PyObject {
+    match core_parse_git_branch_name(stdout) {
+        Some(name) => name.into_py(py),
+        None => py.None(),
+    }
+}
+
+/// Derive a workspace name from a remote URL (preferred) or repository
+/// root path. Returns `None` when neither input produces a non-empty
+/// name.
+///
+/// Mirrors `sase.core.git_query_facade.derive_git_workspace_name`.
+#[pyfunction]
+#[pyo3(name = "derive_git_workspace_name", signature = (remote_url, root_path))]
+fn py_derive_git_workspace_name(
+    py: Python<'_>,
+    remote_url: Option<&str>,
+    root_path: Option<&str>,
+) -> PyObject {
+    match core_derive_git_workspace_name(remote_url, root_path) {
+        Some(name) => name.into_py(py),
+        None => py.None(),
+    }
+}
+
+/// Split `git diff --name-only --diff-filter=U` stdout into a
+/// `list[str]` of conflicted paths (blank lines dropped, order
+/// preserved).
+///
+/// Mirrors `sase.core.git_query_facade.parse_git_conflicted_files`.
+#[pyfunction]
+#[pyo3(name = "parse_git_conflicted_files")]
+fn py_parse_git_conflicted_files<'py>(
+    py: Python<'py>,
+    stdout: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let paths = core_parse_git_conflicted_files(stdout);
+    let list = PyList::empty_bound(py);
+    for p in paths {
+        list.append(p)?;
+    }
+    Ok(list)
+}
+
+/// Normalize `git status --porcelain` stdout into a clean/dirty signal.
+/// Returns `None` for an empty/whitespace-only tree, the stripped text
+/// otherwise.
+///
+/// Mirrors `sase.core.git_query_facade.parse_git_local_changes`.
+#[pyfunction]
+#[pyo3(name = "parse_git_local_changes")]
+fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
+    match core_parse_git_local_changes(stdout) {
+        Some(text) => text.into_py(py),
+        None => py.None(),
+    }
+}
+
 /// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
 ///
 /// Translates the dict to `serde_json::Value` first so missing fields use
@@ -522,6 +627,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_read_status_from_lines, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_status_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_status_transition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_git_name_status_z, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_git_branch_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
     Ok(())
 }
 
