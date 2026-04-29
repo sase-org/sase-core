@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sase-core-rs"
+version = "0.1.0"
+description = "Rust core for the sase TUI/CLI: PyO3 bindings exposing the ChangeSpec parser, query language, agent-artifact scan, status state machine, and git-query parsers."
+readme = "PYPI_README.md"
+requires-python = ">=3.12"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "sase-org" }]
+keywords = ["sase", "changespec", "pyo3", "rust"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/sase-org/sase-core"
+Repository = "https://github.com/sase-org/sase-core"
+Issues = "https://github.com/sase-org/sase-core/issues"
+
+# Distribution name (`sase-core-rs`) differs from the import module name
+# (`sase_core_rs`). The crate name `sase_core_py` is the Cargo crate name
+# only; consumers `import sase_core_rs` and `pip install sase-core-rs`.
+[tool.maturin]
+module-name = "sase_core_rs"
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+# Strip release wheels so platform downloads stay small.
+strip = true

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-checks:
+    name: cargo fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(grep -E '^channel\s*=' rust-toolchain.toml | sed -E 's/.*=\s*"([^"]+)".*/\1/')
+          components=$(grep -E '^components\s*=' rust-toolchain.toml | sed -E 's/.*=\s*\[(.*)\]/\1/' | tr -d '"')
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "components=${components}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-checks
+          workspaces: ". -> target"
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  wheel-smoke:
+    name: maturin build + import smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wheel-smoke
+          workspaces: ". -> target"
+
+      - name: Cache pip / maturin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/maturin
+          key: ${{ runner.os }}-maturin-${{ hashFiles('Cargo.lock', 'crates/sase_core_py/Cargo.toml', 'crates/sase_core_py/pyproject.toml') }}
+
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/sase_core_py
+          args: --release --out dist --strip
+          manylinux: "2_28"
+
+      - name: Run wheel smoke in fresh venv
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
+          /tmp/smoke/bin/python -c "import sase_core_rs; print('ok')"
+          /tmp/smoke/bin/python -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+          /tmp/smoke/bin/python -c "
+          import sase_core_rs
+          # '(' is a syntactically incomplete query: parser sees '(' then
+          # EOF, which is a stable error shape across the parser refactors
+          # in Phase 2. '!!!' is NOT used because '!' is the error-suffix
+          # operator and parses as a string match.
+          try:
+              sase_core_rs.parse_query('(')
+          except ValueError as e:
+              print('expected ValueError:', e)
+          else:
+              raise SystemExit('parse_query(\"(\") should have raised ValueError')
+          "
+
+      - name: twine check
+        run: |
+          /tmp/smoke/bin/pip install --quiet twine
+          /tmp/smoke/bin/twine check crates/sase_core_py/dist/*

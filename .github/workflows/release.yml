@@ -1,0 +1,231 @@
+name: Release wheels
+
+# Builds the Phase 6 wheel matrix for `sase-core-rs` (import module
+# `sase_core_rs`) using maturin.
+#
+# Target matrix (CPython 3.12+ via PyO3 abi3-py312 — one wheel per
+# platform/architecture covers 3.12, 3.13, 3.14):
+#
+#   - Linux x86_64       (manylinux 2_28)
+#   - Linux aarch64      (manylinux 2_28, cross via QEMU)
+#   - macOS universal2   (x86_64 + arm64)
+#   - Windows x86_64
+#
+# An sdist is also built and uploaded so source installs can fall back
+# to building from the published source distribution if no wheel matches.
+#
+# Triggers:
+#   - tag push  vX.Y.Z       — full matrix + smoke + twine check + (optional) publish.
+#   - workflow_dispatch      — full matrix + smoke + twine check (no publish).
+#
+# Publishing: enabled only when a tag is pushed AND the
+# `PYPI_API_TOKEN` repository secret is set. Otherwise the workflow
+# uploads the artifacts as workflow artifacts only — they can be
+# downloaded and published manually with `twine upload dist/*` (the
+# fallback documented in `plans/202604/rust_backend_phase6_phase6a_handoff.md`
+# in the sase repo).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  MATURIN_VERSION: "1.7"
+
+jobs:
+  linux:
+    name: linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-${{ matrix.target }}
+          workspaces: ". -> target"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          working-directory: crates/sase_core_py
+          args: --release --out dist --strip
+          manylinux: "2_28"
+
+      - name: Smoke test (x86_64 only — aarch64 skipped because the host runner cannot import the cross-compiled wheel)
+        if: matrix.target == 'x86_64'
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
+          /tmp/smoke/bin/python -c "import sase_core_rs; print('import ok')"
+          /tmp/smoke/bin/python -c "import sase_core_rs; print('parse_query ok:', sase_core_rs.parse_query('status:Ready'))"
+          /tmp/smoke/bin/python - <<'PY'
+          import sase_core_rs
+          # '(' is a syntactically incomplete query: parser sees '(' then
+          # EOF, which is a stable error shape across the parser refactors
+          # in Phase 2. '!!!' is NOT used because '!' is the error-suffix
+          # operator and parses as a string match.
+          try:
+              sase_core_rs.parse_query('(')
+          except ValueError as e:
+              print('expected ValueError on bad query:', e)
+          else:
+              raise SystemExit('parse_query("(") should have raised ValueError')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: crates/sase_core_py/dist
+
+  macos:
+    name: macos universal2
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-universal2
+          workspaces: ". -> target"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: universal2-apple-darwin
+          working-directory: crates/sase_core_py
+          args: --release --out dist --strip
+
+      - name: Smoke test
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
+          /tmp/smoke/bin/python -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-universal2
+          path: crates/sase_core_py/dist
+
+  windows:
+    name: windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-x64
+          workspaces: ". -> target"
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          working-directory: crates/sase_core_py
+          args: --release --out dist --strip
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          python -m venv $env:TEMP\smoke
+          & $env:TEMP\smoke\Scripts\python.exe -m pip install --upgrade pip
+          $wheel = Get-ChildItem crates\sase_core_py\dist\*.whl | Select-Object -First 1
+          & $env:TEMP\smoke\Scripts\python.exe -m pip install $wheel.FullName
+          & $env:TEMP\smoke\Scripts\python.exe -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: crates/sase_core_py/dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/sase_core_py
+          command: sdist
+          args: --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: crates/sase_core_py/dist
+
+  metadata-check:
+    name: twine check
+    needs: [linux, macos, windows, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet twine
+      - run: ls -la dist
+      - run: twine check dist/*
+
+  publish:
+    name: publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: metadata-check
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Publish (skipped if PYPI_API_TOKEN is unset)
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${TWINE_PASSWORD}" ]; then
+            echo "PYPI_API_TOKEN not configured — skipping publish."
+            echo "Artifacts remain available under the workflow's run page."
+            exit 0
+          fi
+          pip install --quiet twine
+          twine upload --non-interactive --skip-existing dist/*
