@@ -1,0 +1,20 @@
+[package]
+name = "sase_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust core for the sase ChangeSpec wire contract."
+
+[lib]
+name = "sase_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "sase_core_py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings placeholder for sase_core. Wired up in Phase 1D."
+publish = false
+
+# Phase 1A intentionally does NOT depend on PyO3 yet — adding the dep would
+# pull pyo3 into the workspace lockfile and require a Python toolchain at
+# `cargo test --workspace` time. Phase 1D introduces:
+#   pyo3 = { version = "0.22", features = ["extension-module"] }
+#   [lib] crate-type = ["cdylib"]
+# and the actual `parse_project_bytes` binding.
+
+[lib]
+name = "sase_core_py"
+path = "src/lib.rs"
+
+[dependencies]
+sase_core = { path = "../sase_core" }
