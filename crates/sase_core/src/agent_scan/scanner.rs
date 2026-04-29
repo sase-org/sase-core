@@ -369,6 +369,7 @@ fn coerce_float(value: Option<&Value>) -> Option<f64> {
 
 fn coerce_str_list(value: Option<&Value>) -> Vec<String> {
     match value {
+        Some(Value::String(s)) => vec![s.clone()],
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|v| match v {
