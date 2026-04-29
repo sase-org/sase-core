@@ -477,6 +477,34 @@ fn running_record_carries_agent_meta() {
 }
 
 #[test]
+fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260429131818");
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "planner",
+            "plan_submitted_at": "2026-04-29T17:20:22.951546+00:00",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, "20260429131818");
+    let meta = rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(
+        meta.plan_submitted_at,
+        vec!["2026-04-29T17:20:22.951546+00:00".to_string()]
+    );
+}
+
+#[test]
 fn done_record_parses_done_marker() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
