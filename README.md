@@ -63,6 +63,24 @@ All `rust-*` targets short-circuit with a friendly message when `../sase-core` i
 | `ChangeSpecWire`       | `ChangeSpecWire`       |
 | `ParseErrorWire`       | `ParseErrorWire`       |
 
+`crates/sase_core/src/agent_scan/wire.rs` mirrors
+`sase_100/src/sase/core/agent_scan_wire.py` (Phase 3B):
+
+| Rust type                       | Python dataclass                |
+| ------------------------------- | ------------------------------- |
+| `AgentArtifactScanOptionsWire`  | `AgentArtifactScanOptionsWire`  |
+| `AgentArtifactScanStatsWire`    | `AgentArtifactScanStatsWire`    |
+| `DoneMarkerWire`                | `DoneMarkerWire`                |
+| `AgentMetaWire`                 | `AgentMetaWire`                 |
+| `RunningMarkerWire`             | `RunningMarkerWire`             |
+| `WaitingMarkerWire`             | `WaitingMarkerWire`             |
+| `WorkflowStateWire`             | `WorkflowStateWire`             |
+| `WorkflowStepStateWire`         | `WorkflowStepStateWire`         |
+| `PromptStepMarkerWire`          | `PromptStepMarkerWire`          |
+| `PlanPathMarkerWire`            | `PlanPathMarkerWire`            |
+| `AgentArtifactRecordWire`       | `AgentArtifactRecordWire`       |
+| `AgentArtifactScanWire`         | `AgentArtifactScanWire`         |
+
 JSON shape rules (enforced by tests):
 
 - `Option<T>::None` → JSON `null` (never omitted).
@@ -111,6 +129,35 @@ parser parity), **Phase 1D** (PyO3 binding + Python adapter in `sase_100`), and 
 packaging decision) of `sase_100/plans/202604/rust_backend_phase1.md`. Remaining work:
 
 - **1F** — cross-repo parity gate and handoff.
+
+For Phase 3 (`rust_backend_phase3_agent_scan.md`): **Phase 3B** added the
+pure-Rust artifact filesystem snapshot scanner under
+`crates/sase_core/src/agent_scan/` and parity tests in
+`crates/sase_core/tests/agent_scan_parity.rs`. The PyO3 binding for
+`scan_agent_artifacts` lands in Phase 3C.
+
+## Agent artifact scanner (Phase 3B)
+
+`crates/sase_core/src/agent_scan/scanner.rs` exposes:
+
+```rust
+pub fn scan_agent_artifacts(
+    projects_root: &Path,
+    options: AgentArtifactScanOptionsWire,
+) -> AgentArtifactScanWire;
+```
+
+It walks `projects_root/<project>/artifacts/<workflow>/<timestamp>/` for
+the workflow folder families pinned in `agent_scan_wire.py`
+(`ace-run`, `run`, `fix-hook`, `crs`, `summarize-hook`, plus `mentor-*`
+and `workflow-*` prefixes), and parses the marker files `agent_meta.json`,
+`done.json`, `running.json`, `waiting.json`, `workflow_state.json`,
+`plan_path.json`, and `prompt_step_*.json`. Soft errors (unreadable
+directories, malformed marker JSON, marker JSON whose top level is not a
+JSON object) are absorbed silently and counted on
+`AgentArtifactScanStatsWire`. Records are sorted by
+`(project_name, workflow_dir_name, timestamp)` before returning, matching
+`scan_agent_artifacts_python` in `sase_100`.
 
 ## Python binding (`sase_core_rs`)
 

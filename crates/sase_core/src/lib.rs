@@ -8,12 +8,22 @@
 //! corpus. The crate is deliberately free of PyO3 types so later
 //! UniFFI/WASM/server work can reuse the same logic.
 
+pub mod agent_scan;
 pub mod parser;
 pub mod query;
 pub mod sections;
 pub mod suffix;
 pub mod wire;
 
+pub use agent_scan::{
+    is_supported_workflow_dir, scan_agent_artifacts, AgentArtifactRecordWire,
+    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
+    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, PlanPathMarkerWire,
+    PromptStepMarkerWire, RunningMarkerWire, WaitingMarkerWire,
+    WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
+    WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
 pub use parser::parse_project_bytes;
 pub use query::{
     canonicalize_query, compile_query, evaluate_query_many, evaluate_query_one,
