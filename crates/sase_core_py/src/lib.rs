@@ -10,6 +10,11 @@
 //! - `canonicalize_query(query: str) -> str`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
+//! - `remove_workspace_suffix(status: str) -> str`
+//! - `is_valid_status_transition(from_status: str, to_status: str) -> bool`
+//! - `read_status_from_lines(lines: list[str], changespec_name: str) -> str | None`
+//! - `apply_status_update(lines: list[str], changespec_name: str, new_status: str) -> str`
+//! - `plan_status_transition(request: dict) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -32,12 +37,20 @@ use std::path::PathBuf;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
     AgentArtifactScanOptionsWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
+use sase_core::status::{
+    apply_status_update as core_apply_status_update,
+    is_valid_transition as core_is_valid_transition,
+    plan_status_transition as core_plan_status_transition,
+    read_status_from_lines as core_read_status_from_lines,
+    remove_workspace_suffix as core_remove_workspace_suffix,
+    StatusTransitionRequestWire,
+};
 use sase_core::wire::ChangeSpecWire;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -184,6 +197,109 @@ fn py_scan_agent_artifacts<'py>(
     json_value_to_py(py, &value)
 }
 
+// --- Phase 4C status state machine bindings -------------------------------
+
+/// Strip workspace and legacy READY-TO-MAIL suffixes from a STATUS string.
+///
+/// Mirrors `sase.status_state_machine.constants.remove_workspace_suffix`.
+/// Useful for tests and for callers that want the canonical base status
+/// without going through the planner.
+#[pyfunction]
+#[pyo3(name = "remove_workspace_suffix")]
+fn py_remove_workspace_suffix(status: &str) -> String {
+    core_remove_workspace_suffix(status)
+}
+
+/// Whether a transition from *from_status* to *to_status* is allowed.
+///
+/// Mirrors `sase.status_state_machine.constants.is_valid_transition`.
+/// Workspace suffixes on either side are stripped before validation.
+#[pyfunction]
+#[pyo3(name = "is_valid_status_transition")]
+fn py_is_valid_status_transition(from_status: &str, to_status: &str) -> bool {
+    core_is_valid_transition(from_status, to_status)
+}
+
+/// Read the STATUS for *changespec_name* from a list of project-file lines.
+///
+/// Mirrors `sase.status_state_machine.field_updates.read_status_from_lines_python`.
+/// Returns `None` when the ChangeSpec is not present.
+#[pyfunction]
+#[pyo3(name = "read_status_from_lines")]
+fn py_read_status_from_lines<'py>(
+    py: Python<'py>,
+    lines: &Bound<'py, PyList>,
+    changespec_name: &str,
+) -> PyResult<PyObject> {
+    let mut owned: Vec<String> = Vec::with_capacity(lines.len());
+    for (idx, item) in lines.iter().enumerate() {
+        let s: String = item.extract().map_err(|_| {
+            PyValueError::new_err(format!("lines[{idx}] must be a string"))
+        })?;
+        owned.push(s);
+    }
+    let result = core_read_status_from_lines(&owned, changespec_name);
+    Ok(match result {
+        Some(s) => s.into_py(py),
+        None => py.None(),
+    })
+}
+
+/// Apply a STATUS update to a list of project-file lines and return the
+/// updated content as a single string.
+///
+/// Mirrors `sase.status_state_machine.field_updates.apply_status_update_python`.
+#[pyfunction]
+#[pyo3(name = "apply_status_update")]
+fn py_apply_status_update<'py>(
+    lines: &Bound<'py, PyList>,
+    changespec_name: &str,
+    new_status: &str,
+) -> PyResult<String> {
+    let mut owned: Vec<String> = Vec::with_capacity(lines.len());
+    for (idx, item) in lines.iter().enumerate() {
+        let s: String = item.extract().map_err(|_| {
+            PyValueError::new_err(format!("lines[{idx}] must be a string"))
+        })?;
+        owned.push(s);
+    }
+    Ok(core_apply_status_update(
+        &owned,
+        changespec_name,
+        new_status,
+    ))
+}
+
+/// Plan a status transition for one ChangeSpec.
+///
+/// *request* must be a `StatusTransitionRequestWire`-shape dict (see
+/// `sase.core.status_wire`). The result is a
+/// `StatusTransitionPlanWire`-shape dict — the Python adapter rehydrates
+/// it via `status_plan_from_dict`.
+///
+/// Schema-version mismatches and structurally invalid requests surface as
+/// `ValueError` so the existing UI validation layer can catch them.
+#[pyfunction]
+#[pyo3(name = "plan_status_transition")]
+fn py_plan_status_transition<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: StatusTransitionRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid StatusTransitionRequestWire dict: {e}"
+            ))
+        })?;
+    let plan =
+        core_plan_status_transition(&req).map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
 ///
 /// Translates the dict to `serde_json::Value` first so missing fields use
@@ -320,6 +436,13 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
         }
         return Ok(JsonValue::Array(arr));
     }
+    if let Ok(tuple) = value.downcast::<PyTuple>() {
+        let mut arr = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            arr.push(py_to_json_value(&item)?);
+        }
+        return Ok(JsonValue::Array(arr));
+    }
     if let Ok(dict) = value.downcast::<PyDict>() {
         let mut obj = JsonMap::with_capacity(dict.len());
         for (k, v) in dict.iter() {
@@ -394,6 +517,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_remove_workspace_suffix, m)?)?;
+    m.add_function(wrap_pyfunction!(py_is_valid_status_transition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_status_from_lines, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_status_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_status_transition, m)?)?;
     Ok(())
 }
 

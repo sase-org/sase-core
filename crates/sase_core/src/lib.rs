@@ -12,6 +12,7 @@ pub mod agent_scan;
 pub mod parser;
 pub mod query;
 pub mod sections;
+pub mod status;
 pub mod suffix;
 pub mod wire;
 
@@ -31,6 +32,19 @@ pub use query::{
     project_dir_name, strip_reverted_suffix, tokenize_query, QueryErrorWire,
     QueryEvaluationContext, QueryExprWire, QueryProgram, QueryProgramWire,
     QueryTokenKind, QueryTokenWire,
+};
+pub use status::{
+    apply_status_update as apply_status_update_lines, get_next_suffix_number,
+    has_suffix as has_changespec_suffix, is_valid_transition,
+    plan_status_transition, read_status_from_lines, remove_workspace_suffix,
+    status_plan_from_json_value, status_request_from_json_value,
+    valid_transitions_from, ChangespecChildWire, StatusFieldReadWire,
+    StatusFieldUpdateWire, StatusTransitionPlanWire,
+    StatusTransitionRequestWire, ARCHIVE_ACTION_FROM_ARCHIVE,
+    ARCHIVE_ACTION_NONE, ARCHIVE_ACTION_TO_ARCHIVE, ARCHIVE_STATUSES,
+    MENTOR_ACTION_CLEAR, MENTOR_ACTION_NONE, MENTOR_ACTION_SET,
+    STATUS_WIRE_SCHEMA_VERSION, SUFFIX_ACTION_APPEND, SUFFIX_ACTION_NONE,
+    SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
 pub use wire::{
