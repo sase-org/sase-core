@@ -1,12 +1,15 @@
 //! PyO3 bindings for `sase_core`.
 //!
-//! Phase 1D exposed `parse_project_bytes`. Phase 2D adds the query
-//! tokenizer/parser/evaluator behind:
+//! Phase 1D exposed `parse_project_bytes`. Phase 2D added the query
+//! tokenizer/parser/evaluator. Phase 3C adds the agent-artifact snapshot
+//! scanner. Currently exposed:
 //!
+//! - `parse_project_bytes(path: str, data: bytes) -> list[dict]`
 //! - `tokenize_query(query: str) -> list[dict]`
 //! - `parse_query(query: str) -> dict`
 //! - `canonicalize_query(query: str) -> str`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
+//! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -25,9 +28,15 @@
 // outside the user-written function body.
 #![allow(clippy::useless_conversion)]
 
+use std::path::PathBuf;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use sase_core::agent_scan::{
+    scan_agent_artifacts as core_scan_agent_artifacts,
+    AgentArtifactScanOptionsWire,
+};
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::wire::ChangeSpecWire;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -143,6 +152,52 @@ fn py_evaluate_query_many<'py>(
         list.append(b)?;
     }
     Ok(list)
+}
+
+/// Walk an agent-artifact tree and return the snapshot dict.
+///
+/// Mirrors `sase.core.agent_scan_facade.scan_agent_artifacts_python`. The
+/// dict shape matches what `agent_scan_wire_to_json_dict` produces on the
+/// Python side, so the facade can rehydrate it into the Phase 3A
+/// dataclasses without a custom JSON re-encode step.
+///
+/// `options` is an optional `AgentArtifactScanOptionsWire`-shape dict. Any
+/// fields the dict omits fall back to the wire defaults (matching the
+/// pure-Python helper's `AgentArtifactScanOptionsWire()` default). The GIL
+/// is released for the duration of the filesystem walk.
+#[pyfunction]
+#[pyo3(name = "scan_agent_artifacts", signature = (projects_root, options = None))]
+fn py_scan_agent_artifacts<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let root = PathBuf::from(projects_root);
+    let snapshot = py.allow_threads(|| core_scan_agent_artifacts(&root, opts));
+    let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
+///
+/// Translates the dict to `serde_json::Value` first so missing fields use
+/// the Rust struct's serde defaults — this matches the Python facade's
+/// "absent → default" behavior for callers who pass partial dicts.
+fn agent_scan_options_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<AgentArtifactScanOptionsWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "options is not a valid AgentArtifactScanOptionsWire dict: {e}"
+        ))
+    })
 }
 
 fn query_error_to_pyerr(err: QueryErrorWire) -> PyErr {
@@ -338,6 +393,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     Ok(())
 }
 
