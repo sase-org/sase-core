@@ -104,13 +104,34 @@ keep this normalization at the parity boundary.
 ## Phase status
 
 Currently complete: **Phase 1A** (workspace + wire types),
-**Phase 1B** (scalar parser skeleton), and **Phase 1C** (section parser
-parity) of `sase_100/plans/202604/rust_backend_phase1.md`. Subsequent
-phases:
+**Phase 1B** (scalar parser skeleton), **Phase 1C** (section parser
+parity), and **Phase 1D** (PyO3 binding + Python adapter in `sase_100`)
+of `sase_100/plans/202604/rust_backend_phase1.md`. Subsequent phases:
 
-- **1D** — PyO3 binding + Python adapter in `sase_100`.
 - **1E** — dev workflow, benchmarks, packaging decision.
 - **1F** — cross-repo parity gate and handoff.
+
+## Python binding (`sase_core_rs`)
+
+`crates/sase_core_py` is a `cdylib` that builds the Python extension
+module `sase_core_rs`. It exposes one function:
+
+```python
+sase_core_rs.parse_project_bytes(path: str, data: bytes) -> list[dict]
+```
+
+The result is plain Python `dict`/`list`/`str`/`int`/`bool`/`None`
+mirroring the `ChangeSpecWire` JSON shape — no PyO3 classes leak across
+the boundary in Phase 1. A Rust `ParseErrorWire` is surfaced as a
+Python `ValueError` whose message is the wire error's `Display` form
+(`"kind: message (file_path)"`).
+
+Building the wheel requires a Python interpreter on the host
+(`maturin develop` or `maturin build` from `crates/sase_core_py`). It
+is opt-in: the Python `sase` install does not require Rust, and
+`SASE_CORE_BACKEND=python` (the default) ignores the binding entirely.
+The `is_rust_available()` probe in `sase.core.backend` lazy-imports
+`sase_core_rs`, so a missing module never breaks startup.
 
 ## License
 

@@ -5,19 +5,24 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "PyO3 bindings placeholder for sase_core. Wired up in Phase 1D."
+description = "PyO3 bindings for sase_core: a Python extension module exposing parse_project_bytes."
 publish = false
 
-# Phase 1A intentionally does NOT depend on PyO3 yet — adding the dep would
-# pull pyo3 into the workspace lockfile and require a Python toolchain at
-# `cargo test --workspace` time. Phase 1D introduces:
-#   pyo3 = { version = "0.22", features = ["extension-module"] }
-#   [lib] crate-type = ["cdylib"]
-# and the actual `parse_project_bytes` binding.
+# Phase 1D wires PyO3 into the workspace. The pure-Rust crate `sase_core`
+# remains PyO3-free so later UniFFI/WASM/server work can keep reusing it.
+#
+# `crate-type = ["cdylib"]` is what turns this into an importable Python
+# extension. The `extension-module` feature on PyO3 means the cdylib does
+# NOT link against libpython directly; Python provides the symbols at
+# import time. That keeps `cargo build`/`cargo check` from needing a
+# Python development library on the host.
 
 [lib]
-name = "sase_core_py"
+name = "sase_core_rs"
 path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sase_core = { path = "../sase_core" }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde_json = { workspace = true }
