@@ -62,12 +62,35 @@ JSON shape rules (enforced by tests):
 `crates/sase_core/tests/python_wire_parity.rs` checks Rust JSON against a
 captured Python fixture in both directions.
 
+## Parser status
+
+`crates/sase_core/src/parser.rs` exposes:
+
+```rust
+pub fn parse_project_bytes(
+    path: &str,
+    data: &[u8],
+) -> Result<Vec<ChangeSpecWire>, ParseErrorWire>;
+```
+
+Phase 1B handles ChangeSpec boundaries (`## ChangeSpec` headers, direct
+`NAME:` starts, two-blank-line / new-NAME terminators) and the scalar
+fields `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`, `STATUS`,
+`TEST TARGETS`, and `KICKSTART`. Section bodies (`COMMITS`, `HOOKS`,
+`COMMENTS`, `MENTORS`, `TIMESTAMPS`, `DELTAS`) are recognized so they
+don't leak into scalar parsing, but their entries stay empty until
+Phase 1C.
+
+`source_span.start_line` / `end_line` are inclusive 1-based and reflect
+the real last non-blank line of the spec, which improves on Phase 0's
+Python placeholder (`end_line == start_line`).
+
 ## Phase status
 
-This is **Phase 1A** of `sase_100/plans/202604/rust_backend_phase1.md`:
-workspace + wire types only. Subsequent phases:
+Currently complete: **Phase 1A** (workspace + wire types) and
+**Phase 1B** (scalar parser skeleton) of
+`sase_100/plans/202604/rust_backend_phase1.md`. Subsequent phases:
 
-- **1B** — minimal full-file parser (scalar fields, source spans).
 - **1C** — section parser parity (commits, hooks, comments, mentors,
   timestamps, deltas, suffixes).
 - **1D** — PyO3 binding + Python adapter in `sase_100`.

@@ -41,8 +41,8 @@
 //! byte ordered comparison.
 
 use sase_core::{
-    ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire, HookWire,
-    MentorStatusLineWire, MentorWire, SourceSpanWire, TimestampWire,
+    ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
+    HookWire, MentorStatusLineWire, MentorWire, SourceSpanWire, TimestampWire,
     CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 use serde_json::Value;
