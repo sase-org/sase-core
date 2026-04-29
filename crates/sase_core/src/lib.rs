@@ -16,8 +16,11 @@ pub mod wire;
 
 pub use parser::parse_project_bytes;
 pub use query::{
-    canonicalize_query, parse_query, tokenize_query, QueryErrorWire,
-    QueryExprWire, QueryProgramWire, QueryTokenKind, QueryTokenWire,
+    canonicalize_query, compile_query, evaluate_query_many, evaluate_query_one,
+    get_base_status, get_searchable_text, has_any_status_suffix, parse_query,
+    project_dir_name, strip_reverted_suffix, tokenize_query, QueryErrorWire,
+    QueryEvaluationContext, QueryExprWire, QueryProgram, QueryProgramWire,
+    QueryTokenKind, QueryTokenWire,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
 pub use wire::{
