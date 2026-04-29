@@ -9,11 +9,16 @@
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod parser;
+pub mod query;
 pub mod sections;
 pub mod suffix;
 pub mod wire;
 
 pub use parser::parse_project_bytes;
+pub use query::{
+    canonicalize_query, parse_query, tokenize_query, QueryErrorWire,
+    QueryExprWire, QueryProgramWire, QueryTokenKind, QueryTokenWire,
+};
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
 pub use wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
