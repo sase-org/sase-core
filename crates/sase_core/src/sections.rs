@@ -311,10 +311,7 @@ pub fn parse_mentors_line(
         let Some(mentor) = current.as_mut() else {
             return;
         };
-        let timestamp = caps
-            .get(1)
-            .map(|m| m.as_str().to_string())
-            .unwrap_or_default();
+        let timestamp = caps.get(1).map(|m| m.as_str().to_string());
         let profile_name = caps.get(2).unwrap().as_str().to_string();
         let mentor_name = caps.get(3).unwrap().as_str().to_string();
         let status = caps.get(4).unwrap().as_str().to_string();
@@ -627,7 +624,7 @@ mod tests {
         assert_eq!(sl.profile_name, "profileA");
         assert_eq!(sl.mentor_name, "mentor1");
         assert_eq!(sl.status, "PASSED");
-        assert_eq!(sl.timestamp, "260101_130000");
+        assert_eq!(sl.timestamp.as_deref(), Some("260101_130000"));
         // Plain duration → suffix_type "plain", duration set, suffix unset.
         assert_eq!(sl.duration.as_deref(), Some("1m0s"));
         assert_eq!(sl.suffix, None);
@@ -647,6 +644,25 @@ mod tests {
         assert_eq!(sl.suffix.as_deref(), Some("2a"));
         assert_eq!(sl.suffix_type.as_deref(), Some("entry_ref"));
         assert!(sl.duration.is_none());
+    }
+
+    #[test]
+    fn mentors_running_status_without_timestamp_parses_as_none() {
+        let mut current = None;
+        let mut mentors = vec![];
+        let entry = "  (1) profileA[1/1]";
+        parse_mentors_line(entry, entry.trim(), &mut current, &mut mentors);
+        let status =
+            "      | profileA:mentor1 - RUNNING - (@: mentor_mentor1-123-260101_130000)";
+        parse_mentors_line(status, status.trim(), &mut current, &mut mentors);
+        let sl = &current.as_ref().unwrap().status_lines[0];
+        assert_eq!(sl.status, "RUNNING");
+        assert_eq!(sl.timestamp, None);
+        assert_eq!(
+            sl.suffix.as_deref(),
+            Some("mentor_mentor1-123-260101_130000")
+        );
+        assert_eq!(sl.suffix_type.as_deref(), Some("running_agent"));
     }
 
     #[test]

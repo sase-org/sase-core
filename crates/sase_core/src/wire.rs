@@ -80,7 +80,8 @@ pub struct MentorStatusLineWire {
     pub profile_name: String,
     pub mentor_name: String,
     pub status: String,
-    pub timestamp: String,
+    #[serde(default)]
+    pub timestamp: Option<String>,
     #[serde(default)]
     pub duration: Option<String>,
     #[serde(default)]
@@ -374,7 +375,7 @@ mod tests {
                     profile_name: "default".to_string(),
                     mentor_name: "claude".to_string(),
                     status: "OK".to_string(),
-                    timestamp: "20260429_010101".to_string(),
+                    timestamp: Some("20260429_010101".to_string()),
                     duration: None,
                     suffix: None,
                     suffix_type: None,

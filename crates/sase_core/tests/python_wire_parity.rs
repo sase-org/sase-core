@@ -28,7 +28,7 @@
 //!     commits=[CommitWire(number=1, note='init', suffix='@', suffix_type='running', body=['body line'])],
 //!     hooks=[HookWire(command='just lint', status_lines=[HookStatusLineWire(commit_entry_num='1', timestamp='20260429_010101', status='OK', duration='3s')])],
 //!     comments=[CommentWire(reviewer='alice', file_path='src/foo.rs')],
-//!     mentors=[MentorWire(entry_id='m1', profiles=['default'], status_lines=[MentorStatusLineWire(profile_name='default', mentor_name='claude', status='OK', timestamp='20260429_010101')], is_draft=False)],
+//!     mentors=[MentorWire(entry_id='m1', profiles=['default'], status_lines=[MentorStatusLineWire(profile_name='default', mentor_name='claude', status='RUNNING', timestamp=None, suffix='mentor_claude-123-20260429_010101', suffix_type='running_agent')], is_draft=False)],
 //!     timestamps=[TimestampWire(timestamp='20260429_010101', event_type='created', detail='')],
 //!     deltas=[DeltaWire(path='src/lib.rs', change_type='A')],
 //! )
@@ -109,11 +109,11 @@ const PYTHON_FIXTURE: &str = r#"{
                 {
                     "profile_name": "default",
                     "mentor_name": "claude",
-                    "status": "OK",
-                    "timestamp": "20260429_010101",
+                    "status": "RUNNING",
+                    "timestamp": null,
                     "duration": null,
-                    "suffix": null,
-                    "suffix_type": null
+                    "suffix": "mentor_claude-123-20260429_010101",
+                    "suffix_type": "running_agent"
                 }
             ],
             "is_draft": false
@@ -187,11 +187,11 @@ fn rust_changespec() -> ChangeSpecWire {
             status_lines: vec![MentorStatusLineWire {
                 profile_name: "default".to_string(),
                 mentor_name: "claude".to_string(),
-                status: "OK".to_string(),
-                timestamp: "20260429_010101".to_string(),
+                status: "RUNNING".to_string(),
+                timestamp: None,
                 duration: None,
-                suffix: None,
-                suffix_type: None,
+                suffix: Some("mentor_claude-123-20260429_010101".to_string()),
+                suffix_type: Some("running_agent".to_string()),
             }],
             is_draft: false,
         }],
