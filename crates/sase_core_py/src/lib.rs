@@ -11,6 +11,13 @@
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
+//! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
+//! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
+//! - `delete_agent_artifacts(artifacts_dir: str) -> dict`
+//! - `release_workspace_from_content(content: str, workspace_num: int, workflow: str | None, cl_name: str | None) -> dict`
+//! - `mark_hook_agents_as_killed(hooks: list[dict], suffixes: list[str]) -> list[dict]`
+//! - `mark_mentor_agents_as_killed(mentors: list[dict], suffixes: list[str]) -> list[dict]`
+//! - `mark_comment_agents_as_killed(comments: list[dict], suffixes: list[str]) -> list[dict]`
 //! - `remove_workspace_suffix(status: str) -> str`
 //! - `is_valid_status_transition(from_status: str, to_status: str) -> bool`
 //! - `read_status_from_lines(lines: list[str], changespec_name: str) -> str | None`
@@ -46,8 +53,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_cleanup::{
     cleanup_request_from_json_value,
-    plan_agent_cleanup as core_plan_agent_cleanup, AgentCleanupRequestWire,
-    AgentCleanupTargetWire,
+    delete_agent_artifact_markers as core_delete_agent_artifact_markers,
+    mark_comment_agents_as_killed as core_mark_comment_agents_as_killed,
+    mark_hook_agents_as_killed as core_mark_hook_agents_as_killed,
+    mark_mentor_agents_as_killed as core_mark_mentor_agents_as_killed,
+    plan_agent_cleanup as core_plan_agent_cleanup,
+    release_workspace_from_content as core_release_workspace_from_content,
+    save_dismissed_agents_index as core_save_dismissed_agents_index,
+    save_dismissed_bundle_json as core_save_dismissed_bundle_json,
+    AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
 };
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
@@ -70,6 +84,7 @@ use sase_core::status::{
     StatusTransitionRequestWire,
 };
 use sase_core::wire::ChangeSpecWire;
+use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
@@ -254,6 +269,142 @@ fn py_plan_agent_cleanup<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Save dismissed agent identities to the host-provided index file.
+#[pyfunction]
+#[pyo3(name = "save_dismissed_agents_index")]
+fn py_save_dismissed_agents_index(
+    path: &str,
+    identities: &Bound<'_, PyList>,
+) -> PyResult<()> {
+    let mut wire_identities: Vec<AgentCleanupIdentityWire> =
+        Vec::with_capacity(identities.len());
+    for (idx, item) in identities.iter().enumerate() {
+        let json = py_to_json_value(&item)?;
+        let identity: AgentCleanupIdentityWire =
+            serde_json::from_value(json).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "identities[{idx}] is not a valid AgentCleanupIdentityWire dict: {e}"
+                ))
+            })?;
+        wire_identities.push(identity);
+    }
+    core_save_dismissed_agents_index(&PathBuf::from(path), &wire_identities)
+        .map_err(PyValueError::new_err)
+}
+
+/// Write one dismissed-agent bundle using the sharded bundle layout.
+#[pyfunction]
+#[pyo3(name = "save_dismissed_bundle")]
+fn py_save_dismissed_bundle<'py>(
+    py: Python<'py>,
+    bundle_root: &str,
+    bundle: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let json = py_to_json_value(bundle.as_any())?;
+    let result =
+        core_save_dismissed_bundle_json(&PathBuf::from(bundle_root), &json)
+            .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Delete loader marker files from an agent artifacts directory.
+#[pyfunction]
+#[pyo3(name = "delete_agent_artifacts")]
+fn py_delete_agent_artifacts<'py>(
+    py: Python<'py>,
+    artifacts_dir: &str,
+) -> PyResult<PyObject> {
+    let result =
+        core_delete_agent_artifact_markers(&PathBuf::from(artifacts_dir))
+            .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return project-file text after releasing one RUNNING workspace claim.
+#[pyfunction]
+#[pyo3(name = "release_workspace_from_content", signature = (content, workspace_num, workflow = None, cl_name = None))]
+fn py_release_workspace_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    workspace_num: i64,
+    workflow: Option<&str>,
+    cl_name: Option<&str>,
+) -> PyResult<PyObject> {
+    let result = core_release_workspace_from_content(
+        content,
+        workspace_num,
+        workflow,
+        cl_name,
+    );
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Mark hook status lines for killed running-agent suffixes.
+#[pyfunction]
+#[pyo3(name = "mark_hook_agents_as_killed")]
+fn py_mark_hook_agents_as_killed<'py>(
+    py: Python<'py>,
+    hooks: &Bound<'py, PyList>,
+    suffixes: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let wire_hooks = hooks_from_py(hooks)?;
+    let suffixes = strings_from_py_list(suffixes, "suffixes")?;
+    let result = core_mark_hook_agents_as_killed(&wire_hooks, &suffixes);
+    json_value_to_py(
+        py,
+        &serde_json::to_value(result).map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?,
+    )
+}
+
+/// Mark mentor status lines for killed running-agent suffixes.
+#[pyfunction]
+#[pyo3(name = "mark_mentor_agents_as_killed")]
+fn py_mark_mentor_agents_as_killed<'py>(
+    py: Python<'py>,
+    mentors: &Bound<'py, PyList>,
+    suffixes: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let wire_mentors = mentors_from_py(mentors)?;
+    let suffixes = strings_from_py_list(suffixes, "suffixes")?;
+    let result = core_mark_mentor_agents_as_killed(&wire_mentors, &suffixes);
+    json_value_to_py(
+        py,
+        &serde_json::to_value(result).map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?,
+    )
+}
+
+/// Mark comment entries for killed running-agent suffixes.
+#[pyfunction]
+#[pyo3(name = "mark_comment_agents_as_killed")]
+fn py_mark_comment_agents_as_killed<'py>(
+    py: Python<'py>,
+    comments: &Bound<'py, PyList>,
+    suffixes: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let wire_comments = comments_from_py(comments)?;
+    let suffixes = strings_from_py_list(suffixes, "suffixes")?;
+    let result = core_mark_comment_agents_as_killed(&wire_comments, &suffixes);
+    json_value_to_py(
+        py,
+        &serde_json::to_value(result).map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?,
+    )
 }
 
 // --- Phase 4C status state machine bindings -------------------------------
@@ -611,6 +762,61 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
     )))
 }
 
+fn strings_from_py_list(
+    list: &Bound<'_, PyList>,
+    label: &str,
+) -> PyResult<Vec<String>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        values.push(item.extract::<String>().map_err(|_| {
+            PyValueError::new_err(format!("{label}[{idx}] must be a string"))
+        })?);
+    }
+    Ok(values)
+}
+
+fn hooks_from_py(list: &Bound<'_, PyList>) -> PyResult<Vec<HookWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        values.push(serde_json::from_value(py_to_json_value(&item)?).map_err(
+            |e| {
+                PyValueError::new_err(format!(
+                    "hooks[{idx}] is not a valid HookWire dict: {e}"
+                ))
+            },
+        )?);
+    }
+    Ok(values)
+}
+
+fn mentors_from_py(list: &Bound<'_, PyList>) -> PyResult<Vec<MentorWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        values.push(serde_json::from_value(py_to_json_value(&item)?).map_err(
+            |e| {
+                PyValueError::new_err(format!(
+                    "mentors[{idx}] is not a valid MentorWire dict: {e}"
+                ))
+            },
+        )?);
+    }
+    Ok(values)
+}
+
+fn comments_from_py(list: &Bound<'_, PyList>) -> PyResult<Vec<CommentWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        values.push(serde_json::from_value(py_to_json_value(&item)?).map_err(
+            |e| {
+                PyValueError::new_err(format!(
+                    "comments[{idx}] is not a valid CommentWire dict: {e}"
+                ))
+            },
+        )?);
+    }
+    Ok(values)
+}
+
 fn json_value_to_py<'py>(
     py: Python<'py>,
     value: &JsonValue,
@@ -670,6 +876,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
+    m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
+    m.add_function(wrap_pyfunction!(py_delete_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_release_workspace_from_content, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mark_hook_agents_as_killed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mark_mentor_agents_as_killed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mark_comment_agents_as_killed, m)?)?;
     m.add_function(wrap_pyfunction!(py_remove_workspace_suffix, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_valid_status_transition, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_status_from_lines, m)?)?;

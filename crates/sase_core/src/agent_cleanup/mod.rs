@@ -1,6 +1,15 @@
+pub mod execution;
 pub mod planner;
 pub mod wire;
 
+pub use execution::{
+    bundle_filename_from_json, bundle_shard_for_filename,
+    delete_agent_artifact_markers, mark_comment_agents_as_killed,
+    mark_hook_agents_as_killed, mark_mentor_agents_as_killed,
+    release_workspace_from_content, save_dismissed_agents_index,
+    save_dismissed_bundle_json, AgentCleanupArtifactDeleteResultWire,
+    AgentCleanupBundleWriteResultWire, AgentCleanupWorkspaceReleaseResultWire,
+};
 pub use planner::plan_agent_cleanup;
 pub use wire::{
     cleanup_plan_from_json_value, cleanup_request_from_json_value,
