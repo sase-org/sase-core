@@ -8,10 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::wire::{
+    AgentCleanupArtifactDeleteIntentWire, AgentCleanupBundleSaveIntentWire,
     AgentCleanupCountsWire, AgentCleanupDismissItemWire,
-    AgentCleanupIdentityWire, AgentCleanupKillItemWire, AgentCleanupPlanWire,
-    AgentCleanupRequestWire, AgentCleanupSkippedItemWire,
-    AgentCleanupTargetWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
+    AgentCleanupDismissalRenameIntentWire, AgentCleanupIdentityWire,
+    AgentCleanupKillItemWire, AgentCleanupNotificationDismissIntentWire,
+    AgentCleanupPlanWire, AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
+    AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
+    AgentCleanupWorkspaceReleaseIntentWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
     CLEANUP_MODE_DISMISS_COMPLETED, CLEANUP_MODE_KILL_AND_DISMISS,
     CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS,
     CLEANUP_SCOPE_CUSTOM_SELECTION, CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
@@ -160,6 +163,390 @@ fn push_summary_line(lines: &mut Vec<String>, count: u64, noun: &str) {
     }
     let suffix = if count == 1 { "" } else { "s" };
     lines.push(format!("{count} {noun}{suffix}"));
+}
+
+fn is_dismissed_prefixed(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > 7
+        && bytes[0..6].iter().all(u8::is_ascii_digit)
+        && bytes[6] == b'.'
+}
+
+fn strip_dismissed_prefix(name: &str) -> &str {
+    if is_dismissed_prefixed(name) {
+        &name[7..]
+    } else {
+        name
+    }
+}
+
+fn completion_date_prefix(target: &AgentCleanupTargetWire) -> String {
+    for value in [&target.stop_time, &target.start_time]
+        .into_iter()
+        .flatten()
+    {
+        if value.len() >= 10 {
+            let bytes = value.as_bytes();
+            if bytes[0..4].iter().all(u8::is_ascii_digit)
+                && bytes[4] == b'-'
+                && bytes[5..7].iter().all(u8::is_ascii_digit)
+                && bytes[7] == b'-'
+                && bytes[8..10].iter().all(u8::is_ascii_digit)
+            {
+                return format!(
+                    "{}{}{}",
+                    &value[2..4],
+                    &value[5..7],
+                    &value[8..10]
+                );
+            }
+        }
+    }
+    if let Some(raw_suffix) = &target.raw_suffix {
+        if raw_suffix.len() >= 8
+            && raw_suffix.as_bytes()[0..8].iter().all(u8::is_ascii_digit)
+        {
+            return format!(
+                "{}{}{}",
+                &raw_suffix[2..4],
+                &raw_suffix[4..6],
+                &raw_suffix[6..8]
+            );
+        }
+    }
+    "000101".to_string()
+}
+
+fn base_for_dismissal(target: &AgentCleanupTargetWire) -> String {
+    if let Some(name) = &target.agent_name {
+        if !name.is_empty() {
+            return strip_dismissed_prefix(name).to_string();
+        }
+    }
+    if target.identity.cl_name != "unknown"
+        && !target.identity.cl_name.is_empty()
+    {
+        return target.identity.cl_name.clone();
+    }
+    if let Some(raw_suffix) = &target.raw_suffix {
+        if !raw_suffix.is_empty() {
+            return raw_suffix.clone();
+        }
+    }
+    "agent".to_string()
+}
+
+fn add_dismissed_prefix(name: &str, date_prefix: &str) -> String {
+    if is_dismissed_prefixed(name) {
+        name.to_string()
+    } else {
+        format!("{date_prefix}.{name}")
+    }
+}
+
+fn allocate_dismissed_name(
+    base: &str,
+    date_prefix: &str,
+    taken: &mut BTreeSet<String>,
+) -> String {
+    let stripped = strip_dismissed_prefix(base);
+    let primary = add_dismissed_prefix(stripped, date_prefix);
+    if !taken.contains(&primary) {
+        taken.insert(primary.clone());
+        return primary;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{primary}.{n}");
+        if !taken.contains(&candidate) {
+            taken.insert(candidate.clone());
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+fn target_by_identity(
+    targets: &[AgentCleanupTargetWire],
+) -> BTreeMap<AgentCleanupIdentityWire, &AgentCleanupTargetWire> {
+    let mut by_id = BTreeMap::new();
+    for target in targets {
+        by_id.entry(target.identity.clone()).or_insert(target);
+    }
+    by_id
+}
+
+fn add_index_identity(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<AgentCleanupIdentityWire>,
+    target: &AgentCleanupTargetWire,
+) {
+    if seen.insert(target.identity.clone()) {
+        side_effects
+            .dismissed_index_additions
+            .push(target.identity.clone());
+    }
+}
+
+fn add_bundle_candidate(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<AgentCleanupIdentityWire>,
+    target: &AgentCleanupTargetWire,
+) {
+    if target.from_changespec {
+        return;
+    }
+    if seen.insert(target.identity.clone()) {
+        side_effects.bundle_save_candidates.push(
+            AgentCleanupBundleSaveIntentWire {
+                identity: target.identity.clone(),
+            },
+        );
+    }
+}
+
+fn add_artifact_delete(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<(AgentCleanupIdentityWire, String)>,
+    target: &AgentCleanupTargetWire,
+) {
+    let Some(path) = &target.artifacts_dir else {
+        return;
+    };
+    let key = (target.identity.clone(), path.clone());
+    if seen.insert(key) {
+        side_effects.artifact_delete_paths.push(
+            AgentCleanupArtifactDeleteIntentWire {
+                identity: target.identity.clone(),
+                artifacts_dir: path.clone(),
+            },
+        );
+    }
+}
+
+fn add_notification_candidate(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<AgentCleanupIdentityWire>,
+    target: &AgentCleanupTargetWire,
+) {
+    if seen.insert(target.identity.clone()) {
+        side_effects.notification_dismiss_candidates.push(
+            AgentCleanupNotificationDismissIntentWire {
+                identity: target.identity.clone(),
+                cl_name: target.identity.cl_name.clone(),
+                raw_suffix: target.raw_suffix.clone(),
+            },
+        );
+    }
+}
+
+fn add_workspace_release(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<AgentCleanupIdentityWire>,
+    target: &AgentCleanupTargetWire,
+    kind: &str,
+) {
+    if !seen.insert(target.identity.clone()) {
+        return;
+    }
+    if kind == KILL_KIND_RUNNING {
+        if target.workspace.is_none() {
+            return;
+        }
+        side_effects.workspace_release_requests.push(
+            AgentCleanupWorkspaceReleaseIntentWire {
+                identity: target.identity.clone(),
+                project_file: target.project_file.clone().unwrap_or_default(),
+                workspace: target.workspace,
+                workflow: target.workflow.clone(),
+                cl_name: Some(target.identity.cl_name.clone()),
+                lookup_workflow: false,
+            },
+        );
+        return;
+    }
+    if kind == KILL_KIND_WORKFLOW {
+        let workflow_name = if target.is_workflow_child {
+            target
+                .parent_workflow
+                .clone()
+                .or_else(|| target.workflow.clone())
+        } else {
+            target.workflow.clone()
+        };
+        let Some(workflow_name) = workflow_name else {
+            return;
+        };
+        let lookup_cl = if !target.is_workflow_child
+            && target.identity.cl_name != "unknown"
+        {
+            Some(target.identity.cl_name.clone())
+        } else {
+            None
+        };
+        side_effects.workspace_release_requests.push(
+            AgentCleanupWorkspaceReleaseIntentWire {
+                identity: target.identity.clone(),
+                project_file: target.project_file.clone().unwrap_or_default(),
+                workspace: target.workspace,
+                workflow: Some(workflow_name),
+                cl_name: lookup_cl,
+                lookup_workflow: target.workspace.is_none(),
+            },
+        );
+    }
+}
+
+fn related_workflow_targets<'a>(
+    target: &'a AgentCleanupTargetWire,
+    children_by_parent: &BTreeMap<
+        (String, Option<String>),
+        Vec<&'a AgentCleanupTargetWire>,
+    >,
+) -> Vec<&'a AgentCleanupTargetWire> {
+    let mut related = vec![target];
+    if target.agent_type == "workflow" && !is_workflow_child(target) {
+        if let Some(raw_suffix) = &target.raw_suffix {
+            let key = (raw_suffix.clone(), target.workflow.clone());
+            if let Some(children) = children_by_parent.get(&key) {
+                related.extend(children.iter().copied());
+            }
+        }
+    }
+    related
+}
+
+fn add_dismissal_renames(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    related: &[&AgentCleanupTargetWire],
+    taken_names: &mut BTreeSet<String>,
+) {
+    let Some(parent) = related.first() else {
+        return;
+    };
+    let date_prefix = completion_date_prefix(parent);
+    let old_name = parent.agent_name.clone();
+    let base = base_for_dismissal(parent);
+    let new_name = allocate_dismissed_name(&base, &date_prefix, taken_names);
+    side_effects.dismissal_rename_allocations.push(
+        AgentCleanupDismissalRenameIntentWire {
+            identity: parent.identity.clone(),
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+        },
+    );
+    if let Some(old) = old_name {
+        if old != new_name {
+            side_effects
+                .wait_reference_rewrite_map
+                .push((old, new_name));
+        }
+    }
+
+    if parent.agent_type != "workflow" || is_workflow_child(parent) {
+        return;
+    }
+    for child in related.iter().skip(1) {
+        let Some(old_child_name) = &child.agent_name else {
+            continue;
+        };
+        let new_child_name = add_dismissed_prefix(old_child_name, &date_prefix);
+        if old_child_name == &new_child_name {
+            continue;
+        }
+        side_effects.dismissal_rename_allocations.push(
+            AgentCleanupDismissalRenameIntentWire {
+                identity: child.identity.clone(),
+                old_name: Some(old_child_name.clone()),
+                new_name: new_child_name.clone(),
+            },
+        );
+        side_effects
+            .wait_reference_rewrite_map
+            .push((old_child_name.clone(), new_child_name));
+    }
+}
+
+fn build_side_effects(
+    targets: &[AgentCleanupTargetWire],
+    request: &AgentCleanupRequestWire,
+    kill_items: &[AgentCleanupKillItemWire],
+    dismiss_items: &[AgentCleanupDismissItemWire],
+    children_by_parent: &BTreeMap<
+        (String, Option<String>),
+        Vec<&AgentCleanupTargetWire>,
+    >,
+) -> AgentCleanupSideEffectsWire {
+    if request.mode == CLEANUP_MODE_PREVIEW_ONLY {
+        return AgentCleanupSideEffectsWire::default();
+    }
+
+    let by_id = target_by_identity(targets);
+    let mut side_effects = AgentCleanupSideEffectsWire::default();
+    let mut taken_names: BTreeSet<String> =
+        request.taken_dismissed_names.iter().cloned().collect();
+    let mut seen_index = BTreeSet::new();
+    let mut seen_bundle = BTreeSet::new();
+    let mut seen_artifacts = BTreeSet::new();
+    let mut seen_workspace = BTreeSet::new();
+    let mut seen_notifications = BTreeSet::new();
+
+    for dismiss in dismiss_items {
+        let Some(target) = by_id.get(&dismiss.identity).copied() else {
+            continue;
+        };
+        let related = related_workflow_targets(target, children_by_parent);
+        add_dismissal_renames(&mut side_effects, &related, &mut taken_names);
+        for item in related {
+            add_index_identity(&mut side_effects, &mut seen_index, item);
+            add_bundle_candidate(&mut side_effects, &mut seen_bundle, item);
+            add_artifact_delete(&mut side_effects, &mut seen_artifacts, item);
+            add_notification_candidate(
+                &mut side_effects,
+                &mut seen_notifications,
+                item,
+            );
+            if item.agent_type == "workflow" {
+                add_workspace_release(
+                    &mut side_effects,
+                    &mut seen_workspace,
+                    item,
+                    KILL_KIND_WORKFLOW,
+                );
+            }
+        }
+    }
+
+    for kill in kill_items {
+        let Some(target) = by_id.get(&kill.identity).copied() else {
+            continue;
+        };
+        let related = related_workflow_targets(target, children_by_parent);
+        for item in related {
+            add_index_identity(&mut side_effects, &mut seen_index, item);
+            add_notification_candidate(
+                &mut side_effects,
+                &mut seen_notifications,
+                item,
+            );
+            if kill.kind == KILL_KIND_WORKFLOW {
+                add_bundle_candidate(&mut side_effects, &mut seen_bundle, item);
+                add_artifact_delete(
+                    &mut side_effects,
+                    &mut seen_artifacts,
+                    item,
+                );
+            }
+        }
+        add_workspace_release(
+            &mut side_effects,
+            &mut seen_workspace,
+            target,
+            &kill.kind,
+        );
+    }
+
+    side_effects
 }
 
 pub fn plan_agent_cleanup(
@@ -338,6 +725,14 @@ pub fn plan_agent_cleanup(
         summary_lines.push("No agents selected for cleanup".to_string());
     }
 
+    let side_effects = build_side_effects(
+        targets,
+        request,
+        &kill_items,
+        &dismiss_items,
+        &children_by_parent,
+    );
+
     Ok(AgentCleanupPlanWire {
         schema_version: AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
         selected_identities: selected,
@@ -348,6 +743,7 @@ pub fn plan_agent_cleanup(
         counts,
         confirmation_severity: confirmation_severity.to_string(),
         summary_lines,
+        side_effects,
     })
 }
 
@@ -385,6 +781,7 @@ mod tests {
             raw_suffix: raw_suffix.map(str::to_string),
             project_file: Some("/tmp/project.gp".to_string()),
             artifacts_dir: Some("/tmp/artifacts".to_string()),
+            from_changespec: false,
             workspace: None,
             tag: None,
             agent_name: None,
@@ -406,6 +803,7 @@ mod tests {
             tag: None,
             identities: vec![],
             include_pidless_as_dismissable: false,
+            taken_dismissed_names: vec![],
         }
     }
 
@@ -548,5 +946,68 @@ mod tests {
 
         assert!(plan.kill_items.is_empty());
         assert_eq!(plan.skipped_items[0].reason, SKIPPED_UNKNOWN_KILL_KIND);
+    }
+
+    #[test]
+    fn dismiss_side_effects_allocate_names_and_children() {
+        let mut parent =
+            target("workflow", "wf", Some("20260428100000"), "DONE", None);
+        parent.workflow = Some("deploy".to_string());
+        parent.agent_name = Some("root".to_string());
+        let mut child =
+            target("workflow", "wf", Some("20260428100000_c0"), "DONE", None);
+        child.parent_timestamp = Some("20260428100000".to_string());
+        child.parent_workflow = Some("deploy".to_string());
+        child.agent_name = Some("root.plan".to_string());
+        child.is_workflow_child = true;
+        child.artifacts_dir = Some("/tmp/child".to_string());
+
+        let plan = plan_agent_cleanup(
+            &[parent, child],
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.side_effects.dismissal_rename_allocations[0].new_name,
+            "260428.root"
+        );
+        assert_eq!(
+            plan.side_effects.dismissal_rename_allocations[1].new_name,
+            "260428.root.plan"
+        );
+        assert_eq!(
+            plan.side_effects.wait_reference_rewrite_map,
+            vec![
+                ("root".to_string(), "260428.root".to_string()),
+                ("root.plan".to_string(), "260428.root.plan".to_string())
+            ]
+        );
+        assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
+        assert_eq!(plan.side_effects.bundle_save_candidates.len(), 2);
+        assert_eq!(plan.side_effects.artifact_delete_paths.len(), 2);
+    }
+
+    #[test]
+    fn dismissed_name_allocation_uses_taken_names() {
+        let mut first =
+            target("run", "cl_a", Some("20260428100000"), "DONE", None);
+        first.agent_name = Some("foo".to_string());
+        let mut second =
+            target("run", "cl_b", Some("20260428110000"), "DONE", None);
+        second.agent_name = Some("foo".to_string());
+        let mut request =
+            req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED);
+        request.taken_dismissed_names = vec!["260428.foo".to_string()];
+
+        let plan = plan_agent_cleanup(&[first, second], &request).unwrap();
+
+        let names: Vec<String> = plan
+            .side_effects
+            .dismissal_rename_allocations
+            .iter()
+            .map(|intent| intent.new_name.clone())
+            .collect();
+        assert_eq!(names, vec!["260428.foo.2", "260428.foo.3"]);
     }
 }

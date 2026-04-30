@@ -20,10 +20,14 @@ pub mod wire;
 
 pub use agent_cleanup::{
     cleanup_plan_from_json_value, cleanup_request_from_json_value,
-    plan_agent_cleanup, AgentCleanupCountsWire, AgentCleanupDismissItemWire,
-    AgentCleanupIdentityWire, AgentCleanupKillItemWire, AgentCleanupPlanWire,
-    AgentCleanupRequestWire, AgentCleanupSkippedItemWire,
-    AgentCleanupTargetWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
+    plan_agent_cleanup, AgentCleanupArtifactDeleteIntentWire,
+    AgentCleanupBundleSaveIntentWire, AgentCleanupCountsWire,
+    AgentCleanupDismissItemWire, AgentCleanupDismissalRenameIntentWire,
+    AgentCleanupIdentityWire, AgentCleanupKillItemWire,
+    AgentCleanupNotificationDismissIntentWire, AgentCleanupPlanWire,
+    AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
+    AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
+    AgentCleanupWorkspaceReleaseIntentWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
     CLEANUP_MODE_DISMISS_COMPLETED, CLEANUP_MODE_KILL_AND_DISMISS,
     CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS,
     CLEANUP_SCOPE_CUSTOM_SELECTION, CLEANUP_SCOPE_EXPLICIT_IDENTITIES,

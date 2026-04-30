@@ -72,6 +72,8 @@ pub struct AgentCleanupTargetWire {
     #[serde(default)]
     pub artifacts_dir: Option<String>,
     #[serde(default)]
+    pub from_changespec: bool,
+    #[serde(default)]
     pub workspace: Option<i64>,
     #[serde(default)]
     pub tag: Option<String>,
@@ -105,6 +107,8 @@ pub struct AgentCleanupRequestWire {
     pub identities: Vec<AgentCleanupIdentityWire>,
     #[serde(default)]
     pub include_pidless_as_dismissable: bool,
+    #[serde(default)]
+    pub taken_dismissed_names: Vec<String>,
 }
 
 /// One process/workflow kill decision.
@@ -149,6 +153,74 @@ pub struct AgentCleanupCountsWire {
     pub failed: u64,
 }
 
+/// Rename allocation for dismissal-time name prefixing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupDismissalRenameIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+    #[serde(default)]
+    pub old_name: Option<String>,
+    pub new_name: String,
+}
+
+/// Candidate whose agent bundle should be saved by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupBundleSaveIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+}
+
+/// Artifact path whose loader marker files should be removed by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupArtifactDeleteIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+    pub artifacts_dir: String,
+}
+
+/// Workspace release request. Python still performs any project-file writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupWorkspaceReleaseIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+    pub project_file: String,
+    #[serde(default)]
+    pub workspace: Option<i64>,
+    #[serde(default)]
+    pub workflow: Option<String>,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    #[serde(default)]
+    pub lookup_workflow: bool,
+}
+
+/// Notification lookup key to dismiss after cleanup succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupNotificationDismissIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+    pub cl_name: String,
+    #[serde(default)]
+    pub raw_suffix: Option<String>,
+}
+
+/// Deterministic side-effect plan. The host consumes these intents and keeps
+/// ownership of all process signalling, filesystem, and project-file writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupSideEffectsWire {
+    #[serde(default)]
+    pub dismissed_index_additions: Vec<AgentCleanupIdentityWire>,
+    #[serde(default)]
+    pub bundle_save_candidates: Vec<AgentCleanupBundleSaveIntentWire>,
+    #[serde(default)]
+    pub artifact_delete_paths: Vec<AgentCleanupArtifactDeleteIntentWire>,
+    #[serde(default)]
+    pub workspace_release_requests: Vec<AgentCleanupWorkspaceReleaseIntentWire>,
+    #[serde(default)]
+    pub notification_dismiss_candidates:
+        Vec<AgentCleanupNotificationDismissIntentWire>,
+    #[serde(default)]
+    pub dismissal_rename_allocations:
+        Vec<AgentCleanupDismissalRenameIntentWire>,
+    #[serde(default)]
+    pub wait_reference_rewrite_map: Vec<(String, String)>,
+}
+
 /// Complete pure plan. The host may use it for preview only or execute its
 /// side effects in Python.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +240,8 @@ pub struct AgentCleanupPlanWire {
     pub confirmation_severity: String,
     #[serde(default)]
     pub summary_lines: Vec<String>,
+    #[serde(default)]
+    pub side_effects: AgentCleanupSideEffectsWire,
 }
 
 pub fn cleanup_request_from_json_value(
