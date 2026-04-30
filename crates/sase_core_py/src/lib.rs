@@ -10,6 +10,7 @@
 //! - `canonicalize_query(query: str) -> str`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
+//! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `remove_workspace_suffix(status: str) -> str`
 //! - `is_valid_status_transition(from_status: str, to_status: str) -> bool`
 //! - `read_status_from_lines(lines: list[str], changespec_name: str) -> str | None`
@@ -43,6 +44,11 @@ use std::path::PathBuf;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+use sase_core::agent_cleanup::{
+    cleanup_request_from_json_value,
+    plan_agent_cleanup as core_plan_agent_cleanup, AgentCleanupRequestWire,
+    AgentCleanupTargetWire,
+};
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
     AgentArtifactScanOptionsWire,
@@ -204,6 +210,47 @@ fn py_scan_agent_artifacts<'py>(
     let root = PathBuf::from(projects_root);
     let snapshot = py.allow_threads(|| core_scan_agent_artifacts(&root, opts));
     let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Plan agent cleanup without executing side effects.
+///
+/// `targets` is a list of `AgentCleanupTargetWire`-shape dicts gathered by
+/// the host. `request` is an `AgentCleanupRequestWire`-shape dict choosing
+/// the scope and mode. The returned dict is an `AgentCleanupPlanWire` whose
+/// kill/dismiss lists can be previewed or executed by Python.
+#[pyfunction]
+#[pyo3(name = "plan_agent_cleanup")]
+fn py_plan_agent_cleanup<'py>(
+    py: Python<'py>,
+    targets: &Bound<'py, PyList>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let mut wire_targets: Vec<AgentCleanupTargetWire> =
+        Vec::with_capacity(targets.len());
+    for (idx, item) in targets.iter().enumerate() {
+        let json = py_to_json_value(&item)?;
+        let target: AgentCleanupTargetWire =
+            serde_json::from_value(json).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "targets[{idx}] is not a valid AgentCleanupTargetWire dict: {e}"
+                ))
+            })?;
+        wire_targets.push(target);
+    }
+
+    let request_value = py_to_json_value(request.as_any())?;
+    let req: AgentCleanupRequestWire =
+        cleanup_request_from_json_value(&request_value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentCleanupRequestWire dict: {e}"
+            ))
+        })?;
+    let plan = core_plan_agent_cleanup(&wire_targets, &req)
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -622,6 +669,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_remove_workspace_suffix, m)?)?;
     m.add_function(wrap_pyfunction!(py_is_valid_status_transition, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_status_from_lines, m)?)?;
@@ -636,3 +684,97 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 pub use sase_core as core;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::Python;
+    use serde_json::json;
+
+    fn append_json<'py>(
+        py: Python<'py>,
+        list: &Bound<'py, PyList>,
+        value: JsonValue,
+    ) {
+        list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn plan_agent_cleanup_binding_round_trips_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let targets = PyList::empty_bound(py);
+            append_json(
+                py,
+                &targets,
+                json!({
+                    "identity": {"agent_type": "run", "cl_name": "done", "raw_suffix": "1"},
+                    "agent_type": "run",
+                    "status": "DONE",
+                    "pid": null,
+                    "workflow": null,
+                    "parent_workflow": null,
+                    "parent_timestamp": null,
+                    "raw_suffix": "1",
+                    "project_file": "/tmp/project.gp",
+                    "artifacts_dir": "/tmp/artifacts",
+                    "workspace": null,
+                    "tag": null,
+                    "agent_name": "done",
+                    "display_name": "done",
+                    "start_time": null,
+                    "stop_time": null,
+                    "is_workflow_child": false,
+                    "appears_as_agent": false,
+                    "step_type": null
+                }),
+            );
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "scope": "all_panels",
+                    "mode": "dismiss_completed",
+                    "focused_panel_tag": null,
+                    "tag": null,
+                    "identities": [],
+                    "include_pidless_as_dismissable": false
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result = py_plan_agent_cleanup(py, &targets, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value["schema_version"], json!(1));
+            assert_eq!(
+                value["dismiss_items"][0]["identity"]["cl_name"],
+                json!("done")
+            );
+            assert_eq!(value["kill_items"], json!([]));
+            assert_eq!(value["confirmation_severity"], json!("dismiss"));
+        });
+    }
+
+    #[test]
+    fn plan_agent_cleanup_binding_rejects_schema_mismatch() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let targets = PyList::empty_bound(py);
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 999,
+                    "scope": "all_panels",
+                    "mode": "dismiss_completed"
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let err = py_plan_agent_cleanup(py, &targets, request).unwrap_err();
+            assert!(err.to_string().contains("schema mismatch"));
+        });
+    }
+}

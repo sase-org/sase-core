@@ -12,10 +12,9 @@ publish = false
 # remains PyO3-free so later UniFFI/WASM/server work can keep reusing it.
 #
 # `crate-type = ["cdylib"]` is what turns this into an importable Python
-# extension. The `extension-module` feature on PyO3 means the cdylib does
-# NOT link against libpython directly; Python provides the symbols at
-# import time. That keeps `cargo build`/`cargo check` from needing a
-# Python development library on the host.
+# extension. Wheel builds enable PyO3's `extension-module` feature via
+# `pyproject.toml`; plain Cargo builds leave it off so `cargo test` can
+# link libpython for PyO3 conversion tests.
 #
 # `abi3-py312` builds a single wheel against the CPython stable ABI for
 # Python 3.12+. One Linux/macOS/Windows wheel per platform-architecture
@@ -31,5 +30,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sase_core = { path = "../sase_core" }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+pyo3 = { version = "0.22", features = ["abi3-py312"] }
 serde_json = { workspace = true }

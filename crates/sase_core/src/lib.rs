@@ -8,6 +8,7 @@
 //! corpus. The crate is deliberately free of PyO3 types so later
 //! UniFFI/WASM/server work can reuse the same logic.
 
+pub mod agent_cleanup;
 pub mod agent_scan;
 pub mod git_query;
 pub mod parser;
@@ -17,6 +18,23 @@ pub mod status;
 pub mod suffix;
 pub mod wire;
 
+pub use agent_cleanup::{
+    cleanup_plan_from_json_value, cleanup_request_from_json_value,
+    plan_agent_cleanup, AgentCleanupCountsWire, AgentCleanupDismissItemWire,
+    AgentCleanupIdentityWire, AgentCleanupKillItemWire, AgentCleanupPlanWire,
+    AgentCleanupRequestWire, AgentCleanupSkippedItemWire,
+    AgentCleanupTargetWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
+    CLEANUP_MODE_DISMISS_COMPLETED, CLEANUP_MODE_KILL_AND_DISMISS,
+    CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS,
+    CLEANUP_SCOPE_CUSTOM_SELECTION, CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+    CLEANUP_SCOPE_FOCUSED_GROUP, CLEANUP_SCOPE_FOCUSED_PANEL,
+    CLEANUP_SCOPE_TAG, CONFIRMATION_SEVERITY_DESTRUCTIVE,
+    CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
+    KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_RUNNING, KILL_KIND_WORKFLOW,
+    SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
+    SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
+    SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
+};
 pub use agent_scan::{
     is_supported_workflow_dir, scan_agent_artifacts, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
