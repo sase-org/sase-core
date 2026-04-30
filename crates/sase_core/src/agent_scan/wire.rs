@@ -84,6 +84,8 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub workspace_num: Option<i64>,
     #[serde(default)]
+    pub workspace_dir: Option<String>,
+    #[serde(default)]
     pub pid: Option<i64>,
     #[serde(default)]
     pub model: Option<String>,
@@ -143,6 +145,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub workspace_num: Option<i64>,
     #[serde(default)]
+    pub workspace_dir: Option<String>,
+    #[serde(default)]
     pub approve: bool,
     #[serde(default)]
     pub hidden: bool,
@@ -197,6 +201,8 @@ pub struct RunningMarkerWire {
     pub llm_provider: Option<String>,
     #[serde(default)]
     pub vcs_provider: Option<String>,
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
 }
 
 /// Compact projection of `waiting.json`.

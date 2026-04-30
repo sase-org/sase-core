@@ -86,6 +86,7 @@ fn build_home_running(root: &Path) {
             "model": "claude-opus-4-7",
             "llm_provider": "claude",
             "vcs_provider": "github",
+            "workspace_dir": "/tmp/home-target",
         }),
     );
     write_json(
@@ -96,6 +97,7 @@ fn build_home_running(root: &Path) {
             "model": "claude-opus-4-7",
             "llm_provider": "claude",
             "vcs_provider": "github",
+            "workspace_dir": "/tmp/home-target",
             "approve": true,
             "run_started_at": "2026-04-27T10:00:00Z",
         }),
@@ -118,6 +120,7 @@ fn build_ace_run_running(root: &Path) {
             "model": "claude-sonnet-4-6",
             "llm_provider": "claude",
             "vcs_provider": "github",
+            "workspace_dir": "/tmp/workspaces/alpha",
             "approve": false,
             "plan": true,
             "plan_approved": false,
@@ -140,6 +143,7 @@ fn build_ace_run_done(root: &Path) {
             "model": "claude-haiku-4-5-20251001",
             "llm_provider": "claude",
             "vcs_provider": "github",
+            "workspace_dir": "/tmp/workspaces/alpha_3",
             "stopped_at": "2026-04-27T12:05:00Z",
         }),
     );
@@ -151,6 +155,7 @@ fn build_ace_run_done(root: &Path) {
             "cl_name": "feature_alpha",
             "project_file": "/home/u/.sase/projects/myproj/myproj.gp",
             "workspace_num": 3,
+            "workspace_dir": "/tmp/workspaces/alpha_3",
             "model": "claude-haiku-4-5-20251001",
             "llm_provider": "claude",
             "vcs_provider": "github",
@@ -475,6 +480,7 @@ fn running_record_carries_agent_meta() {
     assert!(!meta.plan_approved);
     assert_eq!(meta.wait_for, vec!["bob".to_string(), "carol".to_string()]);
     assert_eq!(meta.wait_duration, Some(3600.0));
+    assert_eq!(meta.workspace_dir.as_deref(), Some("/tmp/workspaces/alpha"));
 }
 
 #[test]
@@ -518,6 +524,10 @@ fn done_record_parses_done_marker() {
     assert_eq!(done.outcome.as_deref(), Some("completed"));
     assert_eq!(done.cl_name.as_deref(), Some("feature_alpha"));
     assert_eq!(done.workspace_num, Some(3));
+    assert_eq!(
+        done.workspace_dir.as_deref(),
+        Some("/tmp/workspaces/alpha_3")
+    );
     assert_eq!(done.diff_path.as_deref(), Some("/tmp/diff_alpha.diff"));
     assert_eq!(
         done.markdown_pdf_paths,
@@ -595,6 +605,7 @@ fn home_running_record_has_running_marker() {
     let running = rec.running.as_ref().unwrap();
     assert_eq!(running.pid, Some(11111));
     assert_eq!(running.cl_name.as_deref(), Some("~"));
+    assert_eq!(running.workspace_dir.as_deref(), Some("/tmp/home-target"));
     assert_eq!(
         rec.raw_prompt_snippet.as_deref(),
         Some("Investigate the failing job")

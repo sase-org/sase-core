@@ -453,6 +453,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         role_suffix: coerce_str(data.get("role_suffix")),
         parent_timestamp: coerce_str(data.get("parent_timestamp")),
         workspace_num: coerce_int(data.get("workspace_num")),
+        workspace_dir: coerce_str(data.get("workspace_dir")),
         approve: coerce_bool_truthy(data.get("approve")),
         hidden: coerce_bool_truthy(data.get("hidden")),
         plan: coerce_bool_truthy(data.get("plan")),
@@ -489,6 +490,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         cl_name: coerce_str(data.get("cl_name")),
         project_file: coerce_str(data.get("project_file")),
         workspace_num: coerce_int(data.get("workspace_num")),
+        workspace_dir: coerce_str(data.get("workspace_dir")),
         pid: coerce_int(data.get("pid")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
@@ -519,6 +521,7 @@ fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
         vcs_provider: coerce_str(data.get("vcs_provider")),
+        workspace_dir: coerce_str(data.get("workspace_dir")),
     }
 }
 
