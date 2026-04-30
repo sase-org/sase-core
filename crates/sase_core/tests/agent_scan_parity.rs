@@ -156,6 +156,7 @@ fn build_ace_run_done(root: &Path) {
             "vcs_provider": "github",
             "name": "done_alpha",
             "diff_path": "/tmp/diff_alpha.diff",
+            "markdown_pdf_paths": ["/tmp/markdown_pdfs/notes.pdf"],
             "response_path": "/tmp/resp_alpha.md",
             "output_path": "/tmp/out_alpha.log",
         }),
@@ -518,6 +519,10 @@ fn done_record_parses_done_marker() {
     assert_eq!(done.cl_name.as_deref(), Some("feature_alpha"));
     assert_eq!(done.workspace_num, Some(3));
     assert_eq!(done.diff_path.as_deref(), Some("/tmp/diff_alpha.diff"));
+    assert_eq!(
+        done.markdown_pdf_paths,
+        vec!["/tmp/markdown_pdfs/notes.pdf"]
+    );
     assert_eq!(done.response_path.as_deref(), Some("/tmp/resp_alpha.md"));
     assert_eq!(done.output_path.as_deref(), Some("/tmp/out_alpha.log"));
 
