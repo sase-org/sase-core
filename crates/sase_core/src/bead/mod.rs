@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod jsonl;
+pub mod mutation;
 pub mod read;
 pub mod schema;
 pub mod wire;
@@ -18,6 +19,12 @@ pub use config::{
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
     JsonlLoadOutcome,
+};
+pub use mutation::{
+    add_dependency, close_issues, create_issue, export_jsonl, init_store,
+    mark_ready_to_work, open_issue, remove_issue, sync_is_clean,
+    unmark_ready_to_work, update_issue, BeadCreateRequestWire,
+    BeadMutationOutcomeWire, BeadUpdateFieldsWire,
 };
 pub use read::{
     blocked_issues, blocked_merged_issues, doctor, get_epic_children,

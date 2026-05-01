@@ -98,21 +98,28 @@ use sase_core::agent_scan::{
     AgentArtifactScanOptionsWire,
 };
 use sase_core::bead::{
+    add_dependency as core_bead_add_dependency,
     blocked_issues as core_bead_blocked_issues,
     blocked_merged_issues as core_bead_blocked_merged_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
-    doctor as core_bead_doctor,
+    close_issues as core_bead_close_issues,
+    create_issue as core_bead_create_issue, doctor as core_bead_doctor,
+    export_jsonl as core_bead_export_jsonl,
     get_epic_children as core_bead_get_epic_children,
     get_merged_epic_children as core_bead_get_merged_epic_children,
-    list_issues as core_bead_list_issues,
+    init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     list_merged_issues as core_bead_list_merged_issues,
-    merged_stats as core_bead_merged_stats,
+    mark_ready_to_work as core_bead_mark_ready_to_work,
+    merged_stats as core_bead_merged_stats, open_issue as core_bead_open_issue,
     ready_issues as core_bead_ready_issues,
     ready_merged_issues as core_bead_ready_merged_issues,
-    show_issue as core_bead_show_issue,
+    remove_issue as core_bead_remove_issue, show_issue as core_bead_show_issue,
     show_merged_issue as core_bead_show_merged_issue, stats as core_bead_stats,
-    BeadError, IssueWire,
+    sync_is_clean as core_bead_sync_is_clean,
+    unmark_ready_to_work as core_bead_unmark_ready_to_work,
+    update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
+    BeadUpdateFieldsWire, IssueWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -902,6 +909,181 @@ fn py_bead_merged_get_epic_children<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_init_store")]
+fn py_bead_init_store<'py>(
+    py: Python<'py>,
+    root_dir: &str,
+    beads_dirname: &str,
+    issue_prefix: &str,
+    owner: &str,
+) -> PyResult<PyObject> {
+    let root_dir = PathBuf::from(root_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_init_store(&root_dir, beads_dirname, issue_prefix, owner)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_create")]
+fn py_bead_create<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let request = bead_create_request_from_pydict(request)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_create_issue(&beads_dir, request)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_update")]
+fn py_bead_update<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    fields: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let fields = bead_update_fields_from_pydict(fields)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_update_issue(&beads_dir, issue_id, fields)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_open")]
+#[pyo3(signature = (beads_dir, issue_id, now=None))]
+fn py_bead_open<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_open_issue(&beads_dir, issue_id, now)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_close")]
+#[pyo3(signature = (beads_dir, issue_ids, reason=None, now=None))]
+fn py_bead_close<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_ids: Vec<String>,
+    reason: Option<String>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_close_issues(&beads_dir, &issue_ids, reason, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_remove")]
+fn py_bead_remove<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_remove_issue(&beads_dir, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_dep_add")]
+#[pyo3(signature = (beads_dir, issue_id, depends_on_id, now=None))]
+fn py_bead_dep_add<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    depends_on_id: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_add_dependency(&beads_dir, issue_id, depends_on_id, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_mark_ready_to_work")]
+#[pyo3(signature = (beads_dir, epic_id, now=None))]
+fn py_bead_mark_ready_to_work<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    epic_id: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_mark_ready_to_work(&beads_dir, epic_id, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_unmark_ready_to_work")]
+#[pyo3(signature = (beads_dir, epic_id, now=None))]
+fn py_bead_unmark_ready_to_work<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    epic_id: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_unmark_ready_to_work(&beads_dir, epic_id, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_export_jsonl")]
+fn py_bead_export_jsonl<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_export_jsonl(&beads_dir)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_sync_is_clean")]
+fn py_bead_sync_is_clean(beads_dir: &str) -> PyResult<bool> {
+    let beads_dir = PathBuf::from(beads_dir);
+    core_bead_sync_is_clean(&beads_dir).map_err(bead_error_to_pyerr)
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_build_epic_work_plan")]
 fn py_bead_build_epic_work_plan<'py>(
     py: Python<'py>,
@@ -949,6 +1131,28 @@ where
             PyValueError::new_err(format!("internal serialize error: {e}"))
         })?;
     json_value_to_py(py, &value)
+}
+
+fn bead_create_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<BeadCreateRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid BeadCreateRequestWire dict: {e}"
+        ))
+    })
+}
+
+fn bead_update_fields_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<BeadUpdateFieldsWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "fields is not a valid BeadUpdateFieldsWire dict: {e}"
+        ))
+    })
 }
 
 fn issues_from_py_list(list: &Bound<'_, PyList>) -> PyResult<Vec<IssueWire>> {
@@ -1761,6 +1965,17 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_merged_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merged_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merged_get_epic_children, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_unmark_ready_to_work, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_export_jsonl, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_sync_is_clean, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_build_epic_work_plan, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_bead_build_epic_work_plan_from_issues,
