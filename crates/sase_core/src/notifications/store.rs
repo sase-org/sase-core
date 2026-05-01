@@ -455,6 +455,9 @@ fn outcome_from_rows(
 fn counts_for(notifications: &[NotificationWire]) -> NotificationCountsWire {
     let mut counts = NotificationCountsWire::default();
     for n in notifications {
+        if n.read || n.silent {
+            continue;
+        }
         if n.muted {
             counts.muted += 1;
         } else if is_priority(n) {

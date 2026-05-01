@@ -109,7 +109,8 @@ fn notification_phase1_contract_fixture_loads_with_expected_counts() {
     assert_eq!(legacy.snooze_until, None);
 
     assert_eq!(active.counts.priority, 6);
-    assert_eq!(active.counts.muted, 3);
+    assert_eq!(active.counts.rest, 2);
+    assert_eq!(active.counts.muted, 2);
 }
 
 #[test]
@@ -143,7 +144,16 @@ fn notification_counts_match_python_priority_rules() {
     let rest = notification("rest");
     let mut muted = notification("muted");
     muted.muted = true;
-    rewrite_notifications(&path, &[plan, crs, error, rest, muted]).unwrap();
+    let mut read_plan = notification("read-plan");
+    read_plan.action = Some("PlanApproval".to_string());
+    read_plan.read = true;
+    let mut silent_rest = notification("silent-rest");
+    silent_rest.silent = true;
+    rewrite_notifications(
+        &path,
+        &[plan, crs, error, rest, muted, read_plan, silent_rest],
+    )
+    .unwrap();
 
     let snapshot = read_notifications_snapshot(&path, false).unwrap();
     assert_eq!(snapshot.counts.priority, 3);
