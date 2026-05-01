@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sase-core-rs"
-version = "0.1.0"
+version = "0.1.1"
 description = "Rust core for the sase TUI/CLI: PyO3 bindings exposing the ChangeSpec parser, query language, agent-artifact scan, status state machine, and git-query parsers."
 readme = "PYPI_README.md"
 requires-python = ">=3.12"
