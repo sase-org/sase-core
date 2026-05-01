@@ -35,6 +35,7 @@
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
 //! - `append_notification(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
+//! - `agent_launch_wire_schema_version() -> int`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -1087,6 +1088,13 @@ fn json_object_to_py<'py>(
     Ok(dict.into())
 }
 
+/// Return the launch wire schema version pinned by the Rust skeleton structs.
+#[pyfunction]
+#[pyo3(name = "agent_launch_wire_schema_version")]
+fn py_agent_launch_wire_schema_version() -> u32 {
+    sase_core::AGENT_LAUNCH_WIRE_SCHEMA_VERSION
+}
+
 #[pymodule]
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1123,6 +1131,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     Ok(())
 }
 
