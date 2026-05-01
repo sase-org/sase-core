@@ -1,5 +1,6 @@
 //! Wire records and deterministic helpers for agent launch.
 
+use chrono::{Duration, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -164,6 +165,72 @@ impl fmt::Display for AgentLaunchPreparationError {
 }
 
 impl std::error::Error for AgentLaunchPreparationError {}
+
+#[derive(Debug)]
+pub enum TimestampBatchAllocationError {
+    InvalidTimestamp {
+        field: &'static str,
+        value: String,
+        error: chrono::ParseError,
+    },
+}
+
+impl fmt::Display for TimestampBatchAllocationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTimestamp {
+                field,
+                value,
+                error,
+            } => write!(
+                f,
+                "invalid {field} launch timestamp {value:?}; expected YYmmdd_HHMMSS: {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TimestampBatchAllocationError {}
+
+pub fn allocate_launch_timestamp_batch(
+    count: usize,
+    base_timestamp: &str,
+    after_timestamp: Option<&str>,
+) -> Result<Vec<String>, TimestampBatchAllocationError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let base = parse_launch_timestamp("base_timestamp", base_timestamp)?;
+    let start = match after_timestamp {
+        Some(after) if !after.is_empty() => {
+            let after = parse_launch_timestamp("after_timestamp", after)?;
+            std::cmp::max(base, after + Duration::seconds(1))
+        }
+        _ => base,
+    };
+
+    Ok((0..count)
+        .map(|offset| {
+            (start + Duration::seconds(offset as i64))
+                .format("%y%m%d_%H%M%S")
+                .to_string()
+        })
+        .collect())
+}
+
+fn parse_launch_timestamp(
+    field: &'static str,
+    value: &str,
+) -> Result<NaiveDateTime, TimestampBatchAllocationError> {
+    NaiveDateTime::parse_from_str(value, "%y%m%d_%H%M%S").map_err(|error| {
+        TimestampBatchAllocationError::InvalidTimestamp {
+            field,
+            value: value.to_string(),
+            error,
+        }
+    })
+}
 
 pub fn prepare_agent_launch(
     request: &AgentLaunchRequestWire,
@@ -784,6 +851,37 @@ mod tests {
         assert_eq!(value["slots"][0]["repeat_name"], json!("task.1"));
         let back: LaunchFanoutPlanWire = serde_json::from_value(value).unwrap();
         assert_eq!(back, plan);
+    }
+
+    #[test]
+    fn timestamp_batch_allocates_unique_visible_timestamps() {
+        let timestamps =
+            allocate_launch_timestamp_batch(3, "260501_120000", None).unwrap();
+
+        assert_eq!(
+            timestamps,
+            vec!["260501_120000", "260501_120001", "260501_120002"]
+        );
+    }
+
+    #[test]
+    fn timestamp_batch_starts_after_previous_allocation() {
+        let timestamps = allocate_launch_timestamp_batch(
+            2,
+            "260501_120000",
+            Some("260501_120005"),
+        )
+        .unwrap();
+
+        assert_eq!(timestamps, vec!["260501_120006", "260501_120007"]);
+    }
+
+    #[test]
+    fn timestamp_batch_rejects_invalid_format() {
+        let err = allocate_launch_timestamp_batch(1, "not-a-timestamp", None)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expected YYmmdd_HHMMSS"));
     }
 
     #[test]
