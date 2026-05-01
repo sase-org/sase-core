@@ -4,11 +4,15 @@
 //!
 //! - [`compile_query`] turns a query string into a [`QueryProgram`] (parsed
 //!   AST plus the original source).
-//! - [`QueryEvaluationContext`] holds a per-list cache keyed by lowercased
-//!   ChangeSpec name (name map, status map, searchable text/lowercase, and
-//!   ancestor memo).
-//! - [`evaluate_query_many`] is the primary public API: build the context
-//!   once, evaluate the program against every spec.
+//! - [`QueryCorpus`] owns a ChangeSpec list plus reusable per-corpus derived
+//!   data such as parent lookup, base statuses, project names, sibling bases,
+//!   and searchable text.
+//! - [`QueryEvaluationContext`] holds query-specific state. Today that is
+//!   only ancestor memoization, which must not be shared across unrelated
+//!   query evaluations.
+//! - [`evaluate_query_many_in_corpus`] evaluates a compiled program against a
+//!   persistent corpus. [`evaluate_query_many`] preserves the older API by
+//!   constructing a temporary corpus.
 //! - [`evaluate_query_one`] is a convenience for tests.
 //!
 //! Substring matching is case-insensitive via lowercasing the searchable
@@ -19,12 +23,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::query::matchers::{
-    get_base_status, has_any_status_suffix, match_name, match_project,
-    match_sibling, match_status,
+    get_base_status, has_any_status_suffix, match_name, strip_reverted_suffix,
 };
 use crate::query::parser::parse_query;
 use crate::query::searchable::{
-    get_searchable_text, RUNNING_AGENT_MARKER, RUNNING_PROCESS_MARKER,
+    get_searchable_text, project_dir_name, RUNNING_AGENT_MARKER,
+    RUNNING_PROCESS_MARKER,
 };
 use crate::query::types::{QueryErrorWire, QueryExprWire};
 use crate::wire::ChangeSpecWire;
@@ -75,79 +79,102 @@ pub fn compile_query(query: &str) -> Result<QueryProgram, QueryErrorWire> {
     Ok(QueryProgram::new(query, expr))
 }
 
-/// Per-ChangeSpec-list cache used during query evaluation.
+/// Persistent ChangeSpec corpus used across many query evaluations.
 ///
-/// Mirrors `QueryEvaluationContext` in Python:
+/// This owns the wire specs and the expensive or repeated derived values that
+/// depend only on the corpus, not on a particular query. A single
+/// [`QueryCorpus`] can safely be reused for different compiled programs
+/// because query-specific mutable state lives in [`QueryEvaluationContext`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCorpus {
+    pub specs: Vec<ChangeSpecWire>,
+    pub name_map: HashMap<String, usize>,
+    pub lower_names: Vec<String>,
+    pub base_statuses: Vec<String>,
+    pub project_names: Vec<String>,
+    pub sibling_bases: Vec<String>,
+    pub searchable_text: Vec<String>,
+    pub searchable_lower: Vec<String>,
+}
+
+impl QueryCorpus {
+    pub fn new(specs: Vec<ChangeSpecWire>) -> Self {
+        let mut name_map = HashMap::with_capacity(specs.len());
+        let mut lower_names = Vec::with_capacity(specs.len());
+        let mut base_statuses = Vec::with_capacity(specs.len());
+        let mut project_names = Vec::with_capacity(specs.len());
+        let mut sibling_bases = Vec::with_capacity(specs.len());
+        let mut searchable_text = Vec::with_capacity(specs.len());
+        let mut searchable_lower = Vec::with_capacity(specs.len());
+
+        for (idx, cs) in specs.iter().enumerate() {
+            let lower_name = cs.name.to_lowercase();
+            name_map.insert(lower_name.clone(), idx);
+            lower_names.push(lower_name);
+            base_statuses.push(get_base_status(&cs.status));
+            project_names.push(project_dir_name(&cs.file_path).to_string());
+            sibling_bases.push(strip_reverted_suffix(&cs.name).to_lowercase());
+
+            let text = get_searchable_text(cs);
+            searchable_lower.push(text.to_lowercase());
+            searchable_text.push(text);
+        }
+
+        Self {
+            specs,
+            name_map,
+            lower_names,
+            base_statuses,
+            project_names,
+            sibling_bases,
+            searchable_text,
+            searchable_lower,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.specs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.specs.is_empty()
+    }
+}
+
+/// Query-evaluation scratch state.
 ///
-/// - `name_map` maps lowercased name → index into `all_specs` so ancestor
-///   walks resolve parents in O(1).
-/// - `status_map` caches the base status per spec.
-/// - `searchable_text` / `searchable_lower` are lazy: they're populated the
-///   first time a string match touches a spec, so unfiltered batches don't
-///   pay the cost.
 /// - `ancestor_memo` keys on `(name_lower, ancestor_value_lower)` to avoid
 ///   re-walking parent chains.
 #[derive(Debug, Clone, Default)]
 pub struct QueryEvaluationContext {
-    pub name_map: HashMap<String, usize>,
-    pub status_map: HashMap<String, String>,
-    pub searchable_text: HashMap<String, String>,
-    pub searchable_lower: HashMap<String, String>,
     pub ancestor_memo: HashMap<(String, String), bool>,
 }
 
 impl QueryEvaluationContext {
-    /// Build a context from a ChangeSpec list.
+    /// Build fresh query-evaluation scratch state.
     ///
-    /// Eagerly fills `name_map` and `status_map` (cheap, used by every row).
-    /// Searchable text is populated lazily during evaluation.
+    /// The `specs` argument is retained for source compatibility with older
+    /// callers that built the context directly. Per-corpus data now lives in
+    /// [`QueryCorpus`].
     pub fn build(specs: &[ChangeSpecWire]) -> Self {
-        let mut name_map = HashMap::with_capacity(specs.len());
-        let mut status_map = HashMap::with_capacity(specs.len());
-        for (idx, cs) in specs.iter().enumerate() {
-            let key = cs.name.to_lowercase();
-            name_map.insert(key.clone(), idx);
-            status_map.insert(key, get_base_status(&cs.status));
-        }
+        let _ = specs;
         Self {
-            name_map,
-            status_map,
-            searchable_text: HashMap::new(),
-            searchable_lower: HashMap::new(),
             ancestor_memo: HashMap::new(),
         }
     }
 
-    fn searchable_text<'a>(&'a mut self, cs: &ChangeSpecWire) -> &'a str {
-        let key = cs.name.to_lowercase();
-        if !self.searchable_text.contains_key(&key) {
-            self.searchable_text
-                .insert(key.clone(), get_searchable_text(cs));
-        }
-        self.searchable_text.get(&key).unwrap()
-    }
-
-    fn searchable_lower<'a>(&'a mut self, cs: &ChangeSpecWire) -> &'a str {
-        let key = cs.name.to_lowercase();
-        if !self.searchable_lower.contains_key(&key) {
-            let text = self.searchable_text(cs).to_string();
-            self.searchable_lower
-                .insert(key.clone(), text.to_lowercase());
-        }
-        self.searchable_lower.get(&key).unwrap()
-    }
-
     fn match_string(
         &mut self,
-        cs: &ChangeSpecWire,
+        corpus: &QueryCorpus,
+        idx: usize,
         value: &str,
         case_sensitive: bool,
     ) -> bool {
         if case_sensitive {
-            self.searchable_text(cs).contains(value)
+            corpus.searchable_text[idx].contains(value)
         } else {
             let needle = value.to_lowercase();
-            self.searchable_lower(cs).contains(&needle)
+            corpus.searchable_lower[idx].contains(&needle)
         }
     }
 
@@ -159,19 +186,23 @@ impl QueryEvaluationContext {
     /// terminates the walk without matching).
     fn match_ancestor(
         &mut self,
-        all_specs: &[ChangeSpecWire],
-        cs: &ChangeSpecWire,
+        corpus: &QueryCorpus,
+        idx: usize,
         ancestor_value: &str,
     ) -> bool {
         let ancestor_value_lower = ancestor_value.to_lowercase();
-        let cache_key = (cs.name.to_lowercase(), ancestor_value_lower.clone());
+        let cache_key = (
+            corpus.lower_names[idx].clone(),
+            ancestor_value_lower.clone(),
+        );
         if let Some(cached) = self.ancestor_memo.get(&cache_key) {
             return *cached;
         }
 
         let mut visited: Vec<String> = Vec::new();
-        let mut current_name_lower = cs.name.to_lowercase();
-        let mut current_parent: Option<String> = cs.parent.clone();
+        let mut current_name_lower = corpus.lower_names[idx].clone();
+        let mut current_parent: Option<String> =
+            corpus.specs[idx].parent.clone();
         let mut found = false;
 
         loop {
@@ -199,11 +230,11 @@ impl QueryEvaluationContext {
                         found = true;
                         break;
                     }
-                    match self.name_map.get(&parent_lower).copied() {
+                    match corpus.name_map.get(&parent_lower).copied() {
                         Some(idx) => {
-                            let parent_cs = &all_specs[idx];
-                            current_name_lower = parent_cs.name.to_lowercase();
-                            current_parent = parent_cs.parent.clone();
+                            current_name_lower =
+                                corpus.lower_names[idx].clone();
+                            current_parent = corpus.specs[idx].parent.clone();
                         }
                         None => break,
                     }
@@ -222,17 +253,20 @@ impl QueryEvaluationContext {
 
     fn match_property(
         &mut self,
-        all_specs: &[ChangeSpecWire],
-        cs: &ChangeSpecWire,
+        corpus: &QueryCorpus,
+        idx: usize,
         key: &str,
         value: &str,
     ) -> bool {
         match key {
-            "status" => match_status(value, cs),
-            "project" => match_project(value, cs),
-            "ancestor" => self.match_ancestor(all_specs, cs, value),
-            "name" => match_name(value, cs),
-            "sibling" => match_sibling(value, cs),
+            "status" => corpus.base_statuses[idx].eq_ignore_ascii_case(value),
+            "project" => corpus.project_names[idx].eq_ignore_ascii_case(value),
+            "ancestor" => self.match_ancestor(corpus, idx, value),
+            "name" => match_name(value, &corpus.specs[idx]),
+            "sibling" => {
+                let search_base = strip_reverted_suffix(value).to_lowercase();
+                corpus.sibling_bases[idx] == search_base
+            }
             // Unknown property keys never match (parser rejects unknown keys
             // up front, so this is just defensive).
             _ => false,
@@ -241,10 +275,11 @@ impl QueryEvaluationContext {
 
     fn evaluate(
         &mut self,
-        all_specs: &[ChangeSpecWire],
-        cs: &ChangeSpecWire,
+        corpus: &QueryCorpus,
+        idx: usize,
         expr: &QueryExprWire,
     ) -> bool {
+        let cs = &corpus.specs[idx];
         match expr {
             QueryExprWire::StringMatch {
                 value,
@@ -257,44 +292,52 @@ impl QueryEvaluationContext {
                     return has_any_status_suffix(cs);
                 }
                 if *is_running_agent {
-                    return self
-                        .searchable_text(cs)
+                    return corpus.searchable_text[idx]
                         .contains(RUNNING_AGENT_MARKER);
                 }
                 if *is_running_process {
-                    return self
-                        .searchable_text(cs)
+                    return corpus.searchable_text[idx]
                         .contains(RUNNING_PROCESS_MARKER);
                 }
-                self.match_string(cs, value, *case_sensitive)
+                self.match_string(corpus, idx, value, *case_sensitive)
             }
             QueryExprWire::PropertyMatch { key, value } => {
-                self.match_property(all_specs, cs, key, value)
+                self.match_property(corpus, idx, key, value)
             }
             QueryExprWire::Not { operand } => {
-                !self.evaluate(all_specs, cs, operand)
+                !self.evaluate(corpus, idx, operand)
             }
             QueryExprWire::And { operands } => {
-                operands.iter().all(|op| self.evaluate(all_specs, cs, op))
+                operands.iter().all(|op| self.evaluate(corpus, idx, op))
             }
             QueryExprWire::Or { operands } => {
-                operands.iter().any(|op| self.evaluate(all_specs, cs, op))
+                operands.iter().any(|op| self.evaluate(corpus, idx, op))
             }
         }
     }
 }
 
+/// Evaluate a compiled query against every spec in a persistent corpus,
+/// returning one boolean per corpus row.
+pub fn evaluate_query_many_in_corpus(
+    program: &QueryProgram,
+    corpus: &QueryCorpus,
+) -> Vec<bool> {
+    let mut ctx = QueryEvaluationContext::default();
+    (0..corpus.len())
+        .map(|idx| ctx.evaluate(corpus, idx, &program.expr))
+        .collect()
+}
+
 /// Evaluate a compiled query against every spec in `specs`, returning a
-/// boolean per spec. The primary public API for Phase 2C.
+/// boolean per spec. Compatibility API for callers that do not yet own a
+/// persistent [`QueryCorpus`].
 pub fn evaluate_query_many(
     program: &QueryProgram,
     specs: &[ChangeSpecWire],
 ) -> Vec<bool> {
-    let mut ctx = QueryEvaluationContext::build(specs);
-    specs
-        .iter()
-        .map(|cs| ctx.evaluate(specs, cs, &program.expr))
-        .collect()
+    let corpus = QueryCorpus::new(specs.to_vec());
+    evaluate_query_many_in_corpus(program, &corpus)
 }
 
 /// Evaluate a compiled query against one spec inside an existing list.
@@ -305,6 +348,20 @@ pub fn evaluate_query_one(
     cs: &ChangeSpecWire,
     all_specs: &[ChangeSpecWire],
 ) -> bool {
-    let mut ctx = QueryEvaluationContext::build(all_specs);
-    ctx.evaluate(all_specs, cs, &program.expr)
+    let idx = all_specs
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, cs))
+        .or_else(|| {
+            all_specs
+                .iter()
+                .position(|candidate| candidate.name == cs.name)
+        });
+    let corpus = QueryCorpus::new(all_specs.to_vec());
+    match idx {
+        Some(idx) => {
+            let mut ctx = QueryEvaluationContext::default();
+            ctx.evaluate(&corpus, idx, &program.expr)
+        }
+        None => false,
+    }
 }

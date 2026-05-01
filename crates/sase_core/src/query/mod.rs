@@ -28,8 +28,8 @@ pub mod types;
 mod tests;
 
 pub use evaluator::{
-    compile_query, evaluate_query_many, evaluate_query_one,
-    QueryEvaluationContext, QueryProgram,
+    compile_query, evaluate_query_many, evaluate_query_many_in_corpus,
+    evaluate_query_one, QueryCorpus, QueryEvaluationContext, QueryProgram,
 };
 pub use matchers::{
     get_base_status, has_any_status_suffix, match_name, match_project,

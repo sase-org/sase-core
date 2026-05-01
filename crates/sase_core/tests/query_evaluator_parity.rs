@@ -10,7 +10,10 @@
 //! `project:` matcher's parent-directory logic produces the same answers as
 //! Python (`project_name == "core_golden"`).
 
-use sase_core::{compile_query, evaluate_query_many, parse_project_bytes};
+use sase_core::{
+    compile_query, evaluate_query_many, evaluate_query_many_in_corpus,
+    parse_project_bytes, QueryCorpus,
+};
 
 const MYPROJ_GP: &[u8] = include_bytes!("fixtures/myproj.gp");
 const MYPROJ_PATH: &str = "tests/core_golden/myproj.gp";
@@ -27,9 +30,27 @@ fn matches(query: &str) -> Vec<String> {
         .collect()
 }
 
+fn corpus_matches(query: &str, corpus: &QueryCorpus) -> Vec<String> {
+    let program = compile_query(query).expect("compile");
+    let results = evaluate_query_many_in_corpus(&program, corpus);
+    corpus
+        .specs
+        .iter()
+        .zip(results.iter())
+        .filter_map(|(cs, m)| if *m { Some(cs.name.clone()) } else { None })
+        .collect()
+}
+
 /// One row from the Python `test_evaluation_matrix_snapshot` golden matrix.
 fn case(query: &str, expected: &[&str]) {
     let got = matches(query);
+    let expected: Vec<String> =
+        expected.iter().map(|s| s.to_string()).collect();
+    assert_eq!(got, expected, "query {query}");
+}
+
+fn corpus_case(query: &str, expected: &[&str], corpus: &QueryCorpus) {
+    let got = corpus_matches(query, corpus);
     let expected: Vec<String> =
         expected.iter().map(|s| s.to_string()).collect();
     assert_eq!(got, expected, "query {query}");
@@ -112,6 +133,27 @@ fn evaluation_matrix_property_shorthands() {
 }
 
 #[test]
+fn persistent_corpus_matches_golden_matrix_samples() {
+    let specs =
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+    let corpus = QueryCorpus::new(specs);
+
+    corpus_case(
+        "\"alpha\" OR \"beta\"",
+        &["alpha", "beta", "beta__260102_010101"],
+        &corpus,
+    );
+    corpus_case("status:Ready", &["gamma"], &corpus);
+    corpus_case(
+        "ancestor:alpha",
+        &["alpha", "beta", "beta__260102_010101"],
+        &corpus,
+    );
+    corpus_case("sibling:beta", &["beta"], &corpus);
+    corpus_case("@@@", &["gamma"], &corpus);
+}
+
+#[test]
 fn substring_semantics_not_regex() {
     // ".*" is not a wildcard — the literal ".*" appears nowhere in the
     // corpus, so this query matches nothing.
@@ -138,6 +180,38 @@ fn batch_evaluation_is_idempotent() {
     let first = evaluate_query_many(&program, &specs);
     let second = evaluate_query_many(&program, &specs);
     assert_eq!(first, second);
+}
+
+#[test]
+fn persistent_corpus_reuses_derived_data_across_repeated_evaluations() {
+    let specs =
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+    let corpus = QueryCorpus::new(specs);
+    let program = compile_query("ancestor:alpha").unwrap();
+
+    let first = evaluate_query_many_in_corpus(&program, &corpus);
+    let second = evaluate_query_many_in_corpus(&program, &corpus);
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn persistent_corpus_keeps_ancestor_memo_query_specific() {
+    let specs =
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+    let corpus = QueryCorpus::new(specs);
+
+    let missing = compile_query("ancestor:missing").unwrap();
+    let alpha = compile_query("ancestor:alpha").unwrap();
+
+    assert_eq!(
+        evaluate_query_many_in_corpus(&missing, &corpus),
+        vec![false, false, false, false]
+    );
+    assert_eq!(
+        evaluate_query_many_in_corpus(&alpha, &corpus),
+        vec![true, true, true, false]
+    );
 }
 
 #[test]
