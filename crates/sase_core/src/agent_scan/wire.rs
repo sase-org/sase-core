@@ -165,6 +165,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub plan_submitted_at: Vec<String>,
     #[serde(default)]
+    pub epic_started_at: Option<String>,
+    #[serde(default)]
     pub feedback_submitted_at: Vec<String>,
     #[serde(default)]
     pub questions_submitted_at: Vec<String>,

@@ -497,6 +497,7 @@ fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
         &json!({
             "name": "planner",
             "plan_submitted_at": "2026-04-29T17:20:22.951546+00:00",
+            "epic_started_at": "2026-04-29T17:21:22.951546+00:00",
         }),
     );
 
@@ -508,6 +509,10 @@ fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
     assert_eq!(
         meta.plan_submitted_at,
         vec!["2026-04-29T17:20:22.951546+00:00".to_string()]
+    );
+    assert_eq!(
+        meta.epic_started_at.as_deref(),
+        Some("2026-04-29T17:21:22.951546+00:00")
     );
 }
 

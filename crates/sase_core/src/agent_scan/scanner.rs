@@ -463,6 +463,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         plan_submitted_at: coerce_str_list(data.get("plan_submitted_at")),
+        epic_started_at: coerce_str(data.get("epic_started_at")),
         feedback_submitted_at: coerce_str_list(
             data.get("feedback_submitted_at"),
         ),
