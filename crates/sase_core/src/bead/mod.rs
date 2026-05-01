@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod jsonl;
+pub mod read;
 pub mod schema;
 pub mod wire;
 
@@ -16,6 +17,13 @@ pub use config::{
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
     JsonlLoadOutcome,
+};
+pub use read::{
+    blocked_issues, blocked_merged_issues, doctor, get_epic_children,
+    get_merged_epic_children, list_issues, list_merged_issues,
+    merge_workspace_issues, merged_stats, read_store_issues, ready_issues,
+    ready_merged_issues, show_issue, show_merged_issue, stats,
+    BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, is_ready_to_work_migration_sql,

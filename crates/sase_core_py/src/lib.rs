@@ -97,6 +97,21 @@ use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
     AgentArtifactScanOptionsWire,
 };
+use sase_core::bead::{
+    blocked_issues as core_bead_blocked_issues,
+    blocked_merged_issues as core_bead_blocked_merged_issues,
+    doctor as core_bead_doctor,
+    get_epic_children as core_bead_get_epic_children,
+    get_merged_epic_children as core_bead_get_merged_epic_children,
+    list_issues as core_bead_list_issues,
+    list_merged_issues as core_bead_list_merged_issues,
+    merged_stats as core_bead_merged_stats,
+    ready_issues as core_bead_ready_issues,
+    ready_merged_issues as core_bead_ready_merged_issues,
+    show_issue as core_bead_show_issue,
+    show_merged_issue as core_bead_show_merged_issue, stats as core_bead_stats,
+    BeadError,
+};
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
     parse_git_branch_name as core_parse_git_branch_name,
@@ -704,6 +719,204 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
     }
 }
 
+// --- Bead read bindings ---------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "bead_show")]
+fn py_bead_show<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_show_issue(&beads_dir, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_list")]
+#[pyo3(signature = (beads_dir, statuses=None, issue_types=None))]
+fn py_bead_list<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    statuses: Option<Vec<String>>,
+    issue_types: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_list_issues(
+                &beads_dir,
+                statuses.as_deref(),
+                issue_types.as_deref(),
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_ready")]
+fn py_bead_ready<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_ready_issues(&beads_dir)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_blocked")]
+fn py_bead_blocked<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_blocked_issues(&beads_dir)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_stats")]
+fn py_bead_stats<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(py, py.allow_threads(|| core_bead_stats(&beads_dir)))
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_doctor")]
+fn py_bead_doctor(beads_dir: &str) -> PyResult<Vec<String>> {
+    let beads_dir = PathBuf::from(beads_dir);
+    core_bead_doctor(&beads_dir).map_err(bead_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_get_epic_children")]
+fn py_bead_get_epic_children<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    epic_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_get_epic_children(&beads_dir, epic_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_show")]
+fn py_bead_merged_show<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_show_merged_issue(&beads_dirs, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_list")]
+#[pyo3(signature = (beads_dirs, statuses=None, issue_types=None))]
+fn py_bead_merged_list<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+    statuses: Option<Vec<String>>,
+    issue_types: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_list_merged_issues(
+                &beads_dirs,
+                statuses.as_deref(),
+                issue_types.as_deref(),
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_ready")]
+fn py_bead_merged_ready<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_ready_merged_issues(&beads_dirs)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_blocked")]
+fn py_bead_merged_blocked<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_blocked_merged_issues(&beads_dirs)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_stats")]
+fn py_bead_merged_stats<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_merged_stats(&beads_dirs)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_merged_get_epic_children")]
+fn py_bead_merged_get_epic_children<'py>(
+    py: Python<'py>,
+    beads_dirs: Vec<String>,
+    epic_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dirs = strings_to_paths(beads_dirs);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_get_merged_epic_children(&beads_dirs, epic_id)
+        }),
+    )
+}
+
+fn strings_to_paths(paths: Vec<String>) -> Vec<PathBuf> {
+    paths.into_iter().map(PathBuf::from).collect()
+}
+
+fn bead_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, BeadError>,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result.map_err(bead_error_to_pyerr)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Notification store bindings -----------------------------------------
 
 /// Read the notification JSONL store and return a snapshot dict.
@@ -847,6 +1060,10 @@ fn notification_update_from_pydict(
 }
 
 fn query_error_to_pyerr(err: QueryErrorWire) -> PyErr {
+    PyValueError::new_err(format!("{err}"))
+}
+
+fn bead_error_to_pyerr(err: BeadError) -> PyErr {
     PyValueError::new_err(format!("{err}"))
 }
 
@@ -1480,6 +1697,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_doctor, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_get_epic_children, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_show, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_ready, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_blocked, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merged_get_epic_children, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_notifications_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;

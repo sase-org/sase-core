@@ -374,6 +374,7 @@ dependencies = [
  "libc",
  "pyo3",
  "sase_core",
+ "serde",
  "serde_json",
 ]
 

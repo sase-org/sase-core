@@ -31,5 +31,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 sase_core = { path = "../sase_core" }
 pyo3 = { version = "0.22", features = ["abi3-py312"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 libc = "0.2"
