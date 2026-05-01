@@ -111,6 +111,8 @@ pub struct LaunchFanoutSlotWire {
     pub launch_kind: String,
     pub slot_index: u32,
     #[serde(default)]
+    pub alt_id: Option<String>,
+    #[serde(default)]
     pub timestamp: Option<String>,
     #[serde(default)]
     pub workflow_name: Option<String>,
@@ -264,6 +266,31 @@ struct DirectiveOccurrence {
     has_plus_suffix: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectiveArg {
+    name: Option<String>,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeBranch {
+    value: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeDirective {
+    start: usize,
+    end: usize,
+    branches: Vec<AlternativeBranch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeSlot {
+    prompt: String,
+    alt_id: String,
+}
+
 pub fn plan_agent_launch_fanout(
     prompt: &str,
     launch_kind: Option<&str>,
@@ -294,6 +321,7 @@ pub fn plan_agent_launch_fanout(
                     prompt: prompt.to_string(),
                     launch_kind: "single".to_string(),
                     slot_index: 0,
+                    alt_id: None,
                     timestamp: None,
                     workflow_name: None,
                     model: None,
@@ -382,9 +410,9 @@ fn push_nonempty_segment(out: &mut Vec<String>, segment: &str) {
     }
 }
 
-fn split_prompt_for_models_rust(
+fn split_prompt_for_models_with_ids(
     prompt: &str,
-) -> Result<Vec<String>, AgentLaunchFanoutPlanError> {
+) -> Result<Vec<AlternativeSlot>, AgentLaunchFanoutPlanError> {
     if !prompt.contains('%') {
         return Ok(Vec::new());
     }
@@ -409,7 +437,7 @@ fn split_prompt_for_models_rust(
 
     if directive_spans.is_empty() {
         return Ok(
-            split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default()
+            split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default()
         );
     }
 
@@ -425,7 +453,7 @@ fn split_prompt_for_models_rust(
 
     if unique_models.len() <= 1 {
         return Ok(
-            split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default()
+            split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default()
         );
     }
 
@@ -457,13 +485,13 @@ fn split_prompt_for_models_rust(
             rewritten.replace_range(start..end, "");
         }
     }
-    Ok(split_prompt_for_alternatives_rust(&rewritten)?.unwrap_or_default())
+    Ok(split_prompt_for_alternatives_with_ids(&rewritten)?.unwrap_or_default())
 }
 
-fn split_prompt_for_alternatives_rust(
+fn split_prompt_for_alternatives_with_ids(
     prompt: &str,
-) -> Result<Option<Vec<String>>, AgentLaunchFanoutPlanError> {
-    let mut directives: Vec<(usize, usize, Vec<String>)> = Vec::new();
+) -> Result<Option<Vec<AlternativeSlot>>, AgentLaunchFanoutPlanError> {
+    let mut directives: Vec<AlternativeDirective> = Vec::new();
     for (start, paren_start) in alt_directive_starts(prompt) {
         let Some(paren_end) = find_matching_paren(prompt, paren_start) else {
             return Err(AgentLaunchFanoutPlanError::UnclosedDirective(
@@ -471,32 +499,51 @@ fn split_prompt_for_alternatives_rust(
             ));
         };
         let inner = &prompt[paren_start + 1..paren_end];
-        let mut args = parse_directive_args(inner);
+        let mut args = parse_directive_args_with_names(inner);
         if args.is_empty() {
             continue;
         }
         if args.len() == 1 {
-            args.push(String::new());
+            args.push(DirectiveArg {
+                name: None,
+                value: String::new(),
+            });
         }
-        directives.push((start, paren_end + 1, args));
+        let branches = allocate_alternative_branch_ids(args);
+        directives.push(AlternativeDirective {
+            start,
+            end: paren_end + 1,
+            branches,
+        });
     }
 
     if directives.is_empty() {
         return Ok(None);
     }
 
-    let arg_lists: Vec<Vec<String>> =
-        directives.iter().map(|(_, _, args)| args.clone()).collect();
+    let arg_lists: Vec<Vec<AlternativeBranch>> = directives
+        .iter()
+        .map(|directive| directive.branches.clone())
+        .collect();
     let mut combinations = Vec::new();
     cartesian_product(&arg_lists, 0, &mut Vec::new(), &mut combinations);
 
     let mut result = Vec::with_capacity(combinations.len());
     for combination in combinations {
         let mut replaced = prompt.to_string();
-        for ((start, end, _), arg) in directives.iter().zip(combination).rev() {
-            replaced.replace_range(*start..*end, &arg);
+        let alt_id = combination
+            .iter()
+            .map(|branch| branch.id.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        for (directive, branch) in directives.iter().zip(combination).rev() {
+            replaced
+                .replace_range(directive.start..directive.end, &branch.value);
         }
-        result.push(replaced);
+        result.push(AlternativeSlot {
+            prompt: replaced,
+            alt_id,
+        });
     }
     Ok(Some(result))
 }
@@ -664,16 +711,112 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
     args.into_iter().filter(|arg| !arg.is_empty()).collect()
 }
 
+fn parse_directive_args_with_names(inner: &str) -> Vec<DirectiveArg> {
+    let mut args = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut in_backticks = false;
+    for (idx, ch) in inner.char_indices() {
+        if ch == '`' {
+            in_backticks = !in_backticks;
+            continue;
+        }
+        if in_backticks {
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                push_directive_arg(&mut args, &inner[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    push_directive_arg(&mut args, &inner[start..]);
+    args.into_iter()
+        .filter(|arg| !arg.value.is_empty() || arg.name.is_some())
+        .collect()
+}
+
+fn push_directive_arg(args: &mut Vec<DirectiveArg>, raw: &str) {
+    let trimmed = raw.trim();
+    let (name, value_raw) = split_named_directive_arg(trimmed);
+    let value_trimmed = value_raw.trim();
+    let value = unquote_directive_arg_value(value_trimmed);
+    args.push(DirectiveArg { name, value });
+}
+
 fn push_arg(args: &mut Vec<String>, raw: &str) {
     let trimmed = raw.trim();
+    args.push(unquote_directive_arg_value(trimmed));
+}
+
+fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
+    let mut depth = 0_i32;
+    let mut in_backticks = false;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '`' {
+            in_backticks = !in_backticks;
+            continue;
+        }
+        if in_backticks {
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth > 0 => depth -= 1,
+            '=' if depth == 0 => {
+                let name = raw[..idx].trim();
+                let value = &raw[idx + ch.len_utf8()..];
+                if !name.is_empty() {
+                    return (Some(unquote_backticks(name)), value);
+                }
+                return (None, raw);
+            }
+            _ => {}
+        }
+    }
+    (None, raw)
+}
+
+fn unquote_directive_arg_value(trimmed: &str) -> String {
     if trimmed.starts_with("[[")
         && trimmed.ends_with("]]")
         && trimmed.len() >= 4
     {
-        args.push(trimmed[2..trimmed.len() - 2].to_string());
+        trimmed[2..trimmed.len() - 2].to_string()
     } else {
-        args.push(unquote_backticks(trimmed));
+        unquote_backticks(trimmed)
     }
+}
+
+fn allocate_alternative_branch_ids(
+    args: Vec<DirectiveArg>,
+) -> Vec<AlternativeBranch> {
+    let named_ids: BTreeSet<String> =
+        args.iter().filter_map(|arg| arg.name.clone()).collect();
+    let mut next_numeric = 1_u32;
+    args.into_iter()
+        .map(|arg| {
+            let id = match arg.name {
+                Some(name) => name,
+                None => {
+                    while named_ids.contains(&next_numeric.to_string()) {
+                        next_numeric += 1;
+                    }
+                    let id = next_numeric.to_string();
+                    next_numeric += 1;
+                    id
+                }
+            };
+            AlternativeBranch {
+                value: arg.value,
+                id,
+            }
+        })
+        .collect()
 }
 
 fn unquote_backticks(value: &str) -> String {
@@ -710,11 +853,11 @@ fn find_matching_paren(text: &str, paren_start: usize) -> Option<usize> {
     None
 }
 
-fn cartesian_product(
-    lists: &[Vec<String>],
+fn cartesian_product<T: Clone>(
+    lists: &[Vec<T>],
     idx: usize,
-    current: &mut Vec<String>,
-    out: &mut Vec<Vec<String>>,
+    current: &mut Vec<T>,
+    out: &mut Vec<Vec<T>>,
 ) {
     if idx == lists.len() {
         out.push(current.clone());
@@ -851,6 +994,7 @@ fn plan_multi_prompt_fanout(prompt: &str) -> LaunchFanoutPlanWire {
                 prompt: segment,
                 launch_kind: "multi_prompt".to_string(),
                 slot_index: idx as u32,
+                alt_id: None,
                 timestamp: None,
                 workflow_name: None,
                 model: None,
@@ -865,19 +1009,20 @@ fn plan_multi_prompt_fanout(prompt: &str) -> LaunchFanoutPlanWire {
 fn plan_alternative_fanout(
     prompt: &str,
 ) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
-    let prompts =
-        split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default();
+    let slots_with_ids =
+        split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default();
     Ok(LaunchFanoutPlanWire {
         schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
         launch_kind: "alternatives".to_string(),
-        slots: prompts
+        slots: slots_with_ids
             .into_iter()
             .enumerate()
-            .map(|(idx, prompt)| LaunchFanoutSlotWire {
-                wait_for_previous: has_wait_directive(&prompt),
-                prompt,
+            .map(|(idx, slot)| LaunchFanoutSlotWire {
+                wait_for_previous: has_wait_directive(&slot.prompt),
+                prompt: slot.prompt,
                 launch_kind: "alternatives".to_string(),
                 slot_index: idx as u32,
+                alt_id: Some(slot.alt_id),
                 timestamp: None,
                 workflow_name: None,
                 model: None,
@@ -892,20 +1037,21 @@ fn plan_alternative_fanout(
 fn plan_model_fanout(
     prompt: &str,
 ) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
-    let prompts = split_prompt_for_models_rust(prompt)?;
+    let slots_with_ids = split_prompt_for_models_with_ids(prompt)?;
     Ok(LaunchFanoutPlanWire {
         schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
         launch_kind: "model".to_string(),
-        slots: prompts
+        slots: slots_with_ids
             .into_iter()
             .enumerate()
-            .map(|(idx, prompt)| {
-                let model = extract_first_model_value(&prompt);
+            .map(|(idx, slot)| {
+                let model = extract_first_model_value(&slot.prompt);
                 LaunchFanoutSlotWire {
-                    wait_for_previous: has_wait_directive(&prompt),
-                    prompt,
+                    wait_for_previous: has_wait_directive(&slot.prompt),
+                    prompt: slot.prompt,
                     launch_kind: "model".to_string(),
                     slot_index: idx as u32,
+                    alt_id: Some(slot.alt_id),
                     timestamp: None,
                     workflow_name: None,
                     model,
@@ -926,6 +1072,7 @@ fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
                 prompt: stripped.clone(),
                 launch_kind: "repeat".to_string(),
                 slot_index: idx,
+                alt_id: None,
                 timestamp: None,
                 workflow_name: None,
                 model: None,
@@ -1550,6 +1697,7 @@ mod tests {
                 prompt: "%n:task.1\nfix it".to_string(),
                 launch_kind: "repeat".to_string(),
                 slot_index: 0,
+                alt_id: None,
                 timestamp: None,
                 workflow_name: None,
                 model: None,
@@ -1561,6 +1709,7 @@ mod tests {
         };
         let value = serde_json::to_value(&plan).unwrap();
         assert_eq!(value["slots"][0]["repeat_name"], json!("task.1"));
+        assert_eq!(value["slots"][0]["alt_id"], json!(null));
         let back: LaunchFanoutPlanWire = serde_json::from_value(value).unwrap();
         assert_eq!(back, plan);
     }
@@ -1799,6 +1948,72 @@ mod tests {
     }
 
     #[test]
+    fn fanout_planner_preserves_named_alt_ids_and_values_only() {
+        let prompt = "%alt(sec=[[security]],perf=[[performance]])\nReview";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.launch_kind, "alternatives");
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("sec"));
+        assert_eq!(plan.slots[0].prompt, "security\nReview");
+        assert_eq!(plan.slots[1].alt_id.as_deref(), Some("perf"));
+        assert_eq!(plan.slots[1].prompt, "performance\nReview");
+    }
+
+    #[test]
+    fn fanout_planner_allocates_unnamed_alt_ids_after_named_ids() {
+        let prompt = "%(fast=a,b,2=c,d)";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("fast"), Some("1"), Some("2"), Some("3")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_composes_cartesian_alt_ids() {
+        let prompt = "%alt(left=a,right=b) %alt(red=x,blue=y)";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("left.red"),
+                Some("left.blue"),
+                Some("right.red"),
+                Some("right.blue")
+            ]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a x", "a y", "b x", "b y"]
+        );
+    }
+
+    #[test]
     fn fanout_planner_splits_models_and_alternatives() {
         let prompt = "%name:foo\n%model:opus\n%model:sonnet %alt(x,y)\nReview";
 
@@ -1807,9 +2022,25 @@ mod tests {
         assert_eq!(plan.launch_kind, "model");
         assert_eq!(plan.slots.len(), 4);
         assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1.1"));
         assert!(plan.slots[0].prompt.contains("%model:opus\n x\nReview"));
         assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
+        assert_eq!(plan.slots[3].alt_id.as_deref(), Some("2.2"));
         assert!(plan.slots[3].prompt.contains("%model:sonnet\n y\nReview"));
+    }
+
+    #[test]
+    fn fanout_planner_model_alt_ids_preserve_named_model_branches() {
+        let prompt = "%alt(opus=%model:opus,sonnet=%model:sonnet)\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[1].model.as_deref(), Some("sonnet"));
+        assert_eq!(plan.slots[1].alt_id.as_deref(), Some("sonnet"));
     }
 
     #[test]
