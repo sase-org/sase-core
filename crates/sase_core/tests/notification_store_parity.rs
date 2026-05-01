@@ -11,6 +11,9 @@ use sase_core::notifications::{
 use serde_json::json;
 use tempfile::tempdir;
 
+const CONTRACT_FIXTURE: &str =
+    include_str!("fixtures/notifications/store_contract.jsonl");
+
 fn store_path(root: &Path) -> PathBuf {
     root.join("notifications").join("notifications.jsonl")
 }
@@ -71,6 +74,42 @@ fn notification_loads_legacy_defaults_and_skips_bad_rows() {
     assert_eq!(snapshot.stats.invalid_json_lines, 1);
     assert_eq!(snapshot.stats.invalid_record_lines, 1);
     assert_eq!(snapshot.stats.dismissed_filtered, 1);
+}
+
+#[test]
+fn notification_phase1_contract_fixture_loads_with_expected_counts() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, CONTRACT_FIXTURE).unwrap();
+
+    let active = read_notifications_snapshot(&path, false).unwrap();
+    let all = read_notifications_snapshot(&path, true).unwrap();
+
+    assert_eq!(active.notifications.len(), 12);
+    assert_eq!(all.notifications.len(), 13);
+    assert!(active.notifications.iter().all(|n| n.id != "dismissed-row"));
+    assert!(all.notifications.iter().any(|n| n.id == "dismissed-row"));
+    assert!(all.notifications.iter().all(|n| n.id != "missing-required"));
+    assert_eq!(all.stats.invalid_json_lines, 1);
+    assert_eq!(all.stats.invalid_record_lines, 1);
+
+    let legacy = all
+        .notifications
+        .iter()
+        .find(|n| n.id == "legacy-minimal")
+        .unwrap();
+    assert!(legacy.notes.is_empty());
+    assert!(legacy.files.is_empty());
+    assert!(legacy.action_data.is_empty());
+    assert!(!legacy.read);
+    assert!(!legacy.dismissed);
+    assert!(!legacy.silent);
+    assert!(!legacy.muted);
+    assert_eq!(legacy.snooze_until, None);
+
+    assert_eq!(active.counts.priority, 6);
+    assert_eq!(active.counts.muted, 3);
 }
 
 #[test]
