@@ -11,6 +11,7 @@
 pub mod agent_cleanup;
 pub mod agent_launch;
 pub mod agent_scan;
+pub mod bead;
 pub mod git_query;
 pub mod notifications;
 pub mod parser;
@@ -64,6 +65,15 @@ pub use agent_scan::{
     WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use bead::{
+    changespec_metadata_migration_sql, default_config, export_issues_to_jsonl,
+    import_issues_from_jsonl, is_ready_to_work_migration_sql,
+    issue_type_migration_sql, load_config, load_config_from_str,
+    missing_changespec_metadata_columns, needs_is_ready_to_work_migration,
+    needs_issue_type_migration, parse_issues_jsonl, save_config,
+    BeadConfigWire, BeadError, DependencyWire, IssueTypeWire, IssueWire,
+    JsonlLoadOutcome, OperationOutcomeWire, StatusWire, BEAD_SQLITE_SCHEMA,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

@@ -1,0 +1,29 @@
+//! Pure-Rust bead storage contract.
+//!
+//! This module mirrors the Python `sase.bead` model and portable storage
+//! codecs without exposing command handlers yet. Later phases build read and
+//! mutation engines on top of these wire records.
+
+pub mod config;
+pub mod jsonl;
+pub mod schema;
+pub mod wire;
+
+pub use config::{
+    default_config, load_config, load_config_from_str, save_config,
+    BeadConfigWire,
+};
+pub use jsonl::{
+    export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
+    JsonlLoadOutcome,
+};
+pub use schema::{
+    changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
+    issue_type_migration_sql, missing_changespec_metadata_columns,
+    needs_is_ready_to_work_migration, needs_issue_type_migration,
+    BEAD_SQLITE_SCHEMA,
+};
+pub use wire::{
+    BeadError, DependencyWire, IssueTypeWire, IssueWire, OperationOutcomeWire,
+    StatusWire,
+};

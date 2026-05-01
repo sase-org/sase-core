@@ -2,9 +2,8 @@
 
 Rust core for the [sase](https://github.com/sase-org/sase) ChangeSpec backend.
 
-This repo is the eventual home of the Rust ChangeSpec parser, query engine, and graph index. Phase 1A only ships the
-Cargo workspace skeleton and the typed wire contract — no parsing logic yet. The Python backend in `sase_100` remains
-the default; the Rust backend is opt-in via `SASE_CORE_BACKEND=rust` once Phase 1D wires up the PyO3 binding.
+This repo is the eventual home of the Rust ChangeSpec parser, query engine, graph index, and bead data backend. The
+Python `sase_100` repo remains the product shell; this crate owns deterministic core data operations as they are ported.
 
 ## Layout
 
@@ -90,6 +89,23 @@ JSON shape rules (enforced by tests):
   declaration order.
 
 `crates/sase_core/tests/python_wire_parity.rs` checks Rust JSON against a captured Python fixture in both directions.
+
+## Bead storage contract
+
+`crates/sase_core/src/bead/` mirrors the portable pieces of `sase_100/src/sase/bead/` for the bead backend migration:
+
+- `wire.rs` defines `IssueWire`, `DependencyWire`, `StatusWire`, `IssueTypeWire`, validation errors, and operation
+  outcomes.
+- `config.rs` loads and saves `.sase_beads/config.json` using the same pretty JSON shape as Python.
+- `jsonl.rs` imports and exports `.sase_beads/issues.jsonl`, skips corrupt lines, applies legacy defaults, validates
+  records, sorts import rows as Python does for parent-before-child loading, and exports compact JSON sorted by issue ID.
+- `schema.rs` pins the current SQLite schema plus migration fragments for legacy issue type names, `is_ready_to_work`,
+  and ChangeSpec metadata columns.
+
+`crates/sase_core/tests/bead_storage_parity.rs` carries the Phase A bead fixtures forward into Rust and checks the
+current JSONL/config shape, legacy defaults, tolerant corrupt-line handling, missing-file behavior, and byte-compatible
+JSONL export. No production Python code routes through these bead APIs yet; read bindings and store operations land in
+later phases.
 
 ## Parser status
 
