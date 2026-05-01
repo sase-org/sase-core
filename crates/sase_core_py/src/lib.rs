@@ -8,6 +8,9 @@
 //! - `tokenize_query(query: str) -> list[dict]`
 //! - `parse_query(query: str) -> dict`
 //! - `canonicalize_query(query: str) -> str`
+//! - `compile_corpus(specs: list[dict]) -> QueryCorpusHandle`
+//! - `compile_query(query: str) -> QueryProgramHandle`
+//! - `evaluate_many(program: QueryProgramHandle, corpus: QueryCorpusHandle) -> list[bool]`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
@@ -86,6 +89,9 @@ use sase_core::notifications::{
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
+use sase_core::query::{
+    QueryCorpus as CoreQueryCorpus, QueryProgram as CoreQueryProgram,
+};
 use sase_core::status::{
     apply_status_update as core_apply_status_update,
     is_valid_transition as core_is_valid_transition,
@@ -97,6 +103,25 @@ use sase_core::status::{
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+
+#[pyclass(name = "QueryCorpusHandle", module = "sase_core_rs")]
+#[derive(Debug)]
+struct PyQueryCorpusHandle {
+    corpus: CoreQueryCorpus,
+}
+
+#[pymethods]
+impl PyQueryCorpusHandle {
+    fn __len__(&self) -> usize {
+        self.corpus.len()
+    }
+}
+
+#[pyclass(name = "QueryProgramHandle", module = "sase_core_rs")]
+#[derive(Debug)]
+struct PyQueryProgramHandle {
+    program: CoreQueryProgram,
+}
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
 /// `ChangeSpecWire` JSON shape.
@@ -173,6 +198,56 @@ fn py_canonicalize_query(query: &str) -> PyResult<String> {
     Ok(sase_core::canonicalize_query(&expr))
 }
 
+/// Compile a persistent ChangeSpec corpus from Python wire dicts.
+///
+/// Python dicts are converted to `ChangeSpecWire` before the GIL is released;
+/// the reusable corpus indexes and searchable text are then built without
+/// holding the GIL.
+#[pyfunction]
+#[pyo3(name = "compile_corpus")]
+fn py_compile_corpus<'py>(
+    py: Python<'py>,
+    specs: &Bound<'py, PyList>,
+) -> PyResult<PyQueryCorpusHandle> {
+    let wire_specs = changespecs_from_py_list(specs)?;
+    let corpus = py.allow_threads(|| CoreQueryCorpus::new(wire_specs));
+    Ok(PyQueryCorpusHandle { corpus })
+}
+
+/// Compile a query into a reusable Rust program handle.
+#[pyfunction]
+#[pyo3(name = "compile_query")]
+fn py_compile_query(query: &str) -> PyResult<PyQueryProgramHandle> {
+    let program =
+        sase_core::compile_query(query).map_err(query_error_to_pyerr)?;
+    Ok(PyQueryProgramHandle { program })
+}
+
+/// Evaluate a compiled query against a persistent corpus.
+///
+/// Evaluation releases the GIL because it only reads the owned Rust handles
+/// and returns one boolean per corpus row.
+#[pyfunction]
+#[pyo3(name = "evaluate_many")]
+fn py_evaluate_many<'py>(
+    py: Python<'py>,
+    program: &PyQueryProgramHandle,
+    corpus: &PyQueryCorpusHandle,
+) -> PyResult<Bound<'py, PyList>> {
+    let results = py.allow_threads(|| {
+        sase_core::evaluate_query_many_in_corpus(
+            &program.program,
+            &corpus.corpus,
+        )
+    });
+
+    let list = PyList::empty_bound(py);
+    for b in results {
+        list.append(b)?;
+    }
+    Ok(list)
+}
+
 /// Evaluate a query against a list of `ChangeSpecWire`-shape dicts.
 ///
 /// `specs` must be a `list[dict]` matching the JSON shape of
@@ -189,20 +264,12 @@ fn py_evaluate_query_many<'py>(
     query: &str,
     specs: &Bound<'py, PyList>,
 ) -> PyResult<Bound<'py, PyList>> {
-    let mut wire_specs: Vec<ChangeSpecWire> = Vec::with_capacity(specs.len());
-    for (idx, item) in specs.iter().enumerate() {
-        let json = py_to_json_value(&item)?;
-        let spec: ChangeSpecWire =
-            serde_json::from_value(json).map_err(|e| {
-                PyValueError::new_err(format!(
-                    "specs[{idx}] is not a valid ChangeSpecWire dict: {e}"
-                ))
-            })?;
-        wire_specs.push(spec);
-    }
+    let wire_specs = changespecs_from_py_list(specs)?;
     let program =
         sase_core::compile_query(query).map_err(query_error_to_pyerr)?;
-    let results = sase_core::evaluate_query_many(&program, &wire_specs);
+    let results = py.allow_threads(|| {
+        sase_core::evaluate_query_many(&program, &wire_specs)
+    });
 
     let list = PyList::empty_bound(py);
     for b in results {
@@ -760,6 +827,23 @@ fn query_error_to_pyerr(err: QueryErrorWire) -> PyErr {
     PyValueError::new_err(format!("{err}"))
 }
 
+fn changespecs_from_py_list(
+    specs: &Bound<'_, PyList>,
+) -> PyResult<Vec<ChangeSpecWire>> {
+    let mut wire_specs: Vec<ChangeSpecWire> = Vec::with_capacity(specs.len());
+    for (idx, item) in specs.iter().enumerate() {
+        let json = py_to_json_value(&item)?;
+        let spec: ChangeSpecWire =
+            serde_json::from_value(json).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "specs[{idx}] is not a valid ChangeSpecWire dict: {e}"
+                ))
+            })?;
+        wire_specs.push(spec);
+    }
+    Ok(wire_specs)
+}
+
 /// Convert a `QueryExprWire` into the Python rectangular wire shape.
 ///
 /// Python's `QueryExprWire` always carries the same flat field set
@@ -1006,10 +1090,15 @@ fn json_object_to_py<'py>(
 #[pymodule]
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyQueryCorpusHandle>()?;
+    m.add_class::<PyQueryProgramHandle>()?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_corpus, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
@@ -1055,6 +1144,60 @@ mod tests {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
     }
 
+    fn spec_json(name: &str, status: &str, parent: Option<&str>) -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "name": name,
+            "project_basename": "proj",
+            "file_path": "proj.gp",
+            "source_span": {
+                "file_path": "proj.gp",
+                "start_line": 1,
+                "end_line": 10
+            },
+            "status": status,
+            "parent": parent,
+            "cl_or_pr": null,
+            "bug": null,
+            "description": format!("description for {name}"),
+            "test_targets": [],
+            "kickstart": null,
+            "commits": [],
+            "hooks": [],
+            "comments": [],
+            "mentors": [],
+            "timestamps": [],
+            "deltas": []
+        })
+    }
+
+    fn spec_list<'py>(
+        py: Python<'py>,
+        specs: &[JsonValue],
+    ) -> Bound<'py, PyList> {
+        let list = PyList::empty_bound(py);
+        for spec in specs {
+            append_json(py, &list, spec.clone());
+        }
+        list
+    }
+
+    fn bools_from_py_list(list: &Bound<'_, PyList>) -> Vec<bool> {
+        list.iter()
+            .map(|item| item.extract::<bool>().unwrap())
+            .collect()
+    }
+
+    fn query_module<'py>(py: Python<'py>) -> Bound<'py, PyModule> {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module.add_class::<PyQueryCorpusHandle>().unwrap();
+        module.add_class::<PyQueryProgramHandle>().unwrap();
+        module
+            .add_function(wrap_pyfunction!(py_evaluate_many, &module).unwrap())
+            .unwrap();
+        module
+    }
+
     fn temp_notification_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1066,6 +1209,132 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    #[test]
+    fn query_handles_evaluate_multiple_queries_against_one_corpus() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let specs = spec_list(
+                py,
+                &[
+                    spec_json("alpha", "WIP", None),
+                    spec_json("beta", "Submitted", Some("alpha")),
+                    spec_json("gamma", "WIP", Some("beta")),
+                ],
+            );
+            let corpus = py_compile_corpus(py, &specs).unwrap();
+
+            let alpha = py_compile_query("name:alpha").unwrap();
+            let alpha_results = py_evaluate_many(py, &alpha, &corpus).unwrap();
+            assert_eq!(
+                bools_from_py_list(&alpha_results),
+                vec![true, false, false]
+            );
+
+            let ancestor = py_compile_query("ancestor:alpha").unwrap();
+            let ancestor_results =
+                py_evaluate_many(py, &ancestor, &corpus).unwrap();
+            assert_eq!(
+                bools_from_py_list(&ancestor_results),
+                vec![true, true, true]
+            );
+            assert_eq!(corpus.__len__(), 3);
+        });
+    }
+
+    #[test]
+    fn query_handles_evaluate_one_query_against_multiple_corpora() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let program = py_compile_query("status:wip").unwrap();
+
+            let first = spec_list(
+                py,
+                &[
+                    spec_json("alpha", "WIP", None),
+                    spec_json("beta", "Submitted", None),
+                ],
+            );
+            let first_corpus = py_compile_corpus(py, &first).unwrap();
+            let first_results =
+                py_evaluate_many(py, &program, &first_corpus).unwrap();
+            assert_eq!(bools_from_py_list(&first_results), vec![true, false]);
+
+            let second = spec_list(
+                py,
+                &[
+                    spec_json("gamma", "Submitted", None),
+                    spec_json("delta", "WIP", None),
+                ],
+            );
+            let second_corpus = py_compile_corpus(py, &second).unwrap();
+            let second_results =
+                py_evaluate_many(py, &program, &second_corpus).unwrap();
+            assert_eq!(bools_from_py_list(&second_results), vec![false, true]);
+        });
+    }
+
+    #[test]
+    fn query_handles_match_legacy_one_shot_results() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let specs = spec_list(
+                py,
+                &[
+                    spec_json("alpha", "WIP", None),
+                    spec_json("beta", "Submitted", Some("alpha")),
+                    spec_json("gamma", "WIP", Some("beta")),
+                ],
+            );
+            let corpus = py_compile_corpus(py, &specs).unwrap();
+
+            for query in ["alpha", "status:wip", "ancestor:alpha"] {
+                let program = py_compile_query(query).unwrap();
+                let handle_results =
+                    py_evaluate_many(py, &program, &corpus).unwrap();
+                let legacy_results =
+                    py_evaluate_query_many(py, query, &specs).unwrap();
+                assert_eq!(
+                    bools_from_py_list(&handle_results),
+                    bools_from_py_list(&legacy_results),
+                    "query {query}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn query_compile_errors_are_python_value_errors() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|_py| {
+            let err = py_compile_query("").unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(_py));
+            assert!(err.to_string().contains("Empty query"));
+        });
+    }
+
+    #[test]
+    fn query_handle_bindings_reject_wrong_handle_types() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = query_module(py);
+            let specs = spec_list(py, &[spec_json("alpha", "WIP", None)]);
+            let corpus =
+                Py::new(py, py_compile_corpus(py, &specs).unwrap()).unwrap();
+            let program =
+                Py::new(py, py_compile_query("alpha").unwrap()).unwrap();
+            let bad = PyDict::new_bound(py);
+            let evaluate_many = module.getattr("evaluate_many").unwrap();
+
+            let err = evaluate_many
+                .call1((bad.clone(), corpus.clone_ref(py)))
+                .unwrap_err();
+            assert!(err.to_string().contains("QueryProgramHandle"));
+
+            let err = evaluate_many.call1((program, bad)).unwrap_err();
+            assert!(err.to_string().contains("QueryCorpusHandle"));
+        });
     }
 
     #[test]
