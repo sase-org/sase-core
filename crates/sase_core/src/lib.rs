@@ -9,7 +9,6 @@
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod agent_cleanup;
-pub mod agent_compose;
 pub mod agent_scan;
 pub mod git_query;
 pub mod notifications;
@@ -45,11 +44,6 @@ pub use agent_cleanup::{
     SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
     SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
-};
-pub use agent_compose::{
-    compose_agent_list, AgentComposeInputWire, AgentComposeOptionsWire,
-    AgentIdentityWire, AgentWire, ComposedAgentListWire, DropReasonWire,
-    MergeReasonWire, RunningClaimWire, AGENT_COMPOSE_WIRE_SCHEMA_VERSION,
 };
 pub use agent_scan::{
     is_supported_workflow_dir, scan_agent_artifacts, AgentArtifactRecordWire,
