@@ -22,6 +22,7 @@ pub fn read_notifications_snapshot(
     read_notifications_snapshot_with_options(path, include_dismissed, false)
 }
 
+#[allow(clippy::incompatible_msrv)]
 pub fn read_notifications_snapshot_with_options(
     path: &Path,
     include_dismissed: bool,
@@ -572,6 +573,7 @@ fn open_lock_file(path: &Path) -> Result<File, String> {
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path_for(path))
@@ -604,6 +606,7 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
     })
 }
 
+#[allow(clippy::incompatible_msrv)]
 fn unlock(lock: File) -> Result<(), String> {
     lock.unlock().map_err(|e| e.to_string())
 }
