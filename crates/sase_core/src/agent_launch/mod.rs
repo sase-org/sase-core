@@ -1,11 +1,13 @@
 //! Wire records and deterministic helpers for agent launch.
 
 use chrono::{Duration, NaiveDateTime};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -192,6 +194,27 @@ impl fmt::Display for TimestampBatchAllocationError {
 
 impl std::error::Error for TimestampBatchAllocationError {}
 
+#[derive(Debug)]
+pub enum AgentLaunchFanoutPlanError {
+    UnsupportedKind(String),
+    UnclosedDirective(String),
+}
+
+impl fmt::Display for AgentLaunchFanoutPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedKind(kind) => {
+                write!(f, "unsupported launch fan-out kind {kind:?}")
+            }
+            Self::UnclosedDirective(name) => {
+                write!(f, "unclosed {name} directive: missing closing ')'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentLaunchFanoutPlanError {}
+
 pub fn allocate_launch_timestamp_batch(
     count: usize,
     base_timestamp: &str,
@@ -230,6 +253,695 @@ fn parse_launch_timestamp(
             error,
         }
     })
+}
+
+#[derive(Debug, Clone)]
+struct DirectiveOccurrence {
+    canonical_name: String,
+    start: usize,
+    end: usize,
+    args: Vec<String>,
+    has_plus_suffix: bool,
+}
+
+pub fn plan_agent_launch_fanout(
+    prompt: &str,
+    launch_kind: Option<&str>,
+) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
+    let requested = launch_kind.unwrap_or("auto");
+    match requested {
+        "multi_prompt" => Ok(plan_multi_prompt_fanout(prompt)),
+        "alternatives" => plan_alternative_fanout(prompt),
+        "model" => plan_model_fanout(prompt),
+        "repeat" => Ok(plan_repeat_fanout(prompt)),
+        "auto" => {
+            let multi = plan_multi_prompt_fanout(prompt);
+            if multi.slots.len() > 1 {
+                return Ok(multi);
+            }
+            let model = plan_model_fanout(prompt)?;
+            if !model.slots.is_empty() {
+                return Ok(model);
+            }
+            let repeat = plan_repeat_fanout(prompt);
+            if !repeat.slots.is_empty() {
+                return Ok(repeat);
+            }
+            Ok(LaunchFanoutPlanWire {
+                schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+                launch_kind: "single".to_string(),
+                slots: vec![LaunchFanoutSlotWire {
+                    prompt: prompt.to_string(),
+                    launch_kind: "single".to_string(),
+                    slot_index: 0,
+                    timestamp: None,
+                    workflow_name: None,
+                    model: None,
+                    repeat_name: None,
+                    wait_for_previous: has_wait_directive(prompt),
+                }],
+                requires_sequential_naming_wait: false,
+                fanout_sleep_seconds: 0.0,
+            })
+        }
+        other => Err(AgentLaunchFanoutPlanError::UnsupportedKind(
+            other.to_string(),
+        )),
+    }
+}
+
+fn split_multi_prompt_segments(prompt: &str) -> Vec<String> {
+    let body = prompt_body_after_frontmatter(prompt);
+    let fenced_ranges = fenced_block_ranges(body);
+    let mut segments = Vec::new();
+    let mut segment_start = 0;
+    let mut line_start = 0;
+
+    for piece in body.split_inclusive('\n') {
+        let line_end = line_start + piece.len();
+        let content_end = if piece.ends_with('\n') {
+            line_end - 1
+        } else {
+            line_end
+        };
+        let line = &body[line_start..content_end];
+        if line.trim() == "---"
+            && !position_in_ranges(line_start, &fenced_ranges)
+        {
+            push_nonempty_segment(
+                &mut segments,
+                &body[segment_start..line_start],
+            );
+            segment_start = line_end;
+        }
+        line_start = line_end;
+    }
+    if segment_start <= body.len() {
+        push_nonempty_segment(&mut segments, &body[segment_start..]);
+    }
+    segments
+}
+
+fn prompt_body_after_frontmatter(prompt: &str) -> &str {
+    let Some(first_line_end) = prompt.find('\n') else {
+        return prompt;
+    };
+    if prompt[..first_line_end].trim() != "---" {
+        return prompt;
+    }
+
+    let mut yaml_like = false;
+    let mut offset = first_line_end + 1;
+    for line in prompt[offset..].split_inclusive('\n') {
+        let line_end = offset + line.len();
+        let content_end = if line.ends_with('\n') {
+            line_end - 1
+        } else {
+            line_end
+        };
+        let content = &prompt[offset..content_end];
+        if content.trim() == "---" {
+            return if yaml_like {
+                &prompt[line_end..]
+            } else {
+                prompt
+            };
+        }
+        if content.contains(':') {
+            yaml_like = true;
+        }
+        offset = line_end;
+    }
+    prompt
+}
+
+fn push_nonempty_segment(out: &mut Vec<String>, segment: &str) {
+    let trimmed = segment.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+}
+
+fn split_prompt_for_models_rust(
+    prompt: &str,
+) -> Result<Vec<String>, AgentLaunchFanoutPlanError> {
+    if !prompt.contains('%') {
+        return Ok(Vec::new());
+    }
+
+    let mut ignored_ranges = fenced_block_ranges(prompt);
+    ignored_ranges.extend(disabled_region_ranges(prompt));
+    ignored_ranges.extend(alt_inner_ranges(prompt)?);
+
+    let mut directive_spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    for directive in directive_occurrences(prompt)? {
+        if directive.canonical_name != "model" {
+            continue;
+        }
+        if position_in_ranges(directive.start, &ignored_ranges) {
+            continue;
+        }
+        if directive.has_plus_suffix {
+            continue;
+        }
+        directive_spans.push((directive.start, directive.end, directive.args));
+    }
+
+    if directive_spans.is_empty() {
+        return Ok(
+            split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default()
+        );
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut unique_models = Vec::new();
+    for (_, _, args) in &directive_spans {
+        for arg in args {
+            if !arg.is_empty() && seen.insert(arg.clone()) {
+                unique_models.push(arg.clone());
+            }
+        }
+    }
+
+    if unique_models.len() <= 1 {
+        return Ok(
+            split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default()
+        );
+    }
+
+    let replacement = format!(
+        "%alt({})",
+        unique_models
+            .iter()
+            .map(|model| format!("%model:{model}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut adjusted = Vec::new();
+    for (idx, (start, mut end, _)) in directive_spans.into_iter().enumerate() {
+        if idx > 0
+            && end < prompt.len()
+            && prompt.as_bytes()[end] == b'\n'
+            && (start == 0 || prompt.as_bytes()[start - 1] == b'\n')
+        {
+            end += 1;
+        }
+        adjusted.push((start, end, idx == 0));
+    }
+
+    let mut rewritten = prompt.to_string();
+    for (start, end, is_first) in adjusted.into_iter().rev() {
+        if is_first {
+            rewritten.replace_range(start..end, &replacement);
+        } else {
+            rewritten.replace_range(start..end, "");
+        }
+    }
+    Ok(split_prompt_for_alternatives_rust(&rewritten)?.unwrap_or_default())
+}
+
+fn split_prompt_for_alternatives_rust(
+    prompt: &str,
+) -> Result<Option<Vec<String>>, AgentLaunchFanoutPlanError> {
+    let mut directives: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    for (start, paren_start) in alt_directive_starts(prompt) {
+        let Some(paren_end) = find_matching_paren(prompt, paren_start) else {
+            return Err(AgentLaunchFanoutPlanError::UnclosedDirective(
+                "%alt".to_string(),
+            ));
+        };
+        let inner = &prompt[paren_start + 1..paren_end];
+        let mut args = parse_directive_args(inner);
+        if args.is_empty() {
+            continue;
+        }
+        if args.len() == 1 {
+            args.push(String::new());
+        }
+        directives.push((start, paren_end + 1, args));
+    }
+
+    if directives.is_empty() {
+        return Ok(None);
+    }
+
+    let arg_lists: Vec<Vec<String>> =
+        directives.iter().map(|(_, _, args)| args.clone()).collect();
+    let mut combinations = Vec::new();
+    cartesian_product(&arg_lists, 0, &mut Vec::new(), &mut combinations);
+
+    let mut result = Vec::with_capacity(combinations.len());
+    for combination in combinations {
+        let mut replaced = prompt.to_string();
+        for ((start, end, _), arg) in directives.iter().zip(combination).rev() {
+            replaced.replace_range(*start..*end, &arg);
+        }
+        result.push(replaced);
+    }
+    Ok(Some(result))
+}
+
+fn extract_repeat_and_name_rust(
+    prompt: &str,
+) -> (Option<u32>, Option<String>, String) {
+    if !prompt.contains('%') {
+        return (None, None, prompt.to_string());
+    }
+
+    let mut ignored_ranges = fenced_block_ranges(prompt);
+    ignored_ranges.extend(disabled_region_ranges(prompt));
+    let mut repeat_count = None;
+    let mut explicit_name = None;
+    let mut regions = Vec::new();
+
+    for directive in directive_occurrences(prompt).unwrap_or_default() {
+        if position_in_ranges(directive.start, &ignored_ranges) {
+            continue;
+        }
+        if directive.canonical_name != "repeat"
+            && directive.canonical_name != "name"
+        {
+            continue;
+        }
+        regions.push((directive.start, directive.end));
+        let raw_arg = if directive.has_plus_suffix {
+            "true".to_string()
+        } else {
+            directive.args.first().cloned().unwrap_or_default()
+        };
+        if directive.canonical_name == "repeat" {
+            repeat_count = raw_arg.parse::<u32>().ok();
+        } else {
+            explicit_name = if raw_arg.is_empty() {
+                None
+            } else {
+                Some(raw_arg)
+            };
+        }
+    }
+
+    if !matches!(repeat_count, Some(count) if count > 1) {
+        return (None, None, prompt.to_string());
+    }
+
+    let mut cleaned = prompt.to_string();
+    for (start, end) in regions.into_iter().rev() {
+        cleaned.replace_range(start..end, "");
+    }
+    cleaned = leading_blank_line_re().replace(&cleaned, "").to_string();
+    cleaned = strip_disabled_region_markers(&cleaned);
+    (repeat_count, explicit_name, cleaned)
+}
+
+fn has_wait_directive(prompt: &str) -> bool {
+    if !prompt.contains('%') {
+        return false;
+    }
+    wait_directive_re().is_match(prompt)
+}
+
+fn extract_first_model_value(prompt: &str) -> Option<String> {
+    if !prompt.contains('%') {
+        return None;
+    }
+    let mut ignored_ranges = fenced_block_ranges(prompt);
+    ignored_ranges.extend(disabled_region_ranges(prompt));
+    for directive in directive_occurrences(prompt).unwrap_or_default() {
+        if directive.canonical_name == "model"
+            && !position_in_ranges(directive.start, &ignored_ranges)
+        {
+            return directive.args.first().cloned();
+        }
+    }
+    None
+}
+
+fn directive_occurrences(
+    prompt: &str,
+) -> Result<Vec<DirectiveOccurrence>, AgentLaunchFanoutPlanError> {
+    let mut out = Vec::new();
+    for caps in directive_re().captures_iter(prompt) {
+        let marker = caps.get(2).expect("directive marker group");
+        let raw_name = caps.get(3).expect("directive name group").as_str();
+        let canonical_name = canonical_directive_name(raw_name).to_string();
+        let mut end = marker.end();
+        let mut args = Vec::new();
+        let mut has_plus_suffix = false;
+
+        if caps.get(4).is_some() {
+            let paren_start = marker.end() - 1;
+            if let Some(paren_end) = find_matching_paren(prompt, paren_start) {
+                args =
+                    parse_directive_args(&prompt[paren_start + 1..paren_end]);
+                end = paren_end + 1;
+            }
+        } else if let Some(colon_arg) = caps.get(5) {
+            args = vec![unquote_backticks(colon_arg.as_str())];
+        } else if caps.get(6).is_some() {
+            has_plus_suffix = true;
+            args = vec!["true".to_string()];
+        } else {
+            args = vec![String::new()];
+        }
+
+        out.push(DirectiveOccurrence {
+            canonical_name,
+            start: marker.start(),
+            end,
+            args,
+            has_plus_suffix,
+        });
+    }
+    Ok(out)
+}
+
+fn alt_directive_starts(prompt: &str) -> Vec<(usize, usize)> {
+    alt_directive_re()
+        .captures_iter(prompt)
+        .filter_map(|caps| {
+            let marker = caps.get(2)?;
+            Some((marker.start(), marker.end() - 1))
+        })
+        .collect()
+}
+
+fn alt_inner_ranges(
+    prompt: &str,
+) -> Result<Vec<(usize, usize)>, AgentLaunchFanoutPlanError> {
+    let mut ranges = Vec::new();
+    for (_, paren_start) in alt_directive_starts(prompt) {
+        if let Some(paren_end) = find_matching_paren(prompt, paren_start) {
+            ranges.push((paren_start + 1, paren_end));
+        }
+    }
+    Ok(ranges)
+}
+
+fn parse_directive_args(inner: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_i32;
+    let mut in_backticks = false;
+    for (idx, ch) in inner.char_indices() {
+        if ch == '`' {
+            in_backticks = !in_backticks;
+            continue;
+        }
+        if in_backticks {
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                push_arg(&mut args, &inner[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    push_arg(&mut args, &inner[start..]);
+    args.into_iter().filter(|arg| !arg.is_empty()).collect()
+}
+
+fn push_arg(args: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("[[")
+        && trimmed.ends_with("]]")
+        && trimmed.len() >= 4
+    {
+        args.push(trimmed[2..trimmed.len() - 2].to_string());
+    } else {
+        args.push(unquote_backticks(trimmed));
+    }
+}
+
+fn unquote_backticks(value: &str) -> String {
+    if value.starts_with('`') && value.ends_with('`') && value.len() >= 2 {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn find_matching_paren(text: &str, paren_start: usize) -> Option<usize> {
+    let mut depth = 0_i32;
+    let mut in_backticks = false;
+    for (rel_idx, ch) in text[paren_start..].char_indices() {
+        let idx = paren_start + rel_idx;
+        if ch == '`' {
+            in_backticks = !in_backticks;
+            continue;
+        }
+        if in_backticks {
+            continue;
+        }
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn cartesian_product(
+    lists: &[Vec<String>],
+    idx: usize,
+    current: &mut Vec<String>,
+    out: &mut Vec<Vec<String>>,
+) {
+    if idx == lists.len() {
+        out.push(current.clone());
+        return;
+    }
+    for item in &lists[idx] {
+        current.push(item.clone());
+        cartesian_product(lists, idx + 1, current, out);
+        current.pop();
+    }
+}
+
+fn fenced_block_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let mut tick_count = 1;
+        while i + tick_count < bytes.len() && bytes[i + tick_count] == b'`' {
+            tick_count += 1;
+        }
+        if tick_count < 3 {
+            i += tick_count;
+            continue;
+        }
+        let fence = "`".repeat(tick_count);
+        let search_start = i + tick_count;
+        if let Some(rel_end) = text[search_start..].find(&fence) {
+            let end = search_start + rel_end + tick_count;
+            ranges.push((i, end));
+            i = end;
+        } else {
+            break;
+        }
+    }
+    ranges
+}
+
+fn disabled_region_ranges(text: &str) -> Vec<(usize, usize)> {
+    disabled_region_re()
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect()
+}
+
+fn strip_disabled_region_markers(text: &str) -> String {
+    disabled_marker_re().replace_all(text, "").to_string()
+}
+
+fn position_in_ranges(pos: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| *start <= pos && pos < *end)
+}
+
+fn canonical_directive_name(name: &str) -> &str {
+    match name {
+        "a" => "approve",
+        "e" => "edit",
+        "h" => "hide",
+        "m" => "model",
+        "n" => "name",
+        "r" => "repeat",
+        "p" => "plan",
+        "t" => "tag",
+        "w" => "wait",
+        other => other,
+    }
+}
+
+fn directive_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)(^|[\s\(\[\{"'])(%([A-Za-z_][A-Za-z0-9_]*)(?:(\()|:(`[^`]*`|[A-Za-z0-9_#/.,()-]*[A-Za-z0-9_#/,()-])|(\+))?)"#,
+        )
+        .unwrap()
+    })
+}
+
+fn alt_directive_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?m)(^|[\s\(\[\{"'])(%(?:alt)?\()"#).unwrap()
+    })
+}
+
+fn wait_directive_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?m)(^|\s)%(?:wait|w)(?:[:+(]|\s|$)").unwrap()
+    })
+}
+
+fn disabled_region_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?ms)^[ \t]*%xprompts_enabled:false[ \t]*\n.*?(?:^[ \t]*|[ \t]+)%xprompts_enabled:true[ \t]*\n?",
+        )
+        .unwrap()
+    })
+}
+
+fn disabled_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?m)^[ \t]*%xprompts_enabled:(?:false|true)[ \t]*\n?|[ \t]+%xprompts_enabled:(?:false|true)[ \t]*",
+        )
+        .unwrap()
+    })
+}
+
+fn leading_blank_line_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*\n").unwrap())
+}
+
+fn plan_multi_prompt_fanout(prompt: &str) -> LaunchFanoutPlanWire {
+    let segments = split_multi_prompt_segments(prompt);
+    LaunchFanoutPlanWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        launch_kind: "multi_prompt".to_string(),
+        slots: segments
+            .into_iter()
+            .enumerate()
+            .map(|(idx, segment)| LaunchFanoutSlotWire {
+                wait_for_previous: has_wait_directive(&segment),
+                prompt: segment,
+                launch_kind: "multi_prompt".to_string(),
+                slot_index: idx as u32,
+                timestamp: None,
+                workflow_name: None,
+                model: None,
+                repeat_name: None,
+            })
+            .collect(),
+        requires_sequential_naming_wait: true,
+        fanout_sleep_seconds: 0.0,
+    }
+}
+
+fn plan_alternative_fanout(
+    prompt: &str,
+) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
+    let prompts =
+        split_prompt_for_alternatives_rust(prompt)?.unwrap_or_default();
+    Ok(LaunchFanoutPlanWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        launch_kind: "alternatives".to_string(),
+        slots: prompts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, prompt)| LaunchFanoutSlotWire {
+                wait_for_previous: has_wait_directive(&prompt),
+                prompt,
+                launch_kind: "alternatives".to_string(),
+                slot_index: idx as u32,
+                timestamp: None,
+                workflow_name: None,
+                model: None,
+                repeat_name: None,
+            })
+            .collect(),
+        requires_sequential_naming_wait: false,
+        fanout_sleep_seconds: 0.0,
+    })
+}
+
+fn plan_model_fanout(
+    prompt: &str,
+) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
+    let prompts = split_prompt_for_models_rust(prompt)?;
+    Ok(LaunchFanoutPlanWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        launch_kind: "model".to_string(),
+        slots: prompts
+            .into_iter()
+            .enumerate()
+            .map(|(idx, prompt)| {
+                let model = extract_first_model_value(&prompt);
+                LaunchFanoutSlotWire {
+                    wait_for_previous: has_wait_directive(&prompt),
+                    prompt,
+                    launch_kind: "model".to_string(),
+                    slot_index: idx as u32,
+                    timestamp: None,
+                    workflow_name: None,
+                    model,
+                    repeat_name: None,
+                }
+            })
+            .collect(),
+        requires_sequential_naming_wait: false,
+        fanout_sleep_seconds: 0.0,
+    })
+}
+
+fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
+    let (count, explicit_name, stripped) = extract_repeat_and_name_rust(prompt);
+    let slots = match count {
+        Some(count) if count > 1 => (0..count)
+            .map(|idx| LaunchFanoutSlotWire {
+                prompt: stripped.clone(),
+                launch_kind: "repeat".to_string(),
+                slot_index: idx,
+                timestamp: None,
+                workflow_name: None,
+                model: None,
+                repeat_name: explicit_name.clone(),
+                wait_for_previous: idx > 0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    LaunchFanoutPlanWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        launch_kind: "repeat".to_string(),
+        slots,
+        requires_sequential_naming_wait: false,
+        fanout_sleep_seconds: 0.0,
+    }
 }
 
 pub fn prepare_agent_launch(
@@ -1070,5 +1782,47 @@ mod tests {
         assert!(plan
             .content
             .contains("#101 | 222 | run-retry | demo | 20260501120000"));
+    }
+
+    #[test]
+    fn fanout_planner_splits_multi_prompt_outside_fences() {
+        let prompt = "one\n```\n---\n```\n---\n%wait\ntwo";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+
+        assert_eq!(plan.launch_kind, "multi_prompt");
+        assert_eq!(plan.slots.len(), 2);
+        assert!(plan.slots[0].prompt.contains("---"));
+        assert_eq!(plan.slots[1].prompt, "%wait\ntwo");
+        assert!(plan.slots[1].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_splits_models_and_alternatives() {
+        let prompt = "%name:foo\n%model:opus\n%model:sonnet %alt(x,y)\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 4);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert!(plan.slots[0].prompt.contains("%model:opus\n x\nReview"));
+        assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
+        assert!(plan.slots[3].prompt.contains("%model:sonnet\n y\nReview"));
+    }
+
+    #[test]
+    fn fanout_planner_extracts_repeat_slots() {
+        let prompt = "%r:3 %n:task %model:opus do work";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
+
+        assert_eq!(plan.launch_kind, "repeat");
+        assert_eq!(plan.slots.len(), 3);
+        assert_eq!(plan.slots[0].repeat_name.as_deref(), Some("task"));
+        assert_eq!(plan.slots[0].prompt, "  %model:opus do work");
+        assert!(!plan.slots[0].wait_for_previous);
+        assert!(plan.slots[1].wait_for_previous);
     }
 }

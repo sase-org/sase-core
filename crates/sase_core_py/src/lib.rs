@@ -38,6 +38,7 @@
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
+//! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
 //! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
@@ -81,6 +82,7 @@ use sase_core::agent_launch::{
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
+    plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
     prepare_agent_launch as core_prepare_agent_launch, AgentLaunchRequestWire,
@@ -1173,6 +1175,23 @@ fn py_allocate_launch_timestamp_batch<'py>(
     Ok(list)
 }
 
+/// Plan deterministic prompt fan-out without launching child agents.
+#[pyfunction]
+#[pyo3(name = "plan_agent_launch_fanout")]
+#[pyo3(signature = (prompt, launch_kind = None))]
+fn py_plan_agent_launch_fanout<'py>(
+    py: Python<'py>,
+    prompt: &str,
+    launch_kind: Option<&str>,
+) -> PyResult<PyObject> {
+    let plan = core_plan_agent_launch_fanout(prompt, launch_kind)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Return parsed RUNNING workspace claims from project-file content.
 #[pyfunction]
 #[pyo3(name = "list_workspace_claims_from_content")]
@@ -1314,6 +1333,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_list_workspace_claims_from_content,
         m
