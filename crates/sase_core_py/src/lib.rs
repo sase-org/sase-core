@@ -37,6 +37,7 @@
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
+//! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
@@ -61,11 +62,15 @@
 // outside the user-written function body.
 #![allow(clippy::useless_conversion)]
 
+use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_cleanup::{
     cleanup_request_from_json_value,
     delete_agent_artifact_markers as core_delete_agent_artifact_markers,
@@ -85,8 +90,8 @@ use sase_core::agent_launch::{
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
-    prepare_agent_launch as core_prepare_agent_launch, AgentLaunchRequestWire,
-    WorkspaceClaimRequestWire,
+    prepare_agent_launch as core_prepare_agent_launch, AgentLaunchPreparedWire,
+    AgentLaunchRequestWire, WorkspaceClaimRequestWire,
 };
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
@@ -1152,6 +1157,48 @@ fn py_prepare_agent_launch<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Spawn a prepared detached agent process and run optional claim callback.
+#[pyfunction]
+#[pyo3(name = "spawn_prepared_agent_process")]
+#[pyo3(signature = (prepared, env, claim_callback = None))]
+fn py_spawn_prepared_agent_process(
+    py: Python<'_>,
+    prepared: &Bound<'_, PyDict>,
+    env: &Bound<'_, PyDict>,
+    claim_callback: Option<&Bound<'_, PyAny>>,
+) -> PyResult<u32> {
+    let prepared = agent_launch_prepared_from_pydict(prepared)?;
+    let env = env_dict_from_pydict(env)?;
+    let mut child = py
+        .allow_threads(move || spawn_prepared_detached_process(prepared, env))
+        .map_err(PyRuntimeError::new_err)?;
+    let pid = child.id();
+
+    if let Some(callback) = claim_callback {
+        match callback.call1((pid,)) {
+            Ok(value) => {
+                let success = value.extract::<bool>().map_err(|err| {
+                    PyValueError::new_err(format!(
+                        "claim_callback must return bool, got invalid value: {err}"
+                    ))
+                })?;
+                if !success {
+                    terminate_child_after_claim_failure(&mut child);
+                    return Err(PyRuntimeError::new_err(
+                        "agent launch claim callback reported failure",
+                    ));
+                }
+            }
+            Err(err) => {
+                terminate_child_after_claim_failure(&mut child);
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(pid)
+}
+
 /// Allocate unique launch timestamps from a base YYmmdd_HHMMSS timestamp.
 #[pyfunction]
 #[pyo3(name = "allocate_launch_timestamp_batch")]
@@ -1261,6 +1308,102 @@ fn py_allocate_and_claim_workspace_from_content<'py>(
     json_value_to_py(py, &value)
 }
 
+fn spawn_prepared_detached_process(
+    prepared: AgentLaunchPreparedWire,
+    env: BTreeMap<String, String>,
+) -> Result<Child, String> {
+    let Some((program, args)) = prepared.argv.split_first() else {
+        return Err("prepared launch argv must not be empty".to_string());
+    };
+
+    let stdout_file = File::create(&prepared.output_path).map_err(|err| {
+        format!(
+            "failed to open launch output file {}: {err}",
+            prepared.output_path
+        )
+    })?;
+    let stderr_file = stdout_file.try_clone().map_err(|err| {
+        format!(
+            "failed to clone launch output file {} for stderr: {err}",
+            prepared.output_path
+        )
+    })?;
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&prepared.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .env_clear()
+        .envs(env);
+
+    configure_detached_process(&mut command);
+
+    command.spawn().map_err(|err| {
+        format!(
+            "failed to spawn prepared agent process in cwd {}: {err}",
+            prepared.cwd
+        )
+    })
+}
+
+#[cfg(unix)]
+fn configure_detached_process(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Match Python's subprocess.Popen(start_new_session=True) behavior.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+fn configure_detached_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_detached_process(_command: &mut Command) {}
+
+fn terminate_child_after_claim_failure(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+
+    terminate_child_gracefully(child);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_child_gracefully(child: &Child) {
+    let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+}
+
+#[cfg(not(unix))]
+fn terminate_child_gracefully(child: &mut Child) {
+    let _ = child.kill();
+}
+
 fn workspace_claim_request_from_pydict(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<WorkspaceClaimRequestWire> {
@@ -1279,6 +1422,17 @@ fn agent_launch_request_from_pydict(
     serde_json::from_value(value).map_err(|e| {
         PyValueError::new_err(format!(
             "request is not a valid AgentLaunchRequestWire dict: {e}"
+        ))
+    })
+}
+
+fn agent_launch_prepared_from_pydict(
+    prepared: &Bound<'_, PyDict>,
+) -> PyResult<AgentLaunchPreparedWire> {
+    let value = py_to_json_value(prepared.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "prepared is not a valid AgentLaunchPreparedWire dict: {e}"
         ))
     })
 }
@@ -1332,6 +1486,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
     m.add_function(wrap_pyfunction!(
