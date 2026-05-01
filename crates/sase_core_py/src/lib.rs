@@ -36,6 +36,7 @@
 //! - `append_notification(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `agent_launch_wire_schema_version() -> int`
+//! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
 //! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
@@ -80,6 +81,7 @@ use sase_core::agent_launch::{
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
+    prepare_agent_launch as core_prepare_agent_launch, AgentLaunchRequestWire,
     WorkspaceClaimRequestWire,
 };
 use sase_core::agent_scan::{
@@ -1106,6 +1108,46 @@ fn py_agent_launch_wire_schema_version() -> u32 {
     sase_core::AGENT_LAUNCH_WIRE_SCHEMA_VERSION
 }
 
+/// Write the launch prompt temp file and return prepared process data.
+#[pyfunction]
+#[pyo3(name = "prepare_agent_launch")]
+#[pyo3(signature = (
+    request,
+    python_executable,
+    runner_script,
+    output_root,
+    sase_tmpdir = None,
+    preallocated_env = None
+))]
+fn py_prepare_agent_launch<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    python_executable: &str,
+    runner_script: &str,
+    output_root: &str,
+    sase_tmpdir: Option<&str>,
+    preallocated_env: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let req = agent_launch_request_from_pydict(request)?;
+    let preallocated = match preallocated_env {
+        Some(env) => env_dict_from_pydict(env)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let prepared = core_prepare_agent_launch(
+        &req,
+        python_executable,
+        runner_script,
+        sase_tmpdir,
+        output_root,
+        &preallocated,
+    )
+    .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let value = serde_json::to_value(&prepared).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Return parsed RUNNING workspace claims from project-file content.
 #[pyfunction]
 #[pyo3(name = "list_workspace_claims_from_content")]
@@ -1186,6 +1228,28 @@ fn workspace_claim_request_from_pydict(
     })
 }
 
+fn agent_launch_request_from_pydict(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<AgentLaunchRequestWire> {
+    let value = py_to_json_value(request.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentLaunchRequestWire dict: {e}"
+        ))
+    })
+}
+
+fn env_dict_from_pydict(
+    env: &Bound<'_, PyDict>,
+) -> PyResult<std::collections::BTreeMap<String, String>> {
+    let value = py_to_json_value(env.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "preallocated_env is not a valid string dict: {e}"
+        ))
+    })
+}
+
 #[pymodule]
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1223,6 +1287,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_list_workspace_claims_from_content,
         m

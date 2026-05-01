@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::io::Write;
+use std::path::Path;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -126,6 +129,190 @@ pub struct LaunchFanoutPlanWire {
     pub requires_sequential_naming_wait: bool,
     #[serde(default)]
     pub fanout_sleep_seconds: f64,
+}
+
+#[derive(Debug)]
+pub enum AgentLaunchPreparationError {
+    SchemaVersion { expected: u32, actual: u32 },
+    CreateTempFile(std::io::Error),
+    WritePrompt(std::io::Error),
+    KeepTempFile(std::io::Error),
+    CreateOutputRoot(std::io::Error),
+}
+
+impl fmt::Display for AgentLaunchPreparationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaVersion { expected, actual } => write!(
+                f,
+                "unsupported AgentLaunchRequestWire schema_version {actual}; expected {expected}"
+            ),
+            Self::CreateTempFile(err) => {
+                write!(f, "failed to create prompt temp file: {err}")
+            }
+            Self::WritePrompt(err) => {
+                write!(f, "failed to write prompt temp file: {err}")
+            }
+            Self::KeepTempFile(err) => {
+                write!(f, "failed to keep prompt temp file: {err}")
+            }
+            Self::CreateOutputRoot(err) => {
+                write!(f, "failed to create launch output root: {err}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentLaunchPreparationError {}
+
+pub fn prepare_agent_launch(
+    request: &AgentLaunchRequestWire,
+    python_executable: &str,
+    runner_script: &str,
+    sase_tmpdir: Option<&str>,
+    output_root: &str,
+    preallocated_env: &BTreeMap<String, String>,
+) -> Result<AgentLaunchPreparedWire, AgentLaunchPreparationError> {
+    if request.schema_version != AGENT_LAUNCH_WIRE_SCHEMA_VERSION {
+        return Err(AgentLaunchPreparationError::SchemaVersion {
+            expected: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+            actual: request.schema_version,
+        });
+    }
+
+    let prompt_file =
+        write_prompt_temp_file(sase_tmpdir, request.prompt.as_bytes())?;
+    let safe_name = safe_launch_name(&request.cl_name);
+    let output_root_path = Path::new(output_root);
+    std::fs::create_dir_all(output_root_path)
+        .map_err(AgentLaunchPreparationError::CreateOutputRoot)?;
+    let output_path = output_root_path
+        .join(format!("{safe_name}_ace-run-{}.txt", request.timestamp))
+        .to_string_lossy()
+        .into_owned();
+
+    let mut env_delta = request.extra_env.clone();
+    env_delta.insert("SASE_AGENT".to_string(), "1".to_string());
+    env_delta.insert("SASE_AGENT_CL_NAME".to_string(), request.cl_name.clone());
+    env_delta.insert(
+        "SASE_AGENT_PROJECT_FILE".to_string(),
+        request.project_file.clone(),
+    );
+    env_delta.insert(
+        "SASE_AGENT_TIMESTAMP".to_string(),
+        request.timestamp.clone(),
+    );
+
+    if request.deferred_workspace {
+        env_delta.insert(
+            "SASE_AGENT_DEFERRED_WORKSPACE".to_string(),
+            "1".to_string(),
+        );
+        if let Some(workflow_type) = request.vcs_workflow_type.as_ref() {
+            env_delta.insert(
+                "SASE_AGENT_VCS_WORKFLOW_TYPE".to_string(),
+                workflow_type.clone(),
+            );
+        }
+    }
+
+    for (key, value) in preallocated_env {
+        env_delta.insert(key.clone(), value.clone());
+    }
+
+    if let Some(local_xprompts_file) = request.local_xprompts_file.as_ref() {
+        env_delta.insert(
+            "SASE_AGENT_LOCAL_XPROMPTS".to_string(),
+            local_xprompts_file.clone(),
+        );
+    }
+
+    let prompt_file_str = prompt_file.to_string_lossy().into_owned();
+    let argv = vec![
+        python_executable.to_string(),
+        runner_script.to_string(),
+        request.cl_name.clone(),
+        request.project_file.clone(),
+        request.workspace_dir.clone(),
+        output_path.clone(),
+        request.workspace_num.to_string(),
+        request.workflow_name.clone(),
+        prompt_file_str.clone(),
+        request.timestamp.clone(),
+        request.update_target.clone(),
+        request.project_name.clone(),
+        request.history_sort_key.clone(),
+        if request.is_home_mode {
+            "1".to_string()
+        } else {
+            String::new()
+        },
+    ];
+
+    let claim_request = if request.is_home_mode {
+        None
+    } else {
+        Some(WorkspaceClaimRequestWire {
+            project_file: request.project_file.clone(),
+            workspace_num: if request.deferred_workspace {
+                0
+            } else {
+                request.workspace_num
+            },
+            workflow_name: request.workflow_name.clone(),
+            pid: 0,
+            cl_name: request.cl_name.clone(),
+            artifacts_timestamp: String::new(),
+            transfer_from_pid: request.retry_transfer_from_pid,
+            pinned: false,
+        })
+    };
+
+    Ok(AgentLaunchPreparedWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        prompt_file: prompt_file_str,
+        output_path,
+        safe_name,
+        argv,
+        cwd: request.workspace_dir.clone(),
+        env_delta,
+        claim_request,
+    })
+}
+
+pub fn safe_launch_name(cl_name: &str) -> String {
+    cl_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_prompt_temp_file(
+    sase_tmpdir: Option<&str>,
+    prompt: &[u8],
+) -> Result<std::path::PathBuf, AgentLaunchPreparationError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("sase_ace_prompt_").suffix(".md");
+    let mut file = match sase_tmpdir {
+        Some(dir) if !dir.is_empty() => builder
+            .tempfile_in(dir)
+            .map_err(AgentLaunchPreparationError::CreateTempFile)?,
+        _ => builder
+            .tempfile()
+            .map_err(AgentLaunchPreparationError::CreateTempFile)?,
+    };
+    file.write_all(prompt)
+        .map_err(AgentLaunchPreparationError::WritePrompt)?;
+    let (_file, path) = file
+        .keep()
+        .map_err(|err| AgentLaunchPreparationError::KeepTempFile(err.error))?;
+    Ok(path)
 }
 
 pub fn list_workspace_claims_from_content(
@@ -597,6 +784,131 @@ mod tests {
         assert_eq!(value["slots"][0]["repeat_name"], json!("task.1"));
         let back: LaunchFanoutPlanWire = serde_json::from_value(value).unwrap();
         assert_eq!(back, plan);
+    }
+
+    #[test]
+    fn prepare_agent_launch_writes_prompt_and_shapes_process_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prompt_dir = tmp.path().join("prompts");
+        std::fs::create_dir(&prompt_dir).unwrap();
+        let output_root = tmp.path().join("workflows").join("202605");
+        let mut extra_env = BTreeMap::new();
+        extra_env.insert("SASE_AGENT".to_string(), "caller".to_string());
+        extra_env.insert("SASE_REPEAT_NAME".to_string(), "task.1".to_string());
+        let request = AgentLaunchRequestWire {
+            schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+            cl_name: "feature/test".to_string(),
+            project_file: "/tmp/project.gp".to_string(),
+            workspace_dir: "/tmp/ws".to_string(),
+            workspace_num: 4,
+            workflow_name: "ace(run)-260501_120000".to_string(),
+            prompt: "fix it".to_string(),
+            timestamp: "260501_120000".to_string(),
+            update_target: "p4head".to_string(),
+            project_name: "proj".to_string(),
+            history_sort_key: "feature/test".to_string(),
+            is_home_mode: false,
+            vcs_workflow_type: Some("gh".to_string()),
+            vcs_ref: Some("feature/test".to_string()),
+            deferred_workspace: false,
+            local_xprompts_file: Some("/tmp/xprompts.json".to_string()),
+            extra_env,
+            retry_transfer_from_pid: Some(99),
+        };
+        let mut preallocated = BTreeMap::new();
+        preallocated.insert("GH_PRE_ALLOCATED".to_string(), "1".to_string());
+        preallocated.insert("GH_WORKSPACE_NUM".to_string(), "4".to_string());
+
+        let prepared = prepare_agent_launch(
+            &request,
+            "/venv/bin/python",
+            "/repo/run_agent_runner.py",
+            Some(prompt_dir.to_str().unwrap()),
+            output_root.to_str().unwrap(),
+            &preallocated,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.safe_name, "feature_test");
+        assert_eq!(
+            std::fs::read_to_string(&prepared.prompt_file).unwrap(),
+            "fix it"
+        );
+        assert!(prepared
+            .prompt_file
+            .starts_with(prompt_dir.to_str().unwrap()));
+        assert_eq!(
+            prepared.output_path,
+            output_root
+                .join("feature_test_ace-run-260501_120000.txt")
+                .to_string_lossy()
+        );
+        assert_eq!(prepared.argv[0], "/venv/bin/python");
+        assert_eq!(prepared.argv[2], "feature/test");
+        assert_eq!(prepared.argv[5], prepared.output_path);
+        assert_eq!(prepared.argv[8], prepared.prompt_file);
+        assert_eq!(prepared.env_delta["SASE_AGENT"], "1");
+        assert_eq!(prepared.env_delta["SASE_REPEAT_NAME"], "task.1");
+        assert_eq!(prepared.env_delta["GH_PRE_ALLOCATED"], "1");
+        assert_eq!(
+            prepared.env_delta["SASE_AGENT_LOCAL_XPROMPTS"],
+            "/tmp/xprompts.json"
+        );
+        assert!(!prepared
+            .env_delta
+            .contains_key("SASE_AGENT_VCS_WORKFLOW_TYPE"));
+        assert_eq!(prepared.claim_request.unwrap().transfer_from_pid, Some(99));
+    }
+
+    #[test]
+    fn prepare_agent_launch_deferred_and_home_claim_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut request = AgentLaunchRequestWire {
+            schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+            cl_name: "home".to_string(),
+            project_file: "/tmp/home.gp".to_string(),
+            workspace_dir: "/home/me".to_string(),
+            workspace_num: 9,
+            workflow_name: "ace(run)-260501_120000".to_string(),
+            prompt: "fix it".to_string(),
+            timestamp: "260501_120000".to_string(),
+            update_target: String::new(),
+            project_name: String::new(),
+            history_sort_key: String::new(),
+            is_home_mode: false,
+            vcs_workflow_type: Some("gh".to_string()),
+            vcs_ref: Some("feature/test".to_string()),
+            deferred_workspace: true,
+            local_xprompts_file: None,
+            extra_env: BTreeMap::new(),
+            retry_transfer_from_pid: None,
+        };
+
+        let deferred = prepare_agent_launch(
+            &request,
+            "python",
+            "runner.py",
+            None,
+            tmp.path().to_str().unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(deferred.claim_request.unwrap().workspace_num, 0);
+        assert_eq!(deferred.env_delta["SASE_AGENT_DEFERRED_WORKSPACE"], "1");
+        assert_eq!(deferred.env_delta["SASE_AGENT_VCS_WORKFLOW_TYPE"], "gh");
+
+        request.is_home_mode = true;
+        let home = prepare_agent_launch(
+            &request,
+            "python",
+            "runner.py",
+            None,
+            tmp.path().to_str().unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(home.claim_request.is_none());
+        assert_eq!(home.argv[13], "1");
     }
 
     #[test]
