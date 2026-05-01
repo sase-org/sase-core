@@ -13,6 +13,7 @@
 //! - `evaluate_many(program: QueryProgramHandle, corpus: QueryCorpusHandle) -> list[bool]`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
+//! - `compose_agent_list(input: dict) -> dict`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -69,6 +70,9 @@ use sase_core::agent_cleanup::{
     save_dismissed_agents_index as core_save_dismissed_agents_index,
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
+};
+use sase_core::agent_compose::{
+    compose_agent_list as core_compose_agent_list, AgentComposeInputWire,
 };
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
@@ -303,6 +307,33 @@ fn py_scan_agent_artifacts<'py>(
     let root = PathBuf::from(projects_root);
     let snapshot = py.allow_threads(|| core_scan_agent_artifacts(&root, opts));
     let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Compose a deterministic agent list from host-collected wire inputs.
+///
+/// `input` must be an `AgentComposeInputWire`-shape dict assembled by the
+/// Python facade. The pure Rust core owns candidate construction,
+/// deterministic dedup/status/sort rules, and diagnostics; Python still owns
+/// process liveness, filesystem mutation, TUI state, and product routing.
+/// The GIL is released while Rust performs composition.
+#[pyfunction]
+#[pyo3(name = "compose_agent_list")]
+fn py_compose_agent_list<'py>(
+    py: Python<'py>,
+    input: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(input.as_any())?;
+    let wire_input: AgentComposeInputWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "input is not a valid AgentComposeInputWire dict: {e}"
+            ))
+        })?;
+    let result = py.allow_threads(|| core_compose_agent_list(&wire_input));
+    let value = serde_json::to_value(&result).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -1101,6 +1132,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compose_agent_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
