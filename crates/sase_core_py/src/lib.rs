@@ -105,6 +105,7 @@ use sase_core::bead::{
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
     close_issues as core_bead_close_issues,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
+    execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     get_epic_children as core_bead_get_epic_children,
     get_merged_epic_children as core_bead_get_merged_epic_children,
@@ -1115,6 +1116,33 @@ fn py_bead_build_epic_work_plan_from_issues<'py>(
     )
 }
 
+#[pyfunction]
+#[pyo3(name = "bead_cli_execute")]
+fn py_bead_cli_execute<'py>(
+    py: Python<'py>,
+    argv: Vec<String>,
+    read_beads_dirs: Vec<String>,
+    write_beads_dir: &str,
+    cwd: &str,
+    relativize_design_paths: bool,
+) -> PyResult<PyObject> {
+    let read_beads_dirs = strings_to_paths(read_beads_dirs);
+    let write_beads_dir = PathBuf::from(write_beads_dir);
+    let cwd = PathBuf::from(cwd);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_execute_bead_cli(
+                &argv,
+                &read_beads_dirs,
+                &write_beads_dir,
+                &cwd,
+                relativize_design_paths,
+            )
+        }),
+    )
+}
+
 fn strings_to_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
@@ -1981,6 +2009,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_bead_build_epic_work_plan_from_issues,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_notifications_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;

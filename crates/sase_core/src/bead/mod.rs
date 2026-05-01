@@ -4,6 +4,7 @@
 //! codecs without exposing command handlers yet. Later phases build read and
 //! mutation engines on top of these wire records.
 
+pub mod cli;
 pub mod config;
 pub mod jsonl;
 pub mod mutation;
@@ -12,6 +13,10 @@ pub mod schema;
 pub mod wire;
 pub mod work;
 
+pub use cli::{
+    execute_bead_cli, BeadCliMutationSummaryWire, BeadCliOutcomeWire,
+    BeadCliStatusTransitionWire,
+};
 pub use config::{
     default_config, load_config, load_config_from_str, save_config,
     BeadConfigWire,
