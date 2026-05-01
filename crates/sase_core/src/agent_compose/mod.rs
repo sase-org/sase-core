@@ -60,7 +60,14 @@ pub fn compose_agent_list(
     let mut agents = Vec::new();
 
     let (bug_by_cl, cl_by_cl) = build_changespec_lookups(&input.changespecs);
-    agents.extend(build_running_claim_agents(input, &bug_by_cl, &cl_by_cl));
+    let artifact_record_index =
+        build_artifact_record_index(input.artifact_scan.as_ref());
+    agents.extend(build_running_claim_agents(
+        input,
+        &bug_by_cl,
+        &cl_by_cl,
+        &artifact_record_index,
+    ));
 
     let mut workflow_agent_steps = Vec::new();
     if let Some(snapshot) = &input.artifact_scan {
@@ -126,6 +133,9 @@ struct Diagnostics {
     merge_log: Vec<MergeReasonWire>,
 }
 
+type ArtifactRecordIndex<'a> =
+    HashMap<(String, String), Vec<&'a AgentArtifactRecordWire>>;
+
 fn build_changespec_lookups(
     changespecs: &[ChangeSpecWire],
 ) -> (
@@ -151,6 +161,7 @@ fn build_running_claim_agents(
     input: &AgentComposeInputWire,
     bug_by_cl: &HashMap<String, Option<String>>,
     cl_by_cl: &HashMap<String, Option<String>>,
+    artifact_record_index: &ArtifactRecordIndex<'_>,
 ) -> Vec<AgentWire> {
     let mut agents = Vec::new();
     for claim in &input.running_claims {
@@ -216,9 +227,94 @@ fn build_running_claim_agents(
         {
             agent.hidden = true;
         }
+        if let Some(record) = matching_artifact_record(
+            artifact_record_index,
+            claim,
+            agent.raw_suffix.as_deref(),
+        ) {
+            agent.artifacts_dir = Some(record.artifact_dir.clone());
+            enrich_from_meta(&mut agent, &record.agent_meta, &record.waiting);
+            enrich_from_prompt_markers(&mut agent, &record.prompt_steps);
+        }
         agents.push(agent);
     }
     agents
+}
+
+fn build_artifact_record_index(
+    snapshot: Option<&AgentArtifactScanWire>,
+) -> ArtifactRecordIndex<'_> {
+    let mut index: ArtifactRecordIndex<'_> = HashMap::new();
+    let Some(snapshot) = snapshot else {
+        return index;
+    };
+    for record in &snapshot.records {
+        let Some(timestamp) = normalize_to_14_digit(Some(&record.timestamp))
+            .or_else(|| {
+                if record.timestamp.is_empty() {
+                    None
+                } else {
+                    Some(record.timestamp.clone())
+                }
+            })
+        else {
+            continue;
+        };
+        index
+            .entry((record.project_file.clone(), timestamp.clone()))
+            .or_default()
+            .push(record);
+        index
+            .entry((record.project_name.clone(), timestamp))
+            .or_default()
+            .push(record);
+    }
+    index
+}
+
+fn matching_artifact_record<'a>(
+    index: &'a ArtifactRecordIndex<'a>,
+    claim: &RunningClaimWire,
+    normalized_ts: Option<&str>,
+) -> Option<&'a AgentArtifactRecordWire> {
+    let ts = normalized_ts?;
+    let by_project_file =
+        index.get(&(claim.project_file.clone(), ts.to_string()));
+    let by_project_name =
+        index.get(&(claim.project_name.clone(), ts.to_string()));
+    let candidates = by_project_file.or(by_project_name)?;
+    candidates
+        .iter()
+        .copied()
+        .find(|record| workflow_matches_claim(record, claim))
+        .or_else(|| candidates.first().copied())
+}
+
+fn workflow_matches_claim(
+    record: &AgentArtifactRecordWire,
+    claim: &RunningClaimWire,
+) -> bool {
+    let Some(raw_workflow) = claim.workflow.as_deref() else {
+        return false;
+    };
+    let workflow_dir = record.workflow_dir_name.as_str();
+    if matches!(raw_workflow, "ace(run)" | "run") {
+        return matches!(workflow_dir, "ace-run" | "run");
+    }
+    if raw_workflow.starts_with("workflow(") && raw_workflow.ends_with(')') {
+        let inner = &raw_workflow[9..raw_workflow.len() - 1];
+        return workflow_dir == format!("workflow-{inner}");
+    }
+    if raw_workflow.starts_with("axe(") {
+        if let Some(end) = raw_workflow.find(')') {
+            let inner = raw_workflow[4..end].replace('_', "-");
+            return workflow_dir == inner
+                || workflow_dir
+                    == inner.strip_prefix("fix-").unwrap_or(&inner);
+        }
+    }
+    let normalized = raw_workflow.replace('_', "-");
+    workflow_dir == raw_workflow || workflow_dir == normalized
 }
 
 fn build_done_agents(
@@ -1504,11 +1600,30 @@ fn enrich_from_meta(
         );
     }
     if let Some(waiting) = waiting {
-        if !waiting.waiting_for.is_empty() {
-            agent.waiting_for = waiting.waiting_for.clone();
+        if agent.status == "RUNNING" {
+            agent.status = "WAITING".to_string();
         }
-        set_opt_if_none(&mut agent.wait_duration, &waiting.wait_duration);
-        set_opt_if_none(&mut agent.wait_until, &waiting.wait_until);
+        agent.waiting_for = waiting.waiting_for.clone();
+        if waiting.wait_duration.is_some() {
+            agent.wait_duration = waiting.wait_duration;
+        }
+        if waiting.wait_until.is_some() {
+            agent.wait_until = waiting.wait_until.clone();
+        }
+    }
+    if let Some(meta) = meta {
+        if meta.plan && agent.status == "RUNNING" {
+            agent.status = if meta.plan_approved {
+                match meta.plan_action.as_deref() {
+                    Some("commit") => "PLAN COMMITTED",
+                    Some("epic") => "EPIC APPROVED",
+                    _ => "PLAN APPROVED",
+                }
+            } else {
+                "PLANNING"
+            }
+            .to_string();
+        }
     }
 }
 
@@ -2037,7 +2152,7 @@ mod tests {
     use crate::agent_scan::{
         AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
         AgentMetaWire, PlanPathMarkerWire, PromptStepMarkerWire,
-        WorkflowStateWire, WorkflowStepStateWire,
+        WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
     };
     use crate::wire::{HookStatusLineWire, HookWire, SourceSpanWire};
     use serde_json::json;
@@ -2216,6 +2331,84 @@ mod tests {
             )]
         );
         assert_eq!(result.agents[1].step_index, None);
+    }
+
+    #[test]
+    fn running_claim_enriches_from_matching_waiting_artifact() {
+        let mut running_record = record("ace-run", "20260501120000");
+        running_record.agent_meta = Some(AgentMetaWire {
+            name: Some("blocked-agent".into()),
+            model: Some("gpt-5.5".into()),
+            plan: true,
+            plan_approved: true,
+            wait_for: vec!["meta-dependency".into()],
+            wait_duration: Some(60.0),
+            wait_until: Some("2026-05-01T12:30:00".into()),
+            ..AgentMetaWire::default()
+        });
+        running_record.waiting = Some(WaitingMarkerWire {
+            waiting_for: vec!["fresh-dependency".into()],
+            wait_duration: Some(120.0),
+            wait_until: Some("2026-05-01T13:00:00".into()),
+        });
+
+        let input = AgentComposeInputWire {
+            artifact_scan: Some(scan(vec![running_record])),
+            running_claims: vec![RunningClaimWire {
+                raw_suffix: Some("20260501120000".into()),
+                pid: Some(1234),
+                ..running_claim("waiting_cl")
+            }],
+            alive_pids: vec![1234],
+            ..AgentComposeInputWire::default()
+        };
+
+        let result = compose_agent_list(&input);
+
+        assert_eq!(result.agents.len(), 1);
+        let agent = &result.agents[0];
+        assert_eq!(agent.status, "WAITING");
+        assert_eq!(agent.agent_name.as_deref(), Some("blocked-agent"));
+        assert_eq!(agent.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(agent.waiting_for, vec!["fresh-dependency"]);
+        assert_eq!(agent.wait_duration, Some(120.0));
+        assert_eq!(agent.wait_until.as_deref(), Some("2026-05-01T13:00:00"));
+        assert_eq!(
+            agent.artifacts_dir.as_deref(),
+            Some("/tmp/sase/projects/demo/artifacts/ace-run/20260501120000")
+        );
+    }
+
+    #[test]
+    fn running_claim_waiting_marker_blocks_plan_transition() {
+        let mut running_record = record("run", "20260501120100");
+        running_record.agent_meta = Some(AgentMetaWire {
+            plan: true,
+            plan_approved: true,
+            plan_action: Some("commit".into()),
+            ..AgentMetaWire::default()
+        });
+        running_record.waiting = Some(WaitingMarkerWire {
+            waiting_for: Vec::new(),
+            wait_duration: Some(30.0),
+            wait_until: None,
+        });
+
+        let input = AgentComposeInputWire {
+            artifact_scan: Some(scan(vec![running_record])),
+            running_claims: vec![RunningClaimWire {
+                workflow: Some("run".into()),
+                raw_suffix: Some("20260501120100".into()),
+                ..running_claim("duration_wait")
+            }],
+            ..AgentComposeInputWire::default()
+        };
+
+        let result = compose_agent_list(&input);
+
+        assert_eq!(result.agents.len(), 1);
+        assert_eq!(result.agents[0].status, "WAITING");
+        assert_eq!(result.agents[0].wait_duration, Some(30.0));
     }
 
     #[test]
