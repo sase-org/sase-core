@@ -257,7 +257,7 @@ fn allocate_dismissed_name(
     }
     let mut n = 2;
     loop {
-        let candidate = format!("{primary}.{n}");
+        let candidate = format!("{primary}_{n}");
         if !taken.contains(&candidate) {
             taken.insert(candidate.clone());
             return candidate;
@@ -1008,6 +1008,6 @@ mod tests {
             .iter()
             .map(|intent| intent.new_name.clone())
             .collect();
-        assert_eq!(names, vec!["260428.foo.2", "260428.foo.3"]);
+        assert_eq!(names, vec!["260428.foo_2", "260428.foo_3"]);
     }
 }
