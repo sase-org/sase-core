@@ -36,6 +36,10 @@
 //! - `append_notification(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `agent_launch_wire_schema_version() -> int`
+//! - `list_workspace_claims_from_content(content: str) -> list[dict]`
+//! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
+//! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
+//! - `allocate_and_claim_workspace_from_content(content: str, min_workspace: int, max_workspace: int, request: dict) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -70,6 +74,13 @@ use sase_core::agent_cleanup::{
     save_dismissed_agents_index as core_save_dismissed_agents_index,
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
+};
+use sase_core::agent_launch::{
+    allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
+    list_workspace_claims_from_content as core_list_workspace_claims_from_content,
+    plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
+    plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
+    WorkspaceClaimRequestWire,
 };
 use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
@@ -1095,6 +1106,86 @@ fn py_agent_launch_wire_schema_version() -> u32 {
     sase_core::AGENT_LAUNCH_WIRE_SCHEMA_VERSION
 }
 
+/// Return parsed RUNNING workspace claims from project-file content.
+#[pyfunction]
+#[pyo3(name = "list_workspace_claims_from_content")]
+fn py_list_workspace_claims_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+) -> PyResult<PyObject> {
+    let claims = core_list_workspace_claims_from_content(content);
+    let value = serde_json::to_value(&claims).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Plan insertion of one RUNNING workspace claim.
+#[pyfunction]
+#[pyo3(name = "plan_claim_workspace_from_content")]
+fn py_plan_claim_workspace_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let req = workspace_claim_request_from_pydict(request)?;
+    let plan = core_plan_claim_workspace_from_content(content, &req);
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Plan transfer of one RUNNING workspace claim to a new PID.
+#[pyfunction]
+#[pyo3(name = "plan_transfer_workspace_claim_from_content")]
+fn py_plan_transfer_workspace_claim_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let req = workspace_claim_request_from_pydict(request)?;
+    let plan = core_plan_transfer_workspace_claim_from_content(content, &req);
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Plan first-free workspace allocation and RUNNING claim insertion together.
+#[pyfunction]
+#[pyo3(name = "allocate_and_claim_workspace_from_content")]
+fn py_allocate_and_claim_workspace_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+    min_workspace: u32,
+    max_workspace: u32,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let req = workspace_claim_request_from_pydict(request)?;
+    let plan = core_allocate_and_claim_workspace_from_content(
+        content,
+        min_workspace,
+        max_workspace,
+        &req,
+    );
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+fn workspace_claim_request_from_pydict(
+    request: &Bound<'_, PyDict>,
+) -> PyResult<WorkspaceClaimRequestWire> {
+    let value = py_to_json_value(request.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid WorkspaceClaimRequestWire dict: {e}"
+        ))
+    })
+}
+
 #[pymodule]
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1132,6 +1223,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_list_workspace_claims_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_plan_claim_workspace_from_content, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_plan_transfer_workspace_claim_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_allocate_and_claim_workspace_from_content,
+        m
+    )?)?;
     Ok(())
 }
 

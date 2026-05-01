@@ -47,8 +47,12 @@ pub use agent_cleanup::{
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 pub use agent_launch::{
-    AgentLaunchPreparedWire, AgentLaunchRequestWire, LaunchFanoutPlanWire,
-    LaunchFanoutSlotWire, WorkspaceClaimOutcomeWire, WorkspaceClaimRequestWire,
+    allocate_and_claim_workspace_from_content,
+    list_workspace_claims_from_content, plan_claim_workspace_from_content,
+    plan_transfer_workspace_claim_from_content, AgentLaunchPreparedWire,
+    AgentLaunchRequestWire, LaunchFanoutPlanWire, LaunchFanoutSlotWire,
+    WorkspaceClaimOutcomeWire, WorkspaceClaimPlanWire,
+    WorkspaceClaimRequestWire, WorkspaceClaimWire,
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
 };
 pub use agent_scan::{
