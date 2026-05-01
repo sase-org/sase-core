@@ -28,6 +28,10 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
+//! - `apply_notification_state_update(path: str, update: dict) -> dict`
+//! - `append_notification(path: str, notification: dict) -> dict`
+//! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -73,6 +77,13 @@ use sase_core::git_query::{
     parse_git_conflicted_files as core_parse_git_conflicted_files,
     parse_git_local_changes as core_parse_git_local_changes,
     parse_git_name_status_z as core_parse_git_name_status_z,
+};
+use sase_core::notifications::{
+    append_notification as core_append_notification,
+    apply_notification_state_update as core_apply_notification_state_update,
+    read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
+    rewrite_notifications as core_rewrite_notifications,
+    NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::status::{
@@ -603,6 +614,93 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
     }
 }
 
+// --- Notification store bindings -----------------------------------------
+
+/// Read the notification JSONL store and return a snapshot dict.
+///
+/// The GIL is released while Rust performs filesystem work. When
+/// ``expire_due_snoozes`` is true, due snoozes are expired under the same
+/// store lock before the returned snapshot is built.
+#[pyfunction]
+#[pyo3(name = "read_notifications_snapshot", signature = (path, include_dismissed, expire_due_snoozes = false))]
+fn py_read_notifications_snapshot<'py>(
+    py: Python<'py>,
+    path: &str,
+    include_dismissed: bool,
+    expire_due_snoozes: bool,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| {
+        core_read_notifications_snapshot_with_options(
+            &path,
+            include_dismissed,
+            expire_due_snoozes,
+        )
+    });
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Apply one notification state update and return the outcome dict.
+#[pyfunction]
+#[pyo3(name = "apply_notification_state_update")]
+fn py_apply_notification_state_update<'py>(
+    py: Python<'py>,
+    path: &str,
+    update: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let update = notification_update_from_pydict(update)?;
+    let path = PathBuf::from(path);
+    let outcome = py
+        .allow_threads(|| core_apply_notification_state_update(&path, &update));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Append one notification dict and return the outcome dict.
+#[pyfunction]
+#[pyo3(name = "append_notification")]
+fn py_append_notification<'py>(
+    py: Python<'py>,
+    path: &str,
+    notification: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let notification = notification_from_pydict(notification)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_append_notification(&path, &notification));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Rewrite the notification JSONL store from notification dicts.
+#[pyfunction]
+#[pyo3(name = "rewrite_notifications")]
+fn py_rewrite_notifications<'py>(
+    py: Python<'py>,
+    path: &str,
+    notifications: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let notifications = notifications_from_py_list(notifications)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_rewrite_notifications(&path, &notifications));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
 ///
 /// Translates the dict to `serde_json::Value` first so missing fields use
@@ -615,6 +713,45 @@ fn agent_scan_options_from_pydict(
     serde_json::from_value(value).map_err(|e| {
         PyValueError::new_err(format!(
             "options is not a valid AgentArtifactScanOptionsWire dict: {e}"
+        ))
+    })
+}
+
+fn notification_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "notification is not a valid NotificationWire dict: {e}"
+        ))
+    })
+}
+
+fn notifications_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<NotificationWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let notification: NotificationWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "notifications[{idx}] is not a valid NotificationWire dict: {e}"
+                ))
+            })?;
+        values.push(notification);
+    }
+    Ok(values)
+}
+
+fn notification_update_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationStateUpdateWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "update is not a valid NotificationStateUpdateWire dict: {e}"
         ))
     })
 }
@@ -893,6 +1030,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_notifications_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     Ok(())
 }
 
@@ -903,6 +1044,8 @@ mod tests {
     use super::*;
     use pyo3::Python;
     use serde_json::json;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn append_json<'py>(
         py: Python<'py>,
@@ -910,6 +1053,19 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    fn temp_notification_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "sase-core-py-notification-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
     }
 
     #[test]
@@ -988,6 +1144,98 @@ mod tests {
 
             let err = py_plan_agent_cleanup(py, &targets, request).unwrap_err();
             assert!(err.to_string().contains("schema mismatch"));
+        });
+    }
+
+    #[test]
+    fn notification_store_binding_round_trips_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let path = temp_notification_path("notifications.jsonl");
+            let notification_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": "n1",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "notes": ["hello"],
+                    "files": [],
+                    "action": "PlanApproval",
+                    "action_data": {},
+                    "read": false,
+                    "dismissed": false,
+                    "silent": false,
+                    "muted": false,
+                    "snooze_until": null
+                }),
+            )
+            .unwrap();
+            let notification =
+                notification_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let appended = py_append_notification(
+                py,
+                path.to_str().unwrap(),
+                notification,
+            )
+            .unwrap();
+            let appended_value = py_to_json_value(appended.bind(py)).unwrap();
+            assert_eq!(appended_value["appended_count"], json!(1));
+
+            let snapshot = py_read_notifications_snapshot(
+                py,
+                path.to_str().unwrap(),
+                false,
+                false,
+            )
+            .unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["schema_version"], json!(1));
+            assert_eq!(snapshot_value["notifications"][0]["id"], json!("n1"));
+            assert_eq!(snapshot_value["counts"]["priority"], json!(1));
+
+            let update_obj =
+                json_value_to_py(py, &json!({"kind": "mark_read", "id": "n1"}))
+                    .unwrap();
+            let update = update_obj.bind(py).downcast::<PyDict>().unwrap();
+            let outcome = py_apply_notification_state_update(
+                py,
+                path.to_str().unwrap(),
+                update,
+            )
+            .unwrap();
+            let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
+            assert_eq!(outcome_value["matched_count"], json!(1));
+            assert_eq!(outcome_value["changed_count"], json!(1));
+
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(
+                path.with_file_name("notifications.jsonl.lock"),
+            );
+            let _ = fs::remove_dir(path.parent().unwrap());
+        });
+    }
+
+    #[test]
+    fn notification_store_binding_rejects_bad_update_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let bad_obj = json_value_to_py(
+                py,
+                &json!({"kind": "mark_snoozed", "id": "n1"}),
+            )
+            .unwrap();
+            let bad = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let err = py_apply_notification_state_update(
+                py,
+                "/tmp/notifications.jsonl",
+                bad,
+            )
+            .unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("NotificationStateUpdateWire dict"));
         });
     }
 }

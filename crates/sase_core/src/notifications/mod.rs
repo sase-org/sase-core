@@ -3,7 +3,8 @@ pub mod wire;
 
 pub use store::{
     append_notification, apply_notification_state_update,
-    read_notifications_snapshot, rewrite_notifications,
+    read_notifications_snapshot, read_notifications_snapshot_with_options,
+    rewrite_notifications,
 };
 pub use wire::{
     NotificationAgentKeyWire, NotificationCountsWire,

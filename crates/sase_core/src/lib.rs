@@ -62,8 +62,8 @@ pub use git_query::{
 };
 pub use notifications::{
     append_notification, apply_notification_state_update,
-    read_notifications_snapshot, rewrite_notifications,
-    NotificationAgentKeyWire, NotificationCountsWire,
+    read_notifications_snapshot, read_notifications_snapshot_with_options,
+    rewrite_notifications, NotificationAgentKeyWire, NotificationCountsWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
     NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,

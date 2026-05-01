@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, NaiveDateTime};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use fs2::FileExt;
 
 use super::wire::{
@@ -19,6 +19,20 @@ pub fn read_notifications_snapshot(
     path: &Path,
     include_dismissed: bool,
 ) -> Result<NotificationStoreSnapshotWire, String> {
+    read_notifications_snapshot_with_options(path, include_dismissed, false)
+}
+
+pub fn read_notifications_snapshot_with_options(
+    path: &Path,
+    include_dismissed: bool,
+    expire_due_snoozes: bool,
+) -> Result<NotificationStoreSnapshotWire, String> {
+    if expire_due_snoozes {
+        return read_notifications_snapshot_expiring_snoozes(
+            path,
+            include_dismissed,
+        );
+    }
     let Some(parent) = path.parent() else {
         return Err(format!(
             "notification path has no parent: {}",
@@ -39,6 +53,41 @@ pub fn read_notifications_snapshot(
     unlock(lock)?;
     let (notifications, stats) = result?;
     Ok(snapshot_from_rows(notifications, stats))
+}
+
+fn read_notifications_snapshot_expiring_snoozes(
+    path: &Path,
+    include_dismissed: bool,
+) -> Result<NotificationStoreSnapshotWire, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let result = (|| {
+        let (mut rows, _) = read_rows_unlocked(path, true)?;
+        let now = DateTime::<Utc>::from(SystemTime::now()).to_rfc3339();
+        let mut expired_ids = Vec::new();
+        for n in &mut rows {
+            let Some(deadline) = &n.snooze_until else {
+                continue;
+            };
+            if iso_timestamp_due(deadline, &now) {
+                n.muted = false;
+                n.snooze_until = None;
+                expired_ids.push(n.id.clone());
+            }
+        }
+        if !expired_ids.is_empty() {
+            rewrite_notifications_unlocked(path, &rows)?;
+        }
+        let (notifications, stats) =
+            read_rows_unlocked(path, include_dismissed)?;
+        let mut snapshot = snapshot_from_rows(notifications, stats);
+        snapshot.expired_ids = expired_ids;
+        Ok(snapshot)
+    })();
+
+    unlock(lock)?;
+    result
 }
 
 pub fn append_notification(
