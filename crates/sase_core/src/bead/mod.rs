@@ -9,6 +9,7 @@ pub mod jsonl;
 pub mod read;
 pub mod schema;
 pub mod wire;
+pub mod work;
 
 pub use config::{
     default_config, load_config, load_config_from_str, save_config,
@@ -34,4 +35,8 @@ pub use schema::{
 pub use wire::{
     BeadError, DependencyWire, IssueTypeWire, IssueWire, OperationOutcomeWire,
     StatusWire,
+};
+pub use work::{
+    build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,
+    PhaseAssignmentWire,
 };

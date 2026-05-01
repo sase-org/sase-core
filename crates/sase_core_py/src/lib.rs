@@ -100,6 +100,8 @@ use sase_core::agent_scan::{
 use sase_core::bead::{
     blocked_issues as core_bead_blocked_issues,
     blocked_merged_issues as core_bead_blocked_merged_issues,
+    build_epic_work_plan as core_bead_build_epic_work_plan,
+    build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
     doctor as core_bead_doctor,
     get_epic_children as core_bead_get_epic_children,
     get_merged_epic_children as core_bead_get_merged_epic_children,
@@ -110,7 +112,7 @@ use sase_core::bead::{
     ready_merged_issues as core_bead_ready_merged_issues,
     show_issue as core_bead_show_issue,
     show_merged_issue as core_bead_show_merged_issue, stats as core_bead_stats,
-    BeadError,
+    BeadError, IssueWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -899,6 +901,38 @@ fn py_bead_merged_get_epic_children<'py>(
     )
 }
 
+#[pyfunction]
+#[pyo3(name = "bead_build_epic_work_plan")]
+fn py_bead_build_epic_work_plan<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    epic_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_build_epic_work_plan(&beads_dir, epic_id)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_build_epic_work_plan_from_issues")]
+fn py_bead_build_epic_work_plan_from_issues<'py>(
+    py: Python<'py>,
+    issues: &Bound<'py, PyList>,
+    epic_id: &str,
+) -> PyResult<PyObject> {
+    let issues = issues_from_py_list(issues)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_build_epic_work_plan_from_issues(issues, epic_id)
+        }),
+    )
+}
+
 fn strings_to_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
@@ -915,6 +949,23 @@ where
             PyValueError::new_err(format!("internal serialize error: {e}"))
         })?;
     json_value_to_py(py, &value)
+}
+
+fn issues_from_py_list(list: &Bound<'_, PyList>) -> PyResult<Vec<IssueWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let issue: IssueWire = serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "issues[{idx}] is not a valid IssueWire dict: {e}"
+            ))
+        })?;
+        issue.validate().map_err(|e| {
+            PyValueError::new_err(format!("issues[{idx}] is invalid: {e}"))
+        })?;
+        values.push(issue);
+    }
+    Ok(values)
 }
 
 // --- Notification store bindings -----------------------------------------
@@ -1710,6 +1761,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_merged_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merged_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merged_get_epic_children, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_build_epic_work_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_build_epic_work_plan_from_issues,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_read_notifications_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
