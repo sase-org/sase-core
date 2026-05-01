@@ -11,6 +11,7 @@
 pub mod agent_cleanup;
 pub mod agent_scan;
 pub mod git_query;
+pub mod notifications;
 pub mod parser;
 pub mod query;
 pub mod sections;
@@ -58,6 +59,14 @@ pub use git_query::{
     parse_git_conflicted_files, parse_git_local_changes,
     parse_git_name_status_z, GitNameStatusEntryWire,
     GIT_QUERY_WIRE_SCHEMA_VERSION,
+};
+pub use notifications::{
+    append_notification, apply_notification_state_update,
+    read_notifications_snapshot, rewrite_notifications,
+    NotificationAgentKeyWire, NotificationCountsWire,
+    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
+    NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
+    NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::parse_project_bytes;
 pub use query::{
