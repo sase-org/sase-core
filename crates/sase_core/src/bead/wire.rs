@@ -20,6 +20,15 @@ pub enum IssueTypeWire {
     Phase,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadTierWire {
+    Plan,
+    #[default]
+    Epic,
+    Legend,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
 pub struct BeadError {
@@ -111,6 +120,8 @@ pub struct IssueWire {
     pub title: String,
     pub status: StatusWire,
     pub issue_type: IssueTypeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<BeadTierWire>,
     #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
     pub parent_id: Option<String>,
     #[serde(
@@ -180,6 +191,11 @@ impl IssueWire {
                 "Phase issues must have a parent_id",
             ));
         }
+        if self.issue_type == IssueTypeWire::Phase && self.tier.is_some() {
+            return Err(BeadError::validation(
+                "Phase issues cannot carry plan tier metadata",
+            ));
+        }
         if self.issue_type == IssueTypeWire::Phase && self.is_ready_to_work {
             return Err(BeadError::validation(
                 "Only plan issues can be marked is_ready_to_work",
@@ -238,6 +254,7 @@ mod tests {
             title: "A phase".to_string(),
             status: StatusWire::Open,
             issue_type: IssueTypeWire::Phase,
+            tier: None,
             parent_id: parent_id.map(str::to_string),
             owner: String::new(),
             assignee: String::new(),

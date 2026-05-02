@@ -5,9 +5,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeSet;
+
 use super::wire::{
-    deserialize_valid_issue, invalid_record_error, BeadError, IssueTypeWire,
-    IssueWire,
+    deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
+    IssueTypeWire, IssueWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -50,6 +52,8 @@ pub fn parse_issues_jsonl(input: &str) -> JsonlLoadOutcome {
         }
     }
 
+    apply_missing_tiers(&mut outcome.issues);
+    outcome.issues.retain(|issue| issue.validate().is_ok());
     outcome
         .issues
         .sort_by(|a, b| issue_import_key(a).cmp(&issue_import_key(b)));
@@ -89,6 +93,23 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
     (kind_order, issue.id.as_str())
 }
 
+pub(crate) fn apply_missing_tiers(issues: &mut [IssueWire]) {
+    let phase_parent_ids: BTreeSet<String> = issues
+        .iter()
+        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
+        .filter_map(|issue| issue.parent_id.clone())
+        .collect();
+    for issue in issues {
+        if issue.issue_type == IssueTypeWire::Plan && issue.tier.is_none() {
+            issue.tier = Some(if phase_parent_ids.contains(&issue.id) {
+                BeadTierWire::Epic
+            } else {
+                BeadTierWire::Plan
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +121,7 @@ mod tests {
             title: "Plan".to_string(),
             status: StatusWire::Open,
             issue_type: IssueTypeWire::Plan,
+            tier: Some(BeadTierWire::Epic),
             parent_id: None,
             owner: String::new(),
             assignee: String::new(),
@@ -135,6 +157,7 @@ mod tests {
     fn export_sorts_by_id_and_uses_compact_json() {
         let mut child = plan("gold-1.1");
         child.issue_type = IssueTypeWire::Phase;
+        child.tier = None;
         child.parent_id = Some("gold-1".to_string());
         child.dependencies = vec![DependencyWire {
             issue_id: "gold-1.1".to_string(),
@@ -146,5 +169,29 @@ mod tests {
         assert!(output.starts_with(r#"{"id":"gold-1","#));
         assert!(output.contains(r#""dependencies":[{"issue_id":"gold-1.1""#));
         assert!(!output.contains(": "));
+    }
+
+    #[test]
+    fn import_defaults_missing_plan_tiers_from_phase_children() {
+        let outcome = parse_issues_jsonl(
+            r#"{"id":"solo","title":"Solo","status":"open","issue_type":"plan","parent_id":null,"created_at":"","updated_at":"","dependencies":[]}
+{"id":"epic","title":"Epic","status":"open","issue_type":"plan","parent_id":null,"created_at":"","updated_at":"","dependencies":[]}
+{"id":"epic.1","title":"Phase","status":"open","issue_type":"phase","parent_id":"epic","created_at":"","updated_at":"","dependencies":[]}
+"#,
+        );
+
+        let solo = outcome
+            .issues
+            .iter()
+            .find(|issue| issue.id == "solo")
+            .unwrap();
+        let epic = outcome
+            .issues
+            .iter()
+            .find(|issue| issue.id == "epic")
+            .unwrap();
+
+        assert_eq!(solo.tier, Some(BeadTierWire::Plan));
+        assert_eq!(epic.tier, Some(BeadTierWire::Epic));
     }
 }

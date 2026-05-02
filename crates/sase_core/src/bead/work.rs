@@ -6,7 +6,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::read::read_store_issues;
-use super::wire::{BeadError, IssueTypeWire, IssueWire, StatusWire};
+use super::wire::{
+    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseAssignmentWire {
@@ -46,6 +48,11 @@ pub fn build_epic_work_plan_from_issues(
     if epic.issue_type != IssueTypeWire::Plan {
         return Err(BeadError::validation(format!(
             "'{epic_id}' is not a plan/epic bead"
+        )));
+    }
+    if epic.tier != Some(BeadTierWire::Epic) {
+        return Err(BeadError::validation(format!(
+            "'{epic_id}' is not an epic bead"
         )));
     }
 
@@ -220,11 +227,14 @@ mod tests {
         issue_type: IssueTypeWire,
         parent_id: Option<&str>,
     ) -> IssueWire {
+        let tier =
+            (issue_type == IssueTypeWire::Plan).then_some(BeadTierWire::Epic);
         IssueWire {
             id: id.to_string(),
             title: id.to_string(),
             status: StatusWire::Open,
             issue_type,
+            tier,
             parent_id: parent_id.map(str::to_string),
             owner: String::new(),
             assignee: String::new(),

@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::jsonl::import_issues_from_jsonl;
-use super::wire::{BeadError, IssueTypeWire, IssueWire, StatusWire};
+use super::wire::{
+    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+};
 
 pub const BEAD_READ_WIRE_SCHEMA_VERSION: u64 = 1;
 
@@ -31,8 +33,14 @@ pub fn list_issues(
     beads_dir: &Path,
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
 ) -> Result<Vec<IssueWire>, BeadError> {
-    list_issues_in_issues(read_store_issues(beads_dir)?, statuses, issue_types)
+    list_issues_in_issues(
+        read_store_issues(beads_dir)?,
+        statuses,
+        issue_types,
+        tiers,
+    )
 }
 
 pub fn ready_issues(beads_dir: &Path) -> Result<Vec<IssueWire>, BeadError> {
@@ -132,11 +140,13 @@ pub fn list_merged_issues(
     beads_dirs: &[PathBuf],
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     list_issues_in_issues(
         merge_workspace_issues(beads_dirs)?,
         statuses,
         issue_types,
+        tiers,
     )
 }
 
@@ -182,9 +192,11 @@ fn list_issues_in_issues(
     mut issues: Vec<IssueWire>,
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     let statuses = parse_statuses(statuses)?;
     let issue_types = parse_issue_types(issue_types)?;
+    let tiers = parse_tiers(tiers)?;
     issues.retain(|issue| {
         statuses
             .as_ref()
@@ -192,6 +204,12 @@ fn list_issues_in_issues(
             && issue_types
                 .as_ref()
                 .map_or(true, |values| values.contains(&issue.issue_type))
+            && tiers.as_ref().map_or(true, |values| {
+                issue
+                    .tier
+                    .as_ref()
+                    .is_some_and(|tier| values.contains(tier))
+            })
     });
     sort_by_created_at(&mut issues);
     Ok(issues)
@@ -208,8 +226,14 @@ fn ready_issues_in_issues(
     Ok(issues
         .into_iter()
         .filter(|issue| issue.status == StatusWire::Open)
+        .filter(|issue| is_ready_surface_issue(issue))
         .filter(|issue| !has_active_blocker(issue, &status_by_id))
         .collect())
+}
+
+fn is_ready_surface_issue(issue: &IssueWire) -> bool {
+    issue.issue_type == IssueTypeWire::Phase
+        || issue.tier == Some(BeadTierWire::Epic)
 }
 
 fn blocked_issues_in_issues(
@@ -298,6 +322,23 @@ fn parse_issue_type(value: &str) -> Result<IssueTypeWire, BeadError> {
         _ => Err(BeadError::validation(format!(
             "invalid bead issue_type: {value}"
         ))),
+    }
+}
+
+fn parse_tiers(
+    tiers: Option<&[String]>,
+) -> Result<Option<Vec<BeadTierWire>>, BeadError> {
+    tiers
+        .map(|values| values.iter().map(|value| parse_tier(value)).collect())
+        .transpose()
+}
+
+fn parse_tier(value: &str) -> Result<BeadTierWire, BeadError> {
+    match value {
+        "plan" => Ok(BeadTierWire::Plan),
+        "epic" => Ok(BeadTierWire::Epic),
+        "legend" => Ok(BeadTierWire::Legend),
+        _ => Err(BeadError::validation(format!("invalid bead tier: {value}"))),
     }
 }
 

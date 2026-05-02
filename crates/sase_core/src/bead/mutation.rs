@@ -13,13 +13,16 @@ use serde_json::Value;
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::jsonl::{export_issues_to_jsonl, import_issues_from_jsonl};
 use super::wire::{
-    BeadError, DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    StatusWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BeadCreateRequestWire {
     pub title: String,
     pub issue_type: IssueTypeWire,
+    #[serde(default)]
+    pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
@@ -62,6 +65,8 @@ pub struct BeadUpdateFieldsWire {
     pub changespec_name: Option<String>,
     #[serde(default)]
     pub changespec_bug_id: Option<String>,
+    #[serde(default)]
+    pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
     #[serde(default)]
@@ -109,6 +114,7 @@ pub fn create_issue(
     request: BeadCreateRequestWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let mut store = MutableStore::load(beads_dir)?;
+    let tier = default_create_tier(&request);
     let now = request.now.unwrap_or_else(now_utc);
     let owner = store.config.owner.clone();
     let issue_id = match request.parent_id.as_deref() {
@@ -132,7 +138,8 @@ pub fn create_issue(
         id: issue_id,
         title: request.title,
         status: StatusWire::Open,
-        issue_type: request.issue_type,
+        issue_type: request.issue_type.clone(),
+        tier,
         parent_id: request.parent_id,
         owner: owner.clone(),
         assignee: request.assignee,
@@ -380,6 +387,15 @@ fn set_ready_to_work(
             ),
         });
     }
+    if store.issues[index].tier != Some(BeadTierWire::Epic) {
+        return Err(BeadError {
+            kind: "not_an_epic".to_string(),
+            message: format!(
+                "sase bead work only applies to epic plan beads (got {} for {epic_id})",
+                tier_label(store.issues[index].tier.as_ref())
+            ),
+        });
+    }
     if reject_already_ready && store.issues[index].is_ready_to_work {
         return Err(BeadError {
             kind: "already_ready".to_string(),
@@ -432,8 +448,31 @@ fn apply_update_fields(
     if let Some(value) = fields.changespec_bug_id {
         issue.changespec_bug_id = value;
     }
+    if let Some(value) = fields.tier {
+        issue.tier = Some(value);
+    }
     issue.updated_at = fields.now.unwrap_or_else(now_utc);
     Ok(())
+}
+
+fn default_create_tier(
+    request: &BeadCreateRequestWire,
+) -> Option<BeadTierWire> {
+    match request.issue_type {
+        IssueTypeWire::Plan => {
+            Some(request.tier.clone().unwrap_or(BeadTierWire::Epic))
+        }
+        IssueTypeWire::Phase => request.tier.clone(),
+    }
+}
+
+fn tier_label(tier: Option<&BeadTierWire>) -> &'static str {
+    match tier {
+        Some(BeadTierWire::Plan) => "plan",
+        Some(BeadTierWire::Epic) => "epic",
+        Some(BeadTierWire::Legend) => "legend",
+        None => "missing tier",
+    }
 }
 
 struct MutableStore {

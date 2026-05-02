@@ -747,12 +747,13 @@ fn py_bead_show<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_list")]
-#[pyo3(signature = (beads_dir, statuses=None, issue_types=None))]
+#[pyo3(signature = (beads_dir, statuses=None, issue_types=None, tiers=None))]
 fn py_bead_list<'py>(
     py: Python<'py>,
     beads_dir: &str,
     statuses: Option<Vec<String>>,
     issue_types: Option<Vec<String>>,
+    tiers: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     bead_result_to_py(
@@ -762,6 +763,7 @@ fn py_bead_list<'py>(
                 &beads_dir,
                 statuses.as_deref(),
                 issue_types.as_deref(),
+                tiers.as_deref(),
             )
         }),
     )
@@ -834,12 +836,13 @@ fn py_bead_merged_show<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_merged_list")]
-#[pyo3(signature = (beads_dirs, statuses=None, issue_types=None))]
+#[pyo3(signature = (beads_dirs, statuses=None, issue_types=None, tiers=None))]
 fn py_bead_merged_list<'py>(
     py: Python<'py>,
     beads_dirs: Vec<String>,
     statuses: Option<Vec<String>>,
     issue_types: Option<Vec<String>>,
+    tiers: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
     let beads_dirs = strings_to_paths(beads_dirs);
     bead_result_to_py(
@@ -849,6 +852,7 @@ fn py_bead_merged_list<'py>(
                 &beads_dirs,
                 statuses.as_deref(),
                 issue_types.as_deref(),
+                tiers.as_deref(),
             )
         }),
     )

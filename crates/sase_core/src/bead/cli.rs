@@ -16,7 +16,8 @@ use super::mutation::{
 };
 use super::read::{merge_workspace_issues, read_store_issues};
 use super::wire::{
-    BeadError, DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    StatusWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +94,9 @@ fn handle_list(
                 .issue_types
                 .as_ref()
                 .map_or(true, |types| types.contains(&issue.issue_type))
+            && filters.tiers.as_ref().map_or(true, |tiers| {
+                issue.tier.as_ref().is_some_and(|tier| tiers.contains(tier))
+            })
     });
     sort_by_created_at(&mut issues);
 
@@ -146,8 +150,9 @@ fn handle_show(
     .expect("writing to String cannot fail");
     writeln!(
         stdout,
-        "Type: {} · Owner: {}",
+        "Type: {}{} · Owner: {}",
         issue_type_value(&issue.issue_type),
+        issue_tier_suffix(issue),
         if issue.owner.is_empty() {
             "(none)"
         } else {
@@ -272,6 +277,7 @@ fn handle_ready(
         .collect();
     issues.retain(|issue| {
         issue.status == StatusWire::Open
+            && is_ready_surface_issue(issue)
             && !has_active_blocker(issue, &status_by_id)
     });
     sort_by_created_at(&mut issues);
@@ -493,11 +499,13 @@ fn handle_dep(
 struct ListFilters {
     statuses: Vec<StatusWire>,
     issue_types: Option<Vec<IssueTypeWire>>,
+    tiers: Option<Vec<BeadTierWire>>,
 }
 
 fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
     let mut statuses = Vec::new();
     let mut issue_types = Vec::new();
+    let mut tiers = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
@@ -513,6 +521,12 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
             issue_types.push(parse_issue_type(value)?);
         } else if let Some(value) = arg.strip_prefix("--type=") {
             issue_types.push(parse_issue_type(value)?);
+        } else if arg == "--tier" {
+            idx += 1;
+            let value = args.get(idx)?;
+            tiers.push(parse_tier(value)?);
+        } else if let Some(value) = arg.strip_prefix("--tier=") {
+            tiers.push(parse_tier(value)?);
         } else {
             return None;
         }
@@ -525,6 +539,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
     Some(ListFilters {
         statuses,
         issue_types: (!issue_types.is_empty()).then_some(issue_types),
+        tiers: (!tiers.is_empty()).then_some(tiers),
     })
 }
 
@@ -546,6 +561,7 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
                 | "--design"
                 | "-a"
                 | "--assignee"
+                | "--tier"
         ) {
             idx += 1;
             (arg.as_str(), args.get(idx)?.clone())
@@ -561,6 +577,8 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             ("--design", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
+        } else if let Some(value) = arg.strip_prefix("--tier=") {
+            ("--tier", value.to_string())
         } else {
             return None;
         };
@@ -574,6 +592,7 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             "-n" | "--notes" => fields.notes = Some(value),
             "-D" | "--design" => fields.design = Some(value),
             "-a" | "--assignee" => fields.assignee = Some(value),
+            "--tier" => fields.tier = Some(parse_tier(&value)?),
             _ => return None,
         }
         idx += 1;
@@ -727,6 +746,20 @@ fn parse_issue_type(value: &str) -> Option<IssueTypeWire> {
     }
 }
 
+fn parse_tier(value: &str) -> Option<BeadTierWire> {
+    match value {
+        "plan" => Some(BeadTierWire::Plan),
+        "epic" => Some(BeadTierWire::Epic),
+        "legend" => Some(BeadTierWire::Legend),
+        _ => None,
+    }
+}
+
+fn is_ready_surface_issue(issue: &IssueWire) -> bool {
+    issue.issue_type == IssueTypeWire::Phase
+        || issue.tier == Some(BeadTierWire::Epic)
+}
+
 fn status_icon(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "○",
@@ -755,6 +788,25 @@ fn issue_type_value(issue_type: &IssueTypeWire) -> &'static str {
     match issue_type {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
+    }
+}
+
+fn issue_tier_suffix(issue: &IssueWire) -> String {
+    if issue.issue_type != IssueTypeWire::Plan {
+        return String::new();
+    }
+    issue
+        .tier
+        .as_ref()
+        .map(|tier| format!(" · Tier: {}", tier_value(tier)))
+        .unwrap_or_default()
+}
+
+fn tier_value(tier: &BeadTierWire) -> &'static str {
+    match tier {
+        BeadTierWire::Plan => "plan",
+        BeadTierWire::Epic => "epic",
+        BeadTierWire::Legend => "legend",
     }
 }
 

@@ -32,14 +32,17 @@ fn read_queries_match_python_contract_ordering() {
         "Epic"
     );
     assert_eq!(
-        ids(bead_list_issues(&beads_dir, None, None).unwrap()),
+        ids(bead_list_issues(&beads_dir, None, None, None).unwrap()),
         vec!["beads-1", "beads-1.1", "beads-1.2", "beads-2"]
     );
     assert_eq!(
-        ids(
-            bead_list_issues(&beads_dir, Some(&["open".to_string()]), None)
-                .unwrap()
-        ),
+        ids(bead_list_issues(
+            &beads_dir,
+            Some(&["open".to_string()]),
+            None,
+            None,
+        )
+        .unwrap()),
         vec!["beads-1", "beads-1.1", "beads-1.2"]
     );
     assert_eq!(

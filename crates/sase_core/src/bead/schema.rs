@@ -9,6 +9,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
                   CHECK(status IN ('open', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
                   CHECK(issue_type IN ('plan', 'phase')),
+    tier        TEXT
+                  CHECK(tier IN ('plan', 'epic', 'legend')),
     parent_id   TEXT
                   REFERENCES issues(id) ON DELETE CASCADE,
     owner       TEXT,
@@ -28,6 +30,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan')
     ),
+    CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
     CHECK(
         issue_type = 'plan' OR
@@ -48,6 +51,7 @@ CREATE TABLE IF NOT EXISTS dependencies (
 
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON dependencies(depends_on_id);
 "#;
@@ -67,18 +71,24 @@ CREATE TABLE _issues_new (
     CHECK(status IN ('open','in_progress','closed')),
   issue_type TEXT NOT NULL DEFAULT 'phase'
     CHECK(issue_type IN ('plan','phase')),
+  tier TEXT CHECK(tier IN ('plan','epic','legend')),
   parent_id TEXT, owner TEXT, assignee TEXT,
   created_at TEXT NOT NULL, created_by TEXT,
   updated_at TEXT NOT NULL, closed_at TEXT,
   close_reason TEXT, description TEXT, notes TEXT, design TEXT,
   CHECK((issue_type='phase' AND parent_id IS NOT NULL)
-    OR (issue_type='plan'))
+    OR (issue_type='plan')),
+  CHECK(issue_type='plan' OR tier IS NULL)
 );
 INSERT INTO _issues_new
 SELECT id, title, status,
   CASE issue_type
     WHEN 'epic' THEN 'plan' WHEN 'child' THEN 'phase'
     ELSE issue_type END,
+  CASE issue_type
+    WHEN 'epic' THEN 'epic'
+    WHEN 'plan' THEN 'epic'
+    ELSE NULL END,
   parent_id, owner, assignee, created_at, created_by,
   updated_at, closed_at, close_reason, description, notes, design
 FROM issues;
@@ -86,6 +96,7 @@ DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
 CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 PRAGMA foreign_keys=ON;"#
 }
@@ -138,6 +149,17 @@ pub fn changespec_metadata_migration_sql(
         .collect()
 }
 
+pub fn needs_tier_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("tier"),
+    }
+}
+
+pub fn tier_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN tier TEXT CHECK(tier IN ('plan','epic','legend'))"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +169,7 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
     }
 
@@ -167,6 +190,10 @@ mod tests {
         assert!(!needs_is_ready_to_work_migration(Some(
             "is_ready_to_work INTEGER"
         )));
+
+        assert!(!needs_tier_migration(None));
+        assert!(needs_tier_migration(Some("CREATE TABLE issues(id TEXT)")));
+        assert!(!needs_tier_migration(Some("tier TEXT")));
     }
 
     #[test]
