@@ -226,7 +226,7 @@ fn ready_issues_in_issues(
     Ok(issues
         .into_iter()
         .filter(|issue| issue.status == StatusWire::Open)
-        .filter(|issue| is_ready_surface_issue(issue))
+        .filter(is_ready_surface_issue)
         .filter(|issue| !has_active_blocker(issue, &status_by_id))
         .collect())
 }
