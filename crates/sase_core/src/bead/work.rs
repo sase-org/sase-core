@@ -197,7 +197,7 @@ fn phase_agent_name(bead_id: &str) -> String {
 }
 
 fn land_agent_name(epic_id: &str) -> String {
-    format!("{epic_id}.land")
+    epic_id.to_string()
 }
 
 fn format_id_list<'a>(ids: impl Iterator<Item = &'a str>) -> String {
@@ -286,7 +286,7 @@ mod tests {
             vec!["p2", "p3"]
         );
         assert_eq!(plan.waves[2][0].waits_on, vec!["p2", "p3"]);
-        assert_eq!(plan.land_agent_name, "e1.land");
+        assert_eq!(plan.land_agent_name, "e1");
         assert_eq!(plan.land_waits_on, vec!["p4"]);
     }
 
