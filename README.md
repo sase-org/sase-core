@@ -96,8 +96,8 @@ JSON shape rules (enforced by tests):
 
 - `wire.rs` defines `IssueWire`, `DependencyWire`, `StatusWire`, `IssueTypeWire`, validation errors, and operation
   outcomes.
-- `config.rs` loads and saves `.sase_beads/config.json` using the same pretty JSON shape as Python.
-- `jsonl.rs` imports and exports `.sase_beads/issues.jsonl`, skips corrupt lines, applies legacy defaults, validates
+- `config.rs` loads and saves `sdd/beads/config.json` using the same pretty JSON shape as Python.
+- `jsonl.rs` imports and exports `sdd/beads/issues.jsonl`, skips corrupt lines, applies legacy defaults, validates
   records, sorts import rows as Python does for parent-before-child loading, and exports compact JSON sorted by issue ID.
 - `schema.rs` pins the current SQLite schema plus migration fragments for legacy issue type names, `is_ready_to_work`,
   and ChangeSpec metadata columns.

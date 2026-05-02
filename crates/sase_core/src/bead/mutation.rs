@@ -749,8 +749,8 @@ mod tests {
     #[test]
     fn create_top_level_uses_workspace_max_and_persists_counter() {
         let temp = tempdir().unwrap();
-        let a = temp.path().join("sase/.sase_beads");
-        let b = temp.path().join("sase_101/.sase_beads");
+        let a = temp.path().join("sase/sdd/beads");
+        let b = temp.path().join("sase_101/sdd/beads");
         fs::create_dir_all(&a).unwrap();
         fs::create_dir_all(&b).unwrap();
         save_config(
@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn close_plan_cascades_open_children_before_parent() {
         let temp = tempdir().unwrap();
-        let beads_dir = temp.path().join(".sase_beads");
-        fs::create_dir(&beads_dir).unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
         save_config(&beads_dir, &default_config("sase", "")).unwrap();
         fs::write(
             beads_dir.join("issues.jsonl"),
@@ -857,8 +857,8 @@ mod tests {
     #[test]
     fn mark_ready_rejects_phase_and_idempotent_plan() {
         let temp = tempdir().unwrap();
-        let beads_dir = temp.path().join(".sase_beads");
-        fs::create_dir(&beads_dir).unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
         save_config(&beads_dir, &default_config("sase", "")).unwrap();
         fs::write(
             beads_dir.join("issues.jsonl"),

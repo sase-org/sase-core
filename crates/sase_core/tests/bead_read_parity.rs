@@ -10,8 +10,8 @@ use tempfile::tempdir;
 #[test]
 fn read_queries_match_python_contract_ordering() {
     let temp = tempdir().unwrap();
-    let beads_dir = temp.path().join(".sase_beads");
-    fs::create_dir(&beads_dir).unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
     fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
     fs::write(beads_dir.join("beads.db"), "").unwrap();
     fs::write(
@@ -67,8 +67,8 @@ fn read_queries_match_python_contract_ordering() {
 #[test]
 fn workspace_merge_uses_latest_updated_at() {
     let temp = tempdir().unwrap();
-    let primary = temp.path().join("project/.sase_beads");
-    let secondary = temp.path().join("project_2/.sase_beads");
+    let primary = temp.path().join("project/sdd/beads");
+    let secondary = temp.path().join("project_2/sdd/beads");
     fs::create_dir_all(&primary).unwrap();
     fs::create_dir_all(&secondary).unwrap();
     fs::write(
