@@ -50,6 +50,8 @@ pub use wire::{
     StatusWire,
 };
 pub use work::{
-    build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,
+    build_epic_work_plan, build_epic_work_plan_from_issues,
+    build_legend_work_plan, build_legend_work_plan_from_issues,
+    EpicWorkPlanWire, LegendEpicAssignmentWire, LegendWorkPlanWire,
     PhaseAssignmentWire,
 };

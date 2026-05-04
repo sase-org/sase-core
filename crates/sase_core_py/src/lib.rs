@@ -111,6 +111,8 @@ use sase_core::bead::{
     blocked_merged_issues as core_bead_blocked_merged_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
+    build_legend_work_plan as core_bead_build_legend_work_plan,
+    build_legend_work_plan_from_issues as core_bead_build_legend_work_plan_from_issues,
     close_issues as core_bead_close_issues,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
     execute_bead_cli as core_execute_bead_cli,
@@ -1252,6 +1254,38 @@ fn py_bead_build_epic_work_plan_from_issues<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_build_legend_work_plan")]
+fn py_bead_build_legend_work_plan<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    legend_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_build_legend_work_plan(&beads_dir, legend_id)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_build_legend_work_plan_from_issues")]
+fn py_bead_build_legend_work_plan_from_issues<'py>(
+    py: Python<'py>,
+    issues: &Bound<'py, PyList>,
+    legend_id: &str,
+) -> PyResult<PyObject> {
+    let issues = issues_from_py_list(issues)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_build_legend_work_plan_from_issues(issues, legend_id)
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_cli_execute")]
 fn py_bead_cli_execute<'py>(
     py: Python<'py>,
@@ -2146,6 +2180,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_build_epic_work_plan, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_bead_build_epic_work_plan_from_issues,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_build_legend_work_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_build_legend_work_plan_from_issues,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
