@@ -392,12 +392,13 @@ fn set_ready_to_work(
             ),
         });
     }
-    if store.issues[index].tier != Some(BeadTierWire::Epic) {
+    let tier = store.issues[index].tier.as_ref();
+    if !matches!(tier, Some(BeadTierWire::Epic) | Some(BeadTierWire::Legend)) {
         return Err(BeadError {
-            kind: "not_an_epic".to_string(),
+            kind: "not_workable_plan".to_string(),
             message: format!(
-                "sase bead work only applies to epic plan beads (got {} for {epic_id})",
-                tier_label(store.issues[index].tier.as_ref())
+                "sase bead work only applies to epic or legend plan beads (got {} for {epic_id})",
+                tier_label(tier)
             ),
         });
     }
@@ -906,6 +907,37 @@ mod tests {
                 .kind,
             "already_ready"
         );
+    }
+
+    #[test]
+    fn mark_ready_allows_legend_plan() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let legend = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Roadmap".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Legend),
+                design: "sdd/legends/roadmap.md".to_string(),
+                epic_count: Some(2),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let marked = mark_ready_to_work(&beads_dir, &legend.id, None)
+            .unwrap()
+            .issue
+            .unwrap();
+        assert!(marked.is_ready_to_work);
     }
 
     #[test]
