@@ -31,6 +31,15 @@ use super::wire::{
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 
+#[derive(Debug)]
+struct ArtifactCandidate {
+    project_name: String,
+    project_dir: PathBuf,
+    workflow_dir_name: String,
+    artifact_dir: PathBuf,
+    timestamp: String,
+}
+
 /// Scan `projects_root` and return a deterministic snapshot of every
 /// artifact directory's parsed marker files.
 ///
@@ -44,79 +53,45 @@ pub fn scan_agent_artifacts(
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut records: Vec<AgentArtifactRecordWire> = Vec::new();
 
-    let only: Option<Vec<String>> = if options.only_workflow_dirs.is_empty() {
-        None
-    } else {
-        Some(options.only_workflow_dirs.clone())
-    };
-
     if projects_root.exists() {
-        let project_dirs = sorted_dir_entries(projects_root, &mut stats);
-        for project_dir in project_dirs {
-            if !project_dir.is_dir() {
+        let candidates =
+            collect_artifact_candidates(projects_root, &options, &mut stats);
+        let mut completed_records = 0u32;
+        for candidate in candidates {
+            stats.artifact_dirs_visited += 1;
+            let has_done_marker =
+                candidate.artifact_dir.join("done.json").exists();
+            if has_done_marker
+                && options.not_before_timestamp.as_deref().is_some_and(
+                    |not_before| candidate.timestamp.as_str() < not_before,
+                )
+            {
                 continue;
             }
-            stats.projects_visited += 1;
-
-            let artifacts_base = project_dir.join("artifacts");
-            if !artifacts_base.exists() {
+            if has_done_marker
+                && options
+                    .max_records
+                    .is_some_and(|max| completed_records >= max)
+            {
                 continue;
             }
 
-            let workflow_dirs = sorted_dir_entries(&artifacts_base, &mut stats);
-            for workflow_dir in workflow_dirs {
-                if !workflow_dir.is_dir() {
-                    continue;
-                }
-                let workflow_dir_name = match workflow_dir.file_name() {
-                    Some(n) => n.to_string_lossy().into_owned(),
-                    None => continue,
-                };
-                if let Some(only) = &only {
-                    if !only.iter().any(|s| s == &workflow_dir_name) {
-                        continue;
-                    }
-                } else if !is_supported_workflow_dir(&workflow_dir_name) {
-                    continue;
-                }
-
-                let artifact_dirs =
-                    sorted_dir_entries(&workflow_dir, &mut stats);
-                for artifact_dir in artifact_dirs {
-                    if !artifact_dir.is_dir() {
-                        continue;
-                    }
-                    stats.artifact_dirs_visited += 1;
-                    let project_name = project_dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let record = scan_artifact_dir(
-                        &project_name,
-                        &project_dir,
-                        &workflow_dir_name,
-                        &artifact_dir,
-                        &options,
-                        &mut stats,
-                    );
-                    records.push(record);
-                }
+            let record = scan_artifact_dir(
+                &candidate.project_name,
+                &candidate.project_dir,
+                &candidate.workflow_dir_name,
+                &candidate.artifact_dir,
+                &options,
+                &mut stats,
+            );
+            if record.has_done_marker {
+                completed_records += 1;
             }
+            records.push(record);
         }
     }
 
-    records.sort_by(|a, b| {
-        (
-            a.project_name.as_str(),
-            a.workflow_dir_name.as_str(),
-            a.timestamp.as_str(),
-        )
-            .cmp(&(
-                b.project_name.as_str(),
-                b.workflow_dir_name.as_str(),
-                b.timestamp.as_str(),
-            ))
-    });
+    sort_records(&mut records, options.newest_first);
 
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -124,6 +99,118 @@ pub fn scan_agent_artifacts(
         options,
         stats,
         records,
+    }
+}
+
+fn collect_artifact_candidates(
+    projects_root: &Path,
+    options: &AgentArtifactScanOptionsWire,
+    stats: &mut AgentArtifactScanStatsWire,
+) -> Vec<ArtifactCandidate> {
+    let mut candidates = Vec::new();
+    let project_dirs = sorted_dir_entries(projects_root, stats);
+    for project_dir in project_dirs {
+        if !project_dir.is_dir() {
+            continue;
+        }
+        let project_name = project_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if !options.only_projects.is_empty()
+            && !options.only_projects.iter().any(|s| s == &project_name)
+        {
+            continue;
+        }
+        stats.projects_visited += 1;
+
+        let artifacts_base = project_dir.join("artifacts");
+        if !artifacts_base.exists() {
+            continue;
+        }
+
+        let workflow_dirs = sorted_dir_entries(&artifacts_base, stats);
+        for workflow_dir in workflow_dirs {
+            if !workflow_dir.is_dir() {
+                continue;
+            }
+            let workflow_dir_name = match workflow_dir.file_name() {
+                Some(n) => n.to_string_lossy().into_owned(),
+                None => continue,
+            };
+            if !options.only_workflow_dirs.is_empty() {
+                if !options
+                    .only_workflow_dirs
+                    .iter()
+                    .any(|s| s == &workflow_dir_name)
+                {
+                    continue;
+                }
+            } else if !is_supported_workflow_dir(&workflow_dir_name) {
+                continue;
+            }
+
+            for artifact_dir in sorted_dir_entries(&workflow_dir, stats) {
+                if !artifact_dir.is_dir() {
+                    continue;
+                }
+                let timestamp = artifact_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                candidates.push(ArtifactCandidate {
+                    project_name: project_name.clone(),
+                    project_dir: project_dir.clone(),
+                    workflow_dir_name: workflow_dir_name.clone(),
+                    artifact_dir,
+                    timestamp,
+                });
+            }
+        }
+    }
+    sort_candidates(&mut candidates, options.newest_first);
+    candidates
+}
+
+fn sort_candidates(candidates: &mut [ArtifactCandidate], newest_first: bool) {
+    if newest_first {
+        candidates.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| a.project_name.cmp(&b.project_name))
+                .then_with(|| a.workflow_dir_name.cmp(&b.workflow_dir_name))
+        });
+    } else {
+        candidates.sort_by(|a, b| {
+            a.project_name
+                .cmp(&b.project_name)
+                .then_with(|| a.workflow_dir_name.cmp(&b.workflow_dir_name))
+                .then_with(|| a.timestamp.cmp(&b.timestamp))
+        });
+    }
+}
+
+fn sort_records(records: &mut [AgentArtifactRecordWire], newest_first: bool) {
+    if newest_first {
+        records.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| a.project_name.cmp(&b.project_name))
+                .then_with(|| a.workflow_dir_name.cmp(&b.workflow_dir_name))
+        });
+    } else {
+        records.sort_by(|a, b| {
+            (
+                a.project_name.as_str(),
+                a.workflow_dir_name.as_str(),
+                a.timestamp.as_str(),
+            )
+                .cmp(&(
+                    b.project_name.as_str(),
+                    b.workflow_dir_name.as_str(),
+                    b.timestamp.as_str(),
+                ))
+        });
     }
 }
 
@@ -146,6 +233,11 @@ pub fn scan_agent_artifact_dir(
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
     if parts.len() != 4 || parts[1] != "artifacts" {
+        return None;
+    }
+    if !options.only_projects.is_empty()
+        && !options.only_projects.iter().any(|s| s == &parts[0])
+    {
         return None;
     }
     if !options.only_workflow_dirs.is_empty()
@@ -216,7 +308,7 @@ fn scan_artifact_dir(
 
     let done_path = artifact_dir.join("done.json");
     let has_done_marker = done_path.exists();
-    let done = if has_done_marker {
+    let done = if has_done_marker && options.include_done_markers {
         match load_marker_object(&done_path, stats) {
             Some(m) => Some(done_marker_from_object(&m)),
             // Mirror Python: "done.json exists but unreadable" still counts
@@ -231,12 +323,19 @@ fn scan_artifact_dir(
     let running = load_marker_object(&artifact_dir.join("running.json"), stats)
         .map(|m| running_marker_from_object(&m));
 
-    let waiting = load_marker_object(&artifact_dir.join("waiting.json"), stats)
-        .map(|m| waiting_marker_from_object(&m));
+    let waiting = if options.include_waiting {
+        load_marker_object(&artifact_dir.join("waiting.json"), stats)
+            .map(|m| waiting_marker_from_object(&m))
+    } else {
+        None
+    };
 
-    let workflow_state =
+    let workflow_state = if options.include_workflow_state {
         load_marker_object(&artifact_dir.join("workflow_state.json"), stats)
-            .map(|m| workflow_state_from_object(&m));
+            .map(|m| workflow_state_from_object(&m))
+    } else {
+        None
+    };
 
     let plan_path =
         load_marker_object(&artifact_dir.join("plan_path.json"), stats)

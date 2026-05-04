@@ -806,9 +806,94 @@ fn options_round_trip_through_snapshot() {
             "ace-run".to_string(),
             "workflow-three_phase".to_string(),
         ],
+        max_records: Some(3),
+        newest_first: true,
+        not_before_timestamp: Some("20260427120000".to_string()),
+        include_done_markers: false,
+        include_workflow_state: false,
+        include_waiting: false,
+        only_projects: vec!["myproj".to_string()],
     };
     let snapshot = scan_agent_artifacts(&root, options.clone());
     assert_eq!(snapshot.options, options);
+}
+
+#[test]
+fn bounded_newest_first_limits_completed_without_hiding_incomplete() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let options = AgentArtifactScanOptionsWire {
+        max_records: Some(2),
+        newest_first: true,
+        ..Default::default()
+    };
+
+    let snapshot = scan_agent_artifacts(&root, options);
+    let timestamps: Vec<&str> = snapshot
+        .records
+        .iter()
+        .map(|r| r.timestamp.as_str())
+        .collect();
+    let completed: Vec<&str> = snapshot
+        .records
+        .iter()
+        .filter(|r| r.has_done_marker)
+        .map(|r| r.timestamp.as_str())
+        .collect();
+
+    assert_eq!(completed, vec![TS_MENTOR_DONE, TS_ACE_RUN_RETRIED_PARENT]);
+    assert!(timestamps.contains(&TS_HOME_RUNNING));
+    assert!(timestamps.contains(&TS_ACE_RUN_RUNNING));
+    assert!(timestamps.contains(&TS_WAITING));
+    let mut sorted = timestamps.clone();
+    sorted.sort_by(|a, b| b.cmp(a));
+    assert_eq!(timestamps, sorted);
+}
+
+#[test]
+fn bounded_not_before_applies_to_completed_rows_only() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let options = AgentArtifactScanOptionsWire {
+        newest_first: true,
+        not_before_timestamp: Some(TS_ACE_RUN_RETRIED_PARENT.to_string()),
+        ..Default::default()
+    };
+
+    let snapshot = scan_agent_artifacts(&root, options);
+    let timestamps: Vec<&str> = snapshot
+        .records
+        .iter()
+        .map(|r| r.timestamp.as_str())
+        .collect();
+
+    assert!(!timestamps.contains(&TS_ACE_RUN_DONE));
+    assert!(!timestamps.contains(&TS_ACE_RUN_FAILED));
+    assert!(timestamps.contains(&TS_HOME_RUNNING));
+    assert!(timestamps.contains(&TS_ACE_RUN_RUNNING));
+    assert!(timestamps.contains(&TS_WAITING));
+}
+
+#[test]
+fn selective_marker_options_skip_payloads_but_keep_done_presence() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let options = AgentArtifactScanOptionsWire {
+        include_done_markers: false,
+        include_waiting: false,
+        include_workflow_state: false,
+        ..Default::default()
+    };
+
+    let snapshot = scan_agent_artifacts(&root, options);
+    let done_rec = record_by_timestamp(&snapshot, TS_ACE_RUN_DONE);
+    assert!(done_rec.has_done_marker);
+    assert!(done_rec.done.is_none());
+
+    let workflow_rec = record_by_timestamp(&snapshot, TS_WORKFLOW_ROOT);
+    assert!(workflow_rec.workflow_state.is_none());
+    let waiting_rec = record_by_timestamp(&snapshot, TS_WAITING);
+    assert!(waiting_rec.waiting.is_none());
 }
 
 #[test]

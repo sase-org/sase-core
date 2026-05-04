@@ -41,11 +41,28 @@ pub const WORKFLOW_STATE_DIR_PREFIXES: &[&str] = &["workflow-"];
 /// Caller-supplied knobs for one snapshot scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArtifactScanOptionsWire {
+    #[serde(default = "default_true")]
     pub include_prompt_step_markers: bool,
+    #[serde(default = "default_true")]
     pub include_raw_prompt_snippets: bool,
+    #[serde(default = "default_prompt_snippet_bytes")]
     pub max_prompt_snippet_bytes: u32,
     #[serde(default)]
     pub only_workflow_dirs: Vec<String>,
+    #[serde(default)]
+    pub max_records: Option<u32>,
+    #[serde(default)]
+    pub newest_first: bool,
+    #[serde(default)]
+    pub not_before_timestamp: Option<String>,
+    #[serde(default = "default_true")]
+    pub include_done_markers: bool,
+    #[serde(default = "default_true")]
+    pub include_workflow_state: bool,
+    #[serde(default = "default_true")]
+    pub include_waiting: bool,
+    #[serde(default)]
+    pub only_projects: Vec<String>,
 }
 
 impl Default for AgentArtifactScanOptionsWire {
@@ -55,8 +72,23 @@ impl Default for AgentArtifactScanOptionsWire {
             include_raw_prompt_snippets: true,
             max_prompt_snippet_bytes: 200,
             only_workflow_dirs: Vec::new(),
+            max_records: None,
+            newest_first: false,
+            not_before_timestamp: None,
+            include_done_markers: true,
+            include_workflow_state: true,
+            include_waiting: true,
+            only_projects: Vec::new(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_prompt_snippet_bytes() -> u32 {
+    200
 }
 
 /// Diagnostic counters for one snapshot scan.
