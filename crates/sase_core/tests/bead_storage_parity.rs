@@ -37,6 +37,7 @@ fn current_schema_fixture_loads_hierarchy_dependencies_and_metadata() {
 
     assert_eq!(parent.issue_type, IssueTypeWire::Plan);
     assert!(parent.is_ready_to_work);
+    assert_eq!(parent.epic_count, None);
     assert_eq!(parent.changespec_name, "current_changespec");
     assert_eq!(parent.changespec_bug_id, "BUG-100");
     assert_eq!(child.parent_id.as_deref(), Some("gold-1"));
@@ -53,6 +54,18 @@ fn legacy_jsonl_fixtures_get_python_defaults() {
     assert_eq!(pre_changespec.issues[0].id, "legacy-meta-1");
     assert_eq!(pre_changespec.issues[0].changespec_name, "");
     assert_eq!(pre_changespec.issues[0].changespec_bug_id, "");
+    assert_eq!(pre_changespec.issues[0].epic_count, None);
+}
+
+#[test]
+fn legend_epic_count_round_trips_jsonl() {
+    let input = r#"{"id":"gold-legend","title":"Legend","status":"open","issue_type":"plan","tier":"legend","parent_id":null,"owner":"","assignee":"","created_at":"2026-01-01T00:00:00Z","created_by":"","updated_at":"2026-01-01T00:00:00Z","closed_at":null,"close_reason":null,"description":"","notes":"","design":"plans/legend.md","is_ready_to_work":false,"epic_count":4,"changespec_name":"","changespec_bug_id":"","dependencies":[]}
+"#;
+    let outcome = parse_issues_jsonl(input);
+    assert_eq!(outcome.issues[0].epic_count, Some(4));
+
+    let exported = export_issues_to_jsonl(&outcome.issues).unwrap();
+    assert_eq!(exported, input);
 }
 
 #[test]

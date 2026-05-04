@@ -247,6 +247,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             is_ready_to_work: false,
+            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: vec![],

@@ -24,6 +24,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     notes       TEXT,
     design      TEXT,
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
+    epic_count  INTEGER,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
     CHECK(
@@ -32,6 +33,10 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     ),
     CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(
+        epic_count IS NULL OR
+        (issue_type = 'plan' AND tier = 'legend' AND epic_count > 0)
+    ),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -114,6 +119,17 @@ pub fn is_ready_to_work_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN is_ready_to_work INTEGER NOT NULL DEFAULT 0"
 }
 
+pub fn needs_epic_count_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("epic_count"),
+    }
+}
+
+pub fn epic_count_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN epic_count INTEGER"
+}
+
 pub fn missing_changespec_metadata_columns<'a, I>(
     columns: I,
 ) -> Vec<&'static str>
@@ -168,6 +184,7 @@ mod tests {
     fn schema_contains_current_constraints() {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("epic_count  INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
@@ -190,6 +207,12 @@ mod tests {
         assert!(!needs_is_ready_to_work_migration(Some(
             "is_ready_to_work INTEGER"
         )));
+
+        assert!(!needs_epic_count_migration(None));
+        assert!(needs_epic_count_migration(Some(
+            "CREATE TABLE issues(id TEXT)"
+        )));
+        assert!(!needs_epic_count_migration(Some("epic_count INTEGER")));
 
         assert!(!needs_tier_migration(None));
         assert!(needs_tier_migration(Some("CREATE TABLE issues(id TEXT)")));

@@ -164,6 +164,10 @@ fn handle_show(
         writeln!(stdout, "Assignee: {}", issue.assignee)
             .expect("writing to String cannot fail");
     }
+    if let Some(epic_count) = issue.epic_count {
+        writeln!(stdout, "Epic Count: {epic_count}")
+            .expect("writing to String cannot fail");
+    }
     if let Some(parent_id) = &issue.parent_id {
         if let Some(parent) = find_issue(&issues, parent_id) {
             write!(
@@ -561,6 +565,8 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
                 | "--design"
                 | "-a"
                 | "--assignee"
+                | "-E"
+                | "--epic-count"
                 | "--tier"
         ) {
             idx += 1;
@@ -577,6 +583,8 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             ("--design", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
+        } else if let Some(value) = arg.strip_prefix("--epic-count=") {
+            ("--epic-count", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--tier=") {
             ("--tier", value.to_string())
         } else {
@@ -592,6 +600,9 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             "-n" | "--notes" => fields.notes = Some(value),
             "-D" | "--design" => fields.design = Some(value),
             "-a" | "--assignee" => fields.assignee = Some(value),
+            "-E" | "--epic-count" => {
+                fields.epic_count = Some(parse_positive_i64(&value)?);
+            }
             "--tier" => fields.tier = Some(parse_tier(&value)?),
             _ => return None,
         }
@@ -753,6 +764,11 @@ fn parse_tier(value: &str) -> Option<BeadTierWire> {
         "legend" => Some(BeadTierWire::Legend),
         _ => None,
     }
+}
+
+fn parse_positive_i64(value: &str) -> Option<i64> {
+    let parsed = value.parse::<i64>().ok()?;
+    (parsed > 0).then_some(parsed)
 }
 
 fn is_ready_surface_issue(issue: &IssueWire) -> bool {

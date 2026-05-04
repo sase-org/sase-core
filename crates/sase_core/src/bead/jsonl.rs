@@ -134,6 +134,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             is_ready_to_work: false,
+            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: vec![],
@@ -193,5 +194,23 @@ mod tests {
 
         assert_eq!(solo.tier, Some(BeadTierWire::Plan));
         assert_eq!(epic.tier, Some(BeadTierWire::Epic));
+    }
+
+    #[test]
+    fn import_defaults_missing_epic_count_to_none() {
+        let outcome = parse_issues_jsonl(
+            r#"{"id":"legend","title":"Legend","status":"open","issue_type":"plan","tier":"legend","parent_id":null,"created_at":"","updated_at":"","dependencies":[]}"#,
+        );
+
+        assert_eq!(outcome.issues[0].epic_count, None);
+    }
+
+    #[test]
+    fn import_preserves_legend_epic_count() {
+        let outcome = parse_issues_jsonl(
+            r#"{"id":"legend","title":"Legend","status":"open","issue_type":"plan","tier":"legend","parent_id":null,"created_at":"","updated_at":"","epic_count":5,"dependencies":[]}"#,
+        );
+
+        assert_eq!(outcome.issues[0].epic_count, Some(5));
     }
 }

@@ -38,6 +38,8 @@ pub struct BeadCreateRequestWire {
     #[serde(default)]
     pub changespec_bug_id: String,
     #[serde(default)]
+    pub epic_count: Option<i64>,
+    #[serde(default)]
     pub now: Option<String>,
     #[serde(default)]
     pub workspace_beads_dirs: Vec<PathBuf>,
@@ -69,6 +71,8 @@ pub struct BeadUpdateFieldsWire {
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
+    #[serde(default)]
+    pub epic_count: Option<i64>,
     #[serde(default)]
     pub now: Option<String>,
 }
@@ -152,6 +156,7 @@ pub fn create_issue(
         notes: request.notes,
         design: request.design,
         is_ready_to_work: false,
+        epic_count: request.epic_count,
         changespec_name: request.changespec_name,
         changespec_bug_id: request.changespec_bug_id,
         dependencies: Vec::new(),
@@ -450,6 +455,9 @@ fn apply_update_fields(
     }
     if let Some(value) = fields.tier {
         issue.tier = Some(value);
+    }
+    if let Some(value) = fields.epic_count {
+        issue.epic_count = Some(value);
     }
     issue.updated_at = fields.now.unwrap_or_else(now_utc);
     Ok(())
@@ -898,6 +906,69 @@ mod tests {
                 .kind,
             "already_ready"
         );
+    }
+
+    #[test]
+    fn create_and_update_legend_epic_count() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let created = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Roadmap".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Legend),
+                epic_count: Some(2),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(created.epic_count, Some(2));
+
+        let updated = update_issue(
+            &beads_dir,
+            &created.id,
+            BeadUpdateFieldsWire {
+                epic_count: Some(5),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(updated.epic_count, Some(5));
+    }
+
+    #[test]
+    fn create_rejects_epic_count_on_non_legend_plan() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let err = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Epic),
+                epic_count: Some(2),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("Only legend plan beads"));
     }
 
     fn issue(

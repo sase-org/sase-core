@@ -39,8 +39,9 @@ pub use read::{
     BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
-    changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
-    issue_type_migration_sql, missing_changespec_metadata_columns,
+    changespec_metadata_migration_sql, epic_count_migration_sql,
+    is_ready_to_work_migration_sql, issue_type_migration_sql,
+    missing_changespec_metadata_columns, needs_epic_count_migration,
     needs_is_ready_to_work_migration, needs_issue_type_migration,
     BEAD_SQLITE_SCHEMA,
 };
