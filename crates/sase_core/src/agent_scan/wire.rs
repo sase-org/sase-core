@@ -149,6 +149,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub approve: bool,
     #[serde(default)]
+    pub auto_approve_plan_action: Option<String>,
+    #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
     pub plan: bool,

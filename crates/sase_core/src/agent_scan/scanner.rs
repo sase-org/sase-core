@@ -127,6 +127,49 @@ pub fn scan_agent_artifacts(
     }
 }
 
+/// Scan one artifact timestamp directory under `projects_root`.
+///
+/// Returns `None` when `artifact_dir` is not a directory in the canonical
+/// `projects_root/<project>/artifacts/<workflow>/<timestamp>` layout.
+pub fn scan_agent_artifact_dir(
+    projects_root: &Path,
+    artifact_dir: &Path,
+    options: &AgentArtifactScanOptionsWire,
+) -> Option<AgentArtifactRecordWire> {
+    if !artifact_dir.is_dir() {
+        return None;
+    }
+
+    let rel = artifact_dir.strip_prefix(projects_root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.len() != 4 || parts[1] != "artifacts" {
+        return None;
+    }
+    if !options.only_workflow_dirs.is_empty()
+        && !options.only_workflow_dirs.iter().any(|s| s == &parts[2])
+    {
+        return None;
+    }
+    if options.only_workflow_dirs.is_empty()
+        && !is_supported_workflow_dir(&parts[2])
+    {
+        return None;
+    }
+
+    let mut stats = AgentArtifactScanStatsWire::default();
+    Some(scan_artifact_dir(
+        &parts[0],
+        &projects_root.join(&parts[0]),
+        &parts[2],
+        artifact_dir,
+        options,
+        &mut stats,
+    ))
+}
+
 /// List `path` entries sorted by file name. Soft-errors increment the
 /// `os_errors` counter and yield an empty list.
 fn sorted_dir_entries(
@@ -455,6 +498,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         workspace_num: coerce_int(data.get("workspace_num")),
         workspace_dir: coerce_str(data.get("workspace_dir")),
         approve: coerce_bool_truthy(data.get("approve")),
+        auto_approve_plan_action: coerce_str(
+            data.get("auto_approve_plan_action"),
+        ),
         hidden: coerce_bool_truthy(data.get("hidden")),
         plan: coerce_bool_truthy(data.get("plan")),
         plan_approved: coerce_bool_truthy(data.get("plan_approved")),

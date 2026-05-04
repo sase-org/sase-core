@@ -19,6 +19,7 @@ thiserror = "1"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 lto = "thin"

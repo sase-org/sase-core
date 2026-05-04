@@ -13,6 +13,10 @@
 //! - `evaluate_many(program: QueryProgramHandle, corpus: QueryCorpusHandle) -> list[bool]`
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
+//! - `rebuild_agent_artifact_index(index_path: str, projects_root: str, options: dict | None = None) -> dict`
+//! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
+//! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
+//! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -94,8 +98,12 @@ use sase_core::agent_launch::{
     AgentLaunchRequestWire, WorkspaceClaimRequestWire,
 };
 use sase_core::agent_scan::{
+    delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
+    query_agent_artifact_index as core_query_agent_artifact_index,
+    rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
     scan_agent_artifacts as core_scan_agent_artifacts,
-    AgentArtifactScanOptionsWire,
+    upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
+    AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -350,6 +358,129 @@ fn py_scan_agent_artifacts<'py>(
     };
     let root = PathBuf::from(projects_root);
     let snapshot = py.allow_threads(|| core_scan_agent_artifacts(&root, opts));
+    let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Rebuild the persistent agent artifact index from source artifacts.
+#[pyfunction]
+#[pyo3(
+    name = "rebuild_agent_artifact_index",
+    signature = (index_path, projects_root, options = None)
+)]
+fn py_rebuild_agent_artifact_index<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let update = py
+        .allow_threads(|| {
+            core_rebuild_agent_artifact_index(&index, &root, opts)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Upsert one artifact directory into the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "upsert_agent_artifact_index_row",
+    signature = (index_path, projects_root, artifact_dir, options = None)
+)]
+fn py_upsert_agent_artifact_index_row<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    artifact_dir: &str,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let artifact = PathBuf::from(artifact_dir);
+    let update = py
+        .allow_threads(|| {
+            core_upsert_agent_artifact_index_row(&index, &root, &artifact, opts)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Delete one artifact directory row from the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "delete_agent_artifact_index_row")]
+fn py_delete_agent_artifact_index_row<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    artifact_dir: &str,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let artifact = PathBuf::from(artifact_dir);
+    let update = py
+        .allow_threads(|| {
+            core_delete_agent_artifact_index_row(&index, &artifact)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Query scanner-shaped rows from the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "query_agent_artifact_index",
+    signature = (index_path, projects_root, query = None, options = None)
+)]
+fn py_query_agent_artifact_index<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    query: Option<&Bound<'py, PyDict>>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let query_wire = match query {
+        Some(dict) => {
+            let json = py_to_json_value(dict)?;
+            serde_json::from_value::<AgentArtifactIndexQueryWire>(json)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "query is not a valid AgentArtifactIndexQueryWire dict: {e}"
+                    ))
+                })?
+        }
+        None => AgentArtifactIndexQueryWire::default(),
+    };
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let snapshot = py
+        .allow_threads(|| {
+            core_query_agent_artifact_index(&index, &root, query_wire, opts)
+        })
+        .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&snapshot).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -1966,6 +2097,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rebuild_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;

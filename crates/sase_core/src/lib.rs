@@ -58,11 +58,16 @@ pub use agent_launch::{
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
 };
 pub use agent_scan::{
-    is_supported_workflow_dir, scan_agent_artifacts, AgentArtifactRecordWire,
+    delete_agent_artifact_index_row, is_supported_workflow_dir,
+    query_agent_artifact_index, rebuild_agent_artifact_index,
+    scan_agent_artifact_dir, scan_agent_artifacts,
+    upsert_agent_artifact_index_row, AgentArtifactIndexQueryWire,
+    AgentArtifactIndexUpdateWire, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
     AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, PlanPathMarkerWire,
     PromptStepMarkerWire, RunningMarkerWire, WaitingMarkerWire,
-    WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    WorkflowStateWire, WorkflowStepStateWire,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, AGENT_SCAN_WIRE_SCHEMA_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };

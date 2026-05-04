@@ -11,10 +11,17 @@
 //! full phase plan and `..._phase3a_handoff.md` for the wire contract
 //! Phase 3B reproduces here.
 
+pub mod index;
 pub mod scanner;
 pub mod wire;
 
-pub use scanner::scan_agent_artifacts;
+pub use index::{
+    delete_agent_artifact_index_row, query_agent_artifact_index,
+    rebuild_agent_artifact_index, upsert_agent_artifact_index_row,
+    AgentArtifactIndexQueryWire, AgentArtifactIndexUpdateWire,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+};
+pub use scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
 pub use wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
