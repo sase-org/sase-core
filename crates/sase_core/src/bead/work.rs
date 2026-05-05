@@ -195,12 +195,9 @@ pub fn build_epic_work_plan_from_issues(
         })
         .collect();
 
-    let mut has_dependent: BTreeSet<&str> = BTreeSet::new();
-    for blockers in deps.values() {
-        has_dependent.extend(blockers.iter().copied());
-    }
-    let land_waits_on = open_phase_ids
-        .difference(&has_dependent)
+    let land_waits_on = waves
+        .iter()
+        .flat_map(|wave_ids| wave_ids.iter())
         .copied()
         .map(phase_agent_name)
         .collect();
@@ -387,7 +384,36 @@ mod tests {
         );
         assert_eq!(plan.waves[2][0].waits_on, vec!["p2", "p3"]);
         assert_eq!(plan.land_agent_name, "e1");
-        assert_eq!(plan.land_waits_on, vec!["p4"]);
+        assert_eq!(plan.land_waits_on, vec!["p1", "p2", "p3", "p4"]);
+    }
+
+    #[test]
+    fn land_waits_on_every_launched_phase_in_wave_order() {
+        let p1 = phase("p1", "e1");
+        let mut p2 = phase("p2", "e1");
+        let mut p3 = phase("p3", "e1");
+        let p4 = phase("p4", "e1");
+        depends(&mut p2, "p1");
+        depends(&mut p3, "p2");
+
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), p1, p2, p3, p4],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.waves
+                .iter()
+                .map(|wave| {
+                    wave.iter()
+                        .map(|assignment| assignment.bead_id.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec!["p1", "p4"], vec!["p2"], vec!["p3"]]
+        );
+        assert_eq!(plan.land_waits_on, vec!["p1", "p4", "p2", "p3"]);
     }
 
     #[test]
