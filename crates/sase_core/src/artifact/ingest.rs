@@ -4826,6 +4826,215 @@ mod tests {
     }
 
     #[test]
+    fn targeted_directory_upsert_adds_file_without_rescanning_sources() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let workspace_root = tmp.path().join("workspace");
+        let existing_file = workspace_root.join("existing/output.txt");
+        let target_file = workspace_root.join("nested/new/output.txt");
+        std::fs::create_dir_all(existing_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        std::fs::write(&existing_file, "existing").unwrap();
+        std::fs::write(&target_file, "new").unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                workspace_root: Some(workspace_root.to_string_lossy().into()),
+                include_sources: vec![ARTIFACT_SOURCE_DIRECTORY.to_string()],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+        assert!(artifact_show(&store, existing_file.to_str().unwrap())
+            .unwrap()
+            .node
+            .is_none());
+
+        let result = artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                workspace_root: Some(workspace_root.to_string_lossy().into()),
+                include_sources: vec![ARTIFACT_SOURCE_DIRECTORY.to_string()],
+                target_path: Some(target_file.to_string_lossy().into()),
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        let target =
+            artifact_show(&store, target_file.to_str().unwrap()).unwrap();
+        assert_eq!(
+            target.node.as_ref().map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_FILE)
+        );
+        assert_eq!(
+            target
+                .outbound_links
+                .iter()
+                .find(|link| link.link_type == ARTIFACT_LINK_PARENT)
+                .map(|link| link.target_id.as_str()),
+            Some(target_file.parent().unwrap().to_str().unwrap())
+        );
+        assert!(artifact_show(&store, existing_file.to_str().unwrap())
+            .unwrap()
+            .node
+            .is_none());
+    }
+
+    #[test]
+    fn targeted_bead_store_upsert_updates_beads_without_project_churn() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("acme");
+        let project_file = project_dir.join("acme.gp");
+        let beads_dir = tmp.path().join("workspace/sdd/beads");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        std::fs::write(
+            &project_file,
+            "NAME: cl-one\nSTATUS: WIP\nCOMMITS:\n  (1) Project note\n",
+        )
+        .unwrap();
+        write_bead_issues(
+            &beads_dir,
+            &[
+                r#"{"id":"sase-11","title":"Epic","status":"open","issue_type":"plan","tier":"epic","owner":"owner@example.com","assignee":"","created_at":"2026-05-05T00:00:00Z","created_by":"owner@example.com","updated_at":"2026-05-05T00:00:00Z","description":"","notes":"","design":"","is_ready_to_work":true,"dependencies":[]}"#,
+            ],
+        );
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                beads_dir: Some(beads_dir.to_string_lossy().into_owned()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_PROJECT_FILE.to_string(),
+                    ARTIFACT_SOURCE_CHANGESPEC.to_string(),
+                    ARTIFACT_SOURCE_COMMIT.to_string(),
+                    ARTIFACT_SOURCE_BEAD_STORE.to_string(),
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        write_bead_issues(
+            &beads_dir,
+            &[
+                r#"{"id":"sase-11","title":"Renamed Epic","status":"in_progress","issue_type":"plan","tier":"epic","owner":"owner@example.com","assignee":"","created_at":"2026-05-05T00:00:00Z","created_by":"owner@example.com","updated_at":"2026-05-05T00:00:00Z","description":"","notes":"","design":"","is_ready_to_work":true,"dependencies":[]}"#,
+            ],
+        );
+        let result = artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                beads_dir: Some(beads_dir.to_string_lossy().into_owned()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_PROJECT_FILE.to_string(),
+                    ARTIFACT_SOURCE_CHANGESPEC.to_string(),
+                    ARTIFACT_SOURCE_COMMIT.to_string(),
+                    ARTIFACT_SOURCE_BEAD_STORE.to_string(),
+                ],
+                target_path: Some(
+                    beads_dir.join("issues.jsonl").to_string_lossy().into(),
+                ),
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(!result
+            .affected_node_ids
+            .iter()
+            .any(|id| id == "cl-one" || id == "cl-one:1"));
+        let bead = artifact_show(&store, "sase-11").unwrap();
+        assert_eq!(bead.node.as_ref().unwrap().display_title, "Renamed Epic");
+        assert_eq!(bead.payloads[0].payload["status"], json!("in_progress"));
+        assert_eq!(
+            artifact_show(&store, "cl-one:1").unwrap().payloads[0].payload
+                ["note"],
+            json!("Project note")
+        );
+    }
+
+    #[test]
+    fn targeted_agent_artifact_dir_upsert_updates_one_agent() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let first_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        let second_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120100");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        std::fs::write(
+            first_dir.join("agent_meta.json"),
+            json!({"name": "agent-alpha", "model": "old-model"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            second_dir.join("agent_meta.json"),
+            json!({"name": "agent-beta", "model": "beta-model"}).to_string(),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string()
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        std::fs::write(
+            first_dir.join("agent_meta.json"),
+            json!({"name": "agent-alpha", "model": "new-model"}).to_string(),
+        )
+        .unwrap();
+        let result = artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                artifact_dir: Some(first_dir.to_string_lossy().into()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string()
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert!(result
+            .affected_node_ids
+            .iter()
+            .any(|id| id == "agent-alpha"));
+        assert!(!result.affected_node_ids.iter().any(|id| id == "agent-beta"));
+        assert_eq!(
+            artifact_show(&store, "agent-alpha").unwrap().payloads[0].payload
+                ["record"]["agent_meta"]["model"],
+            json!("new-model")
+        );
+        assert_eq!(
+            artifact_show(&store, "agent-beta").unwrap().payloads[0].payload
+                ["record"]["agent_meta"]["model"],
+            json!("beta-model")
+        );
+    }
+
+    #[test]
     fn stale_cleanup_marks_removed_project_source_and_clears_on_return() {
         let tmp = tempdir().unwrap();
         let db = tmp.path().join("artifacts.sqlite");
