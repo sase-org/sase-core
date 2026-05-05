@@ -19,6 +19,7 @@ regex = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 rusqlite = { workspace = true }
+petgraph = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]

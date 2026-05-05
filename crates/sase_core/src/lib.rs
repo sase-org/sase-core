@@ -73,8 +73,9 @@ pub use agent_scan::{
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };
 pub use artifact::{
-    artifact_children, artifact_detail, artifact_doctor,
-    artifact_inbound_neighbors, artifact_is_reachable_to_root, artifact_list,
+    artifact_children, artifact_detail, artifact_doctor, artifact_export_dot,
+    artifact_export_json, artifact_export_mermaid, artifact_inbound_neighbors,
+    artifact_is_reachable_to_root, artifact_list, artifact_materialize_graph,
     artifact_outbound_neighbors, artifact_path_to_root, artifact_search,
     artifact_show, deterministic_artifact_link_id, open_artifact_store,
     remove_artifact_link, remove_artifact_node, upsert_artifact_link,

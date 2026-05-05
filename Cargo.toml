@@ -20,6 +20,7 @@ regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+petgraph = "0.6"
 
 [profile.release]
 lto = "thin"
