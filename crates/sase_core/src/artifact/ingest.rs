@@ -993,6 +993,13 @@ fn ingest_agent_artifacts(
                 None,
                 json!({
                     "agent_id": agent_id,
+                    "agent_id_source": if explicit_agent_artifact_id(&record).is_some() {
+                        "marker_name"
+                    } else {
+                        "fallback"
+                    },
+                    "fallback_agent_id": fallback_agent_artifact_id(&record),
+                    "source_artifact_dir": source_id,
                     "record": record,
                     "created_file_paths": created_files
                         .keys()
@@ -1060,6 +1067,13 @@ fn ingest_agent_artifacts(
 }
 
 fn agent_artifact_id(record: &AgentArtifactRecordWire) -> String {
+    explicit_agent_artifact_id(record)
+        .unwrap_or_else(|| fallback_agent_artifact_id(record))
+}
+
+fn explicit_agent_artifact_id(
+    record: &AgentArtifactRecordWire,
+) -> Option<String> {
     record
         .agent_meta
         .as_ref()
@@ -1070,12 +1084,13 @@ fn agent_artifact_id(record: &AgentArtifactRecordWire) -> String {
                 .as_ref()
                 .and_then(|done| done.name.as_deref().and_then(non_empty))
         })
-        .unwrap_or_else(|| {
-            format!(
-                "agent:{}:{}:{}",
-                record.project_name, record.workflow_dir_name, record.timestamp
-            )
-        })
+}
+
+fn fallback_agent_artifact_id(record: &AgentArtifactRecordWire) -> String {
+    format!(
+        "agent:{}:{}:{}",
+        record.project_name, record.workflow_dir_name, record.timestamp
+    )
 }
 
 fn upsert_agent_node(
@@ -1100,6 +1115,30 @@ fn upsert_agent_node(
     metadata.insert(
         "artifact_dir".to_string(),
         Value::String(record.artifact_dir.clone()),
+    );
+    metadata.insert(
+        "source_artifact_dir".to_string(),
+        Value::String(source_id.to_string()),
+    );
+    let uses_fallback_agent_id = explicit_agent_artifact_id(record).is_none();
+    metadata.insert(
+        "fallback_agent_id".to_string(),
+        Value::String(fallback_agent_artifact_id(record)),
+    );
+    metadata.insert(
+        "agent_id_source".to_string(),
+        Value::String(
+            if uses_fallback_agent_id {
+                "fallback"
+            } else {
+                "marker_name"
+            }
+            .to_string(),
+        ),
+    );
+    metadata.insert(
+        "uses_fallback_agent_id".to_string(),
+        Value::Bool(uses_fallback_agent_id),
     );
     metadata.insert(
         "has_done_marker".to_string(),
@@ -1832,6 +1871,9 @@ fn collect_agent_created_file_paths(
         "waiting.json",
         "workflow_state.json",
         "plan_path.json",
+        "plan_feedback.jsonl",
+        "question_request.json",
+        "question_response.json",
         "raw_xprompt.md",
         "live_reply.md",
         "live_reply_timestamps.jsonl",
@@ -2007,6 +2049,11 @@ fn insert_raw_marker_paths(
         "output_path",
         "live_reply_path",
         "timestamps_path",
+        "feedback_path",
+        "plan_feedback_path",
+        "question_path",
+        "question_request_path",
+        "question_response_path",
     ] {
         insert_value_paths(paths, artifact_dir, map.get(key), marker_name);
     }
@@ -3989,7 +4036,11 @@ mod tests {
         .unwrap();
         std::fs::write(
             retry_dir.join("agent_meta.json"),
-            json!({"retry_of_timestamp": "20260505115900"}).to_string(),
+            json!({
+                "retry_of_timestamp": "20260505115900",
+                "questions_submitted_at": ["20260505000000"]
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -4016,10 +4067,32 @@ mod tests {
             retry.node.as_ref().map(|node| node.kind.as_str()),
             Some(ARTIFACT_KIND_AGENT)
         );
+        let metadata = &retry.node.as_ref().unwrap().metadata;
+        assert_eq!(metadata["uses_fallback_agent_id"], json!(true));
+        assert_eq!(metadata["fallback_agent_id"], json!(fallback_id));
+        assert_eq!(
+            metadata["source_artifact_dir"],
+            json!(retry_dir.to_string_lossy())
+        );
+        assert_eq!(
+            retry.payloads[0].payload["agent_id_source"],
+            json!("fallback")
+        );
         assert!(retry.outbound_links.iter().any(|link| {
             link.link_type == ARTIFACT_LINK_RELATED
                 && link.source_id == fallback_id
                 && link.target_id == "retry-parent"
+        }));
+        let doctor =
+            artifact_doctor(&store, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+        assert!(doctor.issues.iter().any(|issue| {
+            issue.issue_type == "fallback_agent_id"
+                && issue.artifact_id.as_deref() == Some(fallback_id)
+        }));
+        assert!(doctor.issues.iter().any(|issue| {
+            issue.issue_type == "unresolved_timestamp_link"
+                && issue.artifact_id.as_deref() == Some(fallback_id)
         }));
     }
 
@@ -4710,6 +4783,17 @@ mod tests {
             pending.payloads[0].payload["unresolved_related"][0],
             "cl-one"
         );
+        let doctor =
+            artifact_doctor(&store, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+        assert!(doctor.issues.iter().any(|issue| {
+            issue.issue_type == "unresolved_bead_reference"
+                && issue.artifact_id.as_deref() == Some("sase-9")
+        }));
+        assert!(doctor.issues.iter().any(|issue| {
+            issue.issue_type == "unresolved_changespec_reference"
+                && issue.artifact_id.as_deref() == Some("sase-9")
+        }));
 
         artifact_rebuild(
             &mut store,

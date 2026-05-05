@@ -271,6 +271,7 @@ pub fn artifact_doctor(
     if options.check_tombstones {
         issues.extend(tombstone_issues(conn)?);
         issues.extend(stale_derived_marker_issues(conn)?);
+        issues.extend(fallback_agent_id_issues(conn)?);
         issues.extend(unresolved_payload_issues(conn)?);
     }
 
@@ -828,13 +829,63 @@ fn stale_derived_marker_issues(
     Ok(issues)
 }
 
+fn fallback_agent_id_issues(
+    conn: &Connection,
+) -> Result<Vec<ArtifactDoctorIssueWire>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, node_json
+            FROM artifacts
+            WHERE kind = 'agent'
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut issues = Vec::new();
+    for row in rows {
+        let (artifact_id, node_json) = row.map_err(|e| e.to_string())?;
+        let Ok(node) = serde_json::from_str::<ArtifactNodeWire>(&node_json)
+        else {
+            continue;
+        };
+        if node
+            .metadata
+            .get("uses_fallback_agent_id")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            let source_dir = node
+                .metadata
+                .get("source_artifact_dir")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            issues.push(issue(
+                "fallback_agent_id",
+                "warning",
+                Some(&artifact_id),
+                None,
+                &format!(
+                    "agent uses fallback id; source artifact directory: {source_dir}"
+                ),
+            ));
+        }
+    }
+    Ok(issues)
+}
+
 fn unresolved_payload_issues(
     conn: &Connection,
 ) -> Result<Vec<ArtifactDoctorIssueWire>, String> {
     let mut stmt = conn
         .prepare(
             r#"
-            SELECT artifact_id, payload_json
+            SELECT artifact_id, payload_type, payload_json
             FROM artifact_payloads
             WHERE provenance = ?1
             ORDER BY artifact_id, payload_type, source_kind, source_id
@@ -843,12 +894,17 @@ fn unresolved_payload_issues(
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([ARTIFACT_PROVENANCE_DERIVED], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .map_err(|e| e.to_string())?;
     let mut issues = Vec::new();
     for row in rows {
-        let (artifact_id, payload_json) = row.map_err(|e| e.to_string())?;
+        let (artifact_id, payload_type, payload_json) =
+            row.map_err(|e| e.to_string())?;
         let Ok(payload) =
             serde_json::from_str::<serde_json::Value>(&payload_json)
         else {
@@ -863,7 +919,7 @@ fn unresolved_payload_issues(
             .filter(|value| !value.is_empty())
         {
             issues.push(issue(
-                "unresolved_worker",
+                "unresolved_bead_reference",
                 "warning",
                 Some(&artifact_id),
                 None,
@@ -878,8 +934,10 @@ fn unresolved_payload_issues(
                 if let Some(target) =
                     value.as_str().filter(|value| !value.is_empty())
                 {
+                    let issue_type =
+                        unresolved_related_issue_type(&payload_type, target);
                     issues.push(issue(
-                        "unresolved_related",
+                        issue_type,
                         "warning",
                         Some(&artifact_id),
                         None,
@@ -890,6 +948,26 @@ fn unresolved_payload_issues(
         }
     }
     Ok(issues)
+}
+
+fn unresolved_related_issue_type(
+    payload_type: &str,
+    target: &str,
+) -> &'static str {
+    if target_is_timestamp_reference(target) {
+        "unresolved_timestamp_link"
+    } else if matches!(payload_type, "bead" | "agent") {
+        "unresolved_changespec_reference"
+    } else {
+        "unresolved_related"
+    }
+}
+
+fn target_is_timestamp_reference(target: &str) -> bool {
+    let value = target
+        .strip_prefix("ambiguous timestamp ")
+        .unwrap_or(target);
+    value.chars().take_while(|ch| ch.is_ascii_digit()).count() >= 14
 }
 
 fn link_is_tombstoned(
