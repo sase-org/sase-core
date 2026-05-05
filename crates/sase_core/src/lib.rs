@@ -11,6 +11,7 @@
 pub mod agent_cleanup;
 pub mod agent_launch;
 pub mod agent_scan;
+pub mod artifact;
 pub mod bead;
 pub mod git_query;
 pub mod notifications;
@@ -70,6 +71,21 @@ pub use agent_scan::{
     AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, AGENT_SCAN_WIRE_SCHEMA_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use artifact::{
+    open_artifact_store, ArtifactDetailWire, ArtifactDoctorIssueWire,
+    ArtifactDoctorOptionsWire, ArtifactDoctorWire, ArtifactGraphOptionsWire,
+    ArtifactGraphWire, ArtifactKindWire, ArtifactLinkRemoveWire,
+    ArtifactLinkTypeWire, ArtifactLinkUpsertWire, ArtifactLinkWire,
+    ArtifactMutationResultWire, ArtifactNodeRemoveWire, ArtifactNodeUpsertWire,
+    ArtifactNodeWire, ArtifactPayloadWire, ArtifactQueryWire, ArtifactStore,
+    ARTIFACT_KIND_AGENT, ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC,
+    ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE,
+    ARTIFACT_KIND_PROJECT, ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT,
+    ARTIFACT_KIND_UNKNOWN, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
+    ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
+    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
+    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 pub use bead::{
     add_dependency as bead_add_dependency,
