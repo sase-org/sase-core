@@ -106,22 +106,23 @@ pub fn artifact_rebuild(
             target_path,
         )?);
     } else if source_selected(&resolved, ARTIFACT_SOURCE_DIRECTORY) {
-        for maybe_path in [
+        for path in [
             resolved.projects_root.as_deref(),
             resolved.workspace_root.as_deref(),
             resolved.beads_dir.as_deref(),
             resolved.artifact_dir.as_deref(),
-        ] {
-            if let Some(path) = maybe_path {
-                let request = ArtifactPathUpsertRequestWire {
-                    kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
-                    provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
-                    source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
-                    source_id: Some(path_to_artifact_id(path)),
-                    ..ArtifactPathUpsertRequestWire::default()
-                };
-                mutations.merge(artifact_upsert_path(store, path, request)?);
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let request = ArtifactPathUpsertRequestWire {
+                kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
+                provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
+                source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
+                source_id: Some(path_to_artifact_id(path)),
+                ..ArtifactPathUpsertRequestWire::default()
+            };
+            mutations.merge(artifact_upsert_path(store, path, request)?);
         }
     }
 
@@ -453,17 +454,18 @@ fn discover_active_sources(
 
     if source_selected(request, ARTIFACT_SOURCE_DIRECTORY) {
         let mut ids = BTreeSet::new();
-        for maybe_path in [
+        for path in [
             request.projects_root.as_deref(),
             request.workspace_root.as_deref(),
             request.beads_dir.as_deref(),
             request.target_path.as_deref(),
             request.artifact_dir.as_deref(),
-        ] {
-            if let Some(path) = maybe_path {
-                if path.exists() {
-                    ids.insert(path_to_artifact_id(path));
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if path.exists() {
+                ids.insert(path_to_artifact_id(path));
             }
         }
         active.insert(ARTIFACT_SOURCE_DIRECTORY.to_string(), ids);
@@ -1061,12 +1063,12 @@ fn agent_artifact_id(record: &AgentArtifactRecordWire) -> String {
     record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.name.as_ref().and_then(non_empty))
+        .and_then(|meta| meta.name.as_deref().and_then(non_empty))
         .or_else(|| {
             record
                 .done
                 .as_ref()
-                .and_then(|done| done.name.as_ref().and_then(non_empty))
+                .and_then(|done| done.name.as_deref().and_then(non_empty))
         })
         .unwrap_or_else(|| {
             format!(
@@ -1145,12 +1147,12 @@ fn agent_display_title(
     record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.name.as_ref().and_then(non_empty))
+        .and_then(|meta| meta.name.as_deref().and_then(non_empty))
         .or_else(|| {
             record
                 .done
                 .as_ref()
-                .and_then(|done| done.name.as_ref().and_then(non_empty))
+                .and_then(|done| done.name.as_deref().and_then(non_empty))
         })
         .unwrap_or_else(|| agent_id.to_string())
 }
@@ -1243,15 +1245,18 @@ fn collect_agent_related_targets(
     let mut targets = RelatedTargets::default();
 
     for maybe_changespec in [
-        record.done.as_ref().and_then(|done| done.cl_name.as_ref()),
+        record
+            .done
+            .as_ref()
+            .and_then(|done| done.cl_name.as_deref()),
         record
             .running
             .as_ref()
-            .and_then(|running| running.cl_name.as_ref()),
+            .and_then(|running| running.cl_name.as_deref()),
         record
             .workflow_state
             .as_ref()
-            .and_then(|workflow| workflow.cl_name.as_ref()),
+            .and_then(|workflow| workflow.cl_name.as_deref()),
     ] {
         if let Some(changespec) = maybe_changespec.and_then(non_empty) {
             targets.resolved.insert(changespec);
@@ -2140,16 +2145,16 @@ fn resolve_agent_path(artifact_dir: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn non_empty(value: &String) -> Option<String> {
+fn non_empty(value: &str) -> Option<String> {
     if value.trim().is_empty() {
         None
     } else {
-        Some(value.clone())
+        Some(value.to_owned())
     }
 }
 
 fn push_optional(parts: &mut Vec<String>, value: &Option<String>) {
-    if let Some(value) = value.as_ref().and_then(non_empty) {
+    if let Some(value) = value.as_deref().and_then(non_empty) {
         parts.push(value);
     }
 }
@@ -3434,7 +3439,7 @@ fn node_for_path(
         source_id: request.source_id.clone(),
         source_version: request.source_version.clone(),
         search_text: request.search_text.clone().unwrap_or(search_text),
-        metadata: request.metadata.clone().unwrap_or_else(Map::new),
+        metadata: request.metadata.clone().unwrap_or_default(),
         created_at: None,
         updated_at: None,
     })
