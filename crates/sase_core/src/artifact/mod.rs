@@ -3,9 +3,16 @@
 //! This module is intentionally PyO3-free. Python bindings should convert
 //! through serde-shaped JSON records in `sase_core_py`.
 
+pub mod query;
 pub mod store;
 pub mod wire;
 
+pub use query::{
+    artifact_children, artifact_detail, artifact_doctor,
+    artifact_inbound_neighbors, artifact_is_reachable_to_root, artifact_list,
+    artifact_outbound_neighbors, artifact_path_to_root, artifact_search,
+    artifact_show,
+};
 pub use store::{
     deterministic_artifact_link_id, open_artifact_store, remove_artifact_link,
     remove_artifact_node, upsert_artifact_link, upsert_artifact_node,
