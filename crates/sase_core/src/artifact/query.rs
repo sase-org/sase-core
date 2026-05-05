@@ -608,8 +608,12 @@ fn duplicate_parent_issues(
         .prepare(
             r#"
             SELECT source_id, COUNT(*) AS parent_count
-            FROM artifact_links
+            FROM artifact_links l
             WHERE link_type = ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM manual_tombstones t
+                  WHERE t.tombstone_type = ?2 AND t.link_id = l.id
+              )
             GROUP BY source_id
             HAVING parent_count > 1
             ORDER BY source_id
@@ -617,9 +621,10 @@ fn duplicate_parent_issues(
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([ARTIFACT_LINK_PARENT], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
+        .query_map(
+            params![ARTIFACT_LINK_PARENT, ARTIFACT_TOMBSTONE_LINK],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
         .map_err(|e| e.to_string())?;
     let mut issues = Vec::new();
     for row in rows {
@@ -1037,13 +1042,14 @@ mod tests {
 
     use crate::artifact::store::{
         deterministic_artifact_link_id, open_artifact_store,
-        remove_artifact_node, upsert_artifact_link, upsert_artifact_node,
-        upsert_artifact_payload,
+        remove_artifact_link, remove_artifact_node, upsert_artifact_link,
+        upsert_artifact_node, upsert_artifact_payload,
     };
     use crate::artifact::wire::{
-        ArtifactLinkUpsertWire, ArtifactNodeRemoveWire, ArtifactNodeUpsertWire,
-        ArtifactPayloadWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_FILE,
-        ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED,
+        ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
+        ArtifactNodeUpsertWire, ArtifactPayloadWire, ARTIFACT_KIND_AGENT,
+        ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED,
+        ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
         ARTIFACT_PROVENANCE_MANUAL,
     };
 
@@ -1232,6 +1238,51 @@ mod tests {
     }
 
     #[test]
+    fn list_filters_by_provenance_source_link_type_and_root() {
+        let mut store = fixture_store();
+        let mut derived =
+            manual_node("project:alpha", ARTIFACT_KIND_PROJECT, "Alpha");
+        derived.provenance = ARTIFACT_PROVENANCE_DERIVED.to_string();
+        derived.source_kind = Some("project_file".to_string());
+        derived.source_id = Some("alpha.gp".to_string());
+        upsert_node(&mut store, derived);
+        upsert_link(
+            &mut store,
+            manual_link(
+                ARTIFACT_LINK_PARENT,
+                "project:alpha",
+                ARTIFACT_ROOT_ID,
+            ),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_WORKER, "project:alpha", "agent-1"),
+        );
+
+        let filtered = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                link_types: vec![ARTIFACT_LINK_WORKER.to_string()],
+                provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
+                source_kinds: vec!["project_file".to_string()],
+                source_ids: vec!["alpha.gp".to_string()],
+                root_id: Some(ARTIFACT_ROOT_ID.to_string()),
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["project:alpha"]
+        );
+    }
+
+    #[test]
     fn detail_includes_payloads_links_children_and_path() {
         let mut store = fixture_store();
         upsert_artifact_payload(
@@ -1298,6 +1349,27 @@ mod tests {
     }
 
     #[test]
+    fn path_and_reachability_cover_root_missing_and_orphan_nodes() {
+        let mut store = fixture_store();
+        upsert_node(
+            &mut store,
+            manual_node("orphan", ARTIFACT_KIND_FILE, "orphan"),
+        );
+
+        assert_eq!(
+            artifact_path_to_root(&store, ARTIFACT_ROOT_ID)
+                .unwrap()
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ARTIFACT_ROOT_ID]
+        );
+        assert!(artifact_path_to_root(&store, "missing").unwrap().is_empty());
+        assert!(artifact_is_reachable_to_root(&store, "/tmp/a.md").unwrap());
+        assert!(!artifact_is_reachable_to_root(&store, "orphan").unwrap());
+    }
+
+    #[test]
     fn doctor_reports_graph_health_cases() {
         let tmp = tempdir().unwrap();
         let db = tmp.path().join("artifacts.sqlite");
@@ -1349,6 +1421,12 @@ mod tests {
         assert!(issue_types.contains("dangling_link"));
         assert!(issue_types.contains("parent_cycle"));
         assert!(issue_types.contains("stale_derived"));
+        assert!(report.issues.iter().any(|issue| {
+            issue.issue_type == "dangling_link" && issue.severity == "error"
+        }));
+        assert!(report.issues.iter().any(|issue| {
+            issue.issue_type == "stale_derived" && issue.severity == "warning"
+        }));
     }
 
     #[test]
@@ -1374,6 +1452,44 @@ mod tests {
         assert!(report.issues.iter().any(|issue| {
             issue.issue_type == "unreachable"
                 && issue.artifact_id.as_deref() == Some("orphan")
+        }));
+    }
+
+    #[test]
+    fn doctor_ignores_tombstoned_parent_links_when_checking_duplicates() {
+        let mut store = fixture_store();
+        let derived_parent =
+            manual_link(ARTIFACT_LINK_PARENT, "/tmp/a.md", ARTIFACT_ROOT_ID);
+        let mut derived_parent_to_tombstone = derived_parent.clone();
+        derived_parent_to_tombstone.id = "derived-parent".to_string();
+        derived_parent_to_tombstone.provenance =
+            ARTIFACT_PROVENANCE_DERIVED.to_string();
+        derived_parent_to_tombstone.source_kind = Some("scan".to_string());
+        derived_parent_to_tombstone.source_id_hint = Some("scan-1".to_string());
+        upsert_link(&mut store, derived_parent_to_tombstone.clone());
+        remove_artifact_link(
+            &mut store,
+            ArtifactLinkRemoveWire {
+                schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+                id: Some(derived_parent_to_tombstone.id.clone()),
+                link_type: None,
+                source_id: None,
+                target_id: None,
+                provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
+                source_kind: None,
+                source_id_hint: None,
+                reason: Some("hidden".to_string()),
+            },
+        )
+        .unwrap();
+
+        let report =
+            artifact_doctor(&store, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+
+        assert!(!report.issues.iter().any(|issue| {
+            issue.issue_type == "duplicate_parent"
+                && issue.artifact_id.as_deref() == Some("/tmp/a.md")
         }));
     }
 }

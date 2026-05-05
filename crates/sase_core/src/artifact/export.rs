@@ -461,7 +461,8 @@ mod tests {
     use crate::artifact::wire::{
         ArtifactLinkUpsertWire, ArtifactNodeUpsertWire, ARTIFACT_KIND_AGENT,
         ARTIFACT_KIND_FILE, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
-        ARTIFACT_LINK_RELATED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
+        ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+        ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
     };
 
     use super::*;
@@ -601,6 +602,66 @@ mod tests {
     }
 
     #[test]
+    fn bounded_graph_respects_direction_flags_and_worker_edges() {
+        let mut store = fixture_store(false);
+        upsert_node(
+            &mut store,
+            manual_node("bead-1", ARTIFACT_KIND_FILE, "bead one"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_WORKER, "bead-1", "agent-1"),
+        );
+
+        let inbound = artifact_materialize_graph(
+            &store,
+            ArtifactGraphOptionsWire {
+                root_id: Some("agent-1".to_string()),
+                max_depth: Some(1),
+                link_types: vec![ARTIFACT_LINK_WORKER.to_string()],
+                include_inbound: true,
+                include_outbound: false,
+                limit: None,
+                ..ArtifactGraphOptionsWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inbound
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-1", "bead-1"]
+        );
+        assert_eq!(inbound.links[0].source_id, "bead-1");
+        assert_eq!(inbound.links[0].target_id, "agent-1");
+
+        let outbound = artifact_materialize_graph(
+            &store,
+            ArtifactGraphOptionsWire {
+                root_id: Some("agent-1".to_string()),
+                max_depth: Some(1),
+                link_types: vec![ARTIFACT_LINK_WORKER.to_string()],
+                include_inbound: false,
+                include_outbound: true,
+                limit: None,
+                ..ArtifactGraphOptionsWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outbound
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-1"]
+        );
+        assert!(outbound.links.is_empty());
+    }
+
+    #[test]
     fn default_limits_truncate_deterministically() {
         let store = fixture_store(false);
 
@@ -648,6 +709,40 @@ mod tests {
             serde_json::from_str(&first_json).unwrap();
         assert_eq!(value["node_count"], json!(5));
         assert_eq!(value["link_count"], json!(5));
+    }
+
+    #[test]
+    fn full_graph_limit_bounds_nodes_and_suppresses_external_links() {
+        let store = fixture_store(false);
+
+        let graph = artifact_materialize_graph(
+            &store,
+            ArtifactGraphOptionsWire {
+                full_graph: true,
+                limit: Some(2),
+                ..ArtifactGraphOptionsWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(graph.truncated);
+        assert_eq!(graph.node_count, 5);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/", "/tmp"]
+        );
+        assert_eq!(
+            graph
+                .links
+                .iter()
+                .map(|link| (link.source_id.as_str(), link.target_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("/tmp", "/")]
+        );
     }
 
     #[test]

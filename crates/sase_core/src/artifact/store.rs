@@ -897,7 +897,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::artifact::wire::{
-        ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED,
+        ARTIFACT_KIND_AGENT, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
+        ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
     };
 
     use super::*;
@@ -1150,6 +1151,140 @@ mod tests {
             })
             .unwrap();
         assert_eq!(link_count, 1);
+    }
+
+    #[test]
+    fn node_update_replaces_stored_wire_and_can_clear_payloads() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let mut store = open_artifact_store(&db).unwrap();
+        let mut node = derived_node("project-a", "project-a.gp");
+        node.metadata.insert("ordinal".to_string(), json!(1));
+        upsert_artifact_node(&mut store, node_upsert(node)).unwrap();
+        upsert_artifact_payload(
+            &mut store,
+            ArtifactPayloadWire {
+                artifact_id: "project-a".to_string(),
+                payload_type: "summary".to_string(),
+                provenance: ARTIFACT_PROVENANCE_DERIVED.to_string(),
+                source_kind: Some("project".to_string()),
+                source_id: Some("project-a.gp".to_string()),
+                source_version: Some("v1".to_string()),
+                payload: json!({"title": "Project A"}),
+                updated_at: None,
+            },
+        )
+        .unwrap();
+
+        let mut updated = derived_node("project-a", "project-a.gp");
+        updated.display_title = "Project Alpha".to_string();
+        updated.source_version = Some("v2".to_string());
+        updated.metadata.insert("ordinal".to_string(), json!(2));
+        let result = upsert_artifact_node(
+            &mut store,
+            ArtifactNodeUpsertWire {
+                schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+                node: updated,
+                replace_payloads: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.nodes_updated, 1);
+        let (title, version, node_json): (String, String, String) = store
+            .connection()
+            .query_row(
+                "SELECT display_title, source_version, node_json FROM artifacts WHERE id = 'project-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let stored: ArtifactNodeWire =
+            serde_json::from_str(&node_json).unwrap();
+        let payload_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM artifact_payloads WHERE artifact_id = 'project-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(title, "Project Alpha");
+        assert_eq!(version, "v2");
+        assert_eq!(stored.metadata["ordinal"], json!(2));
+        assert_eq!(payload_count, 0);
+    }
+
+    #[test]
+    fn supported_link_types_round_trip_direction_and_metadata() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let mut store = open_artifact_store(&db).unwrap();
+        upsert_artifact_node(&mut store, node_upsert(manual_node("agent-1")))
+            .unwrap();
+        upsert_artifact_node(
+            &mut store,
+            node_upsert(ArtifactNodeWire {
+                kind: ARTIFACT_KIND_AGENT.to_string(),
+                ..manual_node("agent-2")
+            }),
+        )
+        .unwrap();
+        upsert_artifact_node(&mut store, node_upsert(manual_node("file-1")))
+            .unwrap();
+        upsert_artifact_node(&mut store, node_upsert(manual_node("file-2")))
+            .unwrap();
+
+        for (link_type, source_id, target_id) in [
+            (ARTIFACT_LINK_PARENT, "file-1", ARTIFACT_ROOT_ID),
+            (ARTIFACT_LINK_CREATED, "agent-1", "file-1"),
+            (ARTIFACT_LINK_WORKER, "file-2", "agent-2"),
+            (ARTIFACT_LINK_RELATED, "file-1", "file-2"),
+        ] {
+            let mut link = manual_link(link_type, source_id, target_id);
+            link.metadata.insert("verified".to_string(), json!(true));
+            upsert_artifact_link(&mut store, link_upsert(link)).unwrap();
+        }
+
+        let mut rows = store
+            .connection()
+            .prepare(
+                "SELECT link_type, source_id, target_id, link_json FROM artifact_links ORDER BY link_type",
+            )
+            .unwrap();
+        let links = rows
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            links
+                .iter()
+                .map(|(link_type, source_id, target_id, _)| {
+                    (link_type.as_str(), source_id.as_str(), target_id.as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (ARTIFACT_LINK_CREATED, "agent-1", "file-1"),
+                (ARTIFACT_LINK_PARENT, "file-1", ARTIFACT_ROOT_ID),
+                (ARTIFACT_LINK_RELATED, "file-1", "file-2"),
+                (ARTIFACT_LINK_WORKER, "file-2", "agent-2"),
+            ]
+        );
+        for (_, _, _, link_json) in links {
+            let link: ArtifactLinkWire =
+                serde_json::from_str(&link_json).unwrap();
+            assert_eq!(link.metadata["verified"], json!(true));
+        }
     }
 
     #[test]
