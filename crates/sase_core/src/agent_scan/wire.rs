@@ -161,6 +161,44 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub artifact_agent_id: Option<String>,
+    #[serde(default)]
+    pub artifact_source_dir: Option<String>,
+    #[serde(default)]
+    pub changespec_name: Option<String>,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    #[serde(default)]
+    pub bead_id: Option<String>,
+    #[serde(default)]
+    pub plan_path: Option<String>,
+    #[serde(default)]
+    pub sdd_prompt_path: Option<String>,
+    #[serde(default)]
+    pub sdd_plan_path: Option<String>,
+    #[serde(default)]
+    pub question_request_path: Option<String>,
+    #[serde(default)]
+    pub question_response_path: Option<String>,
+    #[serde(default)]
+    pub epic_bead_id: Option<String>,
+    #[serde(default)]
+    pub phase_bead_id: Option<String>,
+    #[serde(default)]
+    pub legend_bead_id: Option<String>,
+    #[serde(default)]
+    pub commit_changespec_name: Option<String>,
+    #[serde(default)]
+    pub commit_entry_id: Option<String>,
+    #[serde(default)]
+    pub commit_result: Option<String>,
+    #[serde(default)]
+    pub commit_diff_path: Option<String>,
+    #[serde(default)]
+    pub parent_agent_timestamp: Option<String>,
+    #[serde(default)]
+    pub parent_agent_name: Option<String>,
+    #[serde(default)]
     pub workflow_name: Option<String>,
     #[serde(default)]
     pub pid: Option<i64>,

@@ -1077,7 +1077,12 @@ fn explicit_agent_artifact_id(
     record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.name.as_deref().and_then(non_empty))
+        .and_then(|meta| {
+            meta.artifact_agent_id
+                .as_deref()
+                .and_then(non_empty)
+                .or_else(|| meta.name.as_deref().and_then(non_empty))
+        })
         .or_else(|| {
             record
                 .done
@@ -1216,6 +1221,15 @@ fn agent_search_text(
     }
     if let Some(meta) = &record.agent_meta {
         push_optional(&mut parts, &meta.name);
+        push_optional(&mut parts, &meta.artifact_agent_id);
+        push_optional(&mut parts, &meta.changespec_name);
+        push_optional(&mut parts, &meta.cl_name);
+        push_optional(&mut parts, &meta.bead_id);
+        push_optional(&mut parts, &meta.epic_bead_id);
+        push_optional(&mut parts, &meta.phase_bead_id);
+        push_optional(&mut parts, &meta.legend_bead_id);
+        push_optional(&mut parts, &meta.commit_changespec_name);
+        push_optional(&mut parts, &meta.commit_entry_id);
         push_optional(&mut parts, &meta.model);
         push_optional(&mut parts, &meta.llm_provider);
         push_optional(&mut parts, &meta.vcs_provider);
@@ -1305,6 +1319,7 @@ fn collect_agent_related_targets(
     let mut timestamp_refs = Vec::new();
     if let Some(meta) = &record.agent_meta {
         push_optional(&mut timestamp_refs, &meta.parent_timestamp);
+        push_optional(&mut timestamp_refs, &meta.parent_agent_timestamp);
         push_optional(&mut timestamp_refs, &meta.retry_of_timestamp);
         push_optional(&mut timestamp_refs, &meta.retried_as_timestamp);
         push_optional(&mut timestamp_refs, &meta.retry_chain_root_timestamp);
@@ -1312,6 +1327,27 @@ fn collect_agent_related_targets(
         timestamp_refs.extend(meta.feedback_submitted_at.iter().cloned());
         timestamp_refs.extend(meta.questions_submitted_at.iter().cloned());
         timestamp_refs.extend(meta.retry_started_at.iter().cloned());
+
+        for maybe_related in [
+            meta.changespec_name.as_deref(),
+            meta.cl_name.as_deref(),
+            meta.commit_changespec_name.as_deref(),
+            meta.bead_id.as_deref(),
+            meta.epic_bead_id.as_deref(),
+            meta.phase_bead_id.as_deref(),
+            meta.legend_bead_id.as_deref(),
+            meta.parent_agent_name.as_deref(),
+        ] {
+            if let Some(target) = maybe_related.and_then(non_empty) {
+                targets.resolved.insert(target.to_string());
+            }
+        }
+        if let (Some(changespec), Some(entry_id)) = (
+            meta.commit_changespec_name.as_deref().and_then(non_empty),
+            meta.commit_entry_id.as_deref().and_then(non_empty),
+        ) {
+            targets.resolved.insert(format!("{changespec}:{entry_id}"));
+        }
     }
     if let Some(done) = &record.done {
         push_optional(&mut timestamp_refs, &done.retried_as_timestamp);
@@ -1871,6 +1907,7 @@ fn collect_agent_created_file_paths(
         "waiting.json",
         "workflow_state.json",
         "plan_path.json",
+        "commit_result.json",
         "plan_feedback.jsonl",
         "question_request.json",
         "question_response.json",
@@ -1903,7 +1940,12 @@ fn collect_agent_created_file_paths(
             "plan_path_marker",
         );
     }
-    for marker_name in ["agent_meta.json", "done.json", "workflow_state.json"] {
+    for marker_name in [
+        "agent_meta.json",
+        "done.json",
+        "workflow_state.json",
+        "commit_result.json",
+    ] {
         insert_raw_marker_paths(&mut paths, artifact_dir, marker_name);
     }
 
@@ -2045,6 +2087,8 @@ fn insert_raw_marker_paths(
         "chat_path",
         "diff_path",
         "plan_path",
+        "sdd_prompt_path",
+        "sdd_plan_path",
         "response_path",
         "output_path",
         "live_reply_path",
@@ -2054,6 +2098,7 @@ fn insert_raw_marker_paths(
         "question_path",
         "question_request_path",
         "question_response_path",
+        "commit_diff_path",
     ] {
         insert_value_paths(paths, artifact_dir, map.get(key), marker_name);
     }
@@ -2694,6 +2739,11 @@ fn agent_payload_changespec_targets(payload: &Value) -> BTreeSet<String> {
             targets.insert(value);
         }
     }
+    if let Some(meta) = record.get("agent_meta") {
+        for key in ["changespec_name", "cl_name", "commit_changespec_name"] {
+            push_json_string(&mut targets, meta.get(key));
+        }
+    }
     targets
 }
 
@@ -2705,6 +2755,7 @@ fn agent_payload_timestamp_refs(payload: &Value) -> BTreeSet<String> {
     if let Some(meta) = record.get("agent_meta") {
         for key in [
             "parent_timestamp",
+            "parent_agent_timestamp",
             "retry_of_timestamp",
             "retried_as_timestamp",
             "retry_chain_root_timestamp",
@@ -4016,6 +4067,100 @@ mod tests {
             diff.path_to_root.first().map(|node| node.id.as_str()),
             Some(diff_path.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn agent_ingestion_uses_workflow_relationship_metadata() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let plan_path = artifact_dir.join("plan.md");
+        let sdd_plan_path =
+            tmp.path().join("workspace/sdd/tales/202605/plan.md");
+        let question_path =
+            tmp.path().join("questions/session/question_response.json");
+        let diff_path = artifact_dir.join("commit.diff");
+        for path in [&plan_path, &sdd_plan_path, &question_path, &diff_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "artifact").unwrap();
+        }
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "agent-alpha",
+                "changespec_name": "cl-one",
+                "phase_bead_id": "sase-9.1",
+                "plan_path": plan_path,
+                "sdd_plan_path": sdd_plan_path,
+                "question_response_path": question_path,
+                "commit_changespec_name": "cl-one",
+                "commit_entry_id": "7",
+                "commit_diff_path": diff_path
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("commit_result.json"),
+            json!({
+                "commit_changespec_name": "cl-one",
+                "commit_entry_id": "7",
+                "commit_diff_path": diff_path
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        upsert_node(
+            &mut store,
+            manual_node("cl-one", ARTIFACT_KIND_CHANGESPEC, "cl one"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("cl-one:7", ARTIFACT_KIND_COMMIT, "commit 7"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("sase-9.1", ARTIFACT_KIND_BEAD, "phase"),
+        );
+
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(
+                    projects_root.to_string_lossy().into_owned(),
+                ),
+                workspace_root: None,
+                beads_dir: None,
+                include_sources: vec![
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string(),
+                    ARTIFACT_SOURCE_AGENT_CREATED_FILE.to_string(),
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        let agent = artifact_show(&store, "agent-alpha").unwrap();
+        for target in ["cl-one", "cl-one:7", "sase-9.1"] {
+            assert!(agent.outbound_links.iter().any(|link| {
+                link.link_type == ARTIFACT_LINK_RELATED
+                    && link.source_id == "agent-alpha"
+                    && link.target_id == target
+            }));
+        }
+        for path in [&plan_path, &sdd_plan_path, &question_path, &diff_path] {
+            let id = path.to_string_lossy();
+            assert!(agent.outbound_links.iter().any(|link| {
+                link.link_type == ARTIFACT_LINK_CREATED
+                    && link.source_id == "agent-alpha"
+                    && link.target_id == id.as_ref()
+            }));
+        }
     }
 
     #[test]
