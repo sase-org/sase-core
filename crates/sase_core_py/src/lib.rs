@@ -53,6 +53,7 @@
 //! - `artifact_list(index_path: str, query: dict | None = None) -> list[dict]`
 //! - `artifact_show(index_path: str, artifact_id: str) -> dict`
 //! - `artifact_graph(index_path: str, options: dict | None = None) -> dict`
+//! - `artifact_export(index_path: str, options: dict | None = None, format: str = "json") -> str`
 //! - `artifact_rebuild(index_path: str, request: dict | None = None) -> dict`
 //! - `artifact_upsert_path(index_path: str, artifact_path: str, request: dict | None = None) -> dict`
 //! - `artifact_doctor(index_path: str, options: dict | None = None) -> dict`
@@ -115,6 +116,9 @@ use sase_core::agent_scan::{
 };
 use sase_core::artifact::{
     artifact_doctor as core_artifact_doctor,
+    artifact_export_dot as core_artifact_export_dot,
+    artifact_export_json as core_artifact_export_json,
+    artifact_export_mermaid as core_artifact_export_mermaid,
     artifact_list as core_artifact_list,
     artifact_materialize_graph as core_artifact_materialize_graph,
     artifact_rebuild as core_artifact_rebuild,
@@ -639,6 +643,47 @@ fn py_artifact_graph<'py>(
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &graph)
+}
+
+/// Export an artifact graph as a deterministic text format.
+#[pyfunction]
+#[pyo3(
+    name = "artifact_export",
+    signature = (index_path, options = None, format = "json")
+)]
+fn py_artifact_export<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    options: Option<&Bound<'py, PyDict>>,
+    format: &str,
+) -> PyResult<String> {
+    let options = match options {
+        Some(dict) => artifact_wire_from_pydict::<ArtifactGraphOptionsWire>(
+            dict,
+            "options",
+            "ArtifactGraphOptionsWire",
+        )?,
+        None => ArtifactGraphOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    py.allow_threads(|| {
+        let store = core_open_artifact_store(&index)?;
+        match format {
+            "json" => core_artifact_export_json(&store, options),
+            "dot" => core_artifact_export_dot(&store, options),
+            "mermaid" => core_artifact_export_mermaid(&store, options),
+            other => Err(format!(
+                "unsupported artifact export format {other:?}; expected json, dot, or mermaid"
+            )),
+        }
+    })
+    .map_err(|err| {
+        if err.contains("unsupported artifact export format") {
+            PyValueError::new_err(err)
+        } else {
+            artifact_store_error_to_pyerr(err)
+        }
+    })
 }
 
 /// Rebuild derived artifacts from selected source roots.
@@ -2569,6 +2614,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_export, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_upsert_path, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_doctor, m)?)?;
@@ -3093,6 +3139,30 @@ mod tests {
                 py_artifact_graph(py, index_str, Some(graph_options)).unwrap();
             let graph_value = py_to_json_value(graph.bind(py)).unwrap();
             assert_eq!(graph_value["nodes"].as_array().unwrap().len(), 2);
+
+            let dot =
+                py_artifact_export(py, index_str, Some(graph_options), "dot")
+                    .unwrap();
+            assert!(dot.starts_with("digraph artifact_graph {\n"));
+            assert!(dot.contains("schema_version=1 truncated=false"));
+            assert!(dot.contains("->"));
+
+            let mermaid = py_artifact_export(
+                py,
+                index_str,
+                Some(graph_options),
+                "mermaid",
+            )
+            .unwrap();
+            assert!(mermaid.starts_with("%% schema_version=1 truncated=false"));
+            assert!(mermaid.contains("flowchart TD\n"));
+
+            let export_error =
+                py_artifact_export(py, index_str, Some(graph_options), "svg")
+                    .unwrap_err();
+            assert!(export_error
+                .to_string()
+                .contains("unsupported artifact export format"));
 
             let doctor = py_artifact_doctor(py, index_str, None).unwrap();
             let doctor_value = py_to_json_value(doctor.bind(py)).unwrap();
