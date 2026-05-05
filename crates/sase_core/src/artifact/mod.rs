@@ -6,7 +6,11 @@
 pub mod store;
 pub mod wire;
 
-pub use store::{open_artifact_store, ArtifactStore};
+pub use store::{
+    deterministic_artifact_link_id, open_artifact_store, remove_artifact_link,
+    remove_artifact_node, upsert_artifact_link, upsert_artifact_node,
+    upsert_artifact_payload, ArtifactStore,
+};
 pub use wire::{
     ArtifactDetailWire, ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire,
     ArtifactDoctorWire, ArtifactGraphOptionsWire, ArtifactGraphWire,

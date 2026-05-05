@@ -73,7 +73,9 @@ pub use agent_scan::{
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };
 pub use artifact::{
-    open_artifact_store, ArtifactDetailWire, ArtifactDoctorIssueWire,
+    deterministic_artifact_link_id, open_artifact_store, remove_artifact_link,
+    remove_artifact_node, upsert_artifact_link, upsert_artifact_node,
+    upsert_artifact_payload, ArtifactDetailWire, ArtifactDoctorIssueWire,
     ArtifactDoctorOptionsWire, ArtifactDoctorWire, ArtifactGraphOptionsWire,
     ArtifactGraphWire, ArtifactKindWire, ArtifactLinkRemoveWire,
     ArtifactLinkTypeWire, ArtifactLinkUpsertWire, ArtifactLinkWire,
