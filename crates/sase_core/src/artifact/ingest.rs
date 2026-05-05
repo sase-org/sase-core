@@ -139,6 +139,8 @@ pub fn artifact_rebuild(
         mutations.merge(ingest_beads(store, &resolved)?);
     }
 
+    mutations.merge(reconcile_cross_source_links(store)?);
+
     let active_sources = discover_active_sources(&resolved)?;
     mutations.merge(update_source_watermarks(store, &active_sources)?);
     if resolved.stale_cleanup == ARTIFACT_STALE_CLEANUP_MARK {
@@ -962,6 +964,14 @@ fn ingest_agent_artifacts(
         if !artifact_node_exists(store, &agent_id)? {
             continue;
         }
+        mutations.merge(upsert_derived_link(
+            store,
+            ARTIFACT_LINK_PARENT,
+            &agent_id,
+            &source_id,
+            ARTIFACT_SOURCE_AGENT_ARTIFACT,
+            &source_id,
+        )?);
 
         let created_files = collect_agent_created_file_paths(&record);
         let related_targets =
@@ -1728,6 +1738,14 @@ fn upsert_agent_thought(
             ARTIFACT_SOURCE_AGENT_THOUGHT,
             agent_source_id,
         )?);
+        mutations.merge(upsert_derived_link(
+            store,
+            ARTIFACT_LINK_PARENT,
+            &thought_id,
+            agent_id,
+            ARTIFACT_SOURCE_AGENT_THOUGHT,
+            agent_source_id,
+        )?);
     }
 
     Ok(mutations.into_result())
@@ -2382,6 +2400,337 @@ fn worker_agent_id(issue: &IssueWire) -> Option<&str> {
     (!assignee.is_empty()).then_some(assignee)
 }
 
+fn reconcile_cross_source_links(
+    store: &mut ArtifactStore,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations =
+        ArtifactIngestMutations::new("reconcile_cross_source_links");
+    mutations.merge(reconcile_bead_links(store)?);
+    mutations.merge(reconcile_agent_links(store)?);
+    Ok(mutations.into_result())
+}
+
+fn reconcile_bead_links(
+    store: &mut ArtifactStore,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations = ArtifactIngestMutations::new("reconcile_bead_links");
+    for mut payload in load_derived_payloads(store, "bead")? {
+        if !artifact_node_visible_with_kind(
+            store,
+            &payload.artifact_id,
+            ARTIFACT_KIND_BEAD,
+        )? {
+            continue;
+        }
+
+        let original_payload = payload.payload.clone();
+        let source_id = payload.source_id.clone().unwrap_or_default();
+        let mut unresolved_related = BTreeSet::new();
+
+        if let Some(worker_id) = payload
+            .payload
+            .get("pending_worker_agent_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+        {
+            if artifact_node_visible_with_kind(
+                store,
+                &worker_id,
+                ARTIFACT_KIND_AGENT,
+            )? {
+                mutations.merge(upsert_derived_link(
+                    store,
+                    ARTIFACT_LINK_WORKER,
+                    &payload.artifact_id,
+                    &worker_id,
+                    ARTIFACT_SOURCE_BEAD_STORE,
+                    &source_id,
+                )?);
+                remove_payload_key(
+                    &mut payload.payload,
+                    "pending_worker_agent_id",
+                );
+            }
+        }
+
+        if let Some(changespec_name) = payload
+            .payload
+            .get("changespec_name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+        {
+            if artifact_node_visible_with_kind(
+                store,
+                &changespec_name,
+                ARTIFACT_KIND_CHANGESPEC,
+            )? {
+                mutations.merge(upsert_derived_link(
+                    store,
+                    ARTIFACT_LINK_RELATED,
+                    &payload.artifact_id,
+                    &changespec_name,
+                    ARTIFACT_SOURCE_BEAD_STORE,
+                    &source_id,
+                )?);
+            } else {
+                unresolved_related.insert(changespec_name);
+            }
+        }
+
+        replace_payload_string_array(
+            &mut payload.payload,
+            "unresolved_related",
+            unresolved_related,
+        );
+        if payload.payload != original_payload {
+            mutations.merge(upsert_derived_payload(store, payload)?);
+        }
+    }
+    Ok(mutations.into_result())
+}
+
+fn reconcile_agent_links(
+    store: &mut ArtifactStore,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations = ArtifactIngestMutations::new("reconcile_agent_links");
+    let mut payloads = load_derived_payloads(store, AGENT_PAYLOAD_TYPE)?;
+    payloads.retain(|payload| {
+        artifact_node_visible_with_kind(
+            store,
+            &payload.artifact_id,
+            ARTIFACT_KIND_AGENT,
+        )
+        .unwrap_or(false)
+    });
+    let ids_by_timestamp = agent_payload_ids_by_timestamp(&payloads);
+
+    for mut payload in payloads {
+        let original_payload = payload.payload.clone();
+        let source_id = payload.source_id.clone().unwrap_or_default();
+        let mut unresolved_related = BTreeSet::new();
+
+        for changespec_id in agent_payload_changespec_targets(&payload.payload)
+        {
+            if changespec_id == payload.artifact_id {
+                continue;
+            }
+            if artifact_node_visible_with_kind(
+                store,
+                &changespec_id,
+                ARTIFACT_KIND_CHANGESPEC,
+            )? {
+                mutations.merge(upsert_derived_link(
+                    store,
+                    ARTIFACT_LINK_RELATED,
+                    &payload.artifact_id,
+                    &changespec_id,
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT,
+                    &source_id,
+                )?);
+            } else {
+                unresolved_related.insert(changespec_id);
+            }
+        }
+
+        for timestamp in agent_payload_timestamp_refs(&payload.payload) {
+            match ids_by_timestamp.get(&timestamp) {
+                Some(ids) if ids.len() == 1 => {
+                    let target_id = ids.iter().next().unwrap();
+                    if target_id != &payload.artifact_id
+                        && artifact_node_visible_with_kind(
+                            store,
+                            target_id,
+                            ARTIFACT_KIND_AGENT,
+                        )?
+                    {
+                        mutations.merge(upsert_derived_link(
+                            store,
+                            ARTIFACT_LINK_RELATED,
+                            &payload.artifact_id,
+                            target_id,
+                            ARTIFACT_SOURCE_AGENT_ARTIFACT,
+                            &source_id,
+                        )?);
+                    }
+                }
+                Some(ids) => {
+                    unresolved_related.insert(format!(
+                        "ambiguous timestamp {timestamp}: {}",
+                        ids.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                None => {
+                    unresolved_related.insert(timestamp);
+                }
+            }
+        }
+
+        replace_payload_string_array(
+            &mut payload.payload,
+            "unresolved_related",
+            unresolved_related,
+        );
+        if payload.payload != original_payload {
+            mutations.merge(upsert_derived_payload(store, payload)?);
+        }
+    }
+    Ok(mutations.into_result())
+}
+
+fn load_derived_payloads(
+    store: &ArtifactStore,
+    payload_type: &str,
+) -> Result<Vec<ArtifactPayloadWire>, String> {
+    let mut stmt = store
+        .connection()
+        .prepare(
+            r#"
+            SELECT payload_json
+            FROM artifact_payloads
+            WHERE provenance = ?1
+              AND payload_type = ?2
+            ORDER BY artifact_id, source_kind, source_id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![ARTIFACT_PROVENANCE_DERIVED, payload_type], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let mut payloads = Vec::new();
+    for row in rows {
+        let json = row.map_err(|e| e.to_string())?;
+        payloads.push(serde_json::from_str(&json).map_err(|e| e.to_string())?);
+    }
+    Ok(payloads)
+}
+
+fn agent_payload_ids_by_timestamp(
+    payloads: &[ArtifactPayloadWire],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for payload in payloads {
+        if let Some(timestamp) = payload
+            .payload
+            .get("record")
+            .and_then(|record| record.get("timestamp"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        {
+            out.entry(timestamp.to_string())
+                .or_default()
+                .insert(payload.artifact_id.clone());
+        }
+    }
+    out
+}
+
+fn agent_payload_changespec_targets(payload: &Value) -> BTreeSet<String> {
+    let mut targets = BTreeSet::new();
+    let Some(record) = payload.get("record") else {
+        return targets;
+    };
+    for path in [
+        &["done", "cl_name"][..],
+        &["running", "cl_name"][..],
+        &["workflow_state", "cl_name"][..],
+    ] {
+        if let Some(value) = json_path_string(record, path) {
+            targets.insert(value);
+        }
+    }
+    targets
+}
+
+fn agent_payload_timestamp_refs(payload: &Value) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    let Some(record) = payload.get("record") else {
+        return refs;
+    };
+    if let Some(meta) = record.get("agent_meta") {
+        for key in [
+            "parent_timestamp",
+            "retry_of_timestamp",
+            "retried_as_timestamp",
+            "retry_chain_root_timestamp",
+        ] {
+            push_json_string(&mut refs, meta.get(key));
+        }
+        for key in [
+            "plan_submitted_at",
+            "feedback_submitted_at",
+            "questions_submitted_at",
+            "retry_started_at",
+        ] {
+            push_json_string_array(&mut refs, meta.get(key));
+        }
+    }
+    if let Some(done) = record.get("done") {
+        for key in ["retried_as_timestamp", "retry_chain_root_timestamp"] {
+            push_json_string(&mut refs, done.get(key));
+        }
+    }
+    refs
+}
+
+fn json_path_string(root: &Value, path: &[&str]) -> Option<String> {
+    let mut current = root;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn push_json_string(values: &mut BTreeSet<String>, value: Option<&Value>) {
+    if let Some(value) = value
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        values.insert(value.to_string());
+    }
+}
+
+fn push_json_string_array(
+    values: &mut BTreeSet<String>,
+    value: Option<&Value>,
+) {
+    if let Some(items) = value.and_then(Value::as_array) {
+        for item in items {
+            push_json_string(values, Some(item));
+        }
+    }
+}
+
+fn replace_payload_string_array(
+    payload: &mut Value,
+    key: &str,
+    values: BTreeSet<String>,
+) {
+    let Value::Object(object) = payload else {
+        return;
+    };
+    if values.is_empty() {
+        object.remove(key);
+    } else {
+        object.insert(
+            key.to_string(),
+            Value::Array(values.into_iter().map(Value::String).collect()),
+        );
+    }
+}
+
+fn remove_payload_key(payload: &mut Value, key: &str) {
+    if let Value::Object(object) = payload {
+        object.remove(key);
+    }
+}
+
 fn upsert_derived_link(
     store: &mut ArtifactStore,
     link_type: &str,
@@ -2443,6 +2792,34 @@ fn artifact_node_exists_with_kind(
         .optional()
         .map_err(|e| e.to_string())?;
     Ok(exists.is_some())
+}
+
+fn artifact_node_visible_with_kind(
+    store: &ArtifactStore,
+    artifact_id: &str,
+    kind: &str,
+) -> Result<bool, String> {
+    let exists: bool = store
+        .connection()
+        .query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM artifacts a
+                WHERE a.id = ?1
+                  AND a.kind = ?2
+                  AND NOT EXISTS (
+                      SELECT 1 FROM manual_tombstones t
+                      WHERE t.tombstone_type = ?3
+                        AND t.artifact_id = a.id
+                  )
+            )
+            "#,
+            params![artifact_id, kind, ARTIFACT_TOMBSTONE_NODE],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(exists)
 }
 
 fn project_ingestion_selected(
@@ -3156,15 +3533,19 @@ fn append_unique(target: &mut Vec<String>, source: Vec<String>) {
 mod tests {
     use tempfile::tempdir;
 
+    use super::super::export::{
+        artifact_export_json, artifact_materialize_graph,
+    };
     use super::super::query::{artifact_doctor, artifact_list, artifact_show};
     use super::super::store::{open_artifact_store, remove_artifact_node};
     use super::super::wire::{
-        ArtifactDoctorOptionsWire, ArtifactNodeRemoveWire,
-        ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactQueryWire,
-        ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
-        ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
-        ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL,
-        ARTIFACT_TOMBSTONE_NODE,
+        ArtifactDoctorOptionsWire, ArtifactGraphOptionsWire,
+        ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
+        ArtifactQueryWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC,
+        ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_FILE, ARTIFACT_KIND_THOUGHT,
+        ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
+        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
+        ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_TOMBSTONE_NODE,
     };
     use super::*;
 
@@ -4268,6 +4649,267 @@ mod tests {
             artifact_show(&store, "stale_cl:1").unwrap().payloads[0].payload
                 ["note"],
             json!("New note")
+        );
+    }
+
+    #[test]
+    fn reconciliation_links_targets_after_out_of_order_targeted_rebuilds() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("acme");
+        let project_file = project_dir.join("acme.gp");
+        let artifact_dir = project_dir.join("artifacts/ace-run/20260505120000");
+        let beads_dir = tmp.path().join("workspace/sdd/beads");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        std::fs::write(
+            &project_file,
+            "NAME: cl-one\nSTATUS: WIP\nCOMMITS:\n  (1) Initial note\n",
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({"name": "agent-alpha"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("done.json"),
+            json!({"name": "agent-alpha", "cl_name": "cl-one"}).to_string(),
+        )
+        .unwrap();
+        write_bead_issues(
+            &beads_dir,
+            &[
+                r#"{"id":"sase-9","title":"Epic","status":"open","issue_type":"plan","tier":"epic","owner":"owner@example.com","assignee":"agent-alpha","created_at":"2026-05-05T00:00:00Z","created_by":"owner@example.com","updated_at":"2026-05-05T00:00:00Z","description":"","notes":"","design":"","is_ready_to_work":true,"changespec_name":"cl-one","dependencies":[]}"#,
+            ],
+        );
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                beads_dir: Some(beads_dir.to_string_lossy().into_owned()),
+                include_sources: vec![ARTIFACT_SOURCE_BEAD_STORE.to_string()],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+        let pending = artifact_show(&store, "sase-9").unwrap();
+        assert_eq!(
+            pending.payloads[0].payload["pending_worker_agent_id"],
+            "agent-alpha"
+        );
+        assert_eq!(
+            pending.payloads[0].payload["unresolved_related"][0],
+            "cl-one"
+        );
+
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_PROJECT_FILE.to_string(),
+                    ARTIFACT_SOURCE_CHANGESPEC.to_string(),
+                    ARTIFACT_SOURCE_COMMIT.to_string(),
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string(),
+                ],
+                artifact_dir: Some(artifact_dir.to_string_lossy().into()),
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        let phase = artifact_show(&store, "sase-9").unwrap();
+        assert!(phase.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_WORKER
+                && link.source_id == "sase-9"
+                && link.target_id == "agent-alpha"
+        }));
+        assert!(phase.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_RELATED
+                && link.source_id == "sase-9"
+                && link.target_id == "cl-one"
+        }));
+        assert!(phase.payloads[0]
+            .payload
+            .get("pending_worker_agent_id")
+            .is_none());
+        assert!(phase.payloads[0]
+            .payload
+            .get("unresolved_related")
+            .is_none());
+
+        let agent = artifact_show(&store, "agent-alpha").unwrap();
+        assert!(agent.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_RELATED
+                && link.source_id == "agent-alpha"
+                && link.target_id == "cl-one"
+        }));
+        assert!(agent.payloads[0]
+            .payload
+            .get("unresolved_related")
+            .is_none());
+    }
+
+    #[test]
+    fn end_to_end_fixture_passes_doctor_and_detail_queries() {
+        let tmp = tempdir().unwrap();
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("acme");
+        let project_file = project_dir.join("acme.gp");
+        let artifact_dir = project_dir.join("artifacts/ace-run/20260505120000");
+        let beads_dir = tmp.path().join("workspace/sdd/beads");
+        let response_path = artifact_dir.join("response.md");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        std::fs::write(
+            &project_file,
+            "NAME: cl-one\nDESCRIPTION: Build the feature.\nSTATUS: WIP\nCOMMITS:\n  (1) Initial note\n",
+        )
+        .unwrap();
+        std::fs::write(&response_path, "done").unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({"name": "agent-alpha", "llm_provider": "codex"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("done.json"),
+            json!({
+                "name": "agent-alpha",
+                "cl_name": "cl-one",
+                "response_path": response_path
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("codex_thinking.jsonl"),
+            json!({
+                "text": "inspect the artifact graph",
+                "timestamp": "2026-05-05T12:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        write_bead_issues(
+            &beads_dir,
+            &[
+                r#"{"id":"sase-10","title":"Epic","status":"open","issue_type":"plan","tier":"epic","owner":"owner@example.com","assignee":"","created_at":"2026-05-05T00:00:00Z","created_by":"owner@example.com","updated_at":"2026-05-05T00:00:00Z","description":"","notes":"","design":"","is_ready_to_work":true,"changespec_name":"cl-one","dependencies":[]}"#,
+                r#"{"id":"sase-10.1","title":"Phase","status":"in_progress","issue_type":"phase","parent_id":"sase-10","owner":"owner@example.com","assignee":"agent-alpha","created_at":"2026-05-05T00:00:00Z","created_by":"owner@example.com","updated_at":"2026-05-05T00:00:00Z","description":"","notes":"","design":"","is_ready_to_work":false,"dependencies":[]}"#,
+            ],
+        );
+
+        let first_db = tmp.path().join("first.sqlite");
+        let second_db = tmp.path().join("second.sqlite");
+        let request = ArtifactRebuildRequestWire {
+            projects_root: Some(projects_root.to_string_lossy().into()),
+            workspace_root: Some(
+                tmp.path().join("workspace").to_string_lossy().into(),
+            ),
+            beads_dir: Some(beads_dir.to_string_lossy().into_owned()),
+            ..ArtifactRebuildRequestWire::default()
+        };
+
+        let mut first = open_artifact_store(&first_db).unwrap();
+        let result = artifact_rebuild(&mut first, request.clone()).unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        let doctor =
+            artifact_doctor(&first, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+        assert!(doctor.ok, "{doctor:?}");
+
+        let changespec = artifact_show(&first, "cl-one").unwrap();
+        assert!(changespec.children.iter().any(|node| {
+            node.kind == ARTIFACT_KIND_COMMIT && node.id == "cl-one:1"
+        }));
+        assert!(changespec.inbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_RELATED
+                && link.source_id == "agent-alpha"
+        }));
+        assert!(changespec.inbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_RELATED
+                && link.source_id == "sase-10"
+        }));
+
+        let agent = artifact_show(&first, "agent-alpha").unwrap();
+        assert!(agent.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_CREATED
+                && link.target_id == response_path.to_string_lossy()
+        }));
+        assert!(agent.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_CREATED
+                && link.target_id.starts_with("thought:")
+        }));
+
+        let bead = artifact_show(&first, "sase-10.1").unwrap();
+        assert!(bead.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_PARENT
+                && link.target_id == "sase-10"
+        }));
+        assert!(bead.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_WORKER
+                && link.target_id == "agent-alpha"
+        }));
+
+        let response =
+            artifact_show(&first, response_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            response.node.as_ref().map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_FILE)
+        );
+        assert_eq!(response.path_to_root.last().unwrap().id, ARTIFACT_ROOT_ID);
+
+        let thoughts = artifact_list(
+            &first,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_THOUGHT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(thoughts.len(), 1);
+        let thought = artifact_show(&first, &thoughts[0].id).unwrap();
+        assert_eq!(
+            thought.path_to_root.first().map(|node| node.id.as_str()),
+            Some(thoughts[0].id.as_str())
+        );
+        assert_eq!(thought.path_to_root.last().unwrap().id, ARTIFACT_ROOT_ID);
+
+        let graph = artifact_materialize_graph(
+            &first,
+            ArtifactGraphOptionsWire {
+                root_id: Some("cl-one".to_string()),
+                include_inbound: true,
+                include_outbound: true,
+                max_depth: Some(1),
+                limit: None,
+                ..ArtifactGraphOptionsWire::default()
+            },
+        )
+        .unwrap();
+        let graph_ids: BTreeSet<_> =
+            graph.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert!(graph_ids.contains("cl-one:1"));
+        assert!(graph_ids.contains("agent-alpha"));
+        assert!(graph_ids.contains("sase-10"));
+
+        let mut second = open_artifact_store(&second_db).unwrap();
+        artifact_rebuild(&mut second, request).unwrap();
+        let export_options = ArtifactGraphOptionsWire {
+            full_graph: true,
+            root_id: Some(ARTIFACT_ROOT_ID.to_string()),
+            limit: None,
+            ..ArtifactGraphOptionsWire::default()
+        };
+        assert_eq!(
+            artifact_export_json(&first, export_options.clone()).unwrap(),
+            artifact_export_json(&second, export_options).unwrap()
         );
     }
 
