@@ -1911,7 +1911,10 @@ where
 }
 
 fn artifact_store_error_to_pyerr(err: String) -> PyErr {
-    if err.contains("schema_version") || err.contains("invalid artifact") {
+    if err.contains("schema_version")
+        || err.contains("invalid artifact")
+        || err.contains("unsupported artifact")
+    {
         PyValueError::new_err(err)
     } else {
         PyRuntimeError::new_err(err)
@@ -3283,6 +3286,130 @@ mod tests {
                 py_artifact_add(py, index.to_str().unwrap(), bad).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert!(err.to_string().contains("request must contain"));
+
+            let missing_node_field_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "node": {
+                        "id": "/tmp/missing-title.md",
+                        "kind": "file",
+                        "provenance": "manual"
+                    }
+                }),
+            )
+            .unwrap();
+            let missing_node_field = missing_node_field_obj
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap();
+            let err = py_artifact_add(
+                py,
+                index.to_str().unwrap(),
+                missing_node_field,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("ArtifactNodeUpsertWire dict"));
+
+            let malformed_remove_obj =
+                json_value_to_py(py, &json!({"schema_version": 1})).unwrap();
+            let malformed_remove =
+                malformed_remove_obj.bind(py).downcast::<PyDict>().unwrap();
+            let err = py_artifact_remove(
+                py,
+                index.to_str().unwrap(),
+                malformed_remove,
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("ArtifactNodeRemoveWire dict"));
+
+            let schema_mismatch_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 999,
+                    "text": null,
+                    "kinds": [],
+                    "link_types": [],
+                    "provenance": null,
+                    "source_kinds": [],
+                    "source_ids": [],
+                    "root_id": null,
+                    "include_tombstoned": false,
+                    "limit": 20,
+                    "offset": 0
+                }),
+            )
+            .unwrap();
+            let schema_mismatch =
+                schema_mismatch_obj.bind(py).downcast::<PyDict>().unwrap();
+            let err = py_artifact_list(
+                py,
+                index.to_str().unwrap(),
+                Some(schema_mismatch),
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err
+                .to_string()
+                .contains("unsupported artifact schema_version"));
+
+            let invalid_cleanup_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "projects_root": null,
+                    "workspace_root": null,
+                    "beads_dir": null,
+                    "include_sources": [],
+                    "exclude_sources": [],
+                    "target_path": null,
+                    "artifact_dir": null,
+                    "stale_cleanup": "delete"
+                }),
+            )
+            .unwrap();
+            let invalid_cleanup =
+                invalid_cleanup_obj.bind(py).downcast::<PyDict>().unwrap();
+            let err = py_artifact_rebuild(
+                py,
+                index.to_str().unwrap(),
+                Some(invalid_cleanup),
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err
+                .to_string()
+                .contains("unsupported artifact stale_cleanup"));
+
+            let invalid_source_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "projects_root": null,
+                    "workspace_root": null,
+                    "beads_dir": null,
+                    "include_sources": ["unknown_source"],
+                    "exclude_sources": [],
+                    "target_path": null,
+                    "artifact_dir": null,
+                    "stale_cleanup": "none"
+                }),
+            )
+            .unwrap();
+            let invalid_source =
+                invalid_source_obj.bind(py).downcast::<PyDict>().unwrap();
+            let err = py_artifact_rebuild(
+                py,
+                index.to_str().unwrap(),
+                Some(invalid_source),
+            )
+            .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err
+                .to_string()
+                .contains("unsupported artifact source_kind"));
 
             let _ = fs::remove_dir(index.parent().unwrap());
         });

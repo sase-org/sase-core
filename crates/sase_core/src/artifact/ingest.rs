@@ -3176,6 +3176,8 @@ fn resolve_rebuild_request(
 ) -> Result<ResolvedArtifactRebuildRequest, String> {
     validate_schema_version(request.schema_version)?;
     validate_stale_cleanup(&request.stale_cleanup)?;
+    validate_source_kinds("include_sources", &request.include_sources)?;
+    validate_source_kinds("exclude_sources", &request.exclude_sources)?;
 
     Ok(ResolvedArtifactRebuildRequest {
         projects_root: normalize_optional_path(
@@ -3500,6 +3502,35 @@ fn validate_stale_cleanup(value: &str) -> Result<(), String> {
             "unsupported artifact stale_cleanup {value:?}; expected none or mark"
         ))
     }
+}
+
+fn validate_source_kinds(field: &str, values: &[String]) -> Result<(), String> {
+    for value in values {
+        if !is_supported_source_kind(value) {
+            return Err(format!(
+                "unsupported artifact source_kind {value:?} in {field}; expected one of {}",
+                supported_source_kinds().join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_supported_source_kind(value: &str) -> bool {
+    supported_source_kinds().contains(&value)
+}
+
+fn supported_source_kinds() -> [&'static str; 8] {
+    [
+        ARTIFACT_SOURCE_PROJECT_FILE,
+        ARTIFACT_SOURCE_CHANGESPEC,
+        ARTIFACT_SOURCE_COMMIT,
+        ARTIFACT_SOURCE_DIRECTORY,
+        ARTIFACT_SOURCE_BEAD_STORE,
+        ARTIFACT_SOURCE_AGENT_ARTIFACT,
+        ARTIFACT_SOURCE_AGENT_CREATED_FILE,
+        ARTIFACT_SOURCE_AGENT_THOUGHT,
+    ]
 }
 
 fn default_projects_root() -> Option<PathBuf> {
