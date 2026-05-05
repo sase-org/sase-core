@@ -33,6 +33,7 @@ use super::wire::{
     ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
     ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
     ARTIFACT_STALE_CLEANUP_MARK, ARTIFACT_STALE_CLEANUP_NONE,
+    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
     ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
@@ -48,6 +49,7 @@ pub const ARTIFACT_SOURCE_AGENT_THOUGHT: &str = "agent_thought";
 const AGENT_PAYLOAD_TYPE: &str = "agent";
 const AGENT_CREATED_FILE_PAYLOAD_TYPE: &str = "agent_created_file";
 const AGENT_THOUGHT_PAYLOAD_TYPE: &str = "agent_thought";
+const STALE_DERIVED_REASON: &str = "stale_derived";
 
 #[derive(Debug, Clone)]
 pub struct ResolvedArtifactRebuildRequest {
@@ -94,14 +96,20 @@ pub fn artifact_rebuild(
     request: ArtifactRebuildRequestWire,
 ) -> Result<ArtifactMutationResultWire, String> {
     let resolved = resolve_rebuild_request(request)?;
+    let cleanup_plan = cleanup_plan_for_request(store, &resolved)?;
     let mut mutations = ArtifactIngestMutations::new("rebuild");
 
-    if source_selected(&resolved, ARTIFACT_SOURCE_DIRECTORY) {
+    if let Some(target_path) = resolved.target_path.as_deref() {
+        mutations.merge(artifact_rebuild_target_path(
+            store,
+            &resolved,
+            target_path,
+        )?);
+    } else if source_selected(&resolved, ARTIFACT_SOURCE_DIRECTORY) {
         for maybe_path in [
             resolved.projects_root.as_deref(),
             resolved.workspace_root.as_deref(),
             resolved.beads_dir.as_deref(),
-            resolved.target_path.as_deref(),
             resolved.artifact_dir.as_deref(),
         ] {
             if let Some(path) = maybe_path {
@@ -117,16 +125,28 @@ pub fn artifact_rebuild(
         }
     }
 
-    if project_ingestion_selected(&resolved) {
+    if resolved.target_path.is_none() && project_ingestion_selected(&resolved) {
         mutations.merge(ingest_project_sources(store, &resolved)?);
     }
 
-    if agent_ingestion_selected(&resolved) {
+    if resolved.target_path.is_none() && agent_ingestion_selected(&resolved) {
         mutations.merge(ingest_agent_artifacts(store, &resolved)?);
     }
 
-    if source_selected(&resolved, ARTIFACT_SOURCE_BEAD_STORE) {
+    if resolved.target_path.is_none()
+        && source_selected(&resolved, ARTIFACT_SOURCE_BEAD_STORE)
+    {
         mutations.merge(ingest_beads(store, &resolved)?);
+    }
+
+    let active_sources = discover_active_sources(&resolved)?;
+    mutations.merge(update_source_watermarks(store, &active_sources)?);
+    if resolved.stale_cleanup == ARTIFACT_STALE_CLEANUP_MARK {
+        mutations.merge(mark_stale_sources(
+            store,
+            &cleanup_plan,
+            &active_sources,
+        )?);
     }
 
     Ok(mutations.into_result())
@@ -309,6 +329,311 @@ pub fn path_to_artifact_id(path: &Path) -> String {
     } else {
         value.into_owned()
     }
+}
+
+fn artifact_rebuild_target_path(
+    store: &mut ArtifactStore,
+    request: &ResolvedArtifactRebuildRequest,
+    target_path: &Path,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations = ArtifactIngestMutations::new("rebuild_target_path");
+    let normalized = normalize_artifact_path(target_path)?;
+
+    if source_selected(request, ARTIFACT_SOURCE_DIRECTORY)
+        && normalized.exists()
+    {
+        mutations.merge(artifact_upsert_path(
+            store,
+            &normalized,
+            ArtifactPathUpsertRequestWire {
+                provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
+                source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
+                source_id: Some(path_to_artifact_id(&normalized)),
+                ..ArtifactPathUpsertRequestWire::default()
+            },
+        )?);
+    }
+
+    if project_ingestion_selected(request) && is_project_file(&normalized) {
+        if normalized.exists() {
+            let mut seen_changespec_sources = BTreeMap::new();
+            mutations.merge(upsert_project_file(
+                store,
+                &normalized,
+                request,
+                &mut seen_changespec_sources,
+            )?);
+        }
+        return Ok(mutations.into_result());
+    }
+
+    if source_selected(request, ARTIFACT_SOURCE_BEAD_STORE)
+        && target_matches_bead_store(request, &normalized)
+    {
+        mutations.merge(ingest_beads(store, request)?);
+    }
+
+    Ok(mutations.into_result())
+}
+
+#[derive(Debug, Clone)]
+struct CleanupPlan {
+    scoped_sources: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn cleanup_plan_for_request(
+    store: &ArtifactStore,
+    request: &ResolvedArtifactRebuildRequest,
+) -> Result<CleanupPlan, String> {
+    let mut scoped_sources = BTreeMap::new();
+    for source_kind in selected_stale_source_kinds(request) {
+        scoped_sources.insert(
+            source_kind.to_string(),
+            cleanup_scope_source_ids(store, request, source_kind)?,
+        );
+    }
+    Ok(CleanupPlan { scoped_sources })
+}
+
+fn cleanup_scope_source_ids(
+    store: &ArtifactStore,
+    request: &ResolvedArtifactRebuildRequest,
+    source_kind: &str,
+) -> Result<BTreeSet<String>, String> {
+    if let Some(target_path) = request.target_path.as_deref() {
+        let normalized = normalize_artifact_path(target_path)?;
+        let target_id = path_to_artifact_id(&normalized);
+        if source_kind == ARTIFACT_SOURCE_DIRECTORY {
+            return Ok(BTreeSet::from([target_id]));
+        }
+        if project_source_kind(source_kind) && is_project_file(&normalized) {
+            return Ok(BTreeSet::from([target_id]));
+        }
+        if source_kind == ARTIFACT_SOURCE_BEAD_STORE
+            && target_matches_bead_store(request, &normalized)
+        {
+            return request
+                .beads_dir
+                .as_deref()
+                .map(path_to_artifact_id)
+                .map(|id| BTreeSet::from([id]))
+                .ok_or_else(|| {
+                    "targeted bead cleanup requires beads_dir".to_string()
+                });
+        }
+        return Ok(BTreeSet::new());
+    }
+
+    if let Some(artifact_dir) = request.artifact_dir.as_deref() {
+        let artifact_dir_id = path_to_artifact_id(artifact_dir);
+        if source_kind == ARTIFACT_SOURCE_AGENT_ARTIFACT {
+            return Ok(BTreeSet::from([artifact_dir_id]));
+        }
+        if source_kind == ARTIFACT_SOURCE_AGENT_CREATED_FILE
+            || source_kind == ARTIFACT_SOURCE_AGENT_THOUGHT
+        {
+            return existing_source_ids_for_hint(
+                store,
+                source_kind,
+                &artifact_dir_id,
+            );
+        }
+        return Ok(BTreeSet::new());
+    }
+
+    existing_watermark_source_ids(store, source_kind)
+}
+
+fn discover_active_sources(
+    request: &ResolvedArtifactRebuildRequest,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut active = BTreeMap::new();
+
+    if source_selected(request, ARTIFACT_SOURCE_DIRECTORY) {
+        let mut ids = BTreeSet::new();
+        for maybe_path in [
+            request.projects_root.as_deref(),
+            request.workspace_root.as_deref(),
+            request.beads_dir.as_deref(),
+            request.target_path.as_deref(),
+            request.artifact_dir.as_deref(),
+        ] {
+            if let Some(path) = maybe_path {
+                if path.exists() {
+                    ids.insert(path_to_artifact_id(path));
+                }
+            }
+        }
+        active.insert(ARTIFACT_SOURCE_DIRECTORY.to_string(), ids);
+    }
+
+    if project_ingestion_selected(request) {
+        let project_files = discover_selected_project_files(request);
+        for source_kind in [
+            ARTIFACT_SOURCE_PROJECT_FILE,
+            ARTIFACT_SOURCE_CHANGESPEC,
+            ARTIFACT_SOURCE_COMMIT,
+        ] {
+            if source_selected(request, source_kind) {
+                active.insert(
+                    source_kind.to_string(),
+                    project_files
+                        .iter()
+                        .map(|path| path_to_artifact_id(path))
+                        .collect(),
+                );
+            }
+        }
+    }
+
+    if source_selected(request, ARTIFACT_SOURCE_BEAD_STORE) {
+        let ids = request
+            .beads_dir
+            .as_deref()
+            .filter(|path| path.join("issues.jsonl").exists())
+            .map(path_to_artifact_id)
+            .map(|id| BTreeSet::from([id]))
+            .unwrap_or_default();
+        active.insert(ARTIFACT_SOURCE_BEAD_STORE.to_string(), ids);
+    }
+
+    if agent_ingestion_selected(request) {
+        let records = discover_selected_agent_records(request);
+        if source_selected(request, ARTIFACT_SOURCE_AGENT_ARTIFACT) {
+            active.insert(
+                ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string(),
+                records
+                    .iter()
+                    .filter_map(|record| {
+                        normalize_artifact_path(Path::new(&record.artifact_dir))
+                            .ok()
+                    })
+                    .map(|path| path_to_artifact_id(&path))
+                    .collect(),
+            );
+        }
+        if source_selected(request, ARTIFACT_SOURCE_AGENT_CREATED_FILE) {
+            let mut ids = BTreeSet::new();
+            for record in &records {
+                ids.extend(
+                    collect_agent_created_file_paths(record)
+                        .keys()
+                        .filter_map(|path| normalize_artifact_path(path).ok())
+                        .map(|path| path_to_artifact_id(&path)),
+                );
+            }
+            active.insert(ARTIFACT_SOURCE_AGENT_CREATED_FILE.to_string(), ids);
+        }
+        if source_selected(request, ARTIFACT_SOURCE_AGENT_THOUGHT) {
+            let mut ids = BTreeSet::new();
+            for record in &records {
+                ids.extend(
+                    collect_agent_thoughts(record)
+                        .source_files
+                        .iter()
+                        .filter_map(|path| normalize_artifact_path(path).ok())
+                        .map(|path| path_to_artifact_id(&path)),
+                );
+            }
+            active.insert(ARTIFACT_SOURCE_AGENT_THOUGHT.to_string(), ids);
+        }
+    }
+
+    Ok(active)
+}
+
+fn update_source_watermarks(
+    store: &mut ArtifactStore,
+    active_sources: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mutations = ArtifactIngestMutations::new("update_source_watermarks");
+    let tx = store
+        .connection_mut()
+        .transaction()
+        .map_err(|e| e.to_string())?;
+    for (source_kind, source_ids) in active_sources {
+        for source_id in source_ids {
+            tx.execute(
+                r#"
+                INSERT INTO source_watermarks (source_kind, source_id, watermark)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(source_kind, source_id) DO UPDATE SET
+                    watermark = excluded.watermark,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+                params![source_kind, source_id, source_watermark(source_id)],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(mutations.into_result())
+}
+
+fn mark_stale_sources(
+    store: &mut ArtifactStore,
+    cleanup_plan: &CleanupPlan,
+    active_sources: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations = ArtifactIngestMutations::new("mark_stale_sources");
+    let mut stale_by_kind = BTreeMap::new();
+    for (source_kind, scoped_ids) in &cleanup_plan.scoped_sources {
+        let active_ids =
+            active_sources.get(source_kind).cloned().unwrap_or_default();
+        let stale_ids: BTreeSet<_> =
+            scoped_ids.difference(&active_ids).cloned().collect();
+        if !stale_ids.is_empty() {
+            stale_by_kind.insert(source_kind.clone(), stale_ids);
+        }
+    }
+    if stale_by_kind.is_empty() {
+        return Ok(mutations.into_result());
+    }
+
+    let tx = store
+        .connection_mut()
+        .transaction()
+        .map_err(|e| e.to_string())?;
+    for (source_kind, source_ids) in stale_by_kind {
+        for source_id in source_ids {
+            let node_ids = stale_node_ids(&tx, &source_kind, &source_id)?;
+            for node_id in node_ids {
+                if node_id == ARTIFACT_ROOT_ID {
+                    continue;
+                }
+                if insert_stale_node_tombstone(
+                    &tx,
+                    &node_id,
+                    &source_kind,
+                    &source_id,
+                )? {
+                    mutations.result.tombstones_added += 1;
+                    mutations.result.affected_node_ids.push(node_id);
+                }
+            }
+
+            let link_ids = stale_link_ids(&tx, &source_kind, &source_id)?;
+            for link_id in link_ids {
+                if insert_stale_link_tombstone(
+                    &tx,
+                    &link_id,
+                    &source_kind,
+                    &source_id,
+                )? {
+                    mutations.result.tombstones_added += 1;
+                    mutations.result.affected_link_ids.push(link_id);
+                }
+            }
+
+            tx.execute(
+                "DELETE FROM source_watermarks WHERE source_kind = ?1 AND source_id = ?2",
+                params![source_kind, source_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(mutations.into_result())
 }
 
 fn ingest_project_sources(
@@ -2417,6 +2742,265 @@ fn source_selected(
         && !request.exclude_sources.contains(source_kind)
 }
 
+fn selected_stale_source_kinds(
+    request: &ResolvedArtifactRebuildRequest,
+) -> Vec<&'static str> {
+    [
+        ARTIFACT_SOURCE_PROJECT_FILE,
+        ARTIFACT_SOURCE_CHANGESPEC,
+        ARTIFACT_SOURCE_COMMIT,
+        ARTIFACT_SOURCE_BEAD_STORE,
+        ARTIFACT_SOURCE_AGENT_ARTIFACT,
+        ARTIFACT_SOURCE_AGENT_CREATED_FILE,
+        ARTIFACT_SOURCE_AGENT_THOUGHT,
+        ARTIFACT_SOURCE_DIRECTORY,
+    ]
+    .into_iter()
+    .filter(|source_kind| source_selected(request, source_kind))
+    .collect()
+}
+
+fn project_source_kind(source_kind: &str) -> bool {
+    matches!(
+        source_kind,
+        ARTIFACT_SOURCE_PROJECT_FILE
+            | ARTIFACT_SOURCE_CHANGESPEC
+            | ARTIFACT_SOURCE_COMMIT
+    )
+}
+
+fn discover_selected_project_files(
+    request: &ResolvedArtifactRebuildRequest,
+) -> Vec<PathBuf> {
+    if let Some(target_path) = request.target_path.as_deref() {
+        if target_path.exists() && is_project_file(target_path) {
+            return vec![target_path.to_path_buf()];
+        }
+        return Vec::new();
+    }
+    let Some(projects_root) = request.projects_root.as_deref() else {
+        return Vec::new();
+    };
+    let mut mutations = ArtifactIngestMutations::new("discover_project_files");
+    discover_project_files(projects_root, &mut mutations)
+}
+
+fn discover_selected_agent_records(
+    request: &ResolvedArtifactRebuildRequest,
+) -> Vec<AgentArtifactRecordWire> {
+    let Some(projects_root) = request.projects_root.as_deref() else {
+        return Vec::new();
+    };
+    let options = AgentArtifactScanOptionsWire::default();
+    if let Some(artifact_dir) = request.artifact_dir.as_deref() {
+        scan_agent_artifact_dir(projects_root, artifact_dir, &options)
+            .into_iter()
+            .collect()
+    } else {
+        scan_agent_artifacts(projects_root, options).records
+    }
+}
+
+fn target_matches_bead_store(
+    request: &ResolvedArtifactRebuildRequest,
+    target_path: &Path,
+) -> bool {
+    request.beads_dir.as_deref().is_some_and(|beads_dir| {
+        target_path == beads_dir
+            || target_path.starts_with(beads_dir)
+            || target_path.file_name().and_then(|name| name.to_str())
+                == Some("issues.jsonl")
+    })
+}
+
+fn existing_watermark_source_ids(
+    store: &ArtifactStore,
+    source_kind: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut stmt = store
+        .connection()
+        .prepare(
+            "SELECT source_id FROM source_watermarks WHERE source_kind = ?1 ORDER BY source_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([source_kind], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn existing_source_ids_for_hint(
+    store: &ArtifactStore,
+    source_kind: &str,
+    source_id_hint: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut ids = existing_watermark_source_ids(store, source_kind)?;
+    let mut stmt = store
+        .connection()
+        .prepare(
+            r#"
+            SELECT DISTINCT target_id
+            FROM artifact_links
+            WHERE provenance = ?1
+              AND source_kind = ?2
+              AND source_id_hint = ?3
+            ORDER BY target_id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![ARTIFACT_PROVENANCE_DERIVED, source_kind, source_id_hint],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        ids.insert(row.map_err(|e| e.to_string())?);
+    }
+    Ok(ids)
+}
+
+fn source_watermark(source_id: &str) -> String {
+    if let Some((size, mtime_unix)) = file_size_and_mtime(Path::new(source_id))
+    {
+        format!("{size}:{mtime_unix}")
+    } else {
+        "present".to_string()
+    }
+}
+
+fn stale_node_ids(
+    tx: &rusqlite::Transaction<'_>,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = tx
+        .prepare(
+            r#"
+            SELECT id
+            FROM artifacts
+            WHERE provenance = ?1
+              AND source_kind = ?2
+              AND source_id = ?3
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![ARTIFACT_PROVENANCE_DERIVED, source_kind, source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn stale_link_ids(
+    tx: &rusqlite::Transaction<'_>,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = tx
+        .prepare(
+            r#"
+            SELECT id
+            FROM artifact_links
+            WHERE provenance = ?1
+              AND source_kind = ?2
+              AND source_id_hint = ?3
+            ORDER BY id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![ARTIFACT_PROVENANCE_DERIVED, source_kind, source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn insert_stale_node_tombstone(
+    tx: &rusqlite::Transaction<'_>,
+    artifact_id: &str,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<bool, String> {
+    insert_stale_tombstone(
+        tx,
+        ARTIFACT_TOMBSTONE_NODE,
+        Some(artifact_id),
+        None,
+        source_kind,
+        source_id,
+    )
+}
+
+fn insert_stale_link_tombstone(
+    tx: &rusqlite::Transaction<'_>,
+    link_id: &str,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<bool, String> {
+    insert_stale_tombstone(
+        tx,
+        ARTIFACT_TOMBSTONE_LINK,
+        None,
+        Some(link_id),
+        source_kind,
+        source_id,
+    )
+}
+
+fn insert_stale_tombstone(
+    tx: &rusqlite::Transaction<'_>,
+    tombstone_type: &str,
+    artifact_id: Option<&str>,
+    link_id: Option<&str>,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<bool, String> {
+    let exists: bool = tx
+        .query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM manual_tombstones
+                WHERE tombstone_type = ?1
+                  AND COALESCE(artifact_id, '') = COALESCE(?2, '')
+                  AND COALESCE(link_id, '') = COALESCE(?3, '')
+                  AND reason = ?4
+            )
+            "#,
+            params![tombstone_type, artifact_id, link_id, STALE_DERIVED_REASON],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists {
+        return Ok(false);
+    }
+    tx.execute(
+        r#"
+        INSERT INTO manual_tombstones (
+            tombstone_type, artifact_id, link_id, source_kind, source_id, reason
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "#,
+        params![
+            tombstone_type,
+            artifact_id,
+            link_id,
+            source_kind,
+            source_id,
+            STALE_DERIVED_REASON,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 fn validate_schema_version(schema_version: u32) -> Result<(), String> {
     if schema_version != ARTIFACT_WIRE_SCHEMA_VERSION {
         return Err(format!(
@@ -2572,14 +3156,15 @@ fn append_unique(target: &mut Vec<String>, source: Vec<String>) {
 mod tests {
     use tempfile::tempdir;
 
-    use super::super::query::{artifact_list, artifact_show};
+    use super::super::query::{artifact_doctor, artifact_list, artifact_show};
     use super::super::store::{open_artifact_store, remove_artifact_node};
     use super::super::wire::{
-        ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-        ArtifactQueryWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC,
-        ARTIFACT_KIND_COMMIT, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
-        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-        ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_TOMBSTONE_NODE,
+        ArtifactDoctorOptionsWire, ArtifactNodeRemoveWire,
+        ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactQueryWire,
+        ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
+        ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+        ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL,
+        ARTIFACT_TOMBSTONE_NODE,
     };
     use super::*;
 
@@ -3564,6 +4149,126 @@ mod tests {
         .unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "alpha:1");
+    }
+
+    #[test]
+    fn targeted_project_file_upsert_updates_only_that_source() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("acme");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let first = project_dir.join("first.gp");
+        let second = project_dir.join("second.gp");
+        std::fs::write(
+            &first,
+            "NAME: first\nSTATUS: WIP\nCOMMITS:\n  (1) First note\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            "NAME: second\nSTATUS: WIP\nCOMMITS:\n  (1) Second note\n",
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let full = ArtifactRebuildRequestWire {
+            projects_root: Some(projects_root.to_string_lossy().into()),
+            workspace_root: None,
+            beads_dir: None,
+            include_sources: vec![
+                ARTIFACT_SOURCE_PROJECT_FILE.to_string(),
+                ARTIFACT_SOURCE_CHANGESPEC.to_string(),
+                ARTIFACT_SOURCE_COMMIT.to_string(),
+            ],
+            ..ArtifactRebuildRequestWire::default()
+        };
+        artifact_rebuild(&mut store, full).unwrap();
+
+        std::fs::write(
+            &first,
+            "NAME: first\nSTATUS: WIP\nCOMMITS:\n  (1) Updated first note\n",
+        )
+        .unwrap();
+        let result = artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(projects_root.to_string_lossy().into()),
+                workspace_root: None,
+                beads_dir: None,
+                include_sources: vec![
+                    ARTIFACT_SOURCE_PROJECT_FILE.to_string(),
+                    ARTIFACT_SOURCE_CHANGESPEC.to_string(),
+                    ARTIFACT_SOURCE_COMMIT.to_string(),
+                ],
+                target_path: Some(first.to_string_lossy().into()),
+                stale_cleanup: ARTIFACT_STALE_CLEANUP_MARK.to_string(),
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert_eq!(
+            artifact_show(&store, "first:1").unwrap().payloads[0].payload
+                ["note"],
+            json!("Updated first note")
+        );
+        assert_eq!(
+            artifact_show(&store, "second:1").unwrap().payloads[0].payload
+                ["note"],
+            json!("Second note")
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_marks_removed_project_source_and_clears_on_return() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let project_dir = projects_root.join("acme");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project_file = project_dir.join("stale.gp");
+        std::fs::write(
+            &project_file,
+            "NAME: stale_cl\nSTATUS: WIP\nCOMMITS:\n  (1) Old note\n",
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let request = ArtifactRebuildRequestWire {
+            projects_root: Some(projects_root.to_string_lossy().into()),
+            workspace_root: None,
+            beads_dir: None,
+            stale_cleanup: ARTIFACT_STALE_CLEANUP_MARK.to_string(),
+            ..ArtifactRebuildRequestWire::default()
+        };
+        artifact_rebuild(&mut store, request.clone()).unwrap();
+        assert!(artifact_show(&store, "stale_cl").unwrap().node.is_some());
+
+        std::fs::remove_file(&project_file).unwrap();
+        artifact_rebuild(&mut store, request.clone()).unwrap();
+        assert!(artifact_show(&store, "stale_cl").unwrap().node.is_none());
+        let doctor =
+            artifact_doctor(&store, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+        assert!(doctor.issues.iter().any(|issue| {
+            issue.issue_type == "stale_derived"
+                && issue.artifact_id.as_deref() == Some("stale_cl")
+        }));
+
+        std::fs::write(
+            &project_file,
+            "NAME: stale_cl\nSTATUS: WIP\nCOMMITS:\n  (1) New note\n",
+        )
+        .unwrap();
+        artifact_rebuild(&mut store, request).unwrap();
+        assert!(artifact_show(&store, "stale_cl").unwrap().node.is_some());
+        assert_eq!(
+            artifact_show(&store, "stale_cl:1").unwrap().payloads[0].payload
+                ["note"],
+            json!("New note")
+        );
     }
 
     fn write_bead_issues(beads_dir: &Path, lines: &[&str]) {

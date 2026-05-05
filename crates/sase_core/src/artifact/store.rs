@@ -14,6 +14,8 @@ use super::wire::{
     ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
+const STALE_DERIVED_REASON: &str = "stale_derived";
+
 pub struct ArtifactStore {
     index_path: PathBuf,
     conn: Connection,
@@ -213,14 +215,15 @@ pub fn upsert_artifact_node(
     let tx = store.conn.transaction().map_err(|e| e.to_string())?;
     if request.node.provenance == ARTIFACT_PROVENANCE_MANUAL {
         clear_node_tombstones(&tx, &request.node.id)?;
-    } else if request.node.provenance == ARTIFACT_PROVENANCE_DERIVED
-        && node_has_tombstone(&tx, &request.node.id)?
-    {
-        tx.commit().map_err(|e| e.to_string())?;
-        return Ok(ArtifactMutationResultWire {
-            operation: "upsert_node".to_string(),
-            ..ArtifactMutationResultWire::default()
-        });
+    } else if request.node.provenance == ARTIFACT_PROVENANCE_DERIVED {
+        clear_stale_node_tombstones(&tx, &request.node.id)?;
+        if node_has_manual_tombstone(&tx, &request.node.id)? {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(ArtifactMutationResultWire {
+                operation: "upsert_node".to_string(),
+                ..ArtifactMutationResultWire::default()
+            });
+        }
     }
 
     let node_json =
@@ -395,14 +398,15 @@ pub fn upsert_artifact_link(
 
     if link.provenance == ARTIFACT_PROVENANCE_MANUAL {
         clear_link_tombstones(&tx, &link.id)?;
-    } else if link.provenance == ARTIFACT_PROVENANCE_DERIVED
-        && link_has_tombstone(&tx, &link.id)?
-    {
-        tx.commit().map_err(|e| e.to_string())?;
-        return Ok(ArtifactMutationResultWire {
-            operation: "upsert_link".to_string(),
-            ..ArtifactMutationResultWire::default()
-        });
+    } else if link.provenance == ARTIFACT_PROVENANCE_DERIVED {
+        clear_stale_link_tombstones(&tx, &link.id)?;
+        if link_has_manual_tombstone(&tx, &link.id)? {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(ArtifactMutationResultWire {
+                operation: "upsert_link".to_string(),
+                ..ArtifactMutationResultWire::default()
+            });
+        }
     }
 
     let link_json = serde_json::to_string(&link).map_err(|e| e.to_string())?;
@@ -708,6 +712,25 @@ fn node_has_tombstone(
     .map_err(|e| e.to_string())
 }
 
+fn node_has_manual_tombstone(
+    tx: &Transaction<'_>,
+    artifact_id: &str,
+) -> Result<bool, String> {
+    tx.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM manual_tombstones
+            WHERE tombstone_type = ?1
+              AND artifact_id = ?2
+              AND COALESCE(reason, '') <> ?3
+        )
+        "#,
+        params![ARTIFACT_TOMBSTONE_NODE, artifact_id, STALE_DERIVED_REASON],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn link_has_tombstone(
     tx: &Transaction<'_>,
     link_id: &str,
@@ -720,6 +743,25 @@ fn link_has_tombstone(
         )
         "#,
         params![ARTIFACT_TOMBSTONE_LINK, link_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn link_has_manual_tombstone(
+    tx: &Transaction<'_>,
+    link_id: &str,
+) -> Result<bool, String> {
+    tx.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM manual_tombstones
+            WHERE tombstone_type = ?1
+              AND link_id = ?2
+              AND COALESCE(reason, '') <> ?3
+        )
+        "#,
+        params![ARTIFACT_TOMBSTONE_LINK, link_id, STALE_DERIVED_REASON],
         |row| row.get(0),
     )
     .map_err(|e| e.to_string())
@@ -744,6 +786,40 @@ fn clear_link_tombstones(
     tx.execute(
         "DELETE FROM manual_tombstones WHERE tombstone_type = ?1 AND link_id = ?2",
         params![ARTIFACT_TOMBSTONE_LINK, link_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn clear_stale_node_tombstones(
+    tx: &Transaction<'_>,
+    artifact_id: &str,
+) -> Result<(), String> {
+    tx.execute(
+        r#"
+        DELETE FROM manual_tombstones
+        WHERE tombstone_type = ?1
+          AND artifact_id = ?2
+          AND reason = ?3
+        "#,
+        params![ARTIFACT_TOMBSTONE_NODE, artifact_id, STALE_DERIVED_REASON],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn clear_stale_link_tombstones(
+    tx: &Transaction<'_>,
+    link_id: &str,
+) -> Result<(), String> {
+    tx.execute(
+        r#"
+        DELETE FROM manual_tombstones
+        WHERE tombstone_type = ?1
+          AND link_id = ?2
+          AND reason = ?3
+        "#,
+        params![ARTIFACT_TOMBSTONE_LINK, link_id, STALE_DERIVED_REASON],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

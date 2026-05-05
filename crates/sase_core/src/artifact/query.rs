@@ -13,6 +13,8 @@ use super::wire::{
     ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
+const STALE_DERIVED_REASON: &str = "stale_derived";
+
 pub fn artifact_show(
     store: &ArtifactStore,
     artifact_id: &str,
@@ -269,6 +271,7 @@ pub fn artifact_doctor(
     if options.check_tombstones {
         issues.extend(tombstone_issues(conn)?);
         issues.extend(stale_derived_marker_issues(conn)?);
+        issues.extend(unresolved_payload_issues(conn)?);
     }
 
     issues.sort_by(|a, b| {
@@ -734,6 +737,42 @@ fn stale_derived_marker_issues(
     conn: &Connection,
 ) -> Result<Vec<ArtifactDoctorIssueWire>, String> {
     let mut issues = Vec::new();
+    let mut stale_stmt = conn
+        .prepare(
+            r#"
+            SELECT artifact_id, link_id, source_kind, source_id
+            FROM manual_tombstones
+            WHERE reason = ?1
+            ORDER BY tombstone_type, artifact_id, link_id, source_kind, source_id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let stale_rows = stale_stmt
+        .query_map([STALE_DERIVED_REASON], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in stale_rows {
+        let (artifact_id, link_id, source_kind, source_id) =
+            row.map_err(|e| e.to_string())?;
+        issues.push(issue(
+            "stale_derived",
+            "warning",
+            artifact_id.as_deref(),
+            link_id.as_deref(),
+            &format!(
+                "derived artifact/link is stale for source {}:{}",
+                source_kind.as_deref().unwrap_or_default(),
+                source_id.as_deref().unwrap_or_default()
+            ),
+        ));
+    }
+
     let mut node_stmt = conn
         .prepare(
             r#"
@@ -786,6 +825,70 @@ fn stale_derived_marker_issues(
         ));
     }
 
+    Ok(issues)
+}
+
+fn unresolved_payload_issues(
+    conn: &Connection,
+) -> Result<Vec<ArtifactDoctorIssueWire>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT artifact_id, payload_json
+            FROM artifact_payloads
+            WHERE provenance = ?1
+            ORDER BY artifact_id, payload_type, source_kind, source_id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([ARTIFACT_PROVENANCE_DERIVED], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut issues = Vec::new();
+    for row in rows {
+        let (artifact_id, payload_json) = row.map_err(|e| e.to_string())?;
+        let Ok(payload) =
+            serde_json::from_str::<serde_json::Value>(&payload_json)
+        else {
+            continue;
+        };
+        let Some(inner) = payload.get("payload") else {
+            continue;
+        };
+        if let Some(worker_id) = inner
+            .get("pending_worker_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            issues.push(issue(
+                "unresolved_worker",
+                "warning",
+                Some(&artifact_id),
+                None,
+                &format!("pending worker agent {worker_id} is not present"),
+            ));
+        }
+        if let Some(unresolved) = inner
+            .get("unresolved_related")
+            .and_then(serde_json::Value::as_array)
+        {
+            for value in unresolved {
+                if let Some(target) =
+                    value.as_str().filter(|value| !value.is_empty())
+                {
+                    issues.push(issue(
+                        "unresolved_related",
+                        "warning",
+                        Some(&artifact_id),
+                        None,
+                        &format!("related target {target} is not present"),
+                    ));
+                }
+            }
+        }
+    }
     Ok(issues)
 }
 
