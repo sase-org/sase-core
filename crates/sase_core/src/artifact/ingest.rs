@@ -2,11 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::agent_scan::{
     scan_agent_artifact_dir, scan_agent_artifacts, AgentArtifactRecordWire,
@@ -27,10 +29,11 @@ use super::wire::{
     ArtifactPayloadWire, ArtifactRebuildRequestWire, ARTIFACT_KIND_AGENT,
     ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
     ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
-    ARTIFACT_KIND_ROOT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
-    ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_STALE_CLEANUP_MARK,
-    ARTIFACT_STALE_CLEANUP_NONE, ARTIFACT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED,
+    ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
+    ARTIFACT_STALE_CLEANUP_MARK, ARTIFACT_STALE_CLEANUP_NONE,
+    ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 pub const ARTIFACT_SOURCE_PROJECT_FILE: &str = "project_file";
@@ -44,6 +47,7 @@ pub const ARTIFACT_SOURCE_AGENT_THOUGHT: &str = "agent_thought";
 
 const AGENT_PAYLOAD_TYPE: &str = "agent";
 const AGENT_CREATED_FILE_PAYLOAD_TYPE: &str = "agent_created_file";
+const AGENT_THOUGHT_PAYLOAD_TYPE: &str = "agent_thought";
 
 #[derive(Debug, Clone)]
 pub struct ResolvedArtifactRebuildRequest {
@@ -614,6 +618,8 @@ fn ingest_agent_artifacts(
     let agent_ids_by_timestamp = agent_ids_by_timestamp(&records);
     let created_files_selected =
         source_selected(request, ARTIFACT_SOURCE_AGENT_CREATED_FILE);
+    let thoughts_selected =
+        source_selected(request, ARTIFACT_SOURCE_AGENT_THOUGHT);
 
     for record in records {
         let agent_id = agent_artifact_id(&record);
@@ -635,6 +641,11 @@ fn ingest_agent_artifacts(
         let created_files = collect_agent_created_file_paths(&record);
         let related_targets =
             collect_agent_related_targets(&record, &agent_ids_by_timestamp);
+        let thought_extraction = if thoughts_selected {
+            collect_agent_thoughts(&record)
+        } else {
+            ThoughtExtraction::default()
+        };
         mutations.merge(upsert_derived_payload(
             store,
             derived_payload(
@@ -650,6 +661,13 @@ fn ingest_agent_artifacts(
                         .keys()
                         .map(|path| path_to_artifact_id(path))
                         .collect::<Vec<_>>(),
+                    "thought_count": thought_extraction.thoughts.len(),
+                    "thought_source_files": thought_extraction
+                        .source_files
+                        .iter()
+                        .map(|path| path_to_artifact_id(path))
+                        .collect::<Vec<_>>(),
+                    "thought_errors": thought_extraction.errors.clone(),
                     "unresolved_related": related_targets.unresolved,
                 }),
             ),
@@ -659,6 +677,29 @@ fn ingest_agent_artifacts(
             for (path, reason) in created_files {
                 mutations.merge(upsert_created_file(
                     store, &agent_id, &source_id, &path, &reason,
+                )?);
+            }
+        }
+
+        if thoughts_selected {
+            for source_file in &thought_extraction.source_files {
+                mutations.merge(upsert_created_file(
+                    store,
+                    &agent_id,
+                    &source_id,
+                    source_file,
+                    "thought_source",
+                )?);
+            }
+            for error in &thought_extraction.errors {
+                mutations.error(format!(
+                    "agent_thought {}: {error}",
+                    record.artifact_dir
+                ));
+            }
+            for thought in thought_extraction.thoughts {
+                mutations.merge(upsert_agent_thought(
+                    store, &agent_id, &source_id, thought,
                 )?);
             }
         }
@@ -926,6 +967,508 @@ fn agent_ids_by_timestamp(
             .insert(agent_artifact_id(record));
     }
     out
+}
+
+#[derive(Debug, Clone, Default)]
+struct ThoughtExtraction {
+    thoughts: Vec<ThoughtRecord>,
+    source_files: Vec<PathBuf>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ThoughtRecord {
+    text: String,
+    source_provider: String,
+    source_file: PathBuf,
+    ordinal: usize,
+    timestamp: Option<String>,
+    following_action: Option<String>,
+    display_title: String,
+}
+
+fn collect_agent_thoughts(
+    record: &AgentArtifactRecordWire,
+) -> ThoughtExtraction {
+    let artifact_dir = Path::new(&record.artifact_dir);
+    let mut extraction = ThoughtExtraction::default();
+
+    let codex_path = artifact_dir.join("codex_thinking.jsonl");
+    if codex_path.exists() {
+        merge_thought_parse_result(
+            &mut extraction,
+            parse_codex_thinking_file(&codex_path),
+        );
+    }
+
+    for claude_path in discover_claude_thinking_paths(artifact_dir) {
+        merge_thought_parse_result(
+            &mut extraction,
+            parse_claude_thinking_file(&claude_path),
+        );
+    }
+
+    extraction.source_files.sort();
+    extraction.source_files.dedup();
+    extraction.thoughts.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.source_provider.cmp(&right.source_provider))
+            .then_with(|| left.source_file.cmp(&right.source_file))
+            .then_with(|| left.ordinal.cmp(&right.ordinal))
+    });
+    extraction
+}
+
+fn merge_thought_parse_result(
+    extraction: &mut ThoughtExtraction,
+    result: ThoughtParseResult,
+) {
+    if result.source_file.is_some() && !result.thoughts.is_empty() {
+        extraction
+            .source_files
+            .extend(result.source_file.iter().cloned());
+    }
+    extraction.thoughts.extend(result.thoughts);
+    extraction.errors.extend(result.errors);
+}
+
+#[derive(Debug, Clone, Default)]
+struct ThoughtParseResult {
+    source_file: Option<PathBuf>,
+    thoughts: Vec<ThoughtRecord>,
+    errors: Vec<String>,
+}
+
+fn parse_codex_thinking_file(path: &Path) -> ThoughtParseResult {
+    let mut result = ThoughtParseResult {
+        source_file: Some(path.to_path_buf()),
+        ..ThoughtParseResult::default()
+    };
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            result.errors.push(format!(
+                "failed to read Codex thinking file {}: {error}",
+                path.display()
+            ));
+            return result;
+        }
+    };
+
+    let mut ordinal = 0usize;
+    let mut malformed = 0usize;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            malformed += 1;
+            continue;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(Value::Object(entry)) = serde_json::from_str::<Value>(line)
+        else {
+            malformed += 1;
+            continue;
+        };
+        let Some(text) = entry.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        ordinal += 1;
+        result.thoughts.push(ThoughtRecord {
+            text: text.to_string(),
+            source_provider: "codex".to_string(),
+            source_file: path.to_path_buf(),
+            ordinal,
+            timestamp: entry
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
+            following_action: entry
+                .get("following_action")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string),
+            display_title: thought_display_title(text),
+        });
+    }
+    if malformed > 0 {
+        result.errors.push(format!(
+            "skipped {malformed} malformed Codex thinking line(s) in {}",
+            path.display()
+        ));
+    }
+    result
+}
+
+fn discover_claude_thinking_paths(artifact_dir: &Path) -> Vec<PathBuf> {
+    let Some(meta) = load_json_object(&artifact_dir.join("agent_meta.json"))
+    else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for key in ["claude_session_path", "claude_transcript_path"] {
+        push_json_string_paths(&mut paths, artifact_dir, meta.get(key));
+    }
+    for key in ["claude_session_paths", "claude_transcript_paths"] {
+        push_json_string_paths(&mut paths, artifact_dir, meta.get(key));
+    }
+    paths.sort();
+    paths.dedup();
+    paths.retain(|path| path.exists());
+    paths
+}
+
+fn push_json_string_paths(
+    paths: &mut Vec<PathBuf>,
+    artifact_dir: &Path,
+    value: Option<&Value>,
+) {
+    match value {
+        Some(Value::String(path)) if !path.trim().is_empty() => {
+            paths.push(resolve_agent_path(artifact_dir, path));
+        }
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let Value::String(path) = item {
+                    if !path.trim().is_empty() {
+                        paths.push(resolve_agent_path(artifact_dir, path));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_claude_thinking_file(path: &Path) -> ThoughtParseResult {
+    let mut result = ThoughtParseResult {
+        source_file: Some(path.to_path_buf()),
+        ..ThoughtParseResult::default()
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            result.errors.push(format!(
+                "failed to read Claude transcript {}: {error}",
+                path.display()
+            ));
+            return result;
+        }
+    };
+    let content = String::from_utf8_lossy(&bytes);
+    let mut events = Vec::new();
+    let mut malformed = 0usize;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(Value::Object(event)) => events.push(event),
+            Ok(_) | Err(_) => malformed += 1,
+        }
+    }
+
+    let mut ordinal = 0usize;
+    for (index, event) in events.iter().enumerate() {
+        if event.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = event
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("thinking") {
+                continue;
+            }
+            let Some(text) = block.get("thinking").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            ordinal += 1;
+            result.thoughts.push(ThoughtRecord {
+                text: text.to_string(),
+                source_provider: "claude".to_string(),
+                source_file: path.to_path_buf(),
+                ordinal,
+                timestamp: event
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string),
+                following_action: find_claude_following_action(&events, index),
+                display_title: thought_display_title(text),
+            });
+        }
+    }
+    if malformed > 0 {
+        result.errors.push(format!(
+            "skipped {malformed} malformed Claude transcript line(s) in {}",
+            path.display()
+        ));
+    }
+    result
+}
+
+fn find_claude_following_action(
+    events: &[Map<String, Value>],
+    index: usize,
+) -> Option<String> {
+    let mut text_action = None;
+    for event in events.iter().skip(index + 1).take(5).filter(|event| {
+        event.get("type").and_then(Value::as_str) == Some("assistant")
+    }) {
+        let Some(content) = event
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                return Some(format_claude_tool_action(block));
+            }
+            if block.get("type").and_then(Value::as_str) == Some("text")
+                && text_action.is_none()
+            {
+                if let Some(text) = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    text_action = Some(truncate_chars(text, 80));
+                }
+            }
+        }
+    }
+    text_action
+}
+
+fn format_claude_tool_action(block: &Value) -> String {
+    let name = block
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown");
+    let input = block.get("input").and_then(Value::as_object);
+
+    if matches!(name, "Read" | "Write" | "Edit") {
+        let filename = input
+            .and_then(|input| input.get("file_path"))
+            .and_then(Value::as_str)
+            .and_then(path_basename);
+        return filename
+            .map(|filename| format!("{name} {filename}"))
+            .unwrap_or_else(|| name.to_string());
+    }
+
+    if name == "Bash" {
+        let first_word = input
+            .and_then(|input| input.get("command"))
+            .and_then(Value::as_str)
+            .and_then(|command| command.split_whitespace().next());
+        return first_word
+            .map(|word| format!("Bash `{word}`"))
+            .unwrap_or_else(|| "Bash".to_string());
+    }
+
+    if matches!(name, "Grep" | "Glob") {
+        let pattern = input
+            .and_then(|input| input.get("pattern"))
+            .and_then(Value::as_str)
+            .filter(|pattern| !pattern.is_empty());
+        return pattern
+            .map(|pattern| format!("{name} /{pattern}/"))
+            .unwrap_or_else(|| name.to_string());
+    }
+
+    if name == "Task" {
+        return "Task (subagent)".to_string();
+    }
+    if name == "Skill" {
+        let skill = input
+            .and_then(|input| input.get("skill"))
+            .and_then(Value::as_str)
+            .filter(|skill| !skill.is_empty());
+        return skill
+            .map(|skill| format!("Skill {skill}"))
+            .unwrap_or_else(|| "Skill".to_string());
+    }
+
+    name.to_string()
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+}
+
+fn upsert_agent_thought(
+    store: &mut ArtifactStore,
+    agent_id: &str,
+    agent_source_id: &str,
+    thought: ThoughtRecord,
+) -> Result<ArtifactMutationResultWire, String> {
+    let mut mutations = ArtifactIngestMutations::new("upsert_agent_thought");
+    let source_file_id = normalize_artifact_path(&thought.source_file)
+        .map(|path| path_to_artifact_id(&path))
+        .unwrap_or_else(|_| thought.source_file.to_string_lossy().into_owned());
+    let thought_id = thought_artifact_id(&thought, &source_file_id);
+    let mut metadata = Map::new();
+    metadata.insert("created_by".to_string(), json!(agent_id));
+    metadata.insert(
+        "source_provider".to_string(),
+        json!(thought.source_provider),
+    );
+    metadata.insert("source_file".to_string(), json!(source_file_id.clone()));
+    metadata.insert("ordinal".to_string(), json!(thought.ordinal));
+    if let Some(timestamp) = &thought.timestamp {
+        metadata.insert("timestamp".to_string(), json!(timestamp));
+    }
+
+    let node = ArtifactNodeWire {
+        id: thought_id.clone(),
+        kind: ARTIFACT_KIND_THOUGHT.to_string(),
+        display_title: thought.display_title.clone(),
+        subtitle: Some(format!(
+            "{} thought {}",
+            thought.source_provider, thought.ordinal
+        )),
+        provenance: ARTIFACT_PROVENANCE_DERIVED.to_string(),
+        source_kind: Some(ARTIFACT_SOURCE_AGENT_THOUGHT.to_string()),
+        source_id: Some(source_file_id.clone()),
+        source_version: None,
+        search_text: format!(
+            "{} {} {} {}",
+            thought.display_title,
+            thought.source_provider,
+            source_file_id,
+            thought.text
+        ),
+        metadata,
+        created_at: thought.timestamp.clone(),
+        updated_at: None,
+    };
+
+    mutations.merge(upsert_artifact_node(
+        store,
+        ArtifactNodeUpsertWire {
+            schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+            node,
+            replace_payloads: false,
+        },
+    )?);
+
+    if artifact_node_exists(store, &thought_id)? {
+        mutations.merge(upsert_derived_payload(
+            store,
+            derived_payload(
+                thought_id.clone(),
+                AGENT_THOUGHT_PAYLOAD_TYPE,
+                ARTIFACT_SOURCE_AGENT_THOUGHT,
+                source_file_id.clone(),
+                None,
+                json!({
+                    "text": thought.text,
+                    "source_provider": thought.source_provider,
+                    "source_file": source_file_id,
+                    "ordinal": thought.ordinal,
+                    "timestamp": thought.timestamp,
+                    "following_action": thought.following_action,
+                    "display_title": thought.display_title,
+                }),
+            ),
+        )?);
+        mutations.merge(upsert_derived_link(
+            store,
+            ARTIFACT_LINK_CREATED,
+            agent_id,
+            &thought_id,
+            ARTIFACT_SOURCE_AGENT_THOUGHT,
+            agent_source_id,
+        )?);
+    }
+
+    Ok(mutations.into_result())
+}
+
+fn thought_artifact_id(
+    thought: &ThoughtRecord,
+    source_file_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(thought.text.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(thought.source_provider.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_file_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(thought.ordinal.to_string().as_bytes());
+    format!("thought:{}", hex_prefix(&hasher.finalize(), 16))
+}
+
+fn hex_prefix(bytes: &[u8], chars: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(chars);
+    for byte in bytes {
+        if output.len() >= chars {
+            break;
+        }
+        output.push(HEX[(byte >> 4) as usize] as char);
+        if output.len() >= chars {
+            break;
+        }
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn thought_display_title(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        "Thought".to_string()
+    } else {
+        truncate_chars(&compact, 60)
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut iter = text.chars();
+    let mut truncated = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = iter.next() else {
+            return text.to_string();
+        };
+        truncated.push(ch);
+    }
+    if iter.next().is_some() {
+        truncated.push_str("...");
+    }
+    truncated
+}
+
+fn load_json_object(path: &Path) -> Option<Map<String, Value>> {
+    let bytes = fs::read(path).ok()?;
+    match serde_json::from_slice::<Value>(&bytes).ok()? {
+        Value::Object(map) => Some(map),
+        _ => None,
+    }
 }
 
 fn collect_agent_created_file_paths(
@@ -2507,6 +3050,320 @@ mod tests {
                 && link.source_id == fallback_id
                 && link.target_id == "retry-parent"
         }));
+    }
+
+    #[test]
+    fn agent_thought_ingestion_creates_codex_thoughts_and_created_links() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "codex-agent",
+                "llm_provider": "codex"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("codex_thinking.jsonl"),
+            [
+                json!({
+                    "text": "first codex thought",
+                    "timestamp": "2026-05-05T12:00:00Z"
+                })
+                .to_string(),
+                json!({
+                    "text": "second codex thought",
+                    "timestamp": "2026-05-05T12:01:00Z",
+                    "following_action": "Read ingest.rs"
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let result = artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(
+                    projects_root.to_string_lossy().into_owned(),
+                ),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string(),
+                    ARTIFACT_SOURCE_AGENT_THOUGHT.to_string(),
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        let thoughts = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_THOUGHT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(thoughts.len(), 2);
+
+        let agent = artifact_show(&store, "codex-agent").unwrap();
+        let thought_ids: BTreeSet<_> =
+            thoughts.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(
+            agent
+                .outbound_links
+                .iter()
+                .filter(|link| {
+                    link.link_type == ARTIFACT_LINK_CREATED
+                        && link.source_id == "codex-agent"
+                        && thought_ids.contains(link.target_id.as_str())
+                })
+                .count(),
+            2
+        );
+        let source_id = artifact_dir
+            .join("codex_thinking.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            artifact_show(&store, &source_id)
+                .unwrap()
+                .node
+                .as_ref()
+                .map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_FILE)
+        );
+        assert!(agent.outbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_CREATED
+                && link.source_id == "codex-agent"
+                && link.target_id == source_id
+        }));
+    }
+
+    #[test]
+    fn agent_thought_ingestion_parses_claude_transcript_following_action() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        let transcript = tmp.path().join("claude/session.jsonl");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            [
+                json!({
+                    "type": "assistant",
+                    "timestamp": "2026-05-05T12:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "thinking", "thinking": "inspect the Rust parser"}
+                        ]
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "I will inspect the file first."}
+                        ]
+                    }
+                })
+                .to_string(),
+                json!({
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Read",
+                                "input": {"file_path": "/tmp/lib.rs"}
+                            }
+                        ]
+                    }
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "claude-agent",
+                "llm_provider": "claude",
+                "claude_session_path": transcript.to_string_lossy()
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let result =
+            artifact_rebuild(
+                &mut store,
+                ArtifactRebuildRequestWire {
+                    projects_root: Some(
+                        projects_root.to_string_lossy().into_owned(),
+                    ),
+                    include_sources: vec![
+                        ARTIFACT_SOURCE_AGENT_THOUGHT.to_string()
+                    ],
+                    ..ArtifactRebuildRequestWire::default()
+                },
+            )
+            .unwrap();
+
+        assert!(result.errors.is_empty(), "{result:?}");
+        let thoughts = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_THOUGHT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(thoughts.len(), 1);
+        let detail = artifact_show(&store, &thoughts[0].id).unwrap();
+        let payload = &detail.payloads[0].payload;
+        assert_eq!(payload["source_provider"], "claude");
+        assert_eq!(payload["text"], "inspect the Rust parser");
+        assert_eq!(payload["following_action"], "Read lib.rs");
+        assert!(detail.inbound_links.iter().any(|link| {
+            link.link_type == ARTIFACT_LINK_CREATED
+                && link.source_id == "claude-agent"
+        }));
+    }
+
+    #[test]
+    fn agent_thought_ids_do_not_collide_for_duplicate_text_sessions() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        let first = tmp.path().join("claude/first.jsonl");
+        let second = tmp.path().join("claude/second.jsonl");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        for path in [&first, &second] {
+            std::fs::write(
+                path,
+                json!({
+                    "type": "assistant",
+                    "timestamp": "2026-05-05T12:00:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "thinking", "thinking": "same thought text"}
+                        ]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "duplicate-agent",
+                "claude_session_paths": [
+                    first.to_string_lossy(),
+                    second.to_string_lossy()
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(
+                    projects_root.to_string_lossy().into_owned(),
+                ),
+                include_sources: vec![ARTIFACT_SOURCE_AGENT_THOUGHT.to_string()],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        let thoughts = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_THOUGHT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+        let ids: BTreeSet<_> = thoughts.iter().map(|node| &node.id).collect();
+        assert_eq!(thoughts.len(), 2);
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn agent_thought_ingestion_diagnoses_malformed_provider_lines() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({"name": "bad-thought-agent"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("codex_thinking.jsonl"),
+            "not json\n{\"text\":\"valid thought\"}\n{broken\n",
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let result =
+            artifact_rebuild(
+                &mut store,
+                ArtifactRebuildRequestWire {
+                    projects_root: Some(
+                        projects_root.to_string_lossy().into_owned(),
+                    ),
+                    include_sources: vec![
+                        ARTIFACT_SOURCE_AGENT_THOUGHT.to_string()
+                    ],
+                    ..ArtifactRebuildRequestWire::default()
+                },
+            )
+            .unwrap();
+
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| error.contains("malformed Codex thinking line")));
+        let thoughts = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_THOUGHT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(thoughts.len(), 1);
     }
 
     #[test]
