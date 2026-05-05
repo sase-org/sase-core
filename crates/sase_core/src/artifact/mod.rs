@@ -4,6 +4,7 @@
 //! through serde-shaped JSON records in `sase_core_py`.
 
 pub mod export;
+pub mod ingest;
 pub mod query;
 pub mod store;
 pub mod wire;
@@ -11,6 +12,17 @@ pub mod wire;
 pub use export::{
     artifact_export_dot, artifact_export_json, artifact_export_mermaid,
     artifact_materialize_graph,
+};
+pub use ingest::{
+    artifact_rebuild, artifact_upsert_path, derived_payload,
+    directory_node_for_path, file_node_for_path, merge_mutation_results,
+    normalize_artifact_path, path_to_artifact_id, select_directory_parent_id,
+    upsert_derived_payload, ArtifactIngestMutations,
+    ResolvedArtifactRebuildRequest, ARTIFACT_SOURCE_AGENT_ARTIFACT,
+    ARTIFACT_SOURCE_AGENT_CREATED_FILE, ARTIFACT_SOURCE_AGENT_THOUGHT,
+    ARTIFACT_SOURCE_BEAD_STORE, ARTIFACT_SOURCE_CHANGESPEC,
+    ARTIFACT_SOURCE_COMMIT, ARTIFACT_SOURCE_DIRECTORY,
+    ARTIFACT_SOURCE_PROJECT_FILE,
 };
 pub use query::{
     artifact_children, artifact_detail, artifact_doctor,
@@ -29,12 +41,14 @@ pub use wire::{
     ArtifactKindWire, ArtifactLinkRemoveWire, ArtifactLinkTypeWire,
     ArtifactLinkUpsertWire, ArtifactLinkWire, ArtifactMutationResultWire,
     ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-    ArtifactPayloadWire, ArtifactQueryWire, ARTIFACT_KIND_AGENT,
-    ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
-    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
-    ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT, ARTIFACT_KIND_UNKNOWN,
-    ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
-    ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
-    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
+    ArtifactPathUpsertRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
+    ArtifactRebuildRequestWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_BEAD,
+    ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_DIRECTORY,
+    ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_KIND_ROOT,
+    ARTIFACT_KIND_THOUGHT, ARTIFACT_KIND_UNKNOWN, ARTIFACT_LINK_CREATED,
+    ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
+    ARTIFACT_STALE_CLEANUP_MARK, ARTIFACT_STALE_CLEANUP_NONE,
+    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
+    ARTIFACT_WIRE_SCHEMA_VERSION,
 };

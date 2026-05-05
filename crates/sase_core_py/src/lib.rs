@@ -76,7 +76,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -117,7 +117,9 @@ use sase_core::artifact::{
     artifact_doctor as core_artifact_doctor,
     artifact_list as core_artifact_list,
     artifact_materialize_graph as core_artifact_materialize_graph,
+    artifact_rebuild as core_artifact_rebuild,
     artifact_show as core_artifact_show,
+    artifact_upsert_path as core_artifact_upsert_path,
     open_artifact_store as core_open_artifact_store,
     remove_artifact_link as core_remove_artifact_link,
     remove_artifact_node as core_remove_artifact_node,
@@ -125,11 +127,9 @@ use sase_core::artifact::{
     upsert_artifact_node as core_upsert_artifact_node,
     upsert_artifact_payload as core_upsert_artifact_payload,
     ArtifactDoctorOptionsWire, ArtifactGraphOptionsWire,
-    ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactMutationResultWire,
-    ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-    ArtifactPayloadWire, ArtifactQueryWire, ARTIFACT_KIND_DIRECTORY,
-    ARTIFACT_KIND_FILE, ARTIFACT_KIND_ROOT, ARTIFACT_PROVENANCE_MANUAL,
-    ARTIFACT_ROOT_ID, ARTIFACT_WIRE_SCHEMA_VERSION,
+    ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
+    ArtifactNodeUpsertWire, ArtifactPathUpsertRequestWire, ArtifactPayloadWire,
+    ArtifactQueryWire, ArtifactRebuildRequestWire,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -641,7 +641,7 @@ fn py_artifact_graph<'py>(
     json_serializable_to_py(py, &graph)
 }
 
-/// Placeholder rebuild entry point for Epic 1.
+/// Rebuild derived artifacts from selected source roots.
 #[pyfunction]
 #[pyo3(name = "artifact_rebuild", signature = (index_path, request = None))]
 fn py_artifact_rebuild<'py>(
@@ -649,29 +649,25 @@ fn py_artifact_rebuild<'py>(
     index_path: &str,
     request: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
-    if let Some(dict) = request {
-        let _ = py_to_json_value(dict.as_any())?;
-    }
+    let request = match request {
+        Some(dict) => artifact_wire_from_pydict::<ArtifactRebuildRequestWire>(
+            dict,
+            "request",
+            "ArtifactRebuildRequestWire",
+        )?,
+        None => ArtifactRebuildRequestWire::default(),
+    };
     let index = PathBuf::from(index_path);
     let result = py
         .allow_threads(|| {
-            let _store = core_open_artifact_store(&index)?;
-            Ok::<_, String>(ArtifactMutationResultWire {
-                schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
-                operation: "rebuild".to_string(),
-                affected_node_ids: vec![ARTIFACT_ROOT_ID.to_string()],
-                errors: vec![
-                    "artifact_rebuild is a no-op: no source ingesters registered"
-                        .to_string(),
-                ],
-                ..ArtifactMutationResultWire::default()
-            })
+            let mut store = core_open_artifact_store(&index)?;
+            core_artifact_rebuild(&mut store, request)
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &result)
 }
 
-/// Path-only artifact upsert used until source ingesters land in Epic 2.
+/// Upsert a file/directory path and its deterministic directory parents.
 #[pyfunction]
 #[pyo3(
     name = "artifact_upsert_path",
@@ -683,24 +679,21 @@ fn py_artifact_upsert_path<'py>(
     artifact_path: &str,
     request: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
-    let overrides = match request {
-        Some(dict) => Some(artifact_path_overrides_from_pydict(dict)?),
-        None => None,
-    };
+    let request =
+        match request {
+            Some(dict) => artifact_wire_from_pydict::<
+                ArtifactPathUpsertRequestWire,
+            >(
+                dict, "request", "ArtifactPathUpsertRequestWire"
+            )?,
+            None => ArtifactPathUpsertRequestWire::default(),
+        };
     let index = PathBuf::from(index_path);
-    let path = artifact_path.to_string();
+    let path = PathBuf::from(artifact_path);
     let result = py
         .allow_threads(|| {
             let mut store = core_open_artifact_store(&index)?;
-            let node = artifact_node_for_path(&path, overrides)?;
-            core_upsert_artifact_node(
-                &mut store,
-                ArtifactNodeUpsertWire {
-                    schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
-                    node,
-                    replace_payloads: false,
-                },
-            )
+            core_artifact_upsert_path(&mut store, &path, request)
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &result)
@@ -1773,19 +1766,6 @@ enum ArtifactRemoveRequest {
     Link(ArtifactLinkRemoveWire),
 }
 
-#[derive(Debug, Clone, Default)]
-struct ArtifactPathOverrides {
-    kind: Option<String>,
-    display_title: Option<String>,
-    subtitle: Option<String>,
-    provenance: Option<String>,
-    source_kind: Option<String>,
-    source_id: Option<String>,
-    source_version: Option<String>,
-    search_text: Option<String>,
-    metadata: Option<JsonMap<String, JsonValue>>,
-}
-
 fn artifact_add_request_from_pydict(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<ArtifactAddRequest> {
@@ -1857,33 +1837,6 @@ fn artifact_remove_request_from_pydict(
         })
 }
 
-fn artifact_path_overrides_from_pydict(
-    request: &Bound<'_, PyDict>,
-) -> PyResult<ArtifactPathOverrides> {
-    let value = py_to_json_value(request.as_any())?;
-    let JsonValue::Object(obj) = value else {
-        return Err(PyValueError::new_err(
-            "request must be a dict of artifact_upsert_path overrides",
-        ));
-    };
-    if obj.contains_key("node") {
-        return Err(PyValueError::new_err(
-            "artifact_upsert_path request accepts flat node override fields, not a nested node",
-        ));
-    }
-    Ok(ArtifactPathOverrides {
-        kind: optional_string_field(&obj, "kind")?,
-        display_title: optional_string_field(&obj, "display_title")?,
-        subtitle: optional_string_field(&obj, "subtitle")?,
-        provenance: optional_string_field(&obj, "provenance")?,
-        source_kind: optional_string_field(&obj, "source_kind")?,
-        source_id: optional_string_field(&obj, "source_id")?,
-        source_version: optional_string_field(&obj, "source_version")?,
-        search_text: optional_string_field(&obj, "search_text")?,
-        metadata: optional_object_field(&obj, "metadata")?,
-    })
-}
-
 fn artifact_wire_from_pydict<T>(
     value: &Bound<'_, PyDict>,
     argument: &str,
@@ -1917,121 +1870,6 @@ fn artifact_store_error_to_pyerr(err: String) -> PyErr {
         PyValueError::new_err(err)
     } else {
         PyRuntimeError::new_err(err)
-    }
-}
-
-fn artifact_node_for_path(
-    artifact_path: &str,
-    overrides: Option<ArtifactPathOverrides>,
-) -> Result<ArtifactNodeWire, String> {
-    let normalized = normalize_artifact_path(artifact_path)?;
-    let id = path_to_artifact_id(&normalized);
-    let metadata = std::fs::metadata(&normalized).ok();
-    let inferred_kind = if id == ARTIFACT_ROOT_ID {
-        ARTIFACT_KIND_ROOT
-    } else if metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
-        ARTIFACT_KIND_DIRECTORY
-    } else {
-        ARTIFACT_KIND_FILE
-    };
-    let display_title = display_title_for_path(&normalized, &id);
-    let subtitle = normalized
-        .parent()
-        .map(|parent| path_to_artifact_id(parent))
-        .filter(|parent| parent != &id);
-    let search_text = format!("{display_title} {id}");
-
-    let overrides = overrides.unwrap_or_default();
-    Ok(ArtifactNodeWire {
-        id,
-        kind: overrides.kind.unwrap_or_else(|| inferred_kind.to_string()),
-        display_title: overrides.display_title.unwrap_or(display_title),
-        subtitle: overrides.subtitle.or(subtitle),
-        provenance: overrides
-            .provenance
-            .unwrap_or_else(|| ARTIFACT_PROVENANCE_MANUAL.to_string()),
-        source_kind: overrides.source_kind,
-        source_id: overrides.source_id,
-        source_version: overrides.source_version,
-        search_text: overrides.search_text.unwrap_or(search_text),
-        metadata: overrides.metadata.unwrap_or_default(),
-        created_at: None,
-        updated_at: None,
-    })
-}
-
-fn normalize_artifact_path(path: &str) -> Result<PathBuf, String> {
-    if path.trim().is_empty() {
-        return Err("artifact_path must not be empty".to_string());
-    }
-    let input = PathBuf::from(path);
-    let absolute = if input.is_absolute() {
-        input
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(input)
-    };
-    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
-        return Ok(canonical);
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-            Component::RootDir | Component::Prefix(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-    Ok(normalized)
-}
-
-fn path_to_artifact_id(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    if value.is_empty() {
-        ARTIFACT_ROOT_ID.to_string()
-    } else {
-        value.into_owned()
-    }
-}
-
-fn display_title_for_path(path: &Path, id: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| id.to_string())
-}
-
-fn optional_string_field(
-    obj: &JsonMap<String, JsonValue>,
-    key: &str,
-) -> PyResult<Option<String>> {
-    match obj.get(key) {
-        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
-        Some(JsonValue::Null) | None => Ok(None),
-        Some(_) => Err(PyValueError::new_err(format!(
-            "{key} must be a string or null"
-        ))),
-    }
-}
-
-fn optional_object_field(
-    obj: &JsonMap<String, JsonValue>,
-    key: &str,
-) -> PyResult<Option<JsonMap<String, JsonValue>>> {
-    match obj.get(key) {
-        Some(JsonValue::Object(value)) => Ok(Some(value.clone())),
-        Some(JsonValue::Null) | None => Ok(None),
-        Some(_) => Err(PyValueError::new_err(format!(
-            "{key} must be an object or null"
-        ))),
     }
 }
 
@@ -2743,6 +2581,7 @@ pub use sase_core as core;
 mod tests {
     use super::*;
     use pyo3::Python;
+    use sase_core::artifact::ArtifactMutationResultWire;
     use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3292,7 +3131,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_bindings_cover_path_and_placeholder_rebuild() {
+    fn artifact_bindings_cover_path_and_rebuild_request() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let index = temp_notification_path("artifact-path.sqlite");
@@ -3307,7 +3146,8 @@ mod tests {
             )
             .unwrap();
             let upserted_value = py_to_json_value(upserted.bind(py)).unwrap();
-            assert_eq!(upserted_value["nodes_added"], json!(1));
+            assert!(upserted_value["nodes_added"].as_u64().unwrap() >= 2);
+            assert!(upserted_value["links_added"].as_u64().unwrap() >= 1);
 
             let detail = py_artifact_show(
                 py,
@@ -3318,15 +3158,36 @@ mod tests {
             let detail_value = py_to_json_value(detail.bind(py)).unwrap();
             assert_eq!(detail_value["node"]["kind"], json!("file"));
             assert_eq!(detail_value["node"]["display_title"], json!("note.md"));
+            assert!(
+                detail_value["path_to_root"].as_array().unwrap().len() >= 2
+            );
 
-            let rebuild =
-                py_artifact_rebuild(py, index.to_str().unwrap(), None).unwrap();
+            let rebuild_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "projects_root": index.parent().unwrap().join("projects"),
+                    "workspace_root": index.parent().unwrap(),
+                    "beads_dir": index.parent().unwrap().join("sdd/beads"),
+                    "include_sources": ["directory"],
+                    "exclude_sources": [],
+                    "target_path": null,
+                    "artifact_dir": null,
+                    "stale_cleanup": "none"
+                }),
+            )
+            .unwrap();
+            let rebuild_request =
+                rebuild_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let rebuild = py_artifact_rebuild(
+                py,
+                index.to_str().unwrap(),
+                Some(rebuild_request),
+            )
+            .unwrap();
             let rebuild_value = py_to_json_value(rebuild.bind(py)).unwrap();
             assert_eq!(rebuild_value["operation"], json!("rebuild"));
-            assert!(rebuild_value["errors"][0]
-                .as_str()
-                .unwrap()
-                .contains("no source ingesters registered"));
+            assert_eq!(rebuild_value["errors"], json!([]));
 
             let _ = fs::remove_file(&artifact_file);
             let _ = fs::remove_file(&index);

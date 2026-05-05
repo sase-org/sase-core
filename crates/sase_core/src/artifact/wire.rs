@@ -36,6 +36,9 @@ pub const ARTIFACT_PROVENANCE_DERIVED: &str = "derived";
 pub const ARTIFACT_TOMBSTONE_NODE: &str = "node";
 pub const ARTIFACT_TOMBSTONE_LINK: &str = "link";
 
+pub const ARTIFACT_STALE_CLEANUP_NONE: &str = "none";
+pub const ARTIFACT_STALE_CLEANUP_MARK: &str = "mark";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactNodeWire {
     pub id: String,
@@ -115,6 +118,85 @@ pub struct ArtifactPayloadWire {
     pub payload: Value,
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRebuildRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub projects_root: Option<String>,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub beads_dir: Option<String>,
+    #[serde(default)]
+    pub include_sources: Vec<String>,
+    #[serde(default)]
+    pub exclude_sources: Vec<String>,
+    #[serde(default)]
+    pub target_path: Option<String>,
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default = "default_stale_cleanup")]
+    pub stale_cleanup: String,
+}
+
+impl Default for ArtifactRebuildRequestWire {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+            projects_root: None,
+            workspace_root: None,
+            beads_dir: None,
+            include_sources: Vec::new(),
+            exclude_sources: Vec::new(),
+            target_path: None,
+            artifact_dir: None,
+            stale_cleanup: ARTIFACT_STALE_CLEANUP_NONE.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactPathUpsertRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub display_title: Option<String>,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub source_version: Option<String>,
+    #[serde(default)]
+    pub search_text: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Map<String, Value>>,
+}
+
+impl Default for ArtifactPathUpsertRequestWire {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+            kind: None,
+            display_title: None,
+            subtitle: None,
+            provenance: None,
+            source_kind: None,
+            source_id: None,
+            source_version: None,
+            search_text: None,
+            metadata: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -370,6 +452,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_schema_version() -> u32 {
+    ARTIFACT_WIRE_SCHEMA_VERSION
+}
+
+fn default_stale_cleanup() -> String {
+    ARTIFACT_STALE_CLEANUP_NONE.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -498,6 +588,47 @@ mod tests {
                 "affected_link_ids": [],
                 "tombstone_ids": [],
                 "errors": []
+            })
+        );
+    }
+
+    #[test]
+    fn rebuild_and_path_upsert_request_shapes_are_stable() {
+        assert_eq!(
+            serde_json::to_value(ArtifactRebuildRequestWire::default())
+                .unwrap(),
+            json!({
+                "schema_version": 1,
+                "projects_root": null,
+                "workspace_root": null,
+                "beads_dir": null,
+                "include_sources": [],
+                "exclude_sources": [],
+                "target_path": null,
+                "artifact_dir": null,
+                "stale_cleanup": "none"
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ArtifactPathUpsertRequestWire {
+                provenance: Some("derived".to_string()),
+                source_kind: Some("directory".to_string()),
+                source_id: Some("/tmp/example.md".to_string()),
+                ..ArtifactPathUpsertRequestWire::default()
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "kind": null,
+                "display_title": null,
+                "subtitle": null,
+                "provenance": "derived",
+                "source_kind": "directory",
+                "source_id": "/tmp/example.md",
+                "source_version": null,
+                "search_text": null,
+                "metadata": null
             })
         );
     }
