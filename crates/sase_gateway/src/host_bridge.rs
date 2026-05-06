@@ -5,8 +5,10 @@ use std::{
 };
 
 use sase_core::notifications::{
-    read_notifications_snapshot_with_options, NotificationStoreSnapshotWire,
-    NotificationWire,
+    current_unix_time, legacy_telegram_pending_actions_path,
+    pending_action_state_from_store, pending_action_store_path,
+    read_notifications_snapshot_with_options, MobileActionStateWire,
+    NotificationStoreSnapshotWire, NotificationWire,
 };
 use thiserror::Error;
 
@@ -30,6 +32,13 @@ impl DynNotificationHostBridge {
         path: &str,
     ) -> HostFileMetadataWire {
         self.0.notification_file_metadata(path)
+    }
+
+    pub fn action_state(
+        &self,
+        notification: &NotificationWire,
+    ) -> MobileActionStateWire {
+        self.0.action_state(notification)
     }
 }
 
@@ -63,6 +72,17 @@ pub trait NotificationHostBridge: Send + Sync {
             },
         }
     }
+
+    fn action_state(
+        &self,
+        notification: &NotificationWire,
+    ) -> MobileActionStateWire {
+        sase_core::notifications::pending_action_state_for_notification(
+            notification,
+            None,
+            current_unix_time(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +94,8 @@ pub struct HostFileMetadataWire {
 #[derive(Debug)]
 pub struct LocalJsonlNotificationBridge {
     notifications_path: PathBuf,
+    pending_actions_path: PathBuf,
+    legacy_telegram_pending_actions_path: PathBuf,
 }
 
 impl LocalJsonlNotificationBridge {
@@ -83,6 +105,9 @@ impl LocalJsonlNotificationBridge {
                 .as_ref()
                 .join("notifications")
                 .join("notifications.jsonl"),
+            pending_actions_path: pending_action_store_path(sase_home.as_ref()),
+            legacy_telegram_pending_actions_path:
+                legacy_telegram_pending_actions_path(sase_home.as_ref()),
         }
     }
 }
@@ -99,11 +124,35 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         )
         .map_err(HostBridgeError::ReadNotifications)
     }
+
+    fn action_state(
+        &self,
+        notification: &NotificationWire,
+    ) -> MobileActionStateWire {
+        match sase_core::notifications::read_pending_action_store(
+            &self.pending_actions_path,
+            Some(&self.legacy_telegram_pending_actions_path),
+        ) {
+            Ok(store) => pending_action_state_from_store(
+                &store,
+                notification,
+                current_unix_time(),
+            ),
+            Err(_) => {
+                sase_core::notifications::pending_action_state_for_notification(
+                    notification,
+                    None,
+                    current_unix_time(),
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct StaticNotificationHostBridge {
     snapshot: NotificationStoreSnapshotWire,
+    action_states: std::collections::HashMap<String, MobileActionStateWire>,
 }
 
 impl StaticNotificationHostBridge {
@@ -116,6 +165,23 @@ impl StaticNotificationHostBridge {
                 expired_ids: Vec::new(),
                 stats: Default::default(),
             },
+            action_states: Default::default(),
+        }
+    }
+
+    pub fn new_with_action_states(
+        notifications: Vec<NotificationWire>,
+        action_states: std::collections::HashMap<String, MobileActionStateWire>,
+    ) -> Self {
+        Self {
+            snapshot: NotificationStoreSnapshotWire {
+                schema_version: sase_core::notifications::NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+                notifications,
+                counts: Default::default(),
+                expired_ids: Vec::new(),
+                stats: Default::default(),
+            },
+            action_states,
         }
     }
 }
@@ -132,6 +198,22 @@ impl NotificationHostBridge for StaticNotificationHostBridge {
                 .retain(|notification| !notification.dismissed);
         }
         Ok(snapshot)
+    }
+
+    fn action_state(
+        &self,
+        notification: &NotificationWire,
+    ) -> MobileActionStateWire {
+        self.action_states
+            .get(&notification.id)
+            .copied()
+            .unwrap_or_else(|| {
+                sase_core::notifications::pending_action_state_for_notification(
+                    notification,
+                    None,
+                    current_unix_time(),
+                )
+            })
     }
 }
 

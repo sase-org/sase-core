@@ -21,7 +21,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sase_core::notifications::{
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
-    mobile_notification_priority_from_wire, MobileActionStateWire,
+    mobile_notification_priority_from_wire,
     MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
     NotificationWire, MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
@@ -434,9 +434,10 @@ async fn list_notifications(
     let notifications = rows
         .iter()
         .map(|row| {
+            let action_state = state.notification_bridge.action_state(row);
             mobile_notification_card_from_wire(
                 row,
-                MobileActionStateWire::Available,
+                action_state,
                 mobile_notification_priority_from_wire(row),
             )
         })
@@ -466,7 +467,7 @@ async fn notification_detail(
     };
     let card = mobile_notification_card_from_wire(
         &notification,
-        MobileActionStateWire::Available,
+        state.notification_bridge.action_state(&notification),
         mobile_notification_priority_from_wire(&notification),
     );
     let attachments = notification
@@ -492,7 +493,7 @@ async fn notification_detail(
         attachments,
         action: mobile_action_detail_from_notification(
             &notification,
-            MobileActionStateWire::Available,
+            state.notification_bridge.action_state(&notification),
         ),
     }))
 }
@@ -913,7 +914,7 @@ mod tests {
         timestamp: &str,
         action: Option<&str>,
     ) -> NotificationWire {
-        NotificationWire {
+        let mut notification = NotificationWire {
             id: id.to_string(),
             timestamp: timestamp.to_string(),
             sender: if action == Some("PlanApproval") {
@@ -930,7 +931,14 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+        };
+        if action == Some("PlanApproval") {
+            notification.action_data.insert(
+                "response_dir".to_string(),
+                "/tmp/response".to_string(),
+            );
         }
+        notification
     }
 
     fn state_for_notifications(
@@ -949,6 +957,32 @@ mod tests {
             Arc::new(crate::host_bridge::StaticNotificationHostBridge::new(
                 notifications,
             )),
+        )
+    }
+
+    fn state_for_notifications_with_action_states(
+        tmp: &TempDir,
+        notifications: Vec<NotificationWire>,
+        action_states: HashMap<
+            String,
+            sase_core::notifications::MobileActionStateWire,
+        >,
+    ) -> GatewayState {
+        GatewayState::new_with_notification_bridge(
+            GatewayStateOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                sase_home: tmp.path().to_path_buf(),
+                pairing_ttl: Duration::minutes(5),
+                host_label: "test-host".to_string(),
+                event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+                heartbeat_interval: StdDuration::from_secs(60),
+            },
+            Arc::new(
+                crate::host_bridge::StaticNotificationHostBridge::new_with_action_states(
+                    notifications,
+                    action_states,
+                ),
+            ),
         )
     }
 
@@ -1282,6 +1316,39 @@ mod tests {
         assert_eq!(value["notifications"][0]["id"], "newest-row");
         assert_eq!(value["notifications"][0]["priority"], true);
         assert_eq!(value["notifications"][0]["actionable"], true);
+    }
+
+    #[tokio::test]
+    async fn notifications_list_uses_host_action_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let row = notification(
+            "handled-row",
+            "2026-05-06T17:00:00Z",
+            Some("PlanApproval"),
+        );
+        let state = state_for_notifications_with_action_states(
+            &tmp,
+            vec![row],
+            HashMap::from([(
+                "handled-row".to_string(),
+                sase_core::notifications::MobileActionStateWire::AlreadyHandled,
+            )]),
+        );
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(Some(&token), "/api/v1/notifications"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notifications"][0]["actionable"], false);
+        assert_eq!(
+            value["notifications"][0]["action_summary"]["state"],
+            "already_handled"
+        );
     }
 
     #[tokio::test]

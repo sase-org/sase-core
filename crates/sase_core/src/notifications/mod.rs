@@ -1,4 +1,5 @@
 pub mod mobile;
+pub mod pending_actions;
 pub mod store;
 pub mod wire;
 
@@ -18,6 +19,16 @@ pub use mobile::{
     PendingActionPrefixResolutionWire, PlanActionChoiceWire,
     PlanActionRequestWire, QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+};
+pub use pending_actions::{
+    cleanup_stale_pending_actions, current_unix_time,
+    legacy_telegram_pending_actions_path, pending_action_from_notification,
+    pending_action_state_for_notification, pending_action_state_from_store,
+    pending_action_store_path, read_pending_action_store,
+    register_pending_action, resolve_pending_action_prefix,
+    PendingActionStoreWire, PendingActionTransportWire, PendingActionWire,
+    DEFAULT_PENDING_ACTION_PREFIX_LEN, DEFAULT_PENDING_ACTION_STALE_SECONDS,
+    PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use store::{
     append_notification, apply_notification_state_update,
