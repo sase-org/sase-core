@@ -101,6 +101,7 @@ pub enum ApiErrorCodeWire {
     LaunchFailed,
     InvalidUpload,
     BridgeUnavailable,
+    PermissionDenied,
     Internal,
 }
 
@@ -293,6 +294,7 @@ pub enum MobileAgentLaunchSlotStatusWire {
 pub struct MobileAgentKillRequestWire {
     pub schema_version: u32,
     pub reason: Option<String>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +508,13 @@ mod tests {
                 target: Some("agent_bridge".to_string()),
                 details: None,
             },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::PermissionDenied,
+                message: "permission denied".to_string(),
+                target: Some("agent_bridge:kill-agent".to_string()),
+                details: None,
+            },
         ];
         assert_eq!(
             serde_json::to_value(errors).unwrap(),
@@ -557,6 +566,13 @@ mod tests {
                     "code": "bridge_unavailable",
                     "message": "agent bridge is unavailable",
                     "target": "agent_bridge",
+                    "details": null
+                },
+                {
+                    "schema_version": 1,
+                    "code": "permission_denied",
+                    "message": "permission denied",
+                    "target": "agent_bridge:kill-agent",
                     "details": null
                 }
             ])

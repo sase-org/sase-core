@@ -727,17 +727,24 @@ async fn agent_kill(
 ) -> Result<Json<MobileAgentKillResultWire>, ApiError> {
     let device =
         authenticate(&state, &headers, "/api/v1/agents/{name}/kill").await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let Json(mut payload) = payload.map_err(ApiError::from_json_rejection)?;
     validate_schema(payload.schema_version)?;
+    payload.device_id = Some(device.device_id.clone());
     match state.agent_bridge.kill_agent(&name, &payload) {
         Ok(result) => {
             state.audit(
                 Some(device.device_id),
                 "/api/v1/agents/{name}/kill",
                 Some(result.name.clone()),
-                "success",
+                &result.status,
             );
-            publish_agents_changed(&state, "kill", Some(result.name.clone()))?;
+            if result.changed {
+                publish_agents_changed(
+                    &state,
+                    "kill",
+                    Some(result.name.clone()),
+                )?;
+            }
             Ok(Json(result))
         }
         Err(error) => {
@@ -2030,6 +2037,11 @@ impl ApiError {
                 ApiErrorCodeWire::InvalidUpload,
                 target.clone(),
             ),
+            HostBridgeError::PermissionDenied(target) => (
+                StatusCode::FORBIDDEN,
+                ApiErrorCodeWire::PermissionDenied,
+                target.clone(),
+            ),
             HostBridgeError::NotificationMissing(target) => (
                 StatusCode::NOT_FOUND,
                 ApiErrorCodeWire::NotFound,
@@ -2109,6 +2121,7 @@ impl ApiErrorCodeWire {
             ApiErrorCodeWire::LaunchFailed => "launch_failed",
             ApiErrorCodeWire::InvalidUpload => "invalid_upload",
             ApiErrorCodeWire::BridgeUnavailable => "bridge_unavailable",
+            ApiErrorCodeWire::PermissionDenied => "permission_denied",
             ApiErrorCodeWire::Internal => "internal",
         }
     }
@@ -2480,6 +2493,9 @@ case "$operation" in
     ;;
   launch-image)
     printf '%s\n' '{"schema_version":1,"primary":{"slot_id":"0","name":"cmd-image","status":"launched","artifact_dir":"/tmp/cmd-image","message":"started pid 4243"},"slots":[{"slot_id":"0","name":"cmd-image","status":"launched","artifact_dir":"/tmp/cmd-image","message":"started pid 4243"}]}'
+    ;;
+  kill-agent)
+    printf '%s\n' '{"schema_version":1,"name":"cmd-demo","status":"killed","pid":4242,"changed":true,"message":"Killed agent"}'
     ;;
   *)
     exit 2
@@ -3146,7 +3162,7 @@ esac
             "dry_run": null,
         });
         let (image_status, image) = json_response_with_state(
-            state,
+            state.clone(),
             agent_post_request(
                 Some(&token),
                 "/api/v1/agents/launch-image",
@@ -3156,6 +3172,20 @@ esac
         .await;
         assert_eq!(image_status, StatusCode::OK);
         assert_eq!(image["primary"]["name"], "cmd-image");
+
+        let (kill_status, kill) = json_response_with_state(
+            state,
+            agent_post_request(
+                Some(&token),
+                "/api/v1/agents/cmd-demo/kill",
+                json!({"schema_version": 1, "reason": "mobile", "device_id": "ignored"}),
+            ),
+        )
+        .await;
+        assert_eq!(kill_status, StatusCode::OK);
+        assert_eq!(kill["name"], "cmd-demo");
+        assert_eq!(kill["pid"], 4242);
+        assert_eq!(kill["changed"], true);
     }
 
     #[tokio::test]

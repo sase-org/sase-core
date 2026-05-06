@@ -270,6 +270,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                     "launch_failed",
                     "invalid_upload",
                     "bridge_unavailable",
+                    "permission_denied",
                     "internal"
                 ],
                 "message": "string",
@@ -389,7 +390,8 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             "MobileAgentKillRequestWire": {
                 "schema_version": "u32",
-                "reason": "string|null"
+                "reason": "string|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
             },
             "MobileAgentKillResultWire": {
                 "schema_version": "u32",

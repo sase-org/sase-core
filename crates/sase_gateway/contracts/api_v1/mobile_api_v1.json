@@ -56,6 +56,7 @@
         "launch_failed",
         "invalid_upload",
         "bridge_unavailable",
+        "permission_denied",
         "internal"
       ],
       "details": "json|null",
@@ -150,6 +151,7 @@
       "schema_version": "u32"
     },
     "MobileAgentKillRequestWire": {
+      "device_id": "string|null; host-injected before bridge dispatch",
       "reason": "string|null",
       "schema_version": "u32"
     },

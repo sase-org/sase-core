@@ -239,6 +239,22 @@ impl CommandAgentHostBridge {
                     "agent_bridge:{operation}"
                 )));
             }
+            if operation == "kill-agent" {
+                return Err(match output.status.code() {
+                    Some(4) => HostBridgeError::AgentNotFound(
+                        "agent_bridge:kill-agent".to_string(),
+                    ),
+                    Some(5) => HostBridgeError::AgentNotRunning(
+                        "agent_bridge:kill-agent".to_string(),
+                    ),
+                    Some(6) => HostBridgeError::PermissionDenied(
+                        "agent_bridge:kill-agent".to_string(),
+                    ),
+                    _ => HostBridgeError::BridgeUnavailable(
+                        "agent_bridge:kill-agent".to_string(),
+                    ),
+                });
+            }
             if operation.starts_with("launch-") {
                 return Err(HostBridgeError::LaunchFailed(format!(
                     "agent_bridge:{operation}"
@@ -285,6 +301,22 @@ impl AgentHostBridge for CommandAgentHostBridge {
         request: &MobileAgentImageLaunchRequestWire,
     ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
         self.invoke("launch-image", request)
+    }
+
+    fn kill_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentKillRequestWire,
+    ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+        self.invoke(
+            "kill-agent",
+            &serde_json::json!({
+                "schema_version": request.schema_version,
+                "name": name,
+                "reason": request.reason.clone(),
+                "device_id": request.device_id.clone(),
+            }),
+        )
     }
 }
 
@@ -919,6 +951,8 @@ pub enum HostBridgeError {
     LaunchFailed(String),
     #[error("invalid image upload: {0}")]
     InvalidUpload(String),
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
     #[error("failed to read notifications: {0}")]
     ReadNotifications(String),
     #[error("notification not found: {0}")]
