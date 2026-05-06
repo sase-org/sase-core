@@ -7,11 +7,14 @@ use std::{
 use sase_core::notifications::{
     apply_notification_state_update, current_unix_time,
     legacy_telegram_pending_actions_path, pending_action_state_from_store,
-    pending_action_store_path, plan_plan_action_response,
+    pending_action_store_path, plan_hitl_action_response,
+    plan_plan_action_response, plan_question_action_response_from_bytes,
     read_notifications_snapshot_with_options, read_pending_action_store,
-    resolve_pending_action_prefix, ActionResultWire, MobileActionStateWire,
-    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
-    NotificationWire, PendingActionPrefixResolutionWire, PlanActionRequestWire,
+    resolve_pending_action_prefix, ActionResultWire, HitlActionRequestWire,
+    MobileActionStateWire, NotificationStateUpdateWire,
+    NotificationStoreSnapshotWire, NotificationWire,
+    PendingActionPrefixResolutionWire, PendingActionStoreWire,
+    PlanActionRequestWire, QuestionActionRequestWire,
 };
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -50,6 +53,20 @@ impl DynNotificationHostBridge {
         request: &PlanActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
         self.0.execute_plan_action(request)
+    }
+
+    pub fn execute_hitl_action(
+        &self,
+        request: &HitlActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.0.execute_hitl_action(request)
+    }
+
+    pub fn execute_question_action(
+        &self,
+        request: &QuestionActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.0.execute_question_action(request)
     }
 }
 
@@ -104,6 +121,26 @@ pub trait NotificationHostBridge: Send + Sync {
                 .to_string(),
         ))
     }
+
+    fn execute_hitl_action(
+        &self,
+        _request: &HitlActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "HITL action mutations are not supported by this bridge"
+                .to_string(),
+        ))
+    }
+
+    fn execute_question_action(
+        &self,
+        _request: &QuestionActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "question action mutations are not supported by this bridge"
+                .to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +167,52 @@ impl LocalJsonlNotificationBridge {
             legacy_telegram_pending_actions_path:
                 legacy_telegram_pending_actions_path(sase_home.as_ref()),
         }
+    }
+
+    fn resolve_action_notification(
+        &self,
+        prefix: &str,
+        expected_action: &str,
+    ) -> Result<(PendingActionStoreWire, NotificationWire), HostBridgeError>
+    {
+        let store = read_pending_action_store(
+            &self.pending_actions_path,
+            Some(&self.legacy_telegram_pending_actions_path),
+        )
+        .map_err(HostBridgeError::ReadPendingActions)?;
+        let identity = resolve_pending_action_prefix(&store, prefix);
+        match identity.resolution {
+            PendingActionPrefixResolutionWire::Exact
+            | PendingActionPrefixResolutionWire::UniquePrefix => {}
+            PendingActionPrefixResolutionWire::Missing => {
+                return Err(HostBridgeError::ActionMissing(prefix.to_string()));
+            }
+            PendingActionPrefixResolutionWire::AmbiguousPrefix
+            | PendingActionPrefixResolutionWire::DuplicateFullId => {
+                return Err(HostBridgeError::AmbiguousPrefix(
+                    prefix.to_string(),
+                ));
+            }
+        }
+
+        let snapshot = self.list_notifications(true)?;
+        let notification = snapshot
+            .notifications
+            .into_iter()
+            .find(|row| row.id == identity.notification_id)
+            .ok_or_else(|| {
+                HostBridgeError::ActionMissing(identity.notification_id.clone())
+            })?;
+        if notification.action.as_deref() != Some(expected_action) {
+            return Err(HostBridgeError::UnsupportedAction(
+                notification
+                    .action
+                    .clone()
+                    .unwrap_or_else(|| "non_action".to_string()),
+            ));
+        }
+        ensure_action_available(&store, &notification)?;
+        Ok((store, notification))
     }
 }
 
@@ -173,70 +256,8 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         &self,
         request: &PlanActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let store = read_pending_action_store(
-            &self.pending_actions_path,
-            Some(&self.legacy_telegram_pending_actions_path),
-        )
-        .map_err(HostBridgeError::ReadPendingActions)?;
-        let identity = resolve_pending_action_prefix(&store, &request.prefix);
-        match identity.resolution {
-            PendingActionPrefixResolutionWire::Exact
-            | PendingActionPrefixResolutionWire::UniquePrefix => {}
-            PendingActionPrefixResolutionWire::Missing => {
-                return Err(HostBridgeError::ActionMissing(
-                    request.prefix.clone(),
-                ));
-            }
-            PendingActionPrefixResolutionWire::AmbiguousPrefix
-            | PendingActionPrefixResolutionWire::DuplicateFullId => {
-                return Err(HostBridgeError::AmbiguousPrefix(
-                    request.prefix.clone(),
-                ));
-            }
-        }
-
-        let snapshot = self.list_notifications(true)?;
-        let notification = snapshot
-            .notifications
-            .into_iter()
-            .find(|row| row.id == identity.notification_id)
-            .ok_or_else(|| {
-                HostBridgeError::ActionMissing(identity.notification_id.clone())
-            })?;
-        if notification.action.as_deref() != Some("PlanApproval") {
-            return Err(HostBridgeError::UnsupportedAction(
-                notification
-                    .action
-                    .clone()
-                    .unwrap_or_else(|| "non_action".to_string()),
-            ));
-        }
-
-        let state = pending_action_state_from_store(
-            &store,
-            &notification,
-            current_unix_time(),
-        );
-        match state {
-            MobileActionStateWire::Available => {}
-            MobileActionStateWire::AlreadyHandled => {
-                return Err(HostBridgeError::ActionAlreadyHandled(
-                    notification.id,
-                ));
-            }
-            MobileActionStateWire::Stale => {
-                return Err(HostBridgeError::ActionStale(notification.id));
-            }
-            MobileActionStateWire::MissingRequest
-            | MobileActionStateWire::MissingTarget => {
-                return Err(HostBridgeError::MissingTarget(notification.id));
-            }
-            MobileActionStateWire::Unsupported => {
-                return Err(HostBridgeError::UnsupportedAction(
-                    "PlanApproval".to_string(),
-                ));
-            }
-        }
+        let (_store, notification) =
+            self.resolve_action_notification(&request.prefix, "PlanApproval")?;
 
         let response_dir = action_path(&notification, "response_dir")
             .filter(|path| path.is_dir())
@@ -277,6 +298,95 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
             },
         );
         persist_plan_approval_metadata(&notification, request);
+        Ok(result)
+    }
+
+    fn execute_hitl_action(
+        &self,
+        request: &HitlActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        let (_store, notification) =
+            self.resolve_action_notification(&request.prefix, "HITL")?;
+        let artifacts_dir = action_path(&notification, "artifacts_dir")
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                HostBridgeError::MissingTarget("artifacts_dir".into())
+            })?;
+        if !artifacts_dir.join("hitl_request.json").is_file() {
+            return Err(HostBridgeError::ActionAlreadyHandled(
+                notification.id.clone(),
+            ));
+        }
+
+        let mut result = plan_hitl_action_response(request).map_err(|err| {
+            HostBridgeError::InvalidActionRequest(err.message)
+        })?;
+        result.notification_id = Some(notification.id.clone());
+        result.state = MobileActionStateWire::Available;
+
+        let response_path = artifacts_dir.join(&result.response_file);
+        write_response_file_once(&response_path, &result.response_json)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    HostBridgeError::ActionAlreadyHandled(
+                        notification.id.clone(),
+                    )
+                } else {
+                    HostBridgeError::WriteResponse(err.to_string())
+                }
+            })?;
+        dismiss_notification_best_effort(
+            &self.notifications_path,
+            &notification,
+        );
+        Ok(result)
+    }
+
+    fn execute_question_action(
+        &self,
+        request: &QuestionActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        let (_store, notification) =
+            self.resolve_action_notification(&request.prefix, "UserQuestion")?;
+        let response_dir = action_path(&notification, "response_dir")
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                HostBridgeError::MissingTarget("response_dir".into())
+            })?;
+        let request_path = response_dir.join("question_request.json");
+        let request_bytes = std::fs::read(&request_path).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                HostBridgeError::ActionAlreadyHandled(notification.id.clone())
+            } else {
+                HostBridgeError::InvalidActionRequest(format!(
+                    "failed to read question_request.json: {err}"
+                ))
+            }
+        })?;
+
+        let mut result =
+            plan_question_action_response_from_bytes(request, &request_bytes)
+                .map_err(|err| {
+                HostBridgeError::InvalidActionRequest(err.message)
+            })?;
+        result.notification_id = Some(notification.id.clone());
+        result.state = MobileActionStateWire::Available;
+
+        let response_path = response_dir.join(&result.response_file);
+        write_response_file_once(&response_path, &result.response_json)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    HostBridgeError::ActionAlreadyHandled(
+                        notification.id.clone(),
+                    )
+                } else {
+                    HostBridgeError::WriteResponse(err.to_string())
+                }
+            })?;
+        dismiss_notification_best_effort(
+            &self.notifications_path,
+            &notification,
+        );
         Ok(result)
     }
 }
@@ -347,6 +457,50 @@ impl NotificationHostBridge for StaticNotificationHostBridge {
                 )
             })
     }
+}
+
+fn ensure_action_available(
+    store: &PendingActionStoreWire,
+    notification: &NotificationWire,
+) -> Result<(), HostBridgeError> {
+    let state = pending_action_state_from_store(
+        store,
+        notification,
+        current_unix_time(),
+    );
+    match state {
+        MobileActionStateWire::Available => Ok(()),
+        MobileActionStateWire::AlreadyHandled => Err(
+            HostBridgeError::ActionAlreadyHandled(notification.id.clone()),
+        ),
+        MobileActionStateWire::Stale => {
+            Err(HostBridgeError::ActionStale(notification.id.clone()))
+        }
+        MobileActionStateWire::MissingRequest
+        | MobileActionStateWire::MissingTarget => {
+            Err(HostBridgeError::MissingTarget(notification.id.clone()))
+        }
+        MobileActionStateWire::Unsupported => {
+            Err(HostBridgeError::UnsupportedAction(
+                notification
+                    .action
+                    .clone()
+                    .unwrap_or_else(|| "non_action".to_string()),
+            ))
+        }
+    }
+}
+
+fn dismiss_notification_best_effort(
+    notifications_path: &Path,
+    notification: &NotificationWire,
+) {
+    let _ = apply_notification_state_update(
+        notifications_path,
+        &NotificationStateUpdateWire::MarkDismissed {
+            id: notification.id.clone(),
+        },
+    );
 }
 
 #[derive(Debug, Error)]

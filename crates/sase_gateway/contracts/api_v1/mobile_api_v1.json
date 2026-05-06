@@ -356,6 +356,56 @@
       "path": "/api/v1/actions/plan/{prefix}/feedback",
       "request": "PlanActionRequestWire without path-derived prefix/choice",
       "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/hitl/{prefix}/accept",
+      "request": "HitlActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/hitl/{prefix}/reject",
+      "request": "HitlActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/hitl/{prefix}/feedback",
+      "request": "HitlActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/question/{prefix}/answer",
+      "request": "QuestionActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/question/{prefix}/custom",
+      "request": "QuestionActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
     }
   ],
   "schema_version": 1

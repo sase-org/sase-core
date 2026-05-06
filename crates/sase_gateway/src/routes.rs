@@ -22,8 +22,10 @@ use sase_core::notifications::{
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
     mobile_notification_priority_from_wire, ActionResultWire,
+    HitlActionChoiceWire, HitlActionRequestWire,
     MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
     NotificationWire, PlanActionChoiceWire, PlanActionRequestWire,
+    QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -256,6 +258,17 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/actions/plan/:prefix/epic", post(plan_epic))
         .route("/api/v1/actions/plan/:prefix/legend", post(plan_legend))
         .route("/api/v1/actions/plan/:prefix/feedback", post(plan_feedback))
+        .route("/api/v1/actions/hitl/:prefix/accept", post(hitl_accept))
+        .route("/api/v1/actions/hitl/:prefix/reject", post(hitl_reject))
+        .route("/api/v1/actions/hitl/:prefix/feedback", post(hitl_feedback))
+        .route(
+            "/api/v1/actions/question/:prefix/answer",
+            post(question_answer),
+        )
+        .route(
+            "/api/v1/actions/question/:prefix/custom",
+            post(question_custom),
+        )
         .fallback(unknown_route)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -521,6 +534,32 @@ struct PlanActionBody {
     coder_model: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct HitlActionBody {
+    #[serde(default = "default_mobile_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct QuestionActionBody {
+    #[serde(default = "default_mobile_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    question_index: Option<u32>,
+    #[serde(default)]
+    selected_option_id: Option<String>,
+    #[serde(default)]
+    selected_option_label: Option<String>,
+    #[serde(default)]
+    selected_option_index: Option<u32>,
+    #[serde(default)]
+    custom_answer: Option<String>,
+    #[serde(default)]
+    global_note: Option<String>,
+}
+
 async fn plan_approve(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -654,6 +693,184 @@ async fn execute_plan_action_route(
             publish_notifications_changed(
                 &state,
                 "plan_action",
+                result.notification_id.clone(),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(prefix),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
+}
+
+async fn hitl_accept(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<HitlActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_hitl_action_route(
+        state,
+        headers,
+        prefix,
+        HitlActionChoiceWire::Accept,
+        payload,
+        "/api/v1/actions/hitl/{prefix}/accept",
+    )
+    .await
+}
+
+async fn hitl_reject(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<HitlActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_hitl_action_route(
+        state,
+        headers,
+        prefix,
+        HitlActionChoiceWire::Reject,
+        payload,
+        "/api/v1/actions/hitl/{prefix}/reject",
+    )
+    .await
+}
+
+async fn hitl_feedback(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<HitlActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_hitl_action_route(
+        state,
+        headers,
+        prefix,
+        HitlActionChoiceWire::Feedback,
+        payload,
+        "/api/v1/actions/hitl/{prefix}/feedback",
+    )
+    .await
+}
+
+async fn execute_hitl_action_route(
+    state: GatewayState,
+    headers: HeaderMap,
+    prefix: String,
+    choice: HitlActionChoiceWire,
+    payload: Result<Json<HitlActionBody>, JsonRejection>,
+    endpoint: &'static str,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    let device = authenticate(&state, &headers, endpoint).await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let request = HitlActionRequestWire {
+        schema_version: payload.schema_version,
+        prefix: prefix.clone(),
+        choice,
+        feedback: payload.feedback,
+    };
+    match state.notification_bridge.execute_hitl_action(&request) {
+        Ok(result) => {
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                result.notification_id.clone().or(Some(prefix)),
+                "success",
+            );
+            publish_notifications_changed(
+                &state,
+                "hitl_action",
+                result.notification_id.clone(),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(prefix),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
+}
+
+async fn question_answer(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<QuestionActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_question_action_route(
+        state,
+        headers,
+        prefix,
+        QuestionActionChoiceWire::Answer,
+        payload,
+        "/api/v1/actions/question/{prefix}/answer",
+    )
+    .await
+}
+
+async fn question_custom(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<QuestionActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_question_action_route(
+        state,
+        headers,
+        prefix,
+        QuestionActionChoiceWire::Custom,
+        payload,
+        "/api/v1/actions/question/{prefix}/custom",
+    )
+    .await
+}
+
+async fn execute_question_action_route(
+    state: GatewayState,
+    headers: HeaderMap,
+    prefix: String,
+    choice: QuestionActionChoiceWire,
+    payload: Result<Json<QuestionActionBody>, JsonRejection>,
+    endpoint: &'static str,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    let device = authenticate(&state, &headers, endpoint).await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let request = QuestionActionRequestWire {
+        schema_version: payload.schema_version,
+        prefix: prefix.clone(),
+        choice,
+        question_index: payload.question_index,
+        selected_option_id: payload.selected_option_id,
+        selected_option_label: payload.selected_option_label,
+        selected_option_index: payload.selected_option_index,
+        custom_answer: payload.custom_answer,
+        global_note: payload.global_note,
+    };
+    match state.notification_bridge.execute_question_action(&request) {
+        Ok(result) => {
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                result.notification_id.clone().or(Some(prefix)),
+                "success",
+            );
+            publish_notifications_changed(
+                &state,
+                "question_action",
                 result.notification_id.clone(),
             )?;
             Ok(Json(result))
@@ -1293,6 +1510,85 @@ mod tests {
         (notification, response_dir)
     }
 
+    fn seed_hitl_notification(
+        tmp: &TempDir,
+        id: &str,
+    ) -> (NotificationWire, PathBuf) {
+        let artifacts_dir = tmp.path().join("agent").join(id).join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        std::fs::write(
+            artifacts_dir.join("hitl_request.json"),
+            r#"{"step_name":"review","step_type":"bash","output":"ok"}"#,
+        )
+        .unwrap();
+        let mut notification =
+            notification(id, "2026-05-06T17:00:00Z", Some("HITL"));
+        notification.action_data.insert(
+            "artifacts_dir".to_string(),
+            artifacts_dir.to_string_lossy().to_string(),
+        );
+        seed_action_notification(tmp, &notification);
+        (notification, artifacts_dir)
+    }
+
+    fn seed_question_notification(
+        tmp: &TempDir,
+        id: &str,
+    ) -> (NotificationWire, PathBuf) {
+        let response_dir = tmp.path().join("agent").join(id).join("question");
+        std::fs::create_dir_all(&response_dir).unwrap();
+        std::fs::write(
+            response_dir.join("question_request.json"),
+            serde_json::to_string_pretty(&json!({
+                "questions": [{
+                    "question": "Which approach?",
+                    "options": [
+                        {"id": "fast", "label": "Fast"},
+                        {"id": "safe", "label": "Safe"}
+                    ]
+                }],
+                "session_id": "session-question",
+                "timestamp": 1778086800.0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut notification =
+            notification(id, "2026-05-06T17:00:00Z", Some("UserQuestion"));
+        notification.action_data.insert(
+            "response_dir".to_string(),
+            response_dir.to_string_lossy().to_string(),
+        );
+        seed_action_notification(tmp, &notification);
+        (notification, response_dir)
+    }
+
+    fn seed_action_notification(
+        tmp: &TempDir,
+        notification: &NotificationWire,
+    ) {
+        let store_path =
+            tmp.path().join("notifications").join("notifications.jsonl");
+        sase_core::notifications::append_notification(
+            &store_path,
+            notification,
+        )
+        .unwrap();
+        let pending_path =
+            sase_core::notifications::pending_action_store_path(tmp.path());
+        let pending =
+            sase_core::notifications::pending_action_from_notification(
+                notification,
+                sase_core::notifications::current_unix_time(),
+            )
+            .unwrap();
+        sase_core::notifications::register_pending_action(
+            &pending_path,
+            &pending,
+        )
+        .unwrap();
+    }
+
     async fn pair_device(
         state: GatewayState,
     ) -> (Value, Value, String, String) {
@@ -1910,6 +2206,204 @@ mod tests {
         .await;
         assert_eq!(handled_status, StatusCode::CONFLICT);
         assert_eq!(handled["code"], "conflict_already_handled");
+    }
+
+    #[tokio::test]
+    async fn hitl_actions_write_response_and_dismiss_notification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_notification, first_artifacts_dir) =
+            seed_hitl_notification(&tmp, "hitl0001-row");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (accept_status, accept_value) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/hitl/hitl0001/accept",
+                json!({"schema_version": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(accept_status, StatusCode::OK);
+        assert_eq!(accept_value["action_kind"], "hitl");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    first_artifacts_dir.join("hitl_response.json")
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({"action": "accept", "approved": true})
+        );
+        let snapshot = sase_core::notifications::read_notifications_snapshot(
+            &tmp.path().join("notifications").join("notifications.jsonl"),
+            true,
+        )
+        .unwrap();
+        assert!(snapshot
+            .notifications
+            .iter()
+            .any(|row| row.id == "hitl0001-row" && row.dismissed));
+
+        let (_notification, second_artifacts_dir) =
+            seed_hitl_notification(&tmp, "hitl0002-row");
+        let (feedback_status, _feedback_value) = json_response_with_state(
+            state,
+            action_request(
+                Some(&token),
+                "/api/v1/actions/hitl/hitl0002/feedback",
+                json!({"schema_version": 1, "feedback": "Needs revision"}),
+            ),
+        )
+        .await;
+        assert_eq!(feedback_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    second_artifacts_dir.join("hitl_response.json")
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({
+                "action": "feedback",
+                "approved": false,
+                "feedback": "Needs revision"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn question_actions_support_option_and_custom_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_notification, first_response_dir) =
+            seed_question_notification(&tmp, "quest001-row");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (answer_status, answer_value) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/question/quest001/answer",
+                json!({
+                    "schema_version": 1,
+                    "selected_option_id": "safe",
+                    "global_note": "Use durable path"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(answer_status, StatusCode::OK);
+        assert_eq!(answer_value["action_kind"], "user_question");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    first_response_dir.join("question_response.json")
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({
+                "answers": [{
+                    "question": "Which approach?",
+                    "selected": ["Safe"],
+                    "custom_feedback": null
+                }],
+                "global_note": "Use durable path"
+            })
+        );
+
+        let (_notification, second_response_dir) =
+            seed_question_notification(&tmp, "quest002-row");
+        let (custom_status, _custom_value) = json_response_with_state(
+            state,
+            action_request(
+                Some(&token),
+                "/api/v1/actions/question/quest002/custom",
+                json!({
+                    "schema_version": 1,
+                    "custom_answer": "Use SQLite",
+                    "global_note": "Small local DB"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(custom_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    second_response_dir.join("question_response.json")
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({
+                "answers": [{
+                    "question": "Which approach?",
+                    "selected": [],
+                    "custom_feedback": "Use SQLite"
+                }],
+                "global_note": "Small local DB"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn hitl_and_question_action_errors_are_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_hitl, artifacts_dir) =
+            seed_hitl_notification(&tmp, "hitlerr1-row");
+        let (_question, response_dir) =
+            seed_question_notification(&tmp, "questerr-row");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        std::fs::write(artifacts_dir.join("hitl_response.json"), "{}").unwrap();
+        let (handled_status, handled) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/hitl/hitlerr1/accept",
+                json!({"schema_version": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(handled_status, StatusCode::CONFLICT);
+        assert_eq!(handled["code"], "conflict_already_handled");
+
+        let (invalid_status, invalid) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/question/questerr/answer",
+                json!({"schema_version": 1, "selected_option_id": "missing"}),
+            ),
+        )
+        .await;
+        assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["code"], "invalid_request");
+        assert!(!response_dir.join("question_response.json").exists());
+
+        std::fs::remove_file(response_dir.join("question_request.json"))
+            .unwrap();
+        let (stale_status, stale) = json_response_with_state(
+            state,
+            action_request(
+                Some(&token),
+                "/api/v1/actions/question/questerr/custom",
+                json!({"schema_version": 1, "custom_answer": "later"}),
+            ),
+        )
+        .await;
+        assert_eq!(stale_status, StatusCode::CONFLICT);
+        assert_eq!(stale["code"], "conflict_already_handled");
+        assert!(!response_dir.join("question_response.json").exists());
     }
 
     #[tokio::test]

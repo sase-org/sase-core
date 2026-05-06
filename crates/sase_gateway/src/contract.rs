@@ -129,6 +129,46 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "request": "PlanActionRequestWire without path-derived prefix/choice",
                 "success": "ActionResultWire",
                 "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/hitl/{prefix}/accept",
+                "auth": true,
+                "request": "HitlActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/hitl/{prefix}/reject",
+                "auth": true,
+                "request": "HitlActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/hitl/{prefix}/feedback",
+                "auth": true,
+                "request": "HitlActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/question/{prefix}/answer",
+                "auth": true,
+                "request": "QuestionActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/question/{prefix}/custom",
+                "auth": true,
+                "request": "QuestionActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
             }
         ],
         "records": {
@@ -308,6 +348,13 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "run_coder": "bool|null",
                 "coder_prompt": "string|null",
                 "coder_model": "string|null"
+            },
+            "HitlActionRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "prefix": "string",
+                "choice": "accept|reject|feedback",
+                "feedback": "string|null"
             },
             "QuestionActionRequestWire": {
                 "defined_by": "sase_core::notifications::mobile",
