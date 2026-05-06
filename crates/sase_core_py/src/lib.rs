@@ -51,6 +51,7 @@
 //! - `artifact_add(index_path: str, request: dict) -> dict`
 //! - `artifact_remove(index_path: str, request: dict) -> dict`
 //! - `artifact_list(index_path: str, query: dict | None = None) -> list[dict]`
+//! - `artifact_search(index_path: str, query: dict | None = None) -> list[dict]`
 //! - `artifact_show(index_path: str, artifact_id: str) -> dict`
 //! - `artifact_show_paged(index_path: str, artifact_id: str, request: dict | None = None) -> dict`
 //! - `artifact_graph(index_path: str, options: dict | None = None) -> dict`
@@ -123,6 +124,7 @@ use sase_core::artifact::{
     artifact_list as core_artifact_list,
     artifact_materialize_graph as core_artifact_materialize_graph,
     artifact_rebuild as core_artifact_rebuild,
+    artifact_search as core_artifact_search,
     artifact_show as core_artifact_show,
     artifact_show_paged as core_artifact_show_paged,
     artifact_upsert_path as core_artifact_upsert_path,
@@ -599,6 +601,32 @@ fn py_artifact_list<'py>(
         .allow_threads(|| {
             let store = core_open_artifact_store(&index)?;
             core_artifact_list(&store, query)
+        })
+        .map_err(artifact_store_error_to_pyerr)?;
+    json_serializable_to_py(py, &nodes)
+}
+
+/// Search artifacts with optional `ArtifactQueryWire` filters.
+#[pyfunction]
+#[pyo3(name = "artifact_search", signature = (index_path, query = None))]
+fn py_artifact_search<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let query = match query {
+        Some(dict) => artifact_wire_from_pydict::<ArtifactQueryWire>(
+            dict,
+            "query",
+            "ArtifactQueryWire",
+        )?,
+        None => ArtifactQueryWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let nodes = py
+        .allow_threads(|| {
+            let store = core_open_artifact_store(&index)?;
+            core_artifact_search(&store, query)
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &nodes)
@@ -2645,6 +2673,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show_paged, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_graph, m)?)?;
@@ -3141,6 +3170,13 @@ mod tests {
             let listed_value = py_to_json_value(listed.bind(py)).unwrap();
             assert_eq!(
                 listed_value[0]["id"],
+                json!("/tmp/artifact-binding.md")
+            );
+            let searched =
+                py_artifact_search(py, index_str, Some(query)).unwrap();
+            let searched_value = py_to_json_value(searched.bind(py)).unwrap();
+            assert_eq!(
+                searched_value[0]["id"],
                 json!("/tmp/artifact-binding.md")
             );
 

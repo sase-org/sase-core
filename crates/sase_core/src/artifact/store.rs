@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::wire::{
-    ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactLinkWire,
-    ArtifactMutationResultWire, ArtifactNodeRemoveWire, ArtifactNodeUpsertWire,
-    ArtifactNodeWire, ArtifactPayloadWire, ARTIFACT_LINK_PARENT,
-    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
-    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
-    ARTIFACT_WIRE_SCHEMA_VERSION,
+    file_artifact_type, ArtifactLinkRemoveWire, ArtifactLinkUpsertWire,
+    ArtifactLinkWire, ArtifactMutationResultWire, ArtifactNodeRemoveWire,
+    ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactPayloadWire,
+    ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED,
+    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
+    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_DERIVED_REASON: &str = "stale_derived";
@@ -62,6 +62,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS artifacts (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
+            artifact_type TEXT NOT NULL DEFAULT '',
             display_title TEXT NOT NULL,
             subtitle TEXT,
             provenance TEXT NOT NULL,
@@ -131,6 +132,8 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
             ON artifacts(provenance, source_kind, source_id);
         CREATE INDEX IF NOT EXISTS idx_artifacts_text
             ON artifacts(search_text, display_title, id);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_display
+            ON artifacts(kind, display_title, id);
         CREATE INDEX IF NOT EXISTS idx_artifact_links_type
             ON artifact_links(link_type, source_id, target_id);
         CREATE INDEX IF NOT EXISTS idx_artifact_links_source
@@ -153,6 +156,15 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+    ensure_artifact_type_column(conn)?;
+    backfill_artifact_type_cache(conn)?;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_artifacts_file_type
+            ON artifacts(kind, artifact_type, display_title, id);
+        "#,
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
         [ARTIFACT_WIRE_SCHEMA_VERSION.to_string()],
@@ -167,14 +179,15 @@ fn ensure_root_artifact(conn: &Connection) -> Result<(), String> {
     conn.execute(
         r#"
         INSERT INTO artifacts (
-            id, kind, display_title, subtitle, provenance, source_kind,
-            source_id, source_version, search_text, node_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            id, kind, artifact_type, display_title, subtitle, provenance,
+            source_kind, source_id, source_version, search_text, node_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(id) DO NOTHING
         "#,
         params![
             root.id,
             root.kind,
+            cached_artifact_type(&root),
             root.display_title,
             root.subtitle,
             root.provenance,
@@ -187,6 +200,70 @@ fn ensure_root_artifact(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn ensure_artifact_type_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(artifacts)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    for column in columns {
+        if column.map_err(|e| e.to_string())? == "artifact_type" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE artifacts ADD COLUMN artifact_type TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn backfill_artifact_type_cache(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT id, node_json, artifact_type FROM artifacts")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, node_json, existing) = row.map_err(|e| e.to_string())?;
+        let node: ArtifactNodeWire =
+            serde_json::from_str(&node_json).map_err(|e| e.to_string())?;
+        let artifact_type = cached_artifact_type(&node);
+        if artifact_type != existing {
+            updates.push((id, artifact_type));
+        }
+    }
+    drop(stmt);
+
+    for (id, artifact_type) in updates {
+        conn.execute(
+            "UPDATE artifacts SET artifact_type = ?2 WHERE id = ?1",
+            params![id, artifact_type],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn cached_artifact_type(node: &ArtifactNodeWire) -> String {
+    if node.kind == ARTIFACT_KIND_FILE {
+        file_artifact_type(node).to_string()
+    } else {
+        String::new()
+    }
 }
 
 pub fn deterministic_artifact_link_id(
@@ -228,11 +305,12 @@ pub fn upsert_artifact_node(
 
     let node_json =
         serde_json::to_string(&request.node).map_err(|e| e.to_string())?;
-    let existing_json: Option<String> = tx
+    let artifact_type = cached_artifact_type(&request.node);
+    let existing_row: Option<(String, String)> = tx
         .query_row(
-            "SELECT node_json FROM artifacts WHERE id = ?1",
+            "SELECT node_json, artifact_type FROM artifacts WHERE id = ?1",
             [&request.node.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
@@ -243,27 +321,31 @@ pub fn upsert_artifact_node(
         ..ArtifactMutationResultWire::default()
     };
 
-    match existing_json {
-        Some(existing) if existing == node_json => {}
+    match existing_row {
+        Some((existing, existing_artifact_type))
+            if existing == node_json
+                && existing_artifact_type == artifact_type => {}
         Some(_) => {
             tx.execute(
                 r#"
                 UPDATE artifacts
                 SET kind = ?2,
-                    display_title = ?3,
-                    subtitle = ?4,
-                    provenance = ?5,
-                    source_kind = ?6,
-                    source_id = ?7,
-                    source_version = ?8,
-                    search_text = ?9,
-                    node_json = ?10,
+                    artifact_type = ?3,
+                    display_title = ?4,
+                    subtitle = ?5,
+                    provenance = ?6,
+                    source_kind = ?7,
+                    source_id = ?8,
+                    source_version = ?9,
+                    search_text = ?10,
+                    node_json = ?11,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?1
                 "#,
                 params![
                     request.node.id,
                     request.node.kind,
+                    artifact_type,
                     request.node.display_title,
                     request.node.subtitle,
                     request.node.provenance,
@@ -281,13 +363,15 @@ pub fn upsert_artifact_node(
             tx.execute(
                 r#"
                 INSERT INTO artifacts (
-                    id, kind, display_title, subtitle, provenance, source_kind,
-                    source_id, source_version, search_text, node_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    id, kind, artifact_type, display_title, subtitle,
+                    provenance, source_kind, source_id, source_version,
+                    search_text, node_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
                 params![
                     request.node.id,
                     request.node.kind,
+                    artifact_type,
                     request.node.display_title,
                     request.node.subtitle,
                     request.node.provenance,
@@ -897,6 +981,7 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::artifact::wire::{
+        ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_PLAN,
         ARTIFACT_KIND_AGENT, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
         ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
     };
@@ -1034,6 +1119,8 @@ mod tests {
             "idx_artifacts_kind",
             "idx_artifacts_source",
             "idx_artifacts_text",
+            "idx_artifacts_display",
+            "idx_artifacts_file_type",
             "idx_artifact_links_type",
             "idx_artifact_links_source",
             "idx_artifact_links_target",
@@ -1077,6 +1164,30 @@ mod tests {
         let root: ArtifactNodeWire = serde_json::from_str(&node_json).unwrap();
         assert_eq!(root, ArtifactNodeWire::root());
         assert_eq!(store.index_path(), db.as_path());
+    }
+
+    #[test]
+    fn node_upsert_caches_file_artifact_type_for_sql_filters() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let mut store = open_artifact_store(&db).unwrap();
+        let mut node = manual_node("plan.md");
+        node.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!(ARTIFACT_FILE_TYPE_PLAN),
+        );
+
+        upsert_artifact_node(&mut store, node_upsert(node)).unwrap();
+
+        let cached: String = store
+            .connection()
+            .query_row(
+                "SELECT artifact_type FROM artifacts WHERE id = ?1",
+                ["plan.md"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, ARTIFACT_FILE_TYPE_PLAN);
     }
 
     #[test]

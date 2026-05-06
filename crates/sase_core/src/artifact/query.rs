@@ -1,19 +1,22 @@
 //! Deterministic read APIs for the unified artifact graph.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection,
+    OptionalExtension,
+};
 
 use super::store::ArtifactStore;
 use super::wire::{
-    file_artifact_type, validate_file_artifact_type, ArtifactDetailPagedWire,
-    ArtifactDetailWire, ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire,
-    ArtifactDoctorWire, ArtifactGroupSummaryWire, ArtifactLinkWire,
-    ArtifactNodeWire, ArtifactPageRequestWire, ArtifactPayloadWire,
-    ArtifactQueryWire, ArtifactRelationPageWire, ArtifactTypeCountWire,
-    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT,
-    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
-    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
+    validate_file_artifact_type, ArtifactDetailPagedWire, ArtifactDetailWire,
+    ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
+    ArtifactGroupSummaryWire, ArtifactLinkWire, ArtifactNodeWire,
+    ArtifactPageRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
+    ArtifactRelationPageWire, ArtifactTypeCountWire, ARTIFACT_KIND_DIRECTORY,
+    ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED,
+    ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
+    ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_DERIVED_REASON: &str = "stale_derived";
@@ -93,106 +96,263 @@ pub fn artifact_list(
     store: &ArtifactStore,
     query: ArtifactQueryWire,
 ) -> Result<Vec<ArtifactNodeWire>, String> {
-    validate_schema_version(query.schema_version)?;
-    let conn = store.connection();
-    let mut nodes = load_all_nodes(conn, query.include_tombstoned)?;
-
-    if let Some(text) = query
-        .text
-        .as_ref()
-        .map(|text| text.trim())
-        .filter(|text| !text.is_empty())
-    {
-        let needle = text.to_lowercase();
-        nodes.retain(|node| {
-            node.id.to_lowercase().contains(&needle)
-                || node.display_title.to_lowercase().contains(&needle)
-                || node
-                    .subtitle
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&needle)
-                || node.search_text.to_lowercase().contains(&needle)
-        });
-    }
-    if !query.kinds.is_empty() {
-        let kinds: BTreeSet<_> =
-            query.kinds.iter().map(String::as_str).collect();
-        nodes.retain(|node| kinds.contains(node.kind.as_str()));
-    }
-    if !query.file_types.is_empty() {
-        for file_type in &query.file_types {
-            validate_file_artifact_type(file_type)?;
-        }
-        let file_types: BTreeSet<_> =
-            query.file_types.iter().map(String::as_str).collect();
-        nodes.retain(|node| {
-            node.kind == ARTIFACT_KIND_FILE
-                && file_types.contains(file_artifact_type(node))
-        });
-    }
-    if let Some(provenance) = query
-        .provenance
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        nodes.retain(|node| node.provenance == *provenance);
-    }
-    if !query.source_kinds.is_empty() {
-        let source_kinds: BTreeSet<_> =
-            query.source_kinds.iter().map(String::as_str).collect();
-        nodes.retain(|node| {
-            node.source_kind
-                .as_deref()
-                .is_some_and(|source_kind| source_kinds.contains(source_kind))
-        });
-    }
-    if !query.source_ids.is_empty() {
-        let source_ids: BTreeSet<_> =
-            query.source_ids.iter().map(String::as_str).collect();
-        nodes.retain(|node| {
-            node.source_id
-                .as_deref()
-                .is_some_and(|source_id| source_ids.contains(source_id))
-        });
-    }
-    if !query.link_types.is_empty() {
-        let linked_ids = linked_artifact_ids(
-            conn,
-            &query.link_types,
-            query.include_tombstoned,
-        )?;
-        nodes.retain(|node| linked_ids.contains(&node.id));
-    }
-    if let Some(root_id) = query
-        .root_id
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        nodes.retain(|node| {
-            node.id == *root_id
-                || path_to_root_ids(conn, &node.id)
-                    .map(|path| path.iter().any(|id| id == root_id))
-                    .unwrap_or(false)
-        });
-    }
-
-    sort_nodes(&mut nodes);
-    let offset = query.offset.unwrap_or(0) as usize;
-    let limit = query.limit.map(|limit| limit as usize);
-    let iter = nodes.into_iter().skip(offset);
-    Ok(match limit {
-        Some(limit) => iter.take(limit).collect(),
-        None => iter.collect(),
-    })
+    query_artifacts(store.connection(), query)
 }
 
 pub fn artifact_search(
     store: &ArtifactStore,
     query: ArtifactQueryWire,
 ) -> Result<Vec<ArtifactNodeWire>, String> {
-    artifact_list(store, query)
+    query_artifacts(store.connection(), query)
+}
+
+fn query_artifacts(
+    conn: &Connection,
+    query: ArtifactQueryWire,
+) -> Result<Vec<ArtifactNodeWire>, String> {
+    validate_schema_version(query.schema_version)?;
+    for file_type in &query.file_types {
+        validate_file_artifact_type(file_type)?;
+    }
+
+    let mut sql = String::from(
+        r#"
+        SELECT a.node_json
+        FROM artifacts a
+        WHERE 1 = 1
+        "#,
+    );
+    let mut values: Vec<SqlValue> = Vec::new();
+    if !query.include_tombstoned {
+        sql.push_str(
+            r#"
+            AND NOT EXISTS (
+                SELECT 1 FROM manual_tombstones t
+                WHERE t.tombstone_type = ? AND t.artifact_id = a.id
+            )
+            "#,
+        );
+        values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_NODE.to_string()));
+    }
+
+    let text = query
+        .text
+        .as_ref()
+        .map(|text| text.trim().to_lowercase())
+        .filter(|text| !text.is_empty());
+    if let Some(text) = text.as_deref() {
+        let pattern = format!("%{}%", escape_like(text));
+        sql.push_str(
+            r#"
+            AND (
+                lower(a.id) LIKE ? ESCAPE '\'
+                OR lower(a.display_title) LIKE ? ESCAPE '\'
+                OR lower(COALESCE(a.subtitle, '')) LIKE ? ESCAPE '\'
+                OR lower(a.search_text) LIKE ? ESCAPE '\'
+            )
+            "#,
+        );
+        for _ in 0..4 {
+            values.push(SqlValue::Text(pattern.clone()));
+        }
+    }
+
+    append_in_filter(&mut sql, &mut values, "a.kind", &query.kinds);
+    if !query.file_types.is_empty() {
+        sql.push_str(" AND a.kind = ?");
+        values.push(SqlValue::Text(ARTIFACT_KIND_FILE.to_string()));
+        append_in_filter(
+            &mut sql,
+            &mut values,
+            "a.artifact_type",
+            &query.file_types,
+        );
+    }
+    if let Some(provenance) = query
+        .provenance
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        sql.push_str(" AND a.provenance = ?");
+        values.push(SqlValue::Text(provenance.to_string()));
+    }
+    append_in_filter(
+        &mut sql,
+        &mut values,
+        "a.source_kind",
+        &query.source_kinds,
+    );
+    append_in_filter(&mut sql, &mut values, "a.source_id", &query.source_ids);
+    append_link_type_filter(
+        &mut sql,
+        &mut values,
+        &query.link_types,
+        query.include_tombstoned,
+    );
+    if let Some(root_id) = query
+        .root_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        append_root_filter(
+            &mut sql,
+            &mut values,
+            root_id,
+            query.include_tombstoned,
+        );
+    }
+
+    if let Some(text) = text.as_deref() {
+        let prefix = format!("{}%", escape_like(text));
+        let pattern = format!("%{}%", escape_like(text));
+        sql.push_str(
+            r#"
+            ORDER BY
+                CASE
+                    WHEN lower(a.id) = ? THEN 0
+                    WHEN lower(a.display_title) = ? THEN 1
+                    WHEN lower(a.id) LIKE ? ESCAPE '\' THEN 2
+                    WHEN lower(a.display_title) LIKE ? ESCAPE '\' THEN 3
+                    WHEN lower(COALESCE(a.subtitle, '')) LIKE ? ESCAPE '\' THEN 4
+                    WHEN lower(a.search_text) LIKE ? ESCAPE '\' THEN 4
+                    ELSE 5
+                END,
+                a.kind, a.display_title, a.id
+            "#,
+        );
+        values.push(SqlValue::Text(text.to_string()));
+        values.push(SqlValue::Text(text.to_string()));
+        values.push(SqlValue::Text(prefix.clone()));
+        values.push(SqlValue::Text(prefix));
+        values.push(SqlValue::Text(pattern.clone()));
+        values.push(SqlValue::Text(pattern));
+    } else {
+        sql.push_str(" ORDER BY a.kind, a.display_title, a.id");
+    }
+
+    match query.limit {
+        Some(limit) => {
+            sql.push_str(" LIMIT ? OFFSET ?");
+            values.push(SqlValue::Integer(i64::from(limit)));
+            values
+                .push(SqlValue::Integer(i64::from(query.offset.unwrap_or(0))));
+        }
+        None => {
+            if let Some(offset) = query.offset.filter(|offset| *offset > 0) {
+                sql.push_str(" LIMIT -1 OFFSET ?");
+                values.push(SqlValue::Integer(i64::from(offset)));
+            }
+        }
+    }
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(values), |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut nodes = Vec::new();
+    for row in rows {
+        let json = row.map_err(|e| e.to_string())?;
+        nodes.push(serde_json::from_str(&json).map_err(|e| e.to_string())?);
+    }
+    Ok(nodes)
+}
+
+fn append_in_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    column: &str,
+    items: &[String],
+) {
+    if items.is_empty() {
+        return;
+    }
+    sql.push_str(" AND ");
+    sql.push_str(column);
+    sql.push_str(" IN (");
+    sql.push_str(&vec!["?"; items.len()].join(", "));
+    sql.push(')');
+    values.extend(items.iter().cloned().map(SqlValue::Text));
+}
+
+fn append_link_type_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    link_types: &[String],
+    include_tombstoned: bool,
+) {
+    if link_types.is_empty() {
+        return;
+    }
+    sql.push_str(
+        r#"
+        AND EXISTS (
+            SELECT 1
+            FROM artifact_links l
+            WHERE (l.source_id = a.id OR l.target_id = a.id)
+        "#,
+    );
+    append_in_filter(sql, values, "l.link_type", link_types);
+    if !include_tombstoned {
+        sql.push_str(
+            r#"
+            AND NOT EXISTS (
+                SELECT 1 FROM manual_tombstones t
+                WHERE t.tombstone_type = ? AND t.link_id = l.id
+            )
+            "#,
+        );
+        values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_LINK.to_string()));
+    }
+    sql.push(')');
+}
+
+fn append_root_filter(
+    sql: &mut String,
+    values: &mut Vec<SqlValue>,
+    root_id: &str,
+    include_tombstoned: bool,
+) {
+    sql.push_str(
+        r#"
+        AND a.id IN (
+            WITH RECURSIVE artifact_descendants(id) AS (
+                SELECT ?
+                UNION
+                SELECT l.source_id
+                FROM artifact_links l
+                JOIN artifact_descendants d ON l.target_id = d.id
+                WHERE l.link_type = ?
+        "#,
+    );
+    values.push(SqlValue::Text(root_id.to_string()));
+    values.push(SqlValue::Text(ARTIFACT_LINK_PARENT.to_string()));
+    if !include_tombstoned {
+        sql.push_str(
+            r#"
+                  AND NOT EXISTS (
+                      SELECT 1 FROM manual_tombstones t
+                      WHERE t.tombstone_type = ? AND t.link_id = l.id
+                  )
+            "#,
+        );
+        values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_LINK.to_string()));
+    }
+    sql.push_str(
+        r#"
+            )
+            SELECT id FROM artifact_descendants
+        )
+        "#,
+    );
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 pub fn artifact_children(
@@ -807,43 +967,6 @@ where
     Ok(links)
 }
 
-fn linked_artifact_ids(
-    conn: &Connection,
-    link_types: &[String],
-    include_tombstoned: bool,
-) -> Result<HashSet<String>, String> {
-    let mut ids = HashSet::new();
-    for link_type in link_types {
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT source_id, target_id, id
-                FROM artifact_links
-                WHERE link_type = ?1
-                "#,
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([link_type], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (source_id, target_id, link_id) =
-                row.map_err(|e| e.to_string())?;
-            if include_tombstoned || !link_is_tombstoned(conn, &link_id)? {
-                ids.insert(source_id);
-                ids.insert(target_id);
-            }
-        }
-    }
-    Ok(ids)
-}
-
 fn path_to_root_ids(
     conn: &Connection,
     artifact_id: &str,
@@ -1430,23 +1553,6 @@ fn target_is_timestamp_reference(target: &str) -> bool {
     value.chars().take_while(|ch| ch.is_ascii_digit()).count() >= 14
 }
 
-fn link_is_tombstoned(
-    conn: &Connection,
-    link_id: &str,
-) -> Result<bool, String> {
-    conn.query_row(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM manual_tombstones
-            WHERE tombstone_type = ?1 AND link_id = ?2
-        )
-        "#,
-        params![ARTIFACT_TOMBSTONE_LINK, link_id],
-        |row| row.get(0),
-    )
-    .map_err(|e| e.to_string())
-}
-
 fn sort_nodes(nodes: &mut [ArtifactNodeWire]) {
     nodes.sort_by(|a, b| {
         (a.kind.as_str(), a.display_title.as_str(), a.id.as_str()).cmp(&(
@@ -1492,6 +1598,9 @@ fn issue(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use rusqlite::params;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -1692,6 +1801,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(searched[0].id, "/tmp/b.md");
+    }
+
+    #[test]
+    fn search_applies_limit_in_sql_before_deserializing_rows() {
+        let mut store = fixture_store();
+        upsert_node(
+            &mut store,
+            manual_node("file:ok", ARTIFACT_KIND_FILE, "ok"),
+        );
+        store
+            .connection()
+            .execute(
+                r#"
+                INSERT INTO artifacts (
+                    id, kind, artifact_type, display_title, subtitle,
+                    provenance, source_kind, source_id, source_version,
+                    search_text, node_json
+                ) VALUES (?1, ?2, '', ?3, NULL, ?4, NULL, NULL, NULL, ?5, ?6)
+                "#,
+                params![
+                    "file:zz-bad",
+                    ARTIFACT_KIND_FILE,
+                    "zz bad",
+                    ARTIFACT_PROVENANCE_MANUAL,
+                    "zz bad",
+                    "{not json",
+                ],
+            )
+            .unwrap();
+
+        let listed = artifact_search(
+            &store,
+            ArtifactQueryWire {
+                kinds: vec![ARTIFACT_KIND_FILE.to_string()],
+                limit: Some(1),
+                offset: Some(0),
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "/tmp/a.md");
     }
 
     #[test]
