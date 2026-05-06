@@ -41,4 +41,11 @@ without secrets.
 cargo run -p sase_gateway -- --bind 127.0.0.1:0 --sase-home /tmp/sase
 ```
 
-The binary binds loopback by default. Bind-policy hardening and user-facing CLI integration live in later phases.
+The binary binds `127.0.0.1:7629` by default. Non-loopback binds such as `0.0.0.0:7629`, LAN addresses, or tailnet
+addresses fail unless `--allow-non-loopback` / `-L` is passed explicitly.
+
+Generate the committed mobile API contract snapshot with:
+
+```bash
+cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
+```

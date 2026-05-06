@@ -1,0 +1,168 @@
+{
+  "auth": {
+    "header": "Authorization",
+    "scheme": "bearer",
+    "unauthenticated_routes": [
+      "GET /api/v1/health",
+      "POST /api/v1/session/pair/start",
+      "POST /api/v1/session/pair/finish"
+    ]
+  },
+  "base_path": "/api/v1",
+  "contract": "sase_mobile_gateway_api_v1",
+  "examples": {
+    "authorization_header": "Authorization: Bearer sase_mobile_<token>",
+    "pair_finish_request": {
+      "code": "123456",
+      "device": {
+        "app_version": "0.1.0",
+        "display_name": "Pixel 9",
+        "platform": "android"
+      },
+      "pairing_id": "pair_abc123",
+      "schema_version": 1
+    },
+    "pair_start_request": {
+      "host_label": "workstation",
+      "schema_version": 1
+    }
+  },
+  "records": {
+    "ApiErrorWire": {
+      "code": [
+        "unauthorized",
+        "not_found",
+        "invalid_request",
+        "pairing_expired",
+        "pairing_rejected",
+        "internal"
+      ],
+      "details": "json|null",
+      "message": "string",
+      "schema_version": "u32",
+      "target": "string|null"
+    },
+    "DeviceRecordWire": {
+      "app_version": "string|null",
+      "device_id": "string",
+      "display_name": "string",
+      "last_seen_at": "rfc3339|null",
+      "paired_at": "rfc3339|null",
+      "platform": "string",
+      "revoked_at": "rfc3339|null",
+      "schema_version": "u32"
+    },
+    "EventRecordWire": {
+      "created_at": "rfc3339",
+      "id": "string",
+      "payload": "EventPayloadWire",
+      "schema_version": "u32"
+    },
+    "GatewayBindWire": {
+      "address": "host:port",
+      "is_loopback": "bool"
+    },
+    "GatewayBuildWire": {
+      "git_sha": "string|null",
+      "package_version": "string"
+    },
+    "HealthResponseWire": {
+      "bind": "GatewayBindWire",
+      "build": "GatewayBuildWire",
+      "schema_version": "u32",
+      "service": "sase_gateway",
+      "status": "ok",
+      "version": "string"
+    },
+    "PairFinishRequestWire": {
+      "code": "string",
+      "device": "PairingDeviceMetadataWire",
+      "pairing_id": "string",
+      "schema_version": "u32"
+    },
+    "PairFinishResponseWire": {
+      "device": "DeviceRecordWire",
+      "schema_version": "u32",
+      "token": "string",
+      "token_type": "bearer"
+    },
+    "PairStartRequestWire": {
+      "host_label": "string|null",
+      "schema_version": "u32"
+    },
+    "PairStartResponseWire": {
+      "code": "string",
+      "expires_at": "rfc3339",
+      "host_fingerprint": "string|null",
+      "host_label": "string",
+      "pairing_id": "string",
+      "schema_version": "u32"
+    },
+    "PairingDeviceMetadataWire": {
+      "app_version": "string|null",
+      "display_name": "string",
+      "platform": "string"
+    },
+    "SessionResponseWire": {
+      "capabilities": "string[]",
+      "device": "DeviceRecordWire",
+      "schema_version": "u32"
+    }
+  },
+  "response_shape": {
+    "error": "ApiErrorWire",
+    "optional_fields": "explicit_null",
+    "success": "direct_json_record"
+  },
+  "routes": [
+    {
+      "auth": false,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/health",
+      "success": "HealthResponseWire"
+    },
+    {
+      "auth": false,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/session/pair/start",
+      "request": "PairStartRequestWire",
+      "success": "PairStartResponseWire"
+    },
+    {
+      "auth": false,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/session/pair/finish",
+      "request": "PairFinishRequestWire",
+      "success": "PairFinishResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/session",
+      "success": "SessionResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/events",
+      "status": "placeholder_until_sse_phase",
+      "success": "EventRecordWire stream"
+    }
+  ],
+  "schema_version": 1
+}
