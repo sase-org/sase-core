@@ -14,10 +14,11 @@ pub use contract::{
     ContractSnapshotError,
 };
 pub use host_bridge::{
-    AgentHostBridge, DynAgentHostBridge, DynNotificationHostBridge,
-    HostBridgeError, HostFileMetadataWire, LocalJsonlNotificationBridge,
-    NotificationHostBridge, StaticAgentHostBridge,
-    StaticNotificationHostBridge, UnavailableAgentHostBridge,
+    split_command_words, AgentHostBridge, CommandAgentHostBridge,
+    DynAgentHostBridge, DynNotificationHostBridge, HostBridgeError,
+    HostFileMetadataWire, LocalJsonlNotificationBridge, NotificationHostBridge,
+    StaticAgentHostBridge, StaticNotificationHostBridge,
+    UnavailableAgentHostBridge,
 };
 pub use routes::{app, app_with_state, default_sase_home, GatewayState};
 pub use server::{serve, validate_bind_policy, GatewayConfig, GatewayRunError};

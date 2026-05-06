@@ -4,13 +4,17 @@ use axum::serve as axum_serve;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
-use crate::routes::{app_with_state, default_sase_home, GatewayState};
+use crate::{
+    host_bridge::CommandAgentHostBridge,
+    routes::{app_with_state, default_sase_home, GatewayState},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub sase_home: PathBuf,
     pub allow_non_loopback: bool,
+    pub agent_bridge_command: Vec<String>,
 }
 
 impl Default for GatewayConfig {
@@ -19,6 +23,7 @@ impl Default for GatewayConfig {
             bind: SocketAddr::from(([127, 0, 0, 1], 7629)),
             sase_home: default_sase_home(),
             allow_non_loopback: false,
+            agent_bridge_command: CommandAgentHostBridge::default_command(),
         }
     }
 }
@@ -47,7 +52,12 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayRunError> {
             source,
         }
     })?;
-    serve_listener(listener, config.sase_home).await
+    serve_listener_with_agent_bridge_command(
+        listener,
+        config.sase_home,
+        config.agent_bridge_command,
+    )
+    .await
 }
 
 pub fn validate_bind_policy(
@@ -66,6 +76,22 @@ pub async fn serve_listener(
     let local_addr = listener.local_addr().map_err(GatewayRunError::Serve)?;
     let state =
         GatewayState::new_with_sase_home(local_addr.to_string(), sase_home);
+    axum_serve(listener, app_with_state(state))
+        .await
+        .map_err(GatewayRunError::Serve)
+}
+
+pub async fn serve_listener_with_agent_bridge_command(
+    listener: TcpListener,
+    sase_home: impl Into<PathBuf>,
+    agent_bridge_command: Vec<String>,
+) -> Result<(), GatewayRunError> {
+    let local_addr = listener.local_addr().map_err(GatewayRunError::Serve)?;
+    let state = GatewayState::new_with_sase_home_and_agent_bridge_command(
+        local_addr.to_string(),
+        sase_home,
+        agent_bridge_command,
+    );
     axum_serve(listener, app_with_state(state))
         .await
         .map_err(GatewayRunError::Serve)
@@ -95,6 +121,7 @@ mod tests {
             bind: "0.0.0.0:7629".parse().unwrap(),
             sase_home: default_sase_home(),
             allow_non_loopback: false,
+            agent_bridge_command: vec!["sase".to_string()],
         };
 
         let err = validate_bind_policy(&config).unwrap_err();
@@ -110,6 +137,7 @@ mod tests {
             bind: "0.0.0.0:7629".parse().unwrap(),
             sase_home: default_sase_home(),
             allow_non_loopback: true,
+            agent_bridge_command: vec!["sase".to_string()],
         };
 
         validate_bind_policy(&config).unwrap();

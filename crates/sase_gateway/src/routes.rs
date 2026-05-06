@@ -33,9 +33,9 @@ use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
 use crate::host_bridge::{
-    AgentHostBridge, DynAgentHostBridge, DynNotificationHostBridge,
-    HostBridgeError, LocalJsonlNotificationBridge, NotificationHostBridge,
-    UnavailableAgentHostBridge,
+    AgentHostBridge, CommandAgentHostBridge, DynAgentHostBridge,
+    DynNotificationHostBridge, HostBridgeError, LocalJsonlNotificationBridge,
+    NotificationHostBridge, UnavailableAgentHostBridge,
 };
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
@@ -94,6 +94,18 @@ impl GatewayState {
         })
     }
 
+    pub fn new_with_sase_home_and_agent_bridge_command(
+        bind_addr: String,
+        sase_home: impl Into<PathBuf>,
+        command: Vec<String>,
+    ) -> Self {
+        let mut state = Self::new_with_sase_home(bind_addr, sase_home);
+        state.agent_bridge = DynAgentHostBridge::new(Arc::new(
+            CommandAgentHostBridge::new(command),
+        ));
+        state
+    }
+
     pub fn new_with_options(options: GatewayStateOptions) -> Self {
         let is_loopback = options
             .bind_addr
@@ -146,6 +158,16 @@ impl GatewayState {
         let mut state = Self::new_with_options(options);
         state.agent_bridge = DynAgentHostBridge::new(agent_bridge);
         state
+    }
+
+    pub fn new_with_agent_bridge_command(
+        options: GatewayStateOptions,
+        command: Vec<String>,
+    ) -> Self {
+        Self::new_with_agent_bridge(
+            options,
+            Arc::new(CommandAgentHostBridge::new(command)),
+        )
     }
 
     pub fn new_with_bridges(
@@ -2431,6 +2453,49 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn state_for_command_agent_bridge(tmp: &TempDir) -> GatewayState {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = tmp.path().join("mobile-agent-bridge");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+operation="$3"
+cat >/dev/null
+case "$operation" in
+  list-agents)
+    printf '%s\n' '{"schema_version":1,"agents":[{"name":"cmd-demo","project":"sase","status":"running","pid":4242,"model":"gpt-5.5","provider":"codex","workspace_number":102,"started_at":"2026-05-06T14:30:00Z","duration_seconds":90,"prompt_snippet":"Command bridge","has_artifact_dir":true,"retry_lineage":{"retry_of_timestamp":null,"retried_as_timestamp":null,"retry_chain_root_timestamp":null,"retry_attempt":null,"parent_agent_name":null},"actions":{"can_resume":true,"can_wait":true,"can_kill":true,"can_retry":true},"display":{"title":"cmd-demo","subtitle":"sase","status_label":"Running"}}],"total_count":1}'
+    ;;
+  resume-options)
+    printf '%s\n' '{"schema_version":1,"options":[{"id":"cmd-demo:resume","agent_name":"cmd-demo","kind":"resume","label":"Resume cmd-demo","prompt_text":"#resume:cmd-demo\n","direct_launch_supported":true}]}'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"##,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        GatewayState::new_with_agent_bridge_command(
+            GatewayStateOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                sase_home: tmp.path().to_path_buf(),
+                pairing_ttl: Duration::minutes(5),
+                host_label: "test-host".to_string(),
+                event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+                heartbeat_interval: StdDuration::from_secs(60),
+                attachment_token_ttl: default_attachment_token_ttl(),
+                max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            },
+            vec![script.to_string_lossy().to_string()],
+        )
+    }
+
     fn seed_plan_notification(
         tmp: &TempDir,
         id: &str,
@@ -3004,6 +3069,31 @@ mod tests {
                 timestamp: Some(_),
             } if reason == "kill" && name == "mobile-demo"
         )));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_agent_bridge_routes_return_command_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_agent_bridge(&tmp);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (list_status, list) = json_response_with_state(
+            state.clone(),
+            agent_get_request(Some(&token), "/api/v1/agents"),
+        )
+        .await;
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(list["agents"][0]["name"], "cmd-demo");
+
+        let (resume_status, resume) = json_response_with_state(
+            state,
+            agent_get_request(Some(&token), "/api/v1/agents/resume-options"),
+        )
+        .await;
+        assert_eq!(resume_status, StatusCode::OK);
+        assert_eq!(resume["options"][0]["prompt_text"], "#resume:cmd-demo\n");
     }
 
     #[tokio::test]

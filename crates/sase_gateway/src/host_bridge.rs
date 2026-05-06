@@ -1,6 +1,8 @@
 use std::{
     fmt,
+    io::Write,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::Arc,
 };
 
@@ -16,6 +18,7 @@ use sase_core::notifications::{
     PendingActionPrefixResolutionWire, PendingActionStoreWire,
     PlanActionRequestWire, QuestionActionRequestWire,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -147,6 +150,102 @@ pub trait AgentHostBridge: Send + Sync {
 pub struct UnavailableAgentHostBridge;
 
 impl AgentHostBridge for UnavailableAgentHostBridge {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandAgentHostBridge {
+    command: Vec<String>,
+}
+
+impl CommandAgentHostBridge {
+    pub fn new(command: Vec<String>) -> Self {
+        Self { command }
+    }
+
+    pub fn default_command() -> Vec<String> {
+        std::env::var("SASE_MOBILE_AGENT_BRIDGE_COMMAND")
+            .ok()
+            .and_then(|raw| split_command_words(&raw).ok())
+            .filter(|parts| !parts.is_empty())
+            .unwrap_or_else(|| vec!["sase".to_string()])
+    }
+
+    fn invoke<Request, Response>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> Result<Response, HostBridgeError>
+    where
+        Request: Serialize,
+        Response: DeserializeOwned,
+    {
+        let (program, fixed_args) =
+            self.command.split_first().ok_or_else(|| {
+                HostBridgeError::BridgeUnavailable("agent_bridge".to_string())
+            })?;
+        let mut child = Command::new(program)
+            .args(fixed_args)
+            .args(["mobile", "agent-bridge", operation])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| {
+                HostBridgeError::BridgeUnavailable("agent_bridge".to_string())
+            })?;
+
+        {
+            let Some(mut stdin) = child.stdin.take() else {
+                return Err(HostBridgeError::BridgeUnavailable(format!(
+                    "agent_bridge:{operation}:stdin"
+                )));
+            };
+            serde_json::to_writer(&mut stdin, request).map_err(|_| {
+                HostBridgeError::BridgeUnavailable(format!(
+                    "agent_bridge:{operation}:encode"
+                ))
+            })?;
+            stdin.write_all(b"\n").map_err(|_| {
+                HostBridgeError::BridgeUnavailable(format!(
+                    "agent_bridge:{operation}:stdin"
+                ))
+            })?;
+        }
+
+        let output = child.wait_with_output().map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "agent_bridge:{operation}:exit"
+            ))
+        })?;
+        if !output.status.success() {
+            return Err(HostBridgeError::BridgeUnavailable(format!(
+                "agent_bridge:{operation}"
+            )));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "agent_bridge:{operation}:invalid_json"
+            ))
+        })
+    }
+}
+
+impl AgentHostBridge for CommandAgentHostBridge {
+    fn list_agents(
+        &self,
+        request: &MobileAgentListRequestWire,
+    ) -> Result<MobileAgentListResponseWire, HostBridgeError> {
+        self.invoke("list-agents", request)
+    }
+
+    fn resume_options(
+        &self,
+    ) -> Result<MobileAgentResumeOptionsResponseWire, HostBridgeError> {
+        self.invoke(
+            "resume-options",
+            &serde_json::json!({"schema_version": GATEWAY_WIRE_SCHEMA_VERSION}),
+        )
+    }
+}
 
 #[derive(Clone)]
 pub struct DynNotificationHostBridge(Arc<dyn NotificationHostBridge>);
@@ -801,6 +900,45 @@ pub enum HostBridgeError {
     InvalidActionRequest(String),
     #[error("failed to write response: {0}")]
     WriteResponse(String),
+}
+
+pub fn split_command_words(raw: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = raw.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+
+    if let Some(q) = quote {
+        return Err(format!("unterminated quote {q}"));
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
 }
 
 fn expand_home_path(path: &str) -> PathBuf {
