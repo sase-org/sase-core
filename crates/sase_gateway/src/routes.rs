@@ -34,8 +34,9 @@ use tower_http::trace::TraceLayer;
 
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, DynAgentHostBridge,
-    DynNotificationHostBridge, HostBridgeError, LocalJsonlNotificationBridge,
-    NotificationHostBridge, UnavailableAgentHostBridge,
+    DynHelperHostBridge, DynNotificationHostBridge, HelperHostBridge,
+    HostBridgeError, LocalJsonlNotificationBridge, NotificationHostBridge,
+    UnavailableAgentHostBridge, UnavailableHelperHostBridge,
 };
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
@@ -49,6 +50,12 @@ use crate::wire::{
     MobileAgentListRequestWire, MobileAgentListResponseWire,
     MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
     MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
+    MobileBeadListRequestWire, MobileBeadListResponseWire,
+    MobileBeadShowRequestWire, MobileBeadShowResponseWire,
+    MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
+    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
+    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
+    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
     NotificationStateMutationResponseWire, PairFinishRequestWire,
     PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
     SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
@@ -70,6 +77,7 @@ pub struct GatewayState {
     heartbeat_interval: StdDuration,
     notification_bridge: DynNotificationHostBridge,
     agent_bridge: DynAgentHostBridge,
+    helper_bridge: DynHelperHostBridge,
     attachment_tokens: AttachmentTokenStore,
 }
 
@@ -135,6 +143,9 @@ impl GatewayState {
             agent_bridge: DynAgentHostBridge::new(Arc::new(
                 UnavailableAgentHostBridge,
             )),
+            helper_bridge: DynHelperHostBridge::new(Arc::new(
+                UnavailableHelperHostBridge,
+            )),
             attachment_tokens: AttachmentTokenStore::new(
                 options.attachment_token_ttl,
                 options.max_attachment_bytes,
@@ -158,6 +169,15 @@ impl GatewayState {
     ) -> Self {
         let mut state = Self::new_with_options(options);
         state.agent_bridge = DynAgentHostBridge::new(agent_bridge);
+        state
+    }
+
+    pub fn new_with_helper_bridge(
+        options: GatewayStateOptions,
+        helper_bridge: Arc<dyn HelperHostBridge>,
+    ) -> Self {
+        let mut state = Self::new_with_options(options);
+        state.helper_bridge = DynHelperHostBridge::new(helper_bridge);
         state
     }
 
@@ -424,6 +444,12 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/agents/launch-image", post(agent_launch_image))
         .route("/api/v1/agents/:name/kill", post(agent_kill))
         .route("/api/v1/agents/:name/retry", post(agent_retry))
+        .route("/api/v1/changespec-tags", get(list_changespec_tags))
+        .route("/api/v1/xprompts/catalog", get(xprompt_catalog))
+        .route("/api/v1/beads", get(list_beads))
+        .route("/api/v1/beads/:id", get(show_bead))
+        .route("/api/v1/update/start", post(update_start))
+        .route("/api/v1/update/:job_id", get(update_status))
         .route("/api/v1/notifications", get(list_notifications))
         .route("/api/v1/notifications/:id", get(notification_detail))
         .route(
@@ -574,6 +600,8 @@ async fn session(
             "agents.read".to_string(),
             "agents.launch".to_string(),
             "agents.lifecycle.write".to_string(),
+            "helpers.read".to_string(),
+            "update.write".to_string(),
             "attachments.download".to_string(),
             "notifications.state.write".to_string(),
         ],
@@ -796,6 +824,206 @@ async fn agent_retry(
             );
             Err(api_error)
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ChangeSpecTagsQuery {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn list_changespec_tags(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<ChangeSpecTagsQuery>,
+) -> Result<Json<MobileChangeSpecTagListResponseWire>, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/changespec-tags").await?;
+    let request = MobileChangeSpecTagListRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        project: query.project,
+        limit: query.limit,
+        device_id: Some(device.device_id),
+    };
+    state
+        .helper_bridge
+        .list_changespec_tags(&request)
+        .map(Json)
+        .map_err(ApiError::from_host_bridge)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct XpromptCatalogQuery {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    include_pdf: bool,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn xprompt_catalog(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<XpromptCatalogQuery>,
+) -> Result<Json<MobileXpromptCatalogResponseWire>, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/xprompts/catalog").await?;
+    let request = MobileXpromptCatalogRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        project: query.project,
+        source: query.source,
+        tag: query.tag,
+        query: query.query,
+        include_pdf: query.include_pdf,
+        limit: query.limit,
+        device_id: Some(device.device_id),
+    };
+    state
+        .helper_bridge
+        .xprompt_catalog(&request)
+        .map(Json)
+        .map_err(ApiError::from_host_bridge)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct BeadListQuery {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    all_projects: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    bead_type: Option<String>,
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    include_closed: bool,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn list_beads(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<BeadListQuery>,
+) -> Result<Json<MobileBeadListResponseWire>, ApiError> {
+    let device = authenticate(&state, &headers, "/api/v1/beads").await?;
+    let request = MobileBeadListRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        project: query.project,
+        all_projects: query.all_projects,
+        status: query.status,
+        bead_type: query.bead_type,
+        tier: query.tier,
+        include_closed: query.include_closed,
+        limit: query.limit,
+        device_id: Some(device.device_id),
+    };
+    state
+        .helper_bridge
+        .list_beads(&request)
+        .map(Json)
+        .map_err(ApiError::from_host_bridge)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct BeadShowQuery {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    all_projects: bool,
+}
+
+async fn show_bead(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<BeadShowQuery>,
+) -> Result<Json<MobileBeadShowResponseWire>, ApiError> {
+    let device = authenticate(&state, &headers, "/api/v1/beads/{id}").await?;
+    let request = MobileBeadShowRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        bead_id: id,
+        project: query.project,
+        all_projects: query.all_projects,
+        device_id: Some(device.device_id),
+    };
+    state
+        .helper_bridge
+        .show_bead(&request)
+        .map(Json)
+        .map_err(ApiError::from_host_bridge)
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UpdateStartBody {
+    #[serde(default = "default_gateway_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+async fn update_start(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateStartBody>, JsonRejection>,
+) -> Result<Json<MobileUpdateStartResponseWire>, ApiError> {
+    let device = authenticate(&state, &headers, "/api/v1/update/start").await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    validate_schema(payload.schema_version)?;
+    let request = MobileUpdateStartRequestWire {
+        schema_version: payload.schema_version,
+        request_id: payload.request_id,
+        device_id: Some(device.device_id.clone()),
+    };
+    match state.helper_bridge.update_start(&request) {
+        Ok(result) => {
+            publish_helpers_changed(
+                &state,
+                "update_start",
+                Some("update".to_string()),
+                Some(result.job.job_id.clone()),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => Err(ApiError::from_host_bridge(error)),
+    }
+}
+
+async fn update_status(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<MobileUpdateStatusResponseWire>, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/update/{job_id}").await?;
+    let request = MobileUpdateStatusRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        job_id,
+        device_id: Some(device.device_id),
+    };
+    match state.helper_bridge.update_status(&request) {
+        Ok(result) => {
+            publish_helpers_changed(
+                &state,
+                "update_status",
+                Some("update".to_string()),
+                Some(result.job.job_id.clone()),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => Err(ApiError::from_host_bridge(error)),
     }
 }
 
@@ -1469,6 +1697,10 @@ fn default_mobile_schema_version() -> u32 {
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
 }
 
+fn default_gateway_schema_version() -> u32 {
+    GATEWAY_WIRE_SCHEMA_VERSION
+}
+
 fn default_attachment_token_ttl() -> ChronoDuration {
     ChronoDuration::minutes(5)
 }
@@ -1497,6 +1729,23 @@ fn publish_agents_changed(
         .append(|_| EventPayloadWire::AgentsChanged {
             reason: reason.to_string(),
             agent_name,
+            timestamp: Some(format_time(Utc::now())),
+        })?;
+    Ok(())
+}
+
+fn publish_helpers_changed(
+    state: &GatewayState,
+    reason: &str,
+    helper: Option<String>,
+    job_id: Option<String>,
+) -> Result<(), ApiError> {
+    state
+        .event_hub
+        .append(|_| EventPayloadWire::HelpersChanged {
+            reason: reason.to_string(),
+            helper,
+            job_id,
             timestamp: Some(format_time(Utc::now())),
         })?;
     Ok(())
@@ -1568,6 +1817,7 @@ fn event_name(payload: &EventPayloadWire) -> &'static str {
             "notifications_changed"
         }
         EventPayloadWire::AgentsChanged { .. } => "agents_changed",
+        EventPayloadWire::HelpersChanged { .. } => "helpers_changed",
     }
 }
 
@@ -2045,6 +2295,21 @@ impl ApiError {
                 ApiErrorCodeWire::PermissionDenied,
                 target.clone(),
             ),
+            HostBridgeError::HelperNotFound(target) => (
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::HelperNotFound,
+                target.clone(),
+            ),
+            HostBridgeError::UpdateAlreadyRunning(target) => (
+                StatusCode::CONFLICT,
+                ApiErrorCodeWire::UpdateAlreadyRunning,
+                target.clone(),
+            ),
+            HostBridgeError::UpdateJobNotFound(target) => (
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::UpdateJobNotFound,
+                target.clone(),
+            ),
             HostBridgeError::NotificationMissing(target) => (
                 StatusCode::NOT_FOUND,
                 ApiErrorCodeWire::NotFound,
@@ -2124,6 +2389,9 @@ impl ApiErrorCodeWire {
             ApiErrorCodeWire::LaunchFailed => "launch_failed",
             ApiErrorCodeWire::InvalidUpload => "invalid_upload",
             ApiErrorCodeWire::BridgeUnavailable => "bridge_unavailable",
+            ApiErrorCodeWire::HelperNotFound => "helper_not_found",
+            ApiErrorCodeWire::UpdateAlreadyRunning => "update_already_running",
+            ApiErrorCodeWire::UpdateJobNotFound => "update_job_not_found",
             ApiErrorCodeWire::PermissionDenied => "permission_denied",
             ApiErrorCodeWire::Internal => "internal",
         }
@@ -2469,6 +2737,152 @@ mod tests {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                     source_agent: "mobile-demo".to_string(),
                     launch,
+                },
+            }),
+        )
+    }
+
+    fn helper_result() -> crate::wire::MobileHelperResultWire {
+        crate::wire::MobileHelperResultWire {
+            status: crate::wire::MobileHelperStatusWire::Success,
+            message: Some("ok".to_string()),
+            warnings: Vec::new(),
+            skipped: Vec::new(),
+            partial_failure_count: None,
+        }
+    }
+
+    fn helper_context() -> crate::wire::MobileHelperProjectContextWire {
+        crate::wire::MobileHelperProjectContextWire {
+            project: Some("sase".to_string()),
+            scope: crate::wire::MobileHelperProjectScopeWire::Explicit,
+        }
+    }
+
+    fn sample_bead_summary() -> crate::wire::MobileBeadSummaryWire {
+        crate::wire::MobileBeadSummaryWire {
+            id: "sase-26.4.1".to_string(),
+            title: "Rust helper skeleton".to_string(),
+            status: "in_progress".to_string(),
+            bead_type: "phase".to_string(),
+            tier: None,
+            project: Some("sase".to_string()),
+            parent_id: Some("sase-26.4".to_string()),
+            assignee: Some("sase-26.4.1".to_string()),
+            updated_at: Some("2026-05-06T15:08:41Z".to_string()),
+            dependency_count: 0,
+            block_count: 5,
+            child_count: 0,
+            plan_path_display: Some(
+                "sdd/epics/202605/mobile_gateway_epic_4.md".to_string(),
+            ),
+            changespec_name: None,
+            changespec_status: None,
+        }
+    }
+
+    fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
+        let result = helper_result();
+        let context = helper_context();
+        let bead_summary = sample_bead_summary();
+        let update_job = crate::wire::MobileUpdateJobWire {
+            job_id: "job_123".to_string(),
+            status: crate::wire::MobileUpdateJobStatusWire::Running,
+            started_at: Some("2026-05-06T15:00:00Z".to_string()),
+            finished_at: None,
+            message: Some("update started".to_string()),
+            log_path_display: Some(
+                "~/.sase/chat_install/job_123.log".to_string(),
+            ),
+            completion_path_display: None,
+        };
+        GatewayState::new_with_helper_bridge(
+            GatewayStateOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                sase_home: tmp.path().to_path_buf(),
+                pairing_ttl: Duration::minutes(5),
+                host_label: "test-host".to_string(),
+                event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+                heartbeat_interval: StdDuration::from_secs(60),
+                attachment_token_ttl: default_attachment_token_ttl(),
+                max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            },
+            Arc::new(crate::host_bridge::StaticHelperHostBridge {
+                changespec_tags_response: MobileChangeSpecTagListResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result: result.clone(),
+                    context: context.clone(),
+                    tags: vec![crate::wire::MobileChangeSpecTagEntryWire {
+                        tag: "#gh:feature".to_string(),
+                        project: Some("sase".to_string()),
+                        changespec: "feature".to_string(),
+                        title: Some("Feature".to_string()),
+                        status: "WIP".to_string(),
+                        workflow: Some("gh".to_string()),
+                        source_path_display: Some(
+                            "~/.sase/projects/sase.gp".to_string(),
+                        ),
+                    }],
+                    total_count: 1,
+                },
+                xprompt_catalog_response: MobileXpromptCatalogResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result: result.clone(),
+                    context: context.clone(),
+                    entries: vec![crate::wire::MobileXpromptCatalogEntryWire {
+                        name: "gh".to_string(),
+                        display_label: "GitHub workflow".to_string(),
+                        description: Some("Workflow tag".to_string()),
+                        source_bucket: "project".to_string(),
+                        project: Some("sase".to_string()),
+                        tags: vec!["changespec".to_string()],
+                        input_signature: Some("topic".to_string()),
+                        is_skill: false,
+                        content_preview: Some("Use gh".to_string()),
+                        source_path_display: Some("xprompts/gh.md".to_string()),
+                    }],
+                    stats: crate::wire::MobileXpromptCatalogStatsWire {
+                        total_count: 1,
+                        project_count: 1,
+                        skill_count: 0,
+                        pdf_requested: false,
+                    },
+                    catalog_attachment: None,
+                },
+                bead_list_response: MobileBeadListResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result: result.clone(),
+                    context: context.clone(),
+                    beads: vec![bead_summary.clone()],
+                    total_count: 1,
+                },
+                bead_show_response: MobileBeadShowResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result: result.clone(),
+                    context,
+                    bead: crate::wire::MobileBeadDetailWire {
+                        summary: bead_summary,
+                        description: Some("Define route skeletons".to_string()),
+                        notes: None,
+                        design_path_display: Some(
+                            "sdd/epics/202605/mobile_gateway_epic_4.md"
+                                .to_string(),
+                        ),
+                        dependencies: Vec::new(),
+                        blocks: vec!["sase-26.4.2".to_string()],
+                        children: Vec::new(),
+                        workspace_display: Some("~/projects/sase".to_string()),
+                    },
+                },
+                update_start_response: MobileUpdateStartResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result: result.clone(),
+                    job: update_job.clone(),
+                },
+                update_status_response: MobileUpdateStatusResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    result,
+                    job: update_job,
                 },
             }),
         )
@@ -2879,6 +3293,8 @@ esac
                 "agents.read",
                 "agents.launch",
                 "agents.lifecycle.write",
+                "helpers.read",
+                "update.write",
                 "attachments.download",
                 "notifications.state.write"
             ])
@@ -3102,6 +3518,215 @@ esac
                 agent_name: Some(name),
                 timestamp: Some(_),
             } if reason == "kill" && name == "mobile-demo"
+        )));
+    }
+
+    #[tokio::test]
+    async fn helper_routes_without_token_return_typed_unauthorized_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_helper_bridge(&tmp);
+        let requests = [
+            Request::builder()
+                .uri("/api/v1/changespec-tags")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/v1/xprompts/catalog")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/v1/beads")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/v1/beads/sase-26.4.1")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/update/start")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"schema_version":1}"#))
+                .unwrap(),
+            Request::builder()
+                .uri("/api/v1/update/job_123")
+                .body(Body::empty())
+                .unwrap(),
+        ];
+
+        for request in requests {
+            let (status, value) =
+                json_response_with_state(state.clone(), request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(value["code"], "unauthorized");
+            assert_eq!(value["target"], "authorization");
+        }
+    }
+
+    #[tokio::test]
+    async fn production_helper_bridge_returns_typed_unavailable_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/changespec-tags")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value["code"], "bridge_unavailable");
+        assert_eq!(value["target"], "helper_bridge");
+    }
+
+    #[test]
+    fn helper_host_bridge_errors_map_to_stable_api_codes() {
+        let cases = [
+            (
+                HostBridgeError::HelperNotFound("xprompt:missing".to_string()),
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::HelperNotFound,
+                "xprompt:missing",
+            ),
+            (
+                HostBridgeError::UpdateAlreadyRunning("update".to_string()),
+                StatusCode::CONFLICT,
+                ApiErrorCodeWire::UpdateAlreadyRunning,
+                "update",
+            ),
+            (
+                HostBridgeError::UpdateJobNotFound("job_404".to_string()),
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::UpdateJobNotFound,
+                "job_404",
+            ),
+        ];
+
+        for (error, status, code, target) in cases {
+            let api_error = ApiError::from_host_bridge(error);
+            assert_eq!(api_error.status, status);
+            assert_eq!(api_error.wire.code, code);
+            assert_eq!(api_error.wire.target.as_deref(), Some(target));
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_helper_bridge_routes_return_stable_success_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_helper_bridge(&tmp);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+        let auth = format!("Bearer {token}");
+
+        let (tags_status, tags) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/changespec-tags?project=sase&limit=10")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(tags_status, StatusCode::OK);
+        assert_eq!(tags["result"]["status"], "success");
+        assert_eq!(tags["tags"][0]["tag"], "#gh:feature");
+
+        let (catalog_status, catalog) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/xprompts/catalog?project=sase&tag=changespec")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(catalog_status, StatusCode::OK);
+        assert_eq!(catalog["entries"][0]["name"], "gh");
+        assert_eq!(catalog["stats"]["total_count"], 1);
+
+        let (beads_status, beads) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/beads?project=sase&status=in_progress")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(beads_status, StatusCode::OK);
+        assert_eq!(beads["beads"][0]["id"], "sase-26.4.1");
+
+        let (bead_status, bead) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/beads/sase-26.4.1?project=sase")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(bead_status, StatusCode::OK);
+        assert_eq!(bead["bead"]["summary"]["title"], "Rust helper skeleton");
+
+        let (start_status, start) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/update/start")
+                .header("authorization", auth.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"schema_version":1}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(start_status, StatusCode::OK);
+        assert_eq!(start["job"]["job_id"], "job_123");
+        assert_eq!(start["job"]["status"], "running");
+
+        let (update_status, update) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/update/job_123")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(update_status, StatusCode::OK);
+        assert_eq!(update["job"]["job_id"], "job_123");
+
+        let events = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::HelpersChanged {
+                reason,
+                helper: Some(helper),
+                job_id: Some(job_id),
+                timestamp: Some(_),
+            } if reason == "update_start"
+                && helper == "update"
+                && job_id == "job_123"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::HelpersChanged {
+                reason,
+                helper: Some(helper),
+                job_id: Some(job_id),
+                timestamp: Some(_),
+            } if reason == "update_status"
+                && helper == "update"
+                && job_id == "job_123"
         )));
     }
 

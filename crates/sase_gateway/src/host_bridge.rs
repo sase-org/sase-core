@@ -28,8 +28,133 @@ use crate::wire::{
     MobileAgentListRequestWire, MobileAgentListResponseWire,
     MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
     MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
+    MobileBeadListRequestWire, MobileBeadListResponseWire,
+    MobileBeadShowRequestWire, MobileBeadShowResponseWire,
+    MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
+    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
+    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
+    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
     NotificationStateMutationResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
+
+#[derive(Clone)]
+pub struct DynHelperHostBridge(Arc<dyn HelperHostBridge>);
+
+impl DynHelperHostBridge {
+    pub fn new(bridge: Arc<dyn HelperHostBridge>) -> Self {
+        Self(bridge)
+    }
+
+    pub fn list_changespec_tags(
+        &self,
+        request: &MobileChangeSpecTagListRequestWire,
+    ) -> Result<MobileChangeSpecTagListResponseWire, HostBridgeError> {
+        self.0.list_changespec_tags(request)
+    }
+
+    pub fn xprompt_catalog(
+        &self,
+        request: &MobileXpromptCatalogRequestWire,
+    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        self.0.xprompt_catalog(request)
+    }
+
+    pub fn list_beads(
+        &self,
+        request: &MobileBeadListRequestWire,
+    ) -> Result<MobileBeadListResponseWire, HostBridgeError> {
+        self.0.list_beads(request)
+    }
+
+    pub fn show_bead(
+        &self,
+        request: &MobileBeadShowRequestWire,
+    ) -> Result<MobileBeadShowResponseWire, HostBridgeError> {
+        self.0.show_bead(request)
+    }
+
+    pub fn update_start(
+        &self,
+        request: &MobileUpdateStartRequestWire,
+    ) -> Result<MobileUpdateStartResponseWire, HostBridgeError> {
+        self.0.update_start(request)
+    }
+
+    pub fn update_status(
+        &self,
+        request: &MobileUpdateStatusRequestWire,
+    ) -> Result<MobileUpdateStatusResponseWire, HostBridgeError> {
+        self.0.update_status(request)
+    }
+}
+
+impl fmt::Debug for DynHelperHostBridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynHelperHostBridge")
+            .finish_non_exhaustive()
+    }
+}
+
+pub trait HelperHostBridge: Send + Sync {
+    fn list_changespec_tags(
+        &self,
+        _request: &MobileChangeSpecTagListRequestWire,
+    ) -> Result<MobileChangeSpecTagListResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn xprompt_catalog(
+        &self,
+        _request: &MobileXpromptCatalogRequestWire,
+    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn list_beads(
+        &self,
+        _request: &MobileBeadListRequestWire,
+    ) -> Result<MobileBeadListResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn show_bead(
+        &self,
+        _request: &MobileBeadShowRequestWire,
+    ) -> Result<MobileBeadShowResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn update_start(
+        &self,
+        _request: &MobileUpdateStartRequestWire,
+    ) -> Result<MobileUpdateStartResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn update_status(
+        &self,
+        _request: &MobileUpdateStatusRequestWire,
+    ) -> Result<MobileUpdateStatusResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnavailableHelperHostBridge;
+
+impl HelperHostBridge for UnavailableHelperHostBridge {}
 
 #[derive(Clone)]
 pub struct DynAgentHostBridge(Arc<dyn AgentHostBridge>);
@@ -883,6 +1008,60 @@ impl AgentHostBridge for StaticAgentHostBridge {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StaticHelperHostBridge {
+    pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
+    pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
+    pub bead_list_response: MobileBeadListResponseWire,
+    pub bead_show_response: MobileBeadShowResponseWire,
+    pub update_start_response: MobileUpdateStartResponseWire,
+    pub update_status_response: MobileUpdateStatusResponseWire,
+}
+
+impl HelperHostBridge for StaticHelperHostBridge {
+    fn list_changespec_tags(
+        &self,
+        _request: &MobileChangeSpecTagListRequestWire,
+    ) -> Result<MobileChangeSpecTagListResponseWire, HostBridgeError> {
+        Ok(self.changespec_tags_response.clone())
+    }
+
+    fn xprompt_catalog(
+        &self,
+        _request: &MobileXpromptCatalogRequestWire,
+    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        Ok(self.xprompt_catalog_response.clone())
+    }
+
+    fn list_beads(
+        &self,
+        _request: &MobileBeadListRequestWire,
+    ) -> Result<MobileBeadListResponseWire, HostBridgeError> {
+        Ok(self.bead_list_response.clone())
+    }
+
+    fn show_bead(
+        &self,
+        _request: &MobileBeadShowRequestWire,
+    ) -> Result<MobileBeadShowResponseWire, HostBridgeError> {
+        Ok(self.bead_show_response.clone())
+    }
+
+    fn update_start(
+        &self,
+        _request: &MobileUpdateStartRequestWire,
+    ) -> Result<MobileUpdateStartResponseWire, HostBridgeError> {
+        Ok(self.update_start_response.clone())
+    }
+
+    fn update_status(
+        &self,
+        _request: &MobileUpdateStatusRequestWire,
+    ) -> Result<MobileUpdateStatusResponseWire, HostBridgeError> {
+        Ok(self.update_status_response.clone())
+    }
+}
+
 fn ensure_action_available(
     store: &PendingActionStoreWire,
     notification: &NotificationWire,
@@ -965,6 +1144,12 @@ pub enum HostBridgeError {
     InvalidUpload(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    #[error("helper result not found: {0}")]
+    HelperNotFound(String),
+    #[error("update is already running: {0}")]
+    UpdateAlreadyRunning(String),
+    #[error("update job not found: {0}")]
+    UpdateJobNotFound(String),
     #[error("failed to read notifications: {0}")]
     ReadNotifications(String),
     #[error("notification not found: {0}")]

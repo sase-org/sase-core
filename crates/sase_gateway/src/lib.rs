@@ -15,10 +15,12 @@ pub use contract::{
 };
 pub use host_bridge::{
     split_command_words, AgentHostBridge, CommandAgentHostBridge,
-    DynAgentHostBridge, DynNotificationHostBridge, HostBridgeError,
-    HostFileMetadataWire, LocalJsonlNotificationBridge, NotificationHostBridge,
-    StaticAgentHostBridge, StaticNotificationHostBridge,
-    UnavailableAgentHostBridge,
+    DynAgentHostBridge, DynHelperHostBridge, DynNotificationHostBridge,
+    HelperHostBridge, HostBridgeError, HostFileMetadataWire,
+    LocalJsonlNotificationBridge, NotificationHostBridge,
+    StaticAgentHostBridge, StaticHelperHostBridge,
+    StaticNotificationHostBridge, UnavailableAgentHostBridge,
+    UnavailableHelperHostBridge,
 };
 pub use routes::{app, app_with_state, default_sase_home, GatewayState};
 pub use server::{serve, validate_bind_policy, GatewayConfig, GatewayRunError};
@@ -35,6 +37,18 @@ pub use wire::{
     MobileAgentResumeOptionsResponseWire, MobileAgentRetryLineageWire,
     MobileAgentRetryRequestWire, MobileAgentRetryResultWire,
     MobileAgentSummaryWire, MobileAgentTextLaunchRequestWire,
+    MobileBeadDetailWire, MobileBeadListRequestWire,
+    MobileBeadListResponseWire, MobileBeadShowRequestWire,
+    MobileBeadShowResponseWire, MobileBeadSummaryWire,
+    MobileChangeSpecTagEntryWire, MobileChangeSpecTagListRequestWire,
+    MobileChangeSpecTagListResponseWire, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire, MobileUpdateJobStatusWire,
+    MobileUpdateJobWire, MobileUpdateStartRequestWire,
+    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
+    MobileUpdateStatusResponseWire, MobileXpromptCatalogAttachmentWire,
+    MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
+    MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
     NotificationStateMutationResponseWire, PairFinishRequestWire,
     PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
     PairingDeviceMetadataWire, SessionResponseWire,

@@ -101,6 +101,9 @@ pub enum ApiErrorCodeWire {
     LaunchFailed,
     InvalidUpload,
     BridgeUnavailable,
+    HelperNotFound,
+    UpdateAlreadyRunning,
+    UpdateJobNotFound,
     PermissionDenied,
     Internal,
 }
@@ -133,6 +136,12 @@ pub enum EventPayloadWire {
     AgentsChanged {
         reason: String,
         agent_name: Option<String>,
+        timestamp: Option<String>,
+    },
+    HelpersChanged {
+        reason: String,
+        helper: Option<String>,
+        job_id: Option<String>,
         timestamp: Option<String>,
     },
 }
@@ -328,6 +337,244 @@ pub struct MobileAgentRetryResultWire {
     pub launch: MobileAgentLaunchResultWire,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileHelperResultWire {
+    pub status: MobileHelperStatusWire,
+    pub message: Option<String>,
+    pub warnings: Vec<String>,
+    pub skipped: Vec<MobileHelperSkippedWire>,
+    pub partial_failure_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileHelperStatusWire {
+    Success,
+    PartialSuccess,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileHelperSkippedWire {
+    pub target: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileHelperProjectContextWire {
+    pub project: Option<String>,
+    pub scope: MobileHelperProjectScopeWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileHelperProjectScopeWire {
+    Explicit,
+    DeviceDefault,
+    AllKnown,
+    Unspecified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileChangeSpecTagListRequestWire {
+    pub schema_version: u32,
+    pub project: Option<String>,
+    pub limit: Option<u32>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileChangeSpecTagListResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub tags: Vec<MobileChangeSpecTagEntryWire>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileChangeSpecTagEntryWire {
+    pub tag: String,
+    pub project: Option<String>,
+    pub changespec: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub workflow: Option<String>,
+    pub source_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptCatalogRequestWire {
+    pub schema_version: u32,
+    pub project: Option<String>,
+    pub source: Option<String>,
+    pub tag: Option<String>,
+    pub query: Option<String>,
+    pub include_pdf: bool,
+    pub limit: Option<u32>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptCatalogResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub entries: Vec<MobileXpromptCatalogEntryWire>,
+    pub stats: MobileXpromptCatalogStatsWire,
+    pub catalog_attachment: Option<MobileXpromptCatalogAttachmentWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptCatalogEntryWire {
+    pub name: String,
+    pub display_label: String,
+    pub description: Option<String>,
+    pub source_bucket: String,
+    pub project: Option<String>,
+    pub tags: Vec<String>,
+    pub input_signature: Option<String>,
+    pub is_skill: bool,
+    pub content_preview: Option<String>,
+    pub source_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptCatalogStatsWire {
+    pub total_count: u64,
+    pub project_count: u64,
+    pub skill_count: u64,
+    pub pdf_requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptCatalogAttachmentWire {
+    pub display_name: String,
+    pub content_type: Option<String>,
+    pub byte_size: Option<u64>,
+    pub path_display: Option<String>,
+    pub generated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadListRequestWire {
+    pub schema_version: u32,
+    pub project: Option<String>,
+    pub all_projects: bool,
+    pub status: Option<String>,
+    pub bead_type: Option<String>,
+    pub tier: Option<String>,
+    pub include_closed: bool,
+    pub limit: Option<u32>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadListResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub beads: Vec<MobileBeadSummaryWire>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadShowRequestWire {
+    pub schema_version: u32,
+    pub bead_id: String,
+    pub project: Option<String>,
+    pub all_projects: bool,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadShowResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub bead: MobileBeadDetailWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadSummaryWire {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub bead_type: String,
+    pub tier: Option<String>,
+    pub project: Option<String>,
+    pub parent_id: Option<String>,
+    pub assignee: Option<String>,
+    pub updated_at: Option<String>,
+    pub dependency_count: u64,
+    pub block_count: u64,
+    pub child_count: u64,
+    pub plan_path_display: Option<String>,
+    pub changespec_name: Option<String>,
+    pub changespec_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileBeadDetailWire {
+    pub summary: MobileBeadSummaryWire,
+    pub description: Option<String>,
+    pub notes: Option<String>,
+    pub design_path_display: Option<String>,
+    pub dependencies: Vec<String>,
+    pub blocks: Vec<String>,
+    pub children: Vec<String>,
+    pub workspace_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileUpdateStartRequestWire {
+    pub schema_version: u32,
+    pub request_id: Option<String>,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileUpdateStartResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub job: MobileUpdateJobWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileUpdateStatusRequestWire {
+    pub schema_version: u32,
+    pub job_id: String,
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileUpdateStatusResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub job: MobileUpdateJobWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileUpdateJobWire {
+    pub job_id: String,
+    pub status: MobileUpdateJobStatusWire,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub message: Option<String>,
+    pub log_path_display: Option<String>,
+    pub completion_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileUpdateJobStatusWire {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -517,6 +764,13 @@ mod tests {
             },
             ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::UpdateJobNotFound,
+                message: "update job not found".to_string(),
+                target: Some("job_123".to_string()),
+                details: None,
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::PermissionDenied,
                 message: "permission denied".to_string(),
                 target: Some("agent_bridge:kill-agent".to_string()),
@@ -577,6 +831,13 @@ mod tests {
                 },
                 {
                     "schema_version": 1,
+                    "code": "update_job_not_found",
+                    "message": "update job not found",
+                    "target": "job_123",
+                    "details": null
+                },
+                {
+                    "schema_version": 1,
                     "code": "permission_denied",
                     "message": "permission denied",
                     "target": "agent_bridge:kill-agent",
@@ -631,6 +892,35 @@ mod tests {
                         "reason": "launch",
                         "agent_name": "mobile-demo",
                         "timestamp": "2026-05-06T14:31:00Z"
+                    }
+                }
+            })
+        );
+
+        let helper_changed = EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "0000000000000003".to_string(),
+            created_at: "2026-05-06T14:32:00Z".to_string(),
+            payload: EventPayloadWire::HelpersChanged {
+                reason: "update_start".to_string(),
+                helper: Some("update".to_string()),
+                job_id: Some("job_123".to_string()),
+                timestamp: Some("2026-05-06T14:32:00Z".to_string()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(helper_changed).unwrap(),
+            json!({
+                "schema_version": 1,
+                "id": "0000000000000003",
+                "created_at": "2026-05-06T14:32:00Z",
+                "payload": {
+                    "type": "helpers_changed",
+                    "data": {
+                        "reason": "update_start",
+                        "helper": "update",
+                        "job_id": "job_123",
+                        "timestamp": "2026-05-06T14:32:00Z"
                     }
                 }
             })
@@ -810,6 +1100,272 @@ mod tests {
                 "runtime": null,
                 "project": "sase",
                 "dry_run": false
+            })
+        );
+    }
+
+    #[test]
+    fn mobile_helper_wire_json_snapshot() {
+        let result = MobileHelperResultWire {
+            status: MobileHelperStatusWire::PartialSuccess,
+            message: Some("loaded helper records".to_string()),
+            warnings: vec!["one project could not be read".to_string()],
+            skipped: vec![MobileHelperSkippedWire {
+                target: Some("archive.gp".to_string()),
+                reason: "terminal changespec".to_string(),
+            }],
+            partial_failure_count: Some(1),
+        };
+        let context = MobileHelperProjectContextWire {
+            project: Some("sase".to_string()),
+            scope: MobileHelperProjectScopeWire::Explicit,
+        };
+
+        assert_eq!(
+            serde_json::to_value(MobileChangeSpecTagListResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                result: result.clone(),
+                context: context.clone(),
+                tags: vec![MobileChangeSpecTagEntryWire {
+                    tag: "#gh:feature".to_string(),
+                    project: Some("sase".to_string()),
+                    changespec: "feature".to_string(),
+                    title: Some("Feature work".to_string()),
+                    status: "WIP".to_string(),
+                    workflow: Some("gh".to_string()),
+                    source_path_display: Some(
+                        "~/.sase/projects/sase.gp".to_string()
+                    ),
+                }],
+                total_count: 1,
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "partial_success",
+                    "message": "loaded helper records",
+                    "warnings": ["one project could not be read"],
+                    "skipped": [{
+                        "target": "archive.gp",
+                        "reason": "terminal changespec"
+                    }],
+                    "partial_failure_count": 1
+                },
+                "context": {
+                    "project": "sase",
+                    "scope": "explicit"
+                },
+                "tags": [{
+                    "tag": "#gh:feature",
+                    "project": "sase",
+                    "changespec": "feature",
+                    "title": "Feature work",
+                    "status": "WIP",
+                    "workflow": "gh",
+                    "source_path_display": "~/.sase/projects/sase.gp"
+                }],
+                "total_count": 1
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(MobileXpromptCatalogResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                result: result.clone(),
+                context: context.clone(),
+                entries: vec![MobileXpromptCatalogEntryWire {
+                    name: "gh".to_string(),
+                    display_label: "GitHub workflow".to_string(),
+                    description: Some(
+                        "Create a GitHub workflow prompt".to_string()
+                    ),
+                    source_bucket: "project".to_string(),
+                    project: Some("sase".to_string()),
+                    tags: vec!["changespec".to_string()],
+                    input_signature: Some("topic".to_string()),
+                    is_skill: false,
+                    content_preview: Some("Use this workflow...".to_string()),
+                    source_path_display: Some("xprompts/gh.md".to_string()),
+                }],
+                stats: MobileXpromptCatalogStatsWire {
+                    total_count: 1,
+                    project_count: 1,
+                    skill_count: 0,
+                    pdf_requested: true,
+                },
+                catalog_attachment: Some(MobileXpromptCatalogAttachmentWire {
+                    display_name: "xprompts.pdf".to_string(),
+                    content_type: Some("application/pdf".to_string()),
+                    byte_size: Some(1234),
+                    path_display: Some("~/.sase/xprompts.pdf".to_string()),
+                    generated: true,
+                }),
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "partial_success",
+                    "message": "loaded helper records",
+                    "warnings": ["one project could not be read"],
+                    "skipped": [{
+                        "target": "archive.gp",
+                        "reason": "terminal changespec"
+                    }],
+                    "partial_failure_count": 1
+                },
+                "context": {
+                    "project": "sase",
+                    "scope": "explicit"
+                },
+                "entries": [{
+                    "name": "gh",
+                    "display_label": "GitHub workflow",
+                    "description": "Create a GitHub workflow prompt",
+                    "source_bucket": "project",
+                    "project": "sase",
+                    "tags": ["changespec"],
+                    "input_signature": "topic",
+                    "is_skill": false,
+                    "content_preview": "Use this workflow...",
+                    "source_path_display": "xprompts/gh.md"
+                }],
+                "stats": {
+                    "total_count": 1,
+                    "project_count": 1,
+                    "skill_count": 0,
+                    "pdf_requested": true
+                },
+                "catalog_attachment": {
+                    "display_name": "xprompts.pdf",
+                    "content_type": "application/pdf",
+                    "byte_size": 1234,
+                    "path_display": "~/.sase/xprompts.pdf",
+                    "generated": true
+                }
+            })
+        );
+
+        let summary = MobileBeadSummaryWire {
+            id: "sase-26.4.1".to_string(),
+            title: "Rust helper skeleton".to_string(),
+            status: "in_progress".to_string(),
+            bead_type: "phase".to_string(),
+            tier: None,
+            project: Some("sase".to_string()),
+            parent_id: Some("sase-26.4".to_string()),
+            assignee: Some("sase-26.4.1".to_string()),
+            updated_at: Some("2026-05-06T15:08:41Z".to_string()),
+            dependency_count: 0,
+            block_count: 5,
+            child_count: 0,
+            plan_path_display: Some("sdd/epics/202605/mobile.md".to_string()),
+            changespec_name: None,
+            changespec_status: None,
+        };
+        assert_eq!(
+            serde_json::to_value(MobileBeadShowResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                result: result.clone(),
+                context: context.clone(),
+                bead: MobileBeadDetailWire {
+                    summary: summary.clone(),
+                    description: Some("Define route skeletons".to_string()),
+                    notes: None,
+                    design_path_display: Some(
+                        "sdd/epics/202605/mobile.md".to_string()
+                    ),
+                    dependencies: Vec::new(),
+                    blocks: vec!["sase-26.4.2".to_string()],
+                    children: Vec::new(),
+                    workspace_display: Some("~/projects/sase".to_string()),
+                },
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "partial_success",
+                    "message": "loaded helper records",
+                    "warnings": ["one project could not be read"],
+                    "skipped": [{
+                        "target": "archive.gp",
+                        "reason": "terminal changespec"
+                    }],
+                    "partial_failure_count": 1
+                },
+                "context": {
+                    "project": "sase",
+                    "scope": "explicit"
+                },
+                "bead": {
+                    "summary": {
+                        "id": "sase-26.4.1",
+                        "title": "Rust helper skeleton",
+                        "status": "in_progress",
+                        "bead_type": "phase",
+                        "tier": null,
+                        "project": "sase",
+                        "parent_id": "sase-26.4",
+                        "assignee": "sase-26.4.1",
+                        "updated_at": "2026-05-06T15:08:41Z",
+                        "dependency_count": 0,
+                        "block_count": 5,
+                        "child_count": 0,
+                        "plan_path_display": "sdd/epics/202605/mobile.md",
+                        "changespec_name": null,
+                        "changespec_status": null
+                    },
+                    "description": "Define route skeletons",
+                    "notes": null,
+                    "design_path_display": "sdd/epics/202605/mobile.md",
+                    "dependencies": [],
+                    "blocks": ["sase-26.4.2"],
+                    "children": [],
+                    "workspace_display": "~/projects/sase"
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(MobileUpdateStartResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                result,
+                job: MobileUpdateJobWire {
+                    job_id: "job_123".to_string(),
+                    status: MobileUpdateJobStatusWire::Running,
+                    started_at: Some("2026-05-06T15:00:00Z".to_string()),
+                    finished_at: None,
+                    message: Some("update started".to_string()),
+                    log_path_display: Some(
+                        "~/.sase/chat_install/job.log".to_string()
+                    ),
+                    completion_path_display: None,
+                },
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "partial_success",
+                    "message": "loaded helper records",
+                    "warnings": ["one project could not be read"],
+                    "skipped": [{
+                        "target": "archive.gp",
+                        "reason": "terminal changespec"
+                    }],
+                    "partial_failure_count": 1
+                },
+                "job": {
+                    "job_id": "job_123",
+                    "status": "running",
+                    "started_at": "2026-05-06T15:00:00Z",
+                    "finished_at": null,
+                    "message": "update started",
+                    "log_path_display": "~/.sase/chat_install/job.log",
+                    "completion_path_display": null
+                }
             })
         );
     }

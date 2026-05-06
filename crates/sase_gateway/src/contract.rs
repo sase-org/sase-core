@@ -120,6 +120,55 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "GET",
+                "path": "/api/v1/changespec-tags",
+                "auth": true,
+                "query": "MobileChangeSpecTagListRequestWire fields as URL query parameters",
+                "success": "MobileChangeSpecTagListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/xprompts/catalog",
+                "auth": true,
+                "query": "MobileXpromptCatalogRequestWire fields as URL query parameters",
+                "success": "MobileXpromptCatalogResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/beads",
+                "auth": true,
+                "query": "MobileBeadListRequestWire fields as URL query parameters",
+                "success": "MobileBeadListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/beads/{id}",
+                "auth": true,
+                "query": "MobileBeadShowRequestWire fields as URL query parameters plus path bead_id",
+                "success": "MobileBeadShowResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/update/start",
+                "auth": true,
+                "request": "MobileUpdateStartRequestWire",
+                "success": "MobileUpdateStartResponseWire",
+                "events_on_success": ["helpers_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/update/{job_id}",
+                "auth": true,
+                "success": "MobileUpdateStatusResponseWire",
+                "events_on_success": ["helpers_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
                 "path": "/api/v1/notifications",
                 "auth": true,
                 "query": "MobileNotificationListRequestWire fields as URL query parameters",
@@ -270,6 +319,9 @@ pub fn api_v1_contract_snapshot() -> Value {
                     "launch_failed",
                     "invalid_upload",
                     "bridge_unavailable",
+                    "helper_not_found",
+                    "update_already_running",
+                    "update_job_not_found",
                     "permission_denied",
                     "internal"
                 ],
@@ -321,6 +373,12 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "agents_changed": {
                     "reason": "string",
                     "agent_name": "string|null",
+                    "timestamp": "rfc3339|null"
+                },
+                "helpers_changed": {
+                    "reason": "string",
+                    "helper": "string|null",
+                    "job_id": "string|null",
                     "timestamp": "rfc3339|null"
                 }
             },
@@ -487,6 +545,173 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "project": "string|null",
                 "device_id": "string|null; host-injected before bridge dispatch",
                 "dry_run": "bool|null"
+            },
+            "MobileHelperResultWire": {
+                "status": "success|partial_success|skipped|failed",
+                "message": "string|null",
+                "warnings": "string[]",
+                "skipped": "MobileHelperSkippedWire[]",
+                "partial_failure_count": "u32|null"
+            },
+            "MobileHelperSkippedWire": {
+                "target": "string|null",
+                "reason": "string"
+            },
+            "MobileHelperProjectContextWire": {
+                "project": "string|null",
+                "scope": "explicit|device_default|all_known|unspecified"
+            },
+            "MobileChangeSpecTagListRequestWire": {
+                "schema_version": "u32",
+                "project": "string|null",
+                "limit": "u32|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileChangeSpecTagListResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "context": "MobileHelperProjectContextWire",
+                "tags": "MobileChangeSpecTagEntryWire[]",
+                "total_count": "u64"
+            },
+            "MobileChangeSpecTagEntryWire": {
+                "tag": "string",
+                "project": "string|null",
+                "changespec": "string",
+                "title": "string|null",
+                "status": "string",
+                "workflow": "string|null",
+                "source_path_display": "string|null"
+            },
+            "MobileXpromptCatalogRequestWire": {
+                "schema_version": "u32",
+                "project": "string|null",
+                "source": "string|null",
+                "tag": "string|null",
+                "query": "string|null",
+                "include_pdf": "bool",
+                "limit": "u32|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileXpromptCatalogResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "context": "MobileHelperProjectContextWire",
+                "entries": "MobileXpromptCatalogEntryWire[]",
+                "stats": "MobileXpromptCatalogStatsWire",
+                "catalog_attachment": "MobileXpromptCatalogAttachmentWire|null"
+            },
+            "MobileXpromptCatalogEntryWire": {
+                "name": "string",
+                "display_label": "string",
+                "description": "string|null",
+                "source_bucket": "string",
+                "project": "string|null",
+                "tags": "string[]",
+                "input_signature": "string|null",
+                "is_skill": "bool",
+                "content_preview": "string|null",
+                "source_path_display": "string|null"
+            },
+            "MobileXpromptCatalogStatsWire": {
+                "total_count": "u64",
+                "project_count": "u64",
+                "skill_count": "u64",
+                "pdf_requested": "bool"
+            },
+            "MobileXpromptCatalogAttachmentWire": {
+                "display_name": "string",
+                "content_type": "string|null",
+                "byte_size": "u64|null",
+                "path_display": "string|null",
+                "generated": "bool"
+            },
+            "MobileBeadListRequestWire": {
+                "schema_version": "u32",
+                "project": "string|null",
+                "all_projects": "bool",
+                "status": "string|null",
+                "bead_type": "string|null",
+                "tier": "string|null",
+                "include_closed": "bool",
+                "limit": "u32|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileBeadListResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "context": "MobileHelperProjectContextWire",
+                "beads": "MobileBeadSummaryWire[]",
+                "total_count": "u64"
+            },
+            "MobileBeadShowRequestWire": {
+                "schema_version": "u32",
+                "bead_id": "string",
+                "project": "string|null",
+                "all_projects": "bool",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileBeadShowResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "context": "MobileHelperProjectContextWire",
+                "bead": "MobileBeadDetailWire"
+            },
+            "MobileBeadSummaryWire": {
+                "id": "string",
+                "title": "string",
+                "status": "string",
+                "bead_type": "string",
+                "tier": "string|null",
+                "project": "string|null",
+                "parent_id": "string|null",
+                "assignee": "string|null",
+                "updated_at": "rfc3339|null",
+                "dependency_count": "u64",
+                "block_count": "u64",
+                "child_count": "u64",
+                "plan_path_display": "string|null",
+                "changespec_name": "string|null",
+                "changespec_status": "string|null"
+            },
+            "MobileBeadDetailWire": {
+                "summary": "MobileBeadSummaryWire",
+                "description": "string|null",
+                "notes": "string|null",
+                "design_path_display": "string|null",
+                "dependencies": "string[]",
+                "blocks": "string[]",
+                "children": "string[]",
+                "workspace_display": "string|null"
+            },
+            "MobileUpdateStartRequestWire": {
+                "schema_version": "u32",
+                "request_id": "string|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileUpdateStartResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "job": "MobileUpdateJobWire"
+            },
+            "MobileUpdateStatusRequestWire": {
+                "schema_version": "u32",
+                "job_id": "string",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobileUpdateStatusResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "job": "MobileUpdateJobWire"
+            },
+            "MobileUpdateJobWire": {
+                "job_id": "string",
+                "status": "queued|running|succeeded|failed",
+                "started_at": "rfc3339|null",
+                "finished_at": "rfc3339|null",
+                "message": "string|null",
+                "log_path_display": "string|null",
+                "completion_path_display": "string|null"
             },
             "MobileNotificationCardWire": {
                 "defined_by": "sase_core::notifications::mobile",
