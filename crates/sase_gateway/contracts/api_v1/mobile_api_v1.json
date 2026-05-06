@@ -147,6 +147,7 @@
       "project": "string|null",
       "prompt": "string",
       "provider": "string|null",
+      "request_id": "string|null; client-provided launch correlation ID preserved in mobile launch context",
       "runtime": "string|null",
       "schema_version": "u32"
     },
@@ -212,6 +213,7 @@
       "dry_run": "bool|null",
       "kill_source_first": "bool|null",
       "prompt_override": "string|null",
+      "request_id": "string|null; client-provided retry correlation ID preserved in mobile launch context",
       "schema_version": "u32"
     },
     "MobileAgentRetryResultWire": {
@@ -244,6 +246,7 @@
       "project": "string|null",
       "prompt": "string",
       "provider": "string|null",
+      "request_id": "string|null; client-provided launch correlation ID preserved in mobile launch context",
       "runtime": "string|null",
       "schema_version": "u32"
     },

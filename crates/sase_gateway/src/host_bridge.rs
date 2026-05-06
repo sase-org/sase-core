@@ -322,6 +322,7 @@ impl AgentHostBridge for CommandAgentHostBridge {
             &serde_json::json!({
                 "schema_version": request.schema_version,
                 "name": name,
+                "request_id": request.request_id.clone(),
                 "prompt_override": request.prompt_override.clone(),
                 "dry_run": request.dry_run,
                 "kill_source_first": request.kill_source_first,

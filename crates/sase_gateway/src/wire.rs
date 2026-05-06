@@ -240,6 +240,7 @@ pub enum MobileAgentResumeOptionKindWire {
 pub struct MobileAgentTextLaunchRequestWire {
     pub schema_version: u32,
     pub prompt: String,
+    pub request_id: Option<String>,
     pub display_name: Option<String>,
     pub name: Option<String>,
     pub model: Option<String>,
@@ -254,6 +255,7 @@ pub struct MobileAgentTextLaunchRequestWire {
 pub struct MobileAgentImageLaunchRequestWire {
     pub schema_version: u32,
     pub prompt: String,
+    pub request_id: Option<String>,
     pub original_filename: String,
     pub content_type: String,
     pub byte_length: u64,
@@ -312,6 +314,7 @@ pub struct MobileAgentKillResultWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileAgentRetryRequestWire {
     pub schema_version: u32,
+    pub request_id: Option<String>,
     pub prompt_override: Option<String>,
     pub dry_run: Option<bool>,
     pub kill_source_first: Option<bool>,
@@ -776,6 +779,7 @@ mod tests {
             serde_json::to_value(MobileAgentImageLaunchRequestWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 prompt: "Review this screenshot".to_string(),
+                request_id: Some("req-image-1".to_string()),
                 original_filename: "screen.png".to_string(),
                 content_type: "image/png".to_string(),
                 byte_length: 8,
@@ -793,6 +797,7 @@ mod tests {
             json!({
                 "schema_version": 1,
                 "prompt": "Review this screenshot",
+                "request_id": "req-image-1",
                 "original_filename": "screen.png",
                 "content_type": "image/png",
                 "byte_length": 8,

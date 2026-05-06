@@ -375,6 +375,7 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileAgentImageLaunchRequestWire": {
                 "schema_version": "u32",
                 "prompt": "string",
+                "request_id": "string|null; client-provided launch correlation ID preserved in mobile launch context",
                 "original_filename": "string",
                 "content_type": "string",
                 "byte_length": "u64",
@@ -447,6 +448,7 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             "MobileAgentRetryRequestWire": {
                 "schema_version": "u32",
+                "request_id": "string|null; client-provided retry correlation ID preserved in mobile launch context",
                 "prompt_override": "string|null",
                 "dry_run": "bool|null",
                 "kill_source_first": "bool|null",
@@ -476,6 +478,7 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileAgentTextLaunchRequestWire": {
                 "schema_version": "u32",
                 "prompt": "string",
+                "request_id": "string|null; client-provided launch correlation ID preserved in mobile launch context",
                 "display_name": "string|null",
                 "name": "string|null",
                 "model": "string|null",

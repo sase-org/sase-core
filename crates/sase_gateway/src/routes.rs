@@ -2483,7 +2483,8 @@ mod tests {
             &script,
             r##"#!/bin/sh
 operation="$3"
-cat >/dev/null
+request_path="$0.$operation.json"
+cat >"$request_path"
 case "$operation" in
   list-agents)
     printf '%s\n' '{"schema_version":1,"agents":[{"name":"cmd-demo","project":"sase","status":"running","pid":4242,"model":"gpt-5.5","provider":"codex","workspace_number":102,"started_at":"2026-05-06T14:30:00Z","duration_seconds":90,"prompt_snippet":"Command bridge","has_artifact_dir":true,"retry_lineage":{"retry_of_timestamp":null,"retried_as_timestamp":null,"retry_chain_root_timestamp":null,"retry_attempt":null,"parent_agent_name":null},"actions":{"can_resume":true,"can_wait":true,"can_kill":true,"can_retry":true},"display":{"title":"cmd-demo","subtitle":"sase","status_label":"Running"}}],"total_count":1}'
@@ -3109,7 +3110,7 @@ esac
     async fn command_agent_bridge_routes_return_command_output() {
         let tmp = tempfile::tempdir().unwrap();
         let state = state_for_command_agent_bridge(&tmp);
-        let (_start, _finish, token, _device_id) =
+        let (_start, _finish, token, device_id) =
             pair_device(state.clone()).await;
 
         let (list_status, list) = json_response_with_state(
@@ -3131,6 +3132,7 @@ esac
         let launch_body = json!({
             "schema_version": 1,
             "prompt": "Do work",
+            "request_id": "req-text-1",
             "display_name": null,
             "name": null,
             "model": null,
@@ -3151,10 +3153,23 @@ esac
         assert_eq!(launch_status, StatusCode::OK);
         assert_eq!(launch["primary"]["name"], "cmd-demo");
         assert_eq!(launch["slots"][0]["status"], "launched");
+        let launch_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path().join("mobile-agent-bridge.launch-text.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(launch_request["request_id"], "req-text-1");
+        assert_eq!(
+            launch_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
 
         let image_body = json!({
             "schema_version": 1,
             "prompt": "Review",
+            "request_id": "req-image-1",
             "original_filename": "screen.png",
             "content_type": "image/png",
             "byte_length": 8,
@@ -3178,6 +3193,18 @@ esac
         .await;
         assert_eq!(image_status, StatusCode::OK);
         assert_eq!(image["primary"]["name"], "cmd-image");
+        let image_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path().join("mobile-agent-bridge.launch-image.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(image_request["request_id"], "req-image-1");
+        assert_eq!(
+            image_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
 
         let (kill_status, kill) = json_response_with_state(
             state.clone(),
@@ -3200,6 +3227,7 @@ esac
                 "/api/v1/agents/cmd-demo/retry",
                 json!({
                     "schema_version": 1,
+                    "request_id": "req-retry-1",
                     "prompt_override": null,
                     "dry_run": false,
                     "kill_source_first": false,
@@ -3211,6 +3239,18 @@ esac
         assert_eq!(retry_status, StatusCode::OK);
         assert_eq!(retry["source_agent"], "cmd-demo");
         assert_eq!(retry["launch"]["primary"]["name"], "cmd-demo.1");
+        let retry_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path().join("mobile-agent-bridge.retry-agent.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retry_request["request_id"], "req-retry-1");
+        assert_eq!(
+            retry_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
     }
 
     #[tokio::test]

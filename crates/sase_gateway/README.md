@@ -53,12 +53,13 @@ The HTTP status code carries transport status, while `code` is the stable client
   `question_response.json` for a pending user-question notification.
 - `GET /api/v1/agents` lists running agents by default, with optional recent/status/project/limit filters.
 - `GET /api/v1/agents/resume-options` returns native copy/share/direct-launch resume and wait prompt options.
-- `POST /api/v1/agents/launch` launches text agents through the fixed Python bridge and host-injects the authenticated
-  device ID before dispatch.
+- `POST /api/v1/agents/launch` launches text agents through the fixed Python bridge, host-injects the authenticated
+  device ID before dispatch, and preserves an optional `request_id` for client correlation.
 - `POST /api/v1/agents/launch-image` validates and stores base64 image uploads under SASE-owned gateway state, then
-  launches an agent whose prompt references the saved host path.
+  launches an agent whose prompt references the saved host path and preserves an optional `request_id`.
 - `POST /api/v1/agents/{name}/kill` kills an exact agent name and persists mobile retry context.
-- `POST /api/v1/agents/{name}/retry` retries an agent from durable mobile launch/kill context or artifact prompt data.
+- `POST /api/v1/agents/{name}/retry` retries an agent from durable mobile launch/kill context or artifact prompt data
+  and preserves an optional `request_id` on the new launch context.
 - Unknown routes return typed `not_found`.
 
 Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
