@@ -69,6 +69,57 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "GET",
+                "path": "/api/v1/agents",
+                "auth": true,
+                "query": "MobileAgentListRequestWire fields as URL query parameters",
+                "success": "MobileAgentListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/agents/resume-options",
+                "auth": true,
+                "success": "MobileAgentResumeOptionsResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/agents/launch",
+                "auth": true,
+                "request": "MobileAgentTextLaunchRequestWire",
+                "success": "MobileAgentLaunchResultWire",
+                "events_on_success": ["agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/agents/launch-image",
+                "auth": true,
+                "request": "MobileAgentImageLaunchRequestWire",
+                "success": "MobileAgentLaunchResultWire",
+                "events_on_success": ["agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/agents/{name}/kill",
+                "auth": true,
+                "request": "MobileAgentKillRequestWire",
+                "success": "MobileAgentKillResultWire",
+                "events_on_success": ["agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/agents/{name}/retry",
+                "auth": true,
+                "request": "MobileAgentRetryRequestWire",
+                "success": "MobileAgentRetryResultWire",
+                "events_on_success": ["agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
                 "path": "/api/v1/notifications",
                 "auth": true,
                 "query": "MobileNotificationListRequestWire fields as URL query parameters",
@@ -214,6 +265,11 @@ pub fn api_v1_contract_snapshot() -> Value {
                     "ambiguous_prefix",
                     "unsupported_action",
                     "attachment_expired",
+                    "agent_not_found",
+                    "agent_not_running",
+                    "launch_failed",
+                    "invalid_upload",
+                    "bridge_unavailable",
                     "internal"
                 ],
                 "message": "string",
@@ -260,6 +316,11 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "notifications_changed": {
                     "reason": "string",
                     "notification_id": "string|null"
+                },
+                "agents_changed": {
+                    "reason": "string",
+                    "agent_name": "string|null",
+                    "timestamp": "rfc3339|null"
                 }
             },
             "GatewayBindWire": {
@@ -298,6 +359,124 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "download_requires_auth": "bool",
                 "can_inline": "bool",
                 "path_available": "bool"
+            },
+            "MobileAgentActionAffordancesWire": {
+                "can_resume": "bool",
+                "can_wait": "bool",
+                "can_kill": "bool",
+                "can_retry": "bool"
+            },
+            "MobileAgentDisplayLabelsWire": {
+                "title": "string",
+                "subtitle": "string|null",
+                "status_label": "string"
+            },
+            "MobileAgentImageLaunchRequestWire": {
+                "schema_version": "u32",
+                "prompt": "string",
+                "original_filename": "string",
+                "content_type": "string",
+                "byte_length": "u64",
+                "base64_image": "base64 string",
+                "display_name": "string|null",
+                "name": "string|null",
+                "model": "string|null",
+                "provider": "string|null",
+                "runtime": "string|null",
+                "project": "string|null",
+                "dry_run": "bool|null"
+            },
+            "MobileAgentKillRequestWire": {
+                "schema_version": "u32",
+                "reason": "string|null"
+            },
+            "MobileAgentKillResultWire": {
+                "schema_version": "u32",
+                "name": "string",
+                "status": "string",
+                "pid": "u32|null",
+                "changed": "bool",
+                "message": "string|null"
+            },
+            "MobileAgentLaunchResultWire": {
+                "schema_version": "u32",
+                "primary": "MobileAgentLaunchSlotResultWire|null",
+                "slots": "MobileAgentLaunchSlotResultWire[]"
+            },
+            "MobileAgentLaunchSlotResultWire": {
+                "slot_id": "string",
+                "name": "string|null",
+                "status": "launched|dry_run|failed",
+                "artifact_dir": "string|null",
+                "message": "string|null"
+            },
+            "MobileAgentListRequestWire": {
+                "schema_version": "u32",
+                "include_recent": "bool",
+                "status": "string|null",
+                "project": "string|null",
+                "limit": "u32|null"
+            },
+            "MobileAgentListResponseWire": {
+                "schema_version": "u32",
+                "agents": "MobileAgentSummaryWire[]",
+                "total_count": "u64"
+            },
+            "MobileAgentResumeOptionWire": {
+                "id": "string",
+                "agent_name": "string",
+                "kind": "resume|wait",
+                "label": "string",
+                "prompt_text": "string",
+                "direct_launch_supported": "bool"
+            },
+            "MobileAgentResumeOptionsResponseWire": {
+                "schema_version": "u32",
+                "options": "MobileAgentResumeOptionWire[]"
+            },
+            "MobileAgentRetryLineageWire": {
+                "retry_of_timestamp": "string|null",
+                "retried_as_timestamp": "string|null",
+                "retry_chain_root_timestamp": "string|null",
+                "retry_attempt": "u32|null",
+                "parent_agent_name": "string|null"
+            },
+            "MobileAgentRetryRequestWire": {
+                "schema_version": "u32",
+                "prompt_override": "string|null",
+                "dry_run": "bool|null"
+            },
+            "MobileAgentRetryResultWire": {
+                "schema_version": "u32",
+                "source_agent": "string",
+                "launch": "MobileAgentLaunchResultWire"
+            },
+            "MobileAgentSummaryWire": {
+                "name": "string",
+                "project": "string|null",
+                "status": "string",
+                "pid": "u32|null",
+                "model": "string|null",
+                "provider": "string|null",
+                "workspace_number": "u32|null",
+                "started_at": "rfc3339|null",
+                "duration_seconds": "u64|null",
+                "prompt_snippet": "string|null",
+                "has_artifact_dir": "bool",
+                "retry_lineage": "MobileAgentRetryLineageWire",
+                "actions": "MobileAgentActionAffordancesWire",
+                "display": "MobileAgentDisplayLabelsWire"
+            },
+            "MobileAgentTextLaunchRequestWire": {
+                "schema_version": "u32",
+                "prompt": "string",
+                "display_name": "string|null",
+                "name": "string|null",
+                "model": "string|null",
+                "provider": "string|null",
+                "runtime": "string|null",
+                "project": "string|null",
+                "dry_run": "bool|null"
             },
             "MobileNotificationCardWire": {
                 "defined_by": "sase_core::notifications::mobile",

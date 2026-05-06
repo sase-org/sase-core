@@ -51,6 +51,11 @@
         "ambiguous_prefix",
         "unsupported_action",
         "attachment_expired",
+        "agent_not_found",
+        "agent_not_running",
+        "launch_failed",
+        "invalid_upload",
+        "bridge_unavailable",
         "internal"
       ],
       "details": "json|null",
@@ -69,6 +74,11 @@
       "schema_version": "u32"
     },
     "EventPayloadWire": {
+      "agents_changed": {
+        "agent_name": "string|null",
+        "reason": "string",
+        "timestamp": "rfc3339|null"
+      },
       "heartbeat": {
         "sequence": "u64"
       },
@@ -110,6 +120,124 @@
       "defined_by": "sase_core::notifications::mobile",
       "feedback": "string|null",
       "prefix": "string",
+      "schema_version": "u32"
+    },
+    "MobileAgentActionAffordancesWire": {
+      "can_kill": "bool",
+      "can_resume": "bool",
+      "can_retry": "bool",
+      "can_wait": "bool"
+    },
+    "MobileAgentDisplayLabelsWire": {
+      "status_label": "string",
+      "subtitle": "string|null",
+      "title": "string"
+    },
+    "MobileAgentImageLaunchRequestWire": {
+      "base64_image": "base64 string",
+      "byte_length": "u64",
+      "content_type": "string",
+      "display_name": "string|null",
+      "dry_run": "bool|null",
+      "model": "string|null",
+      "name": "string|null",
+      "original_filename": "string",
+      "project": "string|null",
+      "prompt": "string",
+      "provider": "string|null",
+      "runtime": "string|null",
+      "schema_version": "u32"
+    },
+    "MobileAgentKillRequestWire": {
+      "reason": "string|null",
+      "schema_version": "u32"
+    },
+    "MobileAgentKillResultWire": {
+      "changed": "bool",
+      "message": "string|null",
+      "name": "string",
+      "pid": "u32|null",
+      "schema_version": "u32",
+      "status": "string"
+    },
+    "MobileAgentLaunchResultWire": {
+      "primary": "MobileAgentLaunchSlotResultWire|null",
+      "schema_version": "u32",
+      "slots": "MobileAgentLaunchSlotResultWire[]"
+    },
+    "MobileAgentLaunchSlotResultWire": {
+      "artifact_dir": "string|null",
+      "message": "string|null",
+      "name": "string|null",
+      "slot_id": "string",
+      "status": "launched|dry_run|failed"
+    },
+    "MobileAgentListRequestWire": {
+      "include_recent": "bool",
+      "limit": "u32|null",
+      "project": "string|null",
+      "schema_version": "u32",
+      "status": "string|null"
+    },
+    "MobileAgentListResponseWire": {
+      "agents": "MobileAgentSummaryWire[]",
+      "schema_version": "u32",
+      "total_count": "u64"
+    },
+    "MobileAgentResumeOptionWire": {
+      "agent_name": "string",
+      "direct_launch_supported": "bool",
+      "id": "string",
+      "kind": "resume|wait",
+      "label": "string",
+      "prompt_text": "string"
+    },
+    "MobileAgentResumeOptionsResponseWire": {
+      "options": "MobileAgentResumeOptionWire[]",
+      "schema_version": "u32"
+    },
+    "MobileAgentRetryLineageWire": {
+      "parent_agent_name": "string|null",
+      "retried_as_timestamp": "string|null",
+      "retry_attempt": "u32|null",
+      "retry_chain_root_timestamp": "string|null",
+      "retry_of_timestamp": "string|null"
+    },
+    "MobileAgentRetryRequestWire": {
+      "dry_run": "bool|null",
+      "prompt_override": "string|null",
+      "schema_version": "u32"
+    },
+    "MobileAgentRetryResultWire": {
+      "launch": "MobileAgentLaunchResultWire",
+      "schema_version": "u32",
+      "source_agent": "string"
+    },
+    "MobileAgentSummaryWire": {
+      "actions": "MobileAgentActionAffordancesWire",
+      "display": "MobileAgentDisplayLabelsWire",
+      "duration_seconds": "u64|null",
+      "has_artifact_dir": "bool",
+      "model": "string|null",
+      "name": "string",
+      "pid": "u32|null",
+      "project": "string|null",
+      "prompt_snippet": "string|null",
+      "provider": "string|null",
+      "retry_lineage": "MobileAgentRetryLineageWire",
+      "started_at": "rfc3339|null",
+      "status": "string",
+      "workspace_number": "u32|null"
+    },
+    "MobileAgentTextLaunchRequestWire": {
+      "display_name": "string|null",
+      "dry_run": "bool|null",
+      "model": "string|null",
+      "name": "string|null",
+      "project": "string|null",
+      "prompt": "string",
+      "provider": "string|null",
+      "runtime": "string|null",
       "schema_version": "u32"
     },
     "MobileAttachmentManifestWire": {
@@ -284,6 +412,77 @@
       "protocol": "server_sent_events",
       "resume_header": "Last-Event-ID",
       "success": "EventRecordWire stream"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/agents",
+      "query": "MobileAgentListRequestWire fields as URL query parameters",
+      "success": "MobileAgentListResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/agents/resume-options",
+      "success": "MobileAgentResumeOptionsResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/v1/agents/launch",
+      "request": "MobileAgentTextLaunchRequestWire",
+      "success": "MobileAgentLaunchResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/v1/agents/launch-image",
+      "request": "MobileAgentImageLaunchRequestWire",
+      "success": "MobileAgentLaunchResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/v1/agents/{name}/kill",
+      "request": "MobileAgentKillRequestWire",
+      "success": "MobileAgentKillResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/v1/agents/{name}/retry",
+      "request": "MobileAgentRetryRequestWire",
+      "success": "MobileAgentRetryResultWire"
     },
     {
       "auth": true,

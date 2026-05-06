@@ -20,8 +20,133 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::wire::{
+    MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
+    MobileAgentKillResultWire, MobileAgentLaunchResultWire,
+    MobileAgentListRequestWire, MobileAgentListResponseWire,
+    MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
+    MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
     NotificationStateMutationResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
+
+#[derive(Clone)]
+pub struct DynAgentHostBridge(Arc<dyn AgentHostBridge>);
+
+impl DynAgentHostBridge {
+    pub fn new(bridge: Arc<dyn AgentHostBridge>) -> Self {
+        Self(bridge)
+    }
+
+    pub fn list_agents(
+        &self,
+        request: &MobileAgentListRequestWire,
+    ) -> Result<MobileAgentListResponseWire, HostBridgeError> {
+        self.0.list_agents(request)
+    }
+
+    pub fn resume_options(
+        &self,
+    ) -> Result<MobileAgentResumeOptionsResponseWire, HostBridgeError> {
+        self.0.resume_options()
+    }
+
+    pub fn launch_text(
+        &self,
+        request: &MobileAgentTextLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        self.0.launch_text(request)
+    }
+
+    pub fn launch_image(
+        &self,
+        request: &MobileAgentImageLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        self.0.launch_image(request)
+    }
+
+    pub fn kill_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentKillRequestWire,
+    ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+        self.0.kill_agent(name, request)
+    }
+
+    pub fn retry_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentRetryRequestWire,
+    ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
+        self.0.retry_agent(name, request)
+    }
+}
+
+impl fmt::Debug for DynAgentHostBridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynAgentHostBridge").finish_non_exhaustive()
+    }
+}
+
+pub trait AgentHostBridge: Send + Sync {
+    fn list_agents(
+        &self,
+        _request: &MobileAgentListRequestWire,
+    ) -> Result<MobileAgentListResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn resume_options(
+        &self,
+    ) -> Result<MobileAgentResumeOptionsResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn launch_text(
+        &self,
+        _request: &MobileAgentTextLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn launch_image(
+        &self,
+        _request: &MobileAgentImageLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn kill_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentKillRequestWire,
+    ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn retry_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentRetryRequestWire,
+    ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnavailableAgentHostBridge;
+
+impl AgentHostBridge for UnavailableAgentHostBridge {}
 
 #[derive(Clone)]
 pub struct DynNotificationHostBridge(Arc<dyn NotificationHostBridge>);
@@ -519,6 +644,61 @@ impl NotificationHostBridge for StaticNotificationHostBridge {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StaticAgentHostBridge {
+    pub list_response: MobileAgentListResponseWire,
+    pub resume_options_response: MobileAgentResumeOptionsResponseWire,
+    pub text_launch_response: MobileAgentLaunchResultWire,
+    pub image_launch_response: MobileAgentLaunchResultWire,
+    pub kill_response: MobileAgentKillResultWire,
+    pub retry_response: MobileAgentRetryResultWire,
+}
+
+impl AgentHostBridge for StaticAgentHostBridge {
+    fn list_agents(
+        &self,
+        _request: &MobileAgentListRequestWire,
+    ) -> Result<MobileAgentListResponseWire, HostBridgeError> {
+        Ok(self.list_response.clone())
+    }
+
+    fn resume_options(
+        &self,
+    ) -> Result<MobileAgentResumeOptionsResponseWire, HostBridgeError> {
+        Ok(self.resume_options_response.clone())
+    }
+
+    fn launch_text(
+        &self,
+        _request: &MobileAgentTextLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        Ok(self.text_launch_response.clone())
+    }
+
+    fn launch_image(
+        &self,
+        _request: &MobileAgentImageLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        Ok(self.image_launch_response.clone())
+    }
+
+    fn kill_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentKillRequestWire,
+    ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+        Ok(self.kill_response.clone())
+    }
+
+    fn retry_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentRetryRequestWire,
+    ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
+        Ok(self.retry_response.clone())
+    }
+}
+
 fn ensure_action_available(
     store: &PendingActionStoreWire,
     notification: &NotificationWire,
@@ -589,6 +769,16 @@ fn apply_notification_state_mutation(
 
 #[derive(Debug, Error)]
 pub enum HostBridgeError {
+    #[error("agent bridge is unavailable: {0}")]
+    BridgeUnavailable(String),
+    #[error("agent not found: {0}")]
+    AgentNotFound(String),
+    #[error("agent is not running: {0}")]
+    AgentNotRunning(String),
+    #[error("agent launch failed: {0}")]
+    LaunchFailed(String),
+    #[error("invalid image upload: {0}")]
+    InvalidUpload(String),
     #[error("failed to read notifications: {0}")]
     ReadNotifications(String),
     #[error("notification not found: {0}")]

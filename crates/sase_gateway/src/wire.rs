@@ -96,6 +96,11 @@ pub enum ApiErrorCodeWire {
     AmbiguousPrefix,
     UnsupportedAction,
     AttachmentExpired,
+    AgentNotFound,
+    AgentNotRunning,
+    LaunchFailed,
+    InvalidUpload,
+    BridgeUnavailable,
     Internal,
 }
 
@@ -124,6 +129,11 @@ pub enum EventPayloadWire {
         reason: String,
         notification_id: Option<String>,
     },
+    AgentsChanged {
+        reason: String,
+        agent_name: Option<String>,
+        timestamp: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -141,6 +151,171 @@ pub struct NotificationStateMutationResponseWire {
     pub read: bool,
     pub dismissed: bool,
     pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentListRequestWire {
+    pub schema_version: u32,
+    pub include_recent: bool,
+    pub status: Option<String>,
+    pub project: Option<String>,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentListResponseWire {
+    pub schema_version: u32,
+    pub agents: Vec<MobileAgentSummaryWire>,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentSummaryWire {
+    pub name: String,
+    pub project: Option<String>,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub workspace_number: Option<u32>,
+    pub started_at: Option<String>,
+    pub duration_seconds: Option<u64>,
+    pub prompt_snippet: Option<String>,
+    pub has_artifact_dir: bool,
+    pub retry_lineage: MobileAgentRetryLineageWire,
+    pub actions: MobileAgentActionAffordancesWire,
+    pub display: MobileAgentDisplayLabelsWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentRetryLineageWire {
+    pub retry_of_timestamp: Option<String>,
+    pub retried_as_timestamp: Option<String>,
+    pub retry_chain_root_timestamp: Option<String>,
+    pub retry_attempt: Option<u32>,
+    pub parent_agent_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentActionAffordancesWire {
+    pub can_resume: bool,
+    pub can_wait: bool,
+    pub can_kill: bool,
+    pub can_retry: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentDisplayLabelsWire {
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub status_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentResumeOptionsResponseWire {
+    pub schema_version: u32,
+    pub options: Vec<MobileAgentResumeOptionWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentResumeOptionWire {
+    pub id: String,
+    pub agent_name: String,
+    pub kind: MobileAgentResumeOptionKindWire,
+    pub label: String,
+    pub prompt_text: String,
+    pub direct_launch_supported: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileAgentResumeOptionKindWire {
+    Resume,
+    Wait,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentTextLaunchRequestWire {
+    pub schema_version: u32,
+    pub prompt: String,
+    pub display_name: Option<String>,
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub runtime: Option<String>,
+    pub project: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentImageLaunchRequestWire {
+    pub schema_version: u32,
+    pub prompt: String,
+    pub original_filename: String,
+    pub content_type: String,
+    pub byte_length: u64,
+    pub base64_image: String,
+    pub display_name: Option<String>,
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub runtime: Option<String>,
+    pub project: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentLaunchResultWire {
+    pub schema_version: u32,
+    pub primary: Option<MobileAgentLaunchSlotResultWire>,
+    pub slots: Vec<MobileAgentLaunchSlotResultWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentLaunchSlotResultWire {
+    pub slot_id: String,
+    pub name: Option<String>,
+    pub status: MobileAgentLaunchSlotStatusWire,
+    pub artifact_dir: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MobileAgentLaunchSlotStatusWire {
+    Launched,
+    DryRun,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentKillRequestWire {
+    pub schema_version: u32,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentKillResultWire {
+    pub schema_version: u32,
+    pub name: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub changed: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentRetryRequestWire {
+    pub schema_version: u32,
+    pub prompt_override: Option<String>,
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileAgentRetryResultWire {
+    pub schema_version: u32,
+    pub source_agent: String,
+    pub launch: MobileAgentLaunchResultWire,
 }
 
 #[cfg(test)]
@@ -323,6 +498,13 @@ mod tests {
                 target: Some("token".to_string()),
                 details: None,
             },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::BridgeUnavailable,
+                message: "agent bridge is unavailable".to_string(),
+                target: Some("agent_bridge".to_string()),
+                details: None,
+            },
         ];
         assert_eq!(
             serde_json::to_value(errors).unwrap(),
@@ -368,6 +550,13 @@ mod tests {
                     "message": "attachment token is expired",
                     "target": "token",
                     "details": null
+                },
+                {
+                    "schema_version": 1,
+                    "code": "bridge_unavailable",
+                    "message": "agent bridge is unavailable",
+                    "target": "agent_bridge",
+                    "details": null
                 }
             ])
         );
@@ -393,6 +582,172 @@ mod tests {
                         "sequence": 1
                     }
                 }
+            })
+        );
+
+        let changed = EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "0000000000000002".to_string(),
+            created_at: "2026-05-06T14:31:00Z".to_string(),
+            payload: EventPayloadWire::AgentsChanged {
+                reason: "launch".to_string(),
+                agent_name: Some("mobile-demo".to_string()),
+                timestamp: Some("2026-05-06T14:31:00Z".to_string()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(changed).unwrap(),
+            json!({
+                "schema_version": 1,
+                "id": "0000000000000002",
+                "created_at": "2026-05-06T14:31:00Z",
+                "payload": {
+                    "type": "agents_changed",
+                    "data": {
+                        "reason": "launch",
+                        "agent_name": "mobile-demo",
+                        "timestamp": "2026-05-06T14:31:00Z"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn mobile_agent_wire_json_snapshot() {
+        let summary = MobileAgentSummaryWire {
+            name: "mobile-demo".to_string(),
+            project: Some("sase".to_string()),
+            status: "running".to_string(),
+            pid: Some(4242),
+            model: Some("gpt-5.5".to_string()),
+            provider: Some("codex".to_string()),
+            workspace_number: Some(102),
+            started_at: Some("2026-05-06T14:30:00Z".to_string()),
+            duration_seconds: Some(90),
+            prompt_snippet: Some("Implement gateway skeleton".to_string()),
+            has_artifact_dir: true,
+            retry_lineage: MobileAgentRetryLineageWire {
+                retry_of_timestamp: None,
+                retried_as_timestamp: None,
+                retry_chain_root_timestamp: Some(
+                    "2026-05-06T14:30:00Z".to_string(),
+                ),
+                retry_attempt: Some(0),
+                parent_agent_name: None,
+            },
+            actions: MobileAgentActionAffordancesWire {
+                can_resume: true,
+                can_wait: true,
+                can_kill: true,
+                can_retry: false,
+            },
+            display: MobileAgentDisplayLabelsWire {
+                title: "mobile-demo".to_string(),
+                subtitle: Some("sase".to_string()),
+                status_label: "Running".to_string(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(MobileAgentListResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                agents: vec![summary],
+                total_count: 1,
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "agents": [{
+                    "name": "mobile-demo",
+                    "project": "sase",
+                    "status": "running",
+                    "pid": 4242,
+                    "model": "gpt-5.5",
+                    "provider": "codex",
+                    "workspace_number": 102,
+                    "started_at": "2026-05-06T14:30:00Z",
+                    "duration_seconds": 90,
+                    "prompt_snippet": "Implement gateway skeleton",
+                    "has_artifact_dir": true,
+                    "retry_lineage": {
+                        "retry_of_timestamp": null,
+                        "retried_as_timestamp": null,
+                        "retry_chain_root_timestamp": "2026-05-06T14:30:00Z",
+                        "retry_attempt": 0,
+                        "parent_agent_name": null
+                    },
+                    "actions": {
+                        "can_resume": true,
+                        "can_wait": true,
+                        "can_kill": true,
+                        "can_retry": false
+                    },
+                    "display": {
+                        "title": "mobile-demo",
+                        "subtitle": "sase",
+                        "status_label": "Running"
+                    }
+                }],
+                "total_count": 1
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(MobileAgentResumeOptionsResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                options: vec![MobileAgentResumeOptionWire {
+                    id: "mobile-demo-resume".to_string(),
+                    agent_name: "mobile-demo".to_string(),
+                    kind: MobileAgentResumeOptionKindWire::Resume,
+                    label: "Resume".to_string(),
+                    prompt_text: "#resume:mobile-demo".to_string(),
+                    direct_launch_supported: true,
+                }],
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "options": [{
+                    "id": "mobile-demo-resume",
+                    "agent_name": "mobile-demo",
+                    "kind": "resume",
+                    "label": "Resume",
+                    "prompt_text": "#resume:mobile-demo",
+                    "direct_launch_supported": true
+                }]
+            })
+        );
+
+        let slot = MobileAgentLaunchSlotResultWire {
+            slot_id: "0".to_string(),
+            name: Some("mobile-demo".to_string()),
+            status: MobileAgentLaunchSlotStatusWire::Launched,
+            artifact_dir: Some("/tmp/sase/agents/mobile-demo".to_string()),
+            message: None,
+        };
+        assert_eq!(
+            serde_json::to_value(MobileAgentLaunchResultWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                primary: Some(slot.clone()),
+                slots: vec![slot],
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "primary": {
+                    "slot_id": "0",
+                    "name": "mobile-demo",
+                    "status": "launched",
+                    "artifact_dir": "/tmp/sase/agents/mobile-demo",
+                    "message": null
+                },
+                "slots": [{
+                    "slot_id": "0",
+                    "name": "mobile-demo",
+                    "status": "launched",
+                    "artifact_dir": "/tmp/sase/agents/mobile-demo",
+                    "message": null
+                }]
             })
         );
     }
