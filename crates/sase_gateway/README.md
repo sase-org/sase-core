@@ -28,10 +28,9 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `POST /api/v1/session/pair/start` returns a short-lived one-time pairing code and no long-lived credential.
 - `POST /api/v1/session/pair/finish` exchanges the one-time code and device metadata for a bearer token exactly once.
 - `GET /api/v1/session` requires `Authorization: Bearer <token>` and returns the authenticated device.
-- `GET /api/v1/events` requires auth and streams `EventRecordWire` records over SSE. Heartbeat events use monotonic
-  IDs, and reconnects may pass `Last-Event-ID` to replay buffered newer events. The first implementation keeps an
-  in-memory ring buffer, so clients should handle `resync_required` after a restart or buffer overflow by fetching full
-  state.
+- `GET /api/v1/events` requires auth and streams `EventRecordWire` records over SSE. Heartbeat events use monotonic IDs,
+  and reconnects may pass `Last-Event-ID` to replay buffered newer events. The first implementation keeps an in-memory
+  ring buffer, so clients should handle `resync_required` after a restart or buffer overflow by fetching full state.
 - `GET /api/v1/notifications` requires auth and returns newest-first mobile notification cards from
   `<sase_home>/notifications/notifications.jsonl`. Supported query fields are `unread`/`unread_only`,
   `include_dismissed`, `include_silent`, `limit`, and `newer_than`.
@@ -57,6 +56,95 @@ without secrets.
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful action mutations
 publish `notifications_changed` SSE events; passive file watching is intentionally left out of the MVP.
 
+## Curl Examples
+
+After pairing, set the bearer token returned by `POST /api/v1/session/pair/finish`:
+
+```bash
+BASE_URL="http://127.0.0.1:7629"
+TOKEN="sase_mobile_example"
+AUTH_HEADER="Authorization: Bearer $TOKEN"
+```
+
+List unread notifications:
+
+```bash
+curl -sS "$BASE_URL/api/v1/notifications?unread=true&limit=25" \
+  -H "$AUTH_HEADER"
+```
+
+Inspect one plan approval notification and mint attachment tokens for its detail view:
+
+```bash
+NOTIFICATION_ID="abcdef12-plan"
+
+curl -sS "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID" \
+  -H "$AUTH_HEADER"
+```
+
+Plan actions accept either the full notification ID or a unique pending-action prefix:
+
+```bash
+PREFIX="abcdef12"
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/approve" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"commit_plan":true,"run_coder":false}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/run" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"coder_prompt":"Focus on tests"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/reject" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"feedback":"Please narrow the scope"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/feedback" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"feedback":"Revise the rollout section"}'
+```
+
+HITL and question actions write the same response-file shapes as existing TUI and Telegram flows:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/v1/actions/hitl/hitl0001/accept" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/hitl/hitl0002/feedback" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"feedback":"Use a smaller change"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/question/quest001/answer" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"selected_option_id":"safe","global_note":"Use durable path"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/question/quest002/custom" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"custom_answer":"Use SQLite"}'
+```
+
+Download an attachment with a token from a detail response:
+
+```bash
+ATTACHMENT_TOKEN="att_example"
+
+curl -sS "$BASE_URL/api/v1/attachments/$ATTACHMENT_TOKEN" \
+  -H "$AUTH_HEADER" \
+  -o attachment.bin
+```
+
+Duplicate, stale, ambiguous-prefix, already-handled, unsupported, and missing-target cases return typed `ApiErrorWire`
+records and never overwrite existing response files.
+
 ## Local Run
 
 ```bash
@@ -80,3 +168,7 @@ payloads for future mobile/client phases. Regenerate it after route or wire-shap
 ```bash
 cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
 ```
+
+MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish
+`notifications_changed` SSE events; oversized or path-unsafe attachments are listed without tokens; and legacy Telegram
+pending-action JSON remains a compatibility source while Telegram adoption of the shared store is incremental.

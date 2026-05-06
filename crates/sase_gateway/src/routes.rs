@@ -3142,6 +3142,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_notification_actions_attachment_smoke_harness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (plan, plan_response_dir) =
+            seed_plan_notification(&tmp, "smokepln-row");
+        let (hitl, hitl_artifacts_dir) =
+            seed_hitl_notification(&tmp, "smokehit-row");
+        let (question, question_response_dir) =
+            seed_question_notification(&tmp, "smokeqst-row");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (list_status, list) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications?unread=true",
+            ),
+        )
+        .await;
+        assert_eq!(list_status, StatusCode::OK);
+        let listed_ids: Vec<&str> = list["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert!(listed_ids.contains(&plan.id.as_str()));
+        assert!(listed_ids.contains(&hitl.id.as_str()));
+        assert!(listed_ids.contains(&question.id.as_str()));
+
+        let (detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                &format!("/api/v1/notifications/{}", plan.id),
+            ),
+        )
+        .await;
+        assert_eq!(detail_status, StatusCode::OK);
+        assert_eq!(detail["action"]["kind"], "plan_approval");
+        let attachment_token =
+            detail["attachments"][0]["token"].as_str().unwrap();
+        let (download_status, headers, body) = raw_response_with_state(
+            state.clone(),
+            attachment_request(
+                Some(&token),
+                &format!("/api/v1/attachments/{attachment_token}"),
+            ),
+        )
+        .await;
+        assert_eq!(download_status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/markdown");
+        assert_eq!(body, b"# Plan\n");
+
+        let (plan_status, plan_result) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/plan/smokepln/approve",
+                json!({
+                    "schema_version": 1,
+                    "commit_plan": true,
+                    "run_coder": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(plan_status, StatusCode::OK);
+        assert_eq!(plan_result["notification_id"], plan.id.as_str());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    plan_response_dir.join("plan_response.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            json!({
+                "action": "approve",
+                "commit_plan": true,
+                "run_coder": false
+            })
+        );
+
+        let (hitl_status, _hitl_result) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/hitl/smokehit/accept",
+                json!({"schema_version": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(hitl_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    hitl_artifacts_dir.join("hitl_response.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            json!({"action": "accept", "approved": true})
+        );
+
+        let (question_status, _question_result) = json_response_with_state(
+            state.clone(),
+            action_request(
+                Some(&token),
+                "/api/v1/actions/question/smokeqst/answer",
+                json!({
+                    "schema_version": 1,
+                    "selected_option_index": 1,
+                    "global_note": "smoke verified"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(question_status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    question_response_dir.join("question_response.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            json!({
+                "answers": [{
+                    "question": "Which approach?",
+                    "selected": ["Safe"],
+                    "custom_feedback": null
+                }],
+                "global_note": "smoke verified"
+            })
+        );
+
+        let snapshot = sase_core::notifications::read_notifications_snapshot(
+            &tmp.path().join("notifications").join("notifications.jsonl"),
+            true,
+        )
+        .unwrap();
+        for id in [&plan.id, &hitl.id, &question.id] {
+            assert!(
+                snapshot
+                    .notifications
+                    .iter()
+                    .any(|row| row.id == id.as_str() && row.dismissed),
+                "{id} should be dismissed after its mobile action",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn event_resume_replays_buffered_records_after_last_event_id() {
         let tmp = tempfile::tempdir().unwrap();
         let state = state_for_tmp(&tmp, Duration::minutes(5));
