@@ -21,6 +21,7 @@ pub struct PhaseAssignmentWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpicWorkPlanWire {
     pub epic_id: String,
+    pub launch_tag_id: String,
     pub waves: Vec<Vec<PhaseAssignmentWire>>,
     pub land_agent_name: String,
     pub land_waits_on: Vec<String>,
@@ -76,6 +77,19 @@ pub fn build_epic_work_plan_from_issues(
             "'{epic_id}' is not an epic bead"
         )));
     }
+    let launch_tag_id = epic
+        .parent_id
+        .as_deref()
+        .and_then(|parent_id| {
+            issue_by_id
+                .get(parent_id)
+                .filter(|parent| {
+                    parent.issue_type == IssueTypeWire::Plan
+                        && parent.tier == Some(BeadTierWire::Legend)
+                })
+                .map(|_| parent_id)
+        })
+        .unwrap_or(epic_id);
 
     let children: Vec<&IssueWire> = issues
         .iter()
@@ -204,6 +218,7 @@ pub fn build_epic_work_plan_from_issues(
 
     Ok(EpicWorkPlanWire {
         epic_id: epic_id.to_string(),
+        launch_tag_id: launch_tag_id.to_string(),
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
         land_waits_on,
@@ -306,6 +321,10 @@ mod tests {
         issue(id, IssueTypeWire::Plan, None)
     }
 
+    fn epic_child(id: &str, parent_id: &str) -> IssueWire {
+        issue(id, IssueTypeWire::Plan, Some(parent_id))
+    }
+
     fn legend(id: &str, epic_count: Option<i64>, design: &str) -> IssueWire {
         let mut issue = issue(id, IssueTypeWire::Plan, None);
         issue.tier = Some(BeadTierWire::Legend);
@@ -385,6 +404,46 @@ mod tests {
         assert_eq!(plan.waves[2][0].waits_on, vec!["p2", "p3"]);
         assert_eq!(plan.land_agent_name, "e1");
         assert_eq!(plan.land_waits_on, vec!["p1", "p2", "p3", "p4"]);
+        assert_eq!(plan.launch_tag_id, "e1");
+    }
+
+    #[test]
+    fn standalone_epic_uses_epic_launch_tag() {
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), phase("p1", "e1")],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.epic_id, "e1");
+        assert_eq!(plan.launch_tag_id, "e1");
+    }
+
+    #[test]
+    fn legend_child_epic_uses_legend_launch_tag() {
+        let plan = build_epic_work_plan_from_issues(
+            vec![
+                legend("l1", Some(1), "sdd/legends/l1.md"),
+                epic_child("e1", "l1"),
+                phase("p1", "e1"),
+            ],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.epic_id, "e1");
+        assert_eq!(plan.launch_tag_id, "l1");
+    }
+
+    #[test]
+    fn non_legend_parent_does_not_change_epic_launch_tag() {
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("p0"), epic_child("e1", "p0"), phase("p1", "e1")],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.launch_tag_id, "e1");
     }
 
     #[test]
