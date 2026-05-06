@@ -484,6 +484,31 @@ fn running_record_carries_agent_meta() {
 }
 
 #[test]
+fn running_record_carries_agent_meta_tag() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    write_json(
+        &root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(TS_ACE_RUN_RUNNING)
+            .join("agent_meta.json"),
+        &json!({
+            "name": "running_alpha",
+            "tag": "sase-26",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    let meta = rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(meta.tag.as_deref(), Some("sase-26"));
+}
+
+#[test]
 fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("projects");

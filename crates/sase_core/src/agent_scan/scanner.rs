@@ -607,6 +607,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         parent_agent_timestamp: coerce_str(data.get("parent_agent_timestamp")),
         parent_agent_name: coerce_str(data.get("parent_agent_name")),
         workflow_name: coerce_str(data.get("workflow_name")),
+        tag: coerce_str(data.get("tag")),
         pid: coerce_int(data.get("pid")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
