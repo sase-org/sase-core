@@ -312,6 +312,8 @@ pub struct MobileAgentRetryRequestWire {
     pub schema_version: u32,
     pub prompt_override: Option<String>,
     pub dry_run: Option<bool>,
+    pub kill_source_first: Option<bool>,
+    pub device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

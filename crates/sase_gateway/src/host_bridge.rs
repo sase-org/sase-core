@@ -239,20 +239,13 @@ impl CommandAgentHostBridge {
                     "agent_bridge:{operation}"
                 )));
             }
-            if operation == "kill-agent" {
+            if operation == "kill-agent" || operation == "retry-agent" {
+                let target = format!("agent_bridge:{operation}");
                 return Err(match output.status.code() {
-                    Some(4) => HostBridgeError::AgentNotFound(
-                        "agent_bridge:kill-agent".to_string(),
-                    ),
-                    Some(5) => HostBridgeError::AgentNotRunning(
-                        "agent_bridge:kill-agent".to_string(),
-                    ),
-                    Some(6) => HostBridgeError::PermissionDenied(
-                        "agent_bridge:kill-agent".to_string(),
-                    ),
-                    _ => HostBridgeError::BridgeUnavailable(
-                        "agent_bridge:kill-agent".to_string(),
-                    ),
+                    Some(4) => HostBridgeError::AgentNotFound(target),
+                    Some(5) => HostBridgeError::AgentNotRunning(target),
+                    Some(6) => HostBridgeError::PermissionDenied(target),
+                    _ => HostBridgeError::BridgeUnavailable(target),
                 });
             }
             if operation.starts_with("launch-") {
@@ -314,6 +307,24 @@ impl AgentHostBridge for CommandAgentHostBridge {
                 "schema_version": request.schema_version,
                 "name": name,
                 "reason": request.reason.clone(),
+                "device_id": request.device_id.clone(),
+            }),
+        )
+    }
+
+    fn retry_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentRetryRequestWire,
+    ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
+        self.invoke(
+            "retry-agent",
+            &serde_json::json!({
+                "schema_version": request.schema_version,
+                "name": name,
+                "prompt_override": request.prompt_override.clone(),
+                "dry_run": request.dry_run,
+                "kill_source_first": request.kill_source_first,
                 "device_id": request.device_id.clone(),
             }),
         )

@@ -447,7 +447,9 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileAgentRetryRequestWire": {
                 "schema_version": "u32",
                 "prompt_override": "string|null",
-                "dry_run": "bool|null"
+                "dry_run": "bool|null",
+                "kill_source_first": "bool|null",
+                "device_id": "string|null"
             },
             "MobileAgentRetryResultWire": {
                 "schema_version": "u32",

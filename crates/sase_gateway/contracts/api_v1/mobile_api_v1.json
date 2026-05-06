@@ -207,7 +207,9 @@
       "retry_of_timestamp": "string|null"
     },
     "MobileAgentRetryRequestWire": {
+      "device_id": "string|null",
       "dry_run": "bool|null",
+      "kill_source_first": "bool|null",
       "prompt_override": "string|null",
       "schema_version": "u32"
     },

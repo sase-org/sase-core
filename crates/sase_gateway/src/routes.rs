@@ -768,8 +768,9 @@ async fn agent_retry(
 ) -> Result<Json<MobileAgentRetryResultWire>, ApiError> {
     let device =
         authenticate(&state, &headers, "/api/v1/agents/{name}/retry").await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let Json(mut payload) = payload.map_err(ApiError::from_json_rejection)?;
     validate_schema(payload.schema_version)?;
+    payload.device_id = Some(device.device_id.clone());
     match state.agent_bridge.retry_agent(&name, &payload) {
         Ok(result) => {
             let primary_name = launch_primary_name(&result.launch)
@@ -2497,6 +2498,9 @@ case "$operation" in
   kill-agent)
     printf '%s\n' '{"schema_version":1,"name":"cmd-demo","status":"killed","pid":4242,"changed":true,"message":"Killed agent"}'
     ;;
+  retry-agent)
+    printf '%s\n' '{"schema_version":1,"source_agent":"cmd-demo","launch":{"schema_version":1,"primary":{"slot_id":"0","name":"cmd-demo.1","status":"launched","artifact_dir":"/tmp/cmd-demo.1","message":"started pid 4244"},"slots":[{"slot_id":"0","name":"cmd-demo.1","status":"launched","artifact_dir":"/tmp/cmd-demo.1","message":"started pid 4244"}]}}'
+    ;;
   *)
     exit 2
     ;;
@@ -3174,7 +3178,7 @@ esac
         assert_eq!(image["primary"]["name"], "cmd-image");
 
         let (kill_status, kill) = json_response_with_state(
-            state,
+            state.clone(),
             agent_post_request(
                 Some(&token),
                 "/api/v1/agents/cmd-demo/kill",
@@ -3186,6 +3190,25 @@ esac
         assert_eq!(kill["name"], "cmd-demo");
         assert_eq!(kill["pid"], 4242);
         assert_eq!(kill["changed"], true);
+
+        let (retry_status, retry) = json_response_with_state(
+            state,
+            agent_post_request(
+                Some(&token),
+                "/api/v1/agents/cmd-demo/retry",
+                json!({
+                    "schema_version": 1,
+                    "prompt_override": null,
+                    "dry_run": false,
+                    "kill_source_first": false,
+                    "device_id": "ignored",
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry["source_agent"], "cmd-demo");
+        assert_eq!(retry["launch"]["primary"]["name"], "cmd-demo.1");
     }
 
     #[tokio::test]
