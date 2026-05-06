@@ -255,6 +255,7 @@ pub struct MobileAgentImageLaunchRequestWire {
     pub content_type: String,
     pub byte_length: u64,
     pub base64_image: String,
+    pub device_id: Option<String>,
     pub display_name: Option<String>,
     pub name: Option<String>,
     pub model: Option<String>,
@@ -748,6 +749,42 @@ mod tests {
                     "artifact_dir": "/tmp/sase/agents/mobile-demo",
                     "message": null
                 }]
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(MobileAgentImageLaunchRequestWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                prompt: "Review this screenshot".to_string(),
+                original_filename: "screen.png".to_string(),
+                content_type: "image/png".to_string(),
+                byte_length: 8,
+                base64_image: "iVBORw0K".to_string(),
+                device_id: Some("device_123".to_string()),
+                display_name: None,
+                name: Some("mobile-demo".to_string()),
+                model: None,
+                provider: None,
+                runtime: None,
+                project: Some("sase".to_string()),
+                dry_run: Some(false),
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "prompt": "Review this screenshot",
+                "original_filename": "screen.png",
+                "content_type": "image/png",
+                "byte_length": 8,
+                "base64_image": "iVBORw0K",
+                "device_id": "device_123",
+                "display_name": null,
+                "name": "mobile-demo",
+                "model": null,
+                "provider": null,
+                "runtime": null,
+                "project": "sase",
+                "dry_run": false
             })
         );
     }

@@ -99,9 +99,10 @@ impl GatewayState {
         sase_home: impl Into<PathBuf>,
         command: Vec<String>,
     ) -> Self {
-        let mut state = Self::new_with_sase_home(bind_addr, sase_home);
+        let sase_home = sase_home.into();
+        let mut state = Self::new_with_sase_home(bind_addr, sase_home.clone());
         state.agent_bridge = DynAgentHostBridge::new(Arc::new(
-            CommandAgentHostBridge::new(command),
+            CommandAgentHostBridge::new_with_sase_home(command, sase_home),
         ));
         state
     }
@@ -164,9 +165,12 @@ impl GatewayState {
         options: GatewayStateOptions,
         command: Vec<String>,
     ) -> Self {
+        let sase_home = options.sase_home.clone();
         Self::new_with_agent_bridge(
             options,
-            Arc::new(CommandAgentHostBridge::new(command)),
+            Arc::new(CommandAgentHostBridge::new_with_sase_home(
+                command, sase_home,
+            )),
         )
     }
 
@@ -687,8 +691,9 @@ async fn agent_launch_image(
 ) -> Result<Json<MobileAgentLaunchResultWire>, ApiError> {
     let device =
         authenticate(&state, &headers, "/api/v1/agents/launch-image").await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let Json(mut payload) = payload.map_err(ApiError::from_json_rejection)?;
     validate_schema(payload.schema_version)?;
+    payload.device_id = Some(device.device_id.clone());
     match state.agent_bridge.launch_image(&payload) {
         Ok(result) => {
             let primary_name = launch_primary_name(&result);
@@ -2473,6 +2478,9 @@ case "$operation" in
   launch-text)
     printf '%s\n' '{"schema_version":1,"primary":{"slot_id":"0","name":"cmd-demo","status":"launched","artifact_dir":"/tmp/cmd-demo","message":"started pid 4242"},"slots":[{"slot_id":"0","name":"cmd-demo","status":"launched","artifact_dir":"/tmp/cmd-demo","message":"started pid 4242"}]}'
     ;;
+  launch-image)
+    printf '%s\n' '{"schema_version":1,"primary":{"slot_id":"0","name":"cmd-image","status":"launched","artifact_dir":"/tmp/cmd-image","message":"started pid 4243"},"slots":[{"slot_id":"0","name":"cmd-image","status":"launched","artifact_dir":"/tmp/cmd-image","message":"started pid 4243"}]}'
+    ;;
   *)
     exit 2
     ;;
@@ -3110,7 +3118,7 @@ esac
             "dry_run": null,
         });
         let (launch_status, launch) = json_response_with_state(
-            state,
+            state.clone(),
             agent_post_request(
                 Some(&token),
                 "/api/v1/agents/launch",
@@ -3121,6 +3129,33 @@ esac
         assert_eq!(launch_status, StatusCode::OK);
         assert_eq!(launch["primary"]["name"], "cmd-demo");
         assert_eq!(launch["slots"][0]["status"], "launched");
+
+        let image_body = json!({
+            "schema_version": 1,
+            "prompt": "Review",
+            "original_filename": "screen.png",
+            "content_type": "image/png",
+            "byte_length": 8,
+            "base64_image": "iVBORw0K",
+            "display_name": null,
+            "name": null,
+            "model": null,
+            "provider": null,
+            "runtime": null,
+            "project": null,
+            "dry_run": null,
+        });
+        let (image_status, image) = json_response_with_state(
+            state,
+            agent_post_request(
+                Some(&token),
+                "/api/v1/agents/launch-image",
+                image_body,
+            ),
+        )
+        .await;
+        assert_eq!(image_status, StatusCode::OK);
+        assert_eq!(image["primary"]["name"], "cmd-image");
     }
 
     #[tokio::test]

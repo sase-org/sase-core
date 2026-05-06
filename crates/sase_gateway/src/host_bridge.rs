@@ -154,11 +154,25 @@ impl AgentHostBridge for UnavailableAgentHostBridge {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandAgentHostBridge {
     command: Vec<String>,
+    sase_home: Option<PathBuf>,
 }
 
 impl CommandAgentHostBridge {
     pub fn new(command: Vec<String>) -> Self {
-        Self { command }
+        Self {
+            command,
+            sase_home: None,
+        }
+    }
+
+    pub fn new_with_sase_home(
+        command: Vec<String>,
+        sase_home: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            command,
+            sase_home: Some(sase_home.into()),
+        }
     }
 
     pub fn default_command() -> Vec<String> {
@@ -182,16 +196,19 @@ impl CommandAgentHostBridge {
             self.command.split_first().ok_or_else(|| {
                 HostBridgeError::BridgeUnavailable("agent_bridge".to_string())
             })?;
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(fixed_args)
             .args(["mobile", "agent-bridge", operation])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| {
-                HostBridgeError::BridgeUnavailable("agent_bridge".to_string())
-            })?;
+            .stderr(Stdio::piped());
+        if let Some(sase_home) = &self.sase_home {
+            command.env("SASE_HOME", sase_home);
+        }
+        let mut child = command.spawn().map_err(|_| {
+            HostBridgeError::BridgeUnavailable("agent_bridge".to_string())
+        })?;
 
         {
             let Some(mut stdin) = child.stdin.take() else {
@@ -217,6 +234,11 @@ impl CommandAgentHostBridge {
             ))
         })?;
         if !output.status.success() {
+            if operation == "launch-image" && output.status.code() == Some(3) {
+                return Err(HostBridgeError::InvalidUpload(format!(
+                    "agent_bridge:{operation}"
+                )));
+            }
             if operation.starts_with("launch-") {
                 return Err(HostBridgeError::LaunchFailed(format!(
                     "agent_bridge:{operation}"
@@ -256,6 +278,13 @@ impl AgentHostBridge for CommandAgentHostBridge {
         request: &MobileAgentTextLaunchRequestWire,
     ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
         self.invoke("launch-text", request)
+    }
+
+    fn launch_image(
+        &self,
+        request: &MobileAgentImageLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        self.invoke("launch-image", request)
     }
 }
 

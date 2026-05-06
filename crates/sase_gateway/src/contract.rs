@@ -378,6 +378,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "content_type": "string",
                 "byte_length": "u64",
                 "base64_image": "base64 string",
+                "device_id": "string|null; host-injected before bridge dispatch",
                 "display_name": "string|null",
                 "name": "string|null",
                 "model": "string|null",

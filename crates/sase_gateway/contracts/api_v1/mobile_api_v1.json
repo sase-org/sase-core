@@ -137,6 +137,7 @@
       "base64_image": "base64 string",
       "byte_length": "u64",
       "content_type": "string",
+      "device_id": "string|null; host-injected before bridge dispatch",
       "display_name": "string|null",
       "dry_run": "bool|null",
       "model": "string|null",
