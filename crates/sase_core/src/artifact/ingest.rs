@@ -109,25 +109,6 @@ pub fn artifact_rebuild(
             &resolved,
             target_path,
         )?);
-    } else if source_selected(&resolved, ARTIFACT_SOURCE_DIRECTORY) {
-        for path in [
-            resolved.projects_root.as_deref(),
-            resolved.workspace_root.as_deref(),
-            resolved.beads_dir.as_deref(),
-            resolved.artifact_dir.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let request = ArtifactPathUpsertRequestWire {
-                kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
-                provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
-                source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
-                source_id: Some(path_to_artifact_id(path)),
-                ..ArtifactPathUpsertRequestWire::default()
-            };
-            mutations.merge(artifact_upsert_path(store, path, request)?);
-        }
     }
 
     if resolved.target_path.is_none() && project_ingestion_selected(&resolved) {
@@ -169,10 +150,20 @@ pub fn artifact_upsert_path(
     let normalized = normalize_artifact_path(artifact_path)?;
     let mut mutations = ArtifactIngestMutations::new("upsert_path");
 
-    let mut known_dirs = ancestor_directories(&normalized);
-    if path_is_directory(&normalized) {
-        known_dirs.push(normalized.clone());
-    }
+    let target_is_directory = request
+        .kind
+        .as_deref()
+        .is_some_and(|kind| kind == ARTIFACT_KIND_DIRECTORY)
+        || (request.kind.is_none() && path_is_directory(&normalized));
+    let mut known_dirs = if target_is_directory {
+        if path_to_artifact_id(&normalized) == ARTIFACT_ROOT_ID {
+            vec![normalized.clone()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        ancestor_directories(&normalized)
+    };
     known_dirs.sort();
     known_dirs.dedup();
 
@@ -196,7 +187,7 @@ pub fn artifact_upsert_path(
         }
     }
 
-    if !path_is_directory(&normalized) {
+    if !target_is_directory {
         let node = file_node_for_path(&normalized, &request)?;
         let upsert = upsert_artifact_node(
             store,
@@ -387,12 +378,17 @@ pub fn directory_node_for_path(
     path: &Path,
     request: &ArtifactPathUpsertRequestWire,
 ) -> Result<ArtifactNodeWire, String> {
+    if path_to_artifact_id(path) == ARTIFACT_ROOT_ID {
+        return Ok(ArtifactNodeWire::root());
+    }
+    let mut directory_request = request.clone();
+    directory_request.kind = None;
     let inferred_kind = if path_to_artifact_id(path) == ARTIFACT_ROOT_ID {
         ARTIFACT_KIND_ROOT
     } else {
         ARTIFACT_KIND_DIRECTORY
     };
-    node_for_path(path, inferred_kind, request)
+    node_for_path(path, inferred_kind, &directory_request)
 }
 
 pub fn select_directory_parent_id(
@@ -849,9 +845,12 @@ fn upsert_project_file(
     let source_id = path_to_artifact_id(&normalized);
     let source_version = file_source_version(&normalized);
 
-    if let Some(parent) = normalized.parent() {
-        mutations.merge(upsert_directory_path(store, parent)?);
-    }
+    mutations.merge(upsert_directory_chain_for_artifact_path(
+        store,
+        &normalized,
+        ARTIFACT_SOURCE_PROJECT_FILE,
+        &source_id,
+    )?);
 
     let upsert_project_node =
         source_selected(request, ARTIFACT_SOURCE_PROJECT_FILE)
@@ -1086,9 +1085,12 @@ fn ingest_agent_artifacts(
                 .map(|path| path_to_artifact_id(&path))
                 .unwrap_or_else(|_| record.artifact_dir.clone());
 
-        for dir in agent_directory_paths(&record) {
-            mutations.merge(upsert_agent_directory(store, &dir, &source_id)?);
-        }
+        mutations.merge(upsert_directory_chain_for_directory(
+            store,
+            Path::new(&source_id),
+            ARTIFACT_SOURCE_AGENT_ARTIFACT,
+            &source_id,
+        )?);
 
         mutations
             .merge(upsert_agent_node(store, &record, &agent_id, &source_id)?);
@@ -1380,38 +1382,6 @@ fn agent_search_text(
         parts.push("done".to_string());
     }
     parts.join(" ")
-}
-
-fn agent_directory_paths(record: &AgentArtifactRecordWire) -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from(&record.project_dir),
-        Path::new(&record.project_dir).join("artifacts"),
-        Path::new(&record.project_dir)
-            .join("artifacts")
-            .join(&record.workflow_dir_name),
-        PathBuf::from(&record.artifact_dir),
-    ];
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-fn upsert_agent_directory(
-    store: &mut ArtifactStore,
-    path: &Path,
-    source_id: &str,
-) -> Result<ArtifactMutationResultWire, String> {
-    artifact_upsert_path(
-        store,
-        path,
-        ArtifactPathUpsertRequestWire {
-            kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
-            provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
-            source_kind: Some(ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string()),
-            source_id: Some(source_id.to_string()),
-            ..ArtifactPathUpsertRequestWire::default()
-        },
-    )
 }
 
 #[derive(Debug, Default)]
@@ -2487,17 +2457,6 @@ fn ingest_beads(
     };
 
     let beads_dir_id = path_to_artifact_id(beads_dir);
-    mutations.merge(artifact_upsert_path(
-        store,
-        beads_dir,
-        ArtifactPathUpsertRequestWire {
-            kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
-            provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
-            source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
-            source_id: Some(beads_dir_id.clone()),
-            ..ArtifactPathUpsertRequestWire::default()
-        },
-    )?);
 
     let issues = match read_store_issues(beads_dir) {
         Ok(issues) => issues,
@@ -2510,6 +2469,14 @@ fn ingest_beads(
             return Ok(mutations.into_result());
         }
     };
+    if !issues.is_empty() {
+        mutations.merge(upsert_directory_chain_for_directory(
+            store,
+            beads_dir,
+            ARTIFACT_SOURCE_BEAD_STORE,
+            &beads_dir_id,
+        )?);
+    }
 
     let issue_by_id: BTreeMap<&str, &IssueWire> = issues
         .iter()
@@ -3165,21 +3132,59 @@ fn agent_ingestion_selected(request: &ResolvedArtifactRebuildRequest) -> bool {
         || source_selected(request, ARTIFACT_SOURCE_AGENT_THOUGHT)
 }
 
-fn upsert_directory_path(
+fn upsert_directory_chain_for_artifact_path(
     store: &mut ArtifactStore,
     path: &Path,
+    source_kind: &str,
+    source_id: &str,
 ) -> Result<ArtifactMutationResultWire, String> {
-    artifact_upsert_path(
-        store,
-        path,
-        ArtifactPathUpsertRequestWire {
-            kind: Some(ARTIFACT_KIND_DIRECTORY.to_string()),
-            provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
-            source_kind: Some(ARTIFACT_SOURCE_DIRECTORY.to_string()),
-            source_id: Some(path_to_artifact_id(path)),
-            ..ArtifactPathUpsertRequestWire::default()
-        },
-    )
+    let normalized = normalize_artifact_path(path)?;
+    let Some(parent) = normalized.parent() else {
+        return Ok(ArtifactIngestMutations::new("upsert_directory_chain")
+            .into_result());
+    };
+    upsert_directory_chain_for_directory(store, parent, source_kind, source_id)
+}
+
+fn upsert_directory_chain_for_directory(
+    store: &mut ArtifactStore,
+    path: &Path,
+    source_kind: &str,
+    source_id: &str,
+) -> Result<ArtifactMutationResultWire, String> {
+    let normalized = normalize_artifact_path(path)?;
+    let mut mutations = ArtifactIngestMutations::new("upsert_directory_chain");
+    let mut known_dirs = directory_closure(&normalized);
+    known_dirs.sort();
+    known_dirs.dedup();
+    let request = ArtifactPathUpsertRequestWire {
+        provenance: Some(ARTIFACT_PROVENANCE_DERIVED.to_string()),
+        source_kind: Some(source_kind.to_string()),
+        source_id: Some(source_id.to_string()),
+        ..ArtifactPathUpsertRequestWire::default()
+    };
+
+    for dir in &known_dirs {
+        let node = directory_node_for_path(dir, &request)?;
+        let upsert = upsert_artifact_node(
+            store,
+            ArtifactNodeUpsertWire {
+                schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+                node: node.clone(),
+                replace_payloads: false,
+            },
+        )?;
+        let node_was_visible = mutation_touched_node(&upsert, &node.id);
+        mutations.merge(upsert);
+        if node.id != ARTIFACT_ROOT_ID && node_was_visible {
+            let parent_id = directory_parent_id(dir, &known_dirs);
+            mutations.merge(upsert_parent_link(
+                store, &node.id, &parent_id, &request,
+            )?);
+        }
+    }
+
+    Ok(mutations.into_result())
 }
 
 fn sorted_read_dir(path: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
@@ -3846,11 +3851,18 @@ fn path_is_directory(path: &Path) -> bool {
 
 fn ancestor_directories(path: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    let mut current = if path_is_directory(path) {
-        Some(path)
-    } else {
-        path.parent()
-    };
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        dirs.push(dir.to_path_buf());
+        current = dir.parent().filter(|parent| *parent != dir);
+    }
+    dirs.reverse();
+    dirs
+}
+
+fn directory_closure(path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = Some(path);
     while let Some(dir) = current {
         dirs.push(dir.to_path_buf());
         current = dir.parent().filter(|parent| *parent != dir);
@@ -3906,13 +3918,28 @@ mod tests {
         ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_MISC,
         ARTIFACT_FILE_TYPE_PLAN, ARTIFACT_FILE_TYPE_PROJECT,
         ARTIFACT_FILE_TYPE_PROMPT, ARTIFACT_KIND_AGENT,
-        ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_FILE,
+        ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
+        ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_ROOT,
         ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
         ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
         ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL,
         ARTIFACT_TOMBSTONE_NODE,
     };
     use super::*;
+
+    #[test]
+    fn fresh_store_contains_root_artifact() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let store = open_artifact_store(&db).unwrap();
+
+        let root = artifact_show(&store, ARTIFACT_ROOT_ID).unwrap();
+
+        assert_eq!(
+            root.node.as_ref().map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_ROOT)
+        );
+    }
 
     #[test]
     fn file_artifact_classifier_uses_marker_keys_reasons_and_names() {
@@ -3962,6 +3989,32 @@ mod tests {
     }
 
     #[test]
+    fn standalone_directory_upsert_does_not_materialize_non_root_directory() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let empty_dir = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        let result = artifact_upsert_path(
+            &mut store,
+            &empty_dir,
+            ArtifactPathUpsertRequestWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result.nodes_added, 0, "{result:?}");
+        assert!(artifact_show(&store, ARTIFACT_ROOT_ID)
+            .unwrap()
+            .node
+            .is_some());
+        assert!(artifact_show(&store, empty_dir.to_str().unwrap())
+            .unwrap()
+            .node
+            .is_none());
+    }
+
+    #[test]
     fn path_upsert_creates_file_directories_and_parent_links_to_root() {
         let tmp = tempdir().unwrap();
         let db = tmp.path().join("artifacts.sqlite");
@@ -4002,6 +4055,13 @@ mod tests {
             ]
         );
         assert_eq!(path_ids.last().unwrap(), ARTIFACT_ROOT_ID);
+        let parent =
+            artifact_show(&store, file.parent().unwrap().to_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            parent.node.as_ref().map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_DIRECTORY)
+        );
     }
 
     #[test]
@@ -4263,7 +4323,7 @@ mod tests {
         assert!(artifact_show(&store, missing_beads_dir.to_str().unwrap())
             .unwrap()
             .node
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -4361,6 +4421,15 @@ mod tests {
         assert_eq!(
             agent.node.as_ref().map(|node| node.kind.as_str()),
             Some(ARTIFACT_KIND_AGENT)
+        );
+        let artifact_dir_detail =
+            artifact_show(&store, artifact_dir.to_str().unwrap()).unwrap();
+        assert_eq!(
+            artifact_dir_detail
+                .node
+                .as_ref()
+                .map(|node| node.kind.as_str()),
+            Some(ARTIFACT_KIND_DIRECTORY)
         );
         assert!(agent.outbound_links.iter().any(|link| {
             link.link_type == ARTIFACT_LINK_RELATED

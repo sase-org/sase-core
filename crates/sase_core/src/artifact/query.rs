@@ -9,9 +9,9 @@ use super::wire::{
     file_artifact_type, validate_file_artifact_type, ArtifactDetailWire,
     ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
     ArtifactLinkWire, ArtifactNodeWire, ArtifactPayloadWire, ArtifactQueryWire,
-    ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
-    ARTIFACT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT,
+    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
+    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_DERIVED_REASON: &str = "stale_derived";
@@ -279,6 +279,7 @@ pub fn artifact_doctor(
     }
     if options.check_reachability {
         issues.extend(reachability_issues(conn)?);
+        issues.extend(orphan_directory_issues(conn)?);
     }
     if options.check_tombstones {
         issues.extend(tombstone_issues(conn)?);
@@ -683,6 +684,82 @@ fn reachability_issues(
     Ok(issues)
 }
 
+fn orphan_directory_issues(
+    conn: &Connection,
+) -> Result<Vec<ArtifactDoctorIssueWire>, String> {
+    let nodes = load_all_nodes(conn, false)?;
+    let mut issues = Vec::new();
+    for node in nodes {
+        if node.id == ARTIFACT_ROOT_ID || node.kind != ARTIFACT_KIND_DIRECTORY {
+            continue;
+        }
+        if !has_visible_non_directory_descendant(conn, &node.id)? {
+            issues.push(issue(
+                "orphan_directory",
+                "warning",
+                Some(&node.id),
+                None,
+                "directory artifact has no visible non-directory descendants",
+            ));
+        }
+    }
+    Ok(issues)
+}
+
+fn has_visible_non_directory_descendant(
+    conn: &Connection,
+    artifact_id: &str,
+) -> Result<bool, String> {
+    let mut stack = visible_child_ids_and_kinds(conn, artifact_id)?;
+    let mut seen = HashSet::new();
+    while let Some((child_id, child_kind)) = stack.pop() {
+        if !seen.insert(child_id.clone()) {
+            continue;
+        }
+        if child_kind != ARTIFACT_KIND_DIRECTORY {
+            return Ok(true);
+        }
+        stack.extend(visible_child_ids_and_kinds(conn, &child_id)?);
+    }
+    Ok(false)
+}
+
+fn visible_child_ids_and_kinds(
+    conn: &Connection,
+    artifact_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT a.id, a.kind
+            FROM artifact_links l
+            JOIN artifacts a ON a.id = l.source_id
+            WHERE l.link_type = ?1
+              AND l.target_id = ?2
+              AND NOT EXISTS (
+                  SELECT 1 FROM manual_tombstones t
+                  WHERE (t.tombstone_type = ?3 AND t.artifact_id = a.id)
+                     OR (t.tombstone_type = ?4 AND t.link_id = l.id)
+              )
+            ORDER BY a.id
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![
+                ARTIFACT_LINK_PARENT,
+                artifact_id,
+                ARTIFACT_TOMBSTONE_NODE,
+                ARTIFACT_TOMBSTONE_LINK,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 fn reachability_state(
     conn: &Connection,
     artifact_id: &str,
@@ -1061,9 +1138,10 @@ mod tests {
         ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
         ArtifactNodeUpsertWire, ArtifactPayloadWire, ARTIFACT_FILE_TYPE_CHAT,
         ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_MISC,
-        ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_FILE,
-        ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED,
-        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_MANUAL,
+        ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_KIND_AGENT,
+        ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
+        ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+        ARTIFACT_PROVENANCE_MANUAL,
     };
 
     use super::*;
@@ -1562,6 +1640,61 @@ mod tests {
         assert!(report.issues.iter().any(|issue| {
             issue.issue_type == "unreachable"
                 && issue.artifact_id.as_deref() == Some("orphan")
+        }));
+    }
+
+    #[test]
+    fn doctor_reports_orphan_directory_without_non_directory_descendants() {
+        let mut store = fixture_store();
+        upsert_node(
+            &mut store,
+            manual_node("empty-dir", ARTIFACT_KIND_DIRECTORY, "empty"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("nested-dir", ARTIFACT_KIND_DIRECTORY, "nested"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("full-dir", ARTIFACT_KIND_DIRECTORY, "full"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("leaf", ARTIFACT_KIND_FILE, "leaf"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_PARENT, "empty-dir", ARTIFACT_ROOT_ID),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_PARENT, "nested-dir", "empty-dir"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_PARENT, "full-dir", ARTIFACT_ROOT_ID),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_PARENT, "leaf", "full-dir"),
+        );
+
+        let report =
+            artifact_doctor(&store, ArtifactDoctorOptionsWire::default())
+                .unwrap();
+
+        assert!(report.issues.iter().any(|issue| {
+            issue.issue_type == "orphan_directory"
+                && issue.severity == "warning"
+                && issue.artifact_id.as_deref() == Some("empty-dir")
+        }));
+        assert!(report.issues.iter().any(|issue| {
+            issue.issue_type == "orphan_directory"
+                && issue.artifact_id.as_deref() == Some("nested-dir")
+        }));
+        assert!(!report.issues.iter().any(|issue| {
+            issue.issue_type == "orphan_directory"
+                && issue.artifact_id.as_deref() == Some("full-dir")
         }));
     }
 
