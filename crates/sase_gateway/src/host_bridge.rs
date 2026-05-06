@@ -217,6 +217,11 @@ impl CommandAgentHostBridge {
             ))
         })?;
         if !output.status.success() {
+            if operation.starts_with("launch-") {
+                return Err(HostBridgeError::LaunchFailed(format!(
+                    "agent_bridge:{operation}"
+                )));
+            }
             return Err(HostBridgeError::BridgeUnavailable(format!(
                 "agent_bridge:{operation}"
             )));
@@ -244,6 +249,13 @@ impl AgentHostBridge for CommandAgentHostBridge {
             "resume-options",
             &serde_json::json!({"schema_version": GATEWAY_WIRE_SCHEMA_VERSION}),
         )
+    }
+
+    fn launch_text(
+        &self,
+        request: &MobileAgentTextLaunchRequestWire,
+    ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+        self.invoke("launch-text", request)
     }
 }
 

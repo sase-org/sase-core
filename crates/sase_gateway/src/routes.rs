@@ -2470,6 +2470,9 @@ case "$operation" in
   resume-options)
     printf '%s\n' '{"schema_version":1,"options":[{"id":"cmd-demo:resume","agent_name":"cmd-demo","kind":"resume","label":"Resume cmd-demo","prompt_text":"#resume:cmd-demo\n","direct_launch_supported":true}]}'
     ;;
+  launch-text)
+    printf '%s\n' '{"schema_version":1,"primary":{"slot_id":"0","name":"cmd-demo","status":"launched","artifact_dir":"/tmp/cmd-demo","message":"started pid 4242"},"slots":[{"slot_id":"0","name":"cmd-demo","status":"launched","artifact_dir":"/tmp/cmd-demo","message":"started pid 4242"}]}'
+    ;;
   *)
     exit 2
     ;;
@@ -3088,12 +3091,36 @@ esac
         assert_eq!(list["agents"][0]["name"], "cmd-demo");
 
         let (resume_status, resume) = json_response_with_state(
-            state,
+            state.clone(),
             agent_get_request(Some(&token), "/api/v1/agents/resume-options"),
         )
         .await;
         assert_eq!(resume_status, StatusCode::OK);
         assert_eq!(resume["options"][0]["prompt_text"], "#resume:cmd-demo\n");
+
+        let launch_body = json!({
+            "schema_version": 1,
+            "prompt": "Do work",
+            "display_name": null,
+            "name": null,
+            "model": null,
+            "provider": null,
+            "runtime": null,
+            "project": null,
+            "dry_run": null,
+        });
+        let (launch_status, launch) = json_response_with_state(
+            state,
+            agent_post_request(
+                Some(&token),
+                "/api/v1/agents/launch",
+                launch_body,
+            ),
+        )
+        .await;
+        assert_eq!(launch_status, StatusCode::OK);
+        assert_eq!(launch["primary"]["name"], "cmd-demo");
+        assert_eq!(launch["slots"][0]["status"], "launched");
     }
 
     #[tokio::test]
