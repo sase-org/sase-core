@@ -269,6 +269,80 @@ pub struct ArtifactDetailWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPageRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub group_key: Option<String>,
+    #[serde(default)]
+    pub relation: Option<String>,
+    #[serde(default)]
+    pub link_type: Option<ArtifactLinkTypeWire>,
+    #[serde(default)]
+    pub offset: u32,
+    #[serde(default = "default_page_limit")]
+    pub limit: u32,
+}
+
+impl Default for ArtifactPageRequestWire {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+            group_key: None,
+            relation: None,
+            link_type: None,
+            offset: 0,
+            limit: default_page_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactGroupSummaryWire {
+    pub group_key: String,
+    pub direction: String,
+    #[serde(default)]
+    pub link_type: Option<ArtifactLinkTypeWire>,
+    pub total_count: u64,
+    pub loaded_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactRelationPageWire {
+    pub summary: ArtifactGroupSummaryWire,
+    #[serde(default)]
+    pub nodes: Vec<ArtifactNodeWire>,
+    #[serde(default)]
+    pub links: Vec<ArtifactLinkWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTypeCountWire {
+    pub artifact_type: String,
+    pub total_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactDetailPagedWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub node: Option<ArtifactNodeWire>,
+    #[serde(default)]
+    pub payloads: Vec<ArtifactPayloadWire>,
+    #[serde(default)]
+    pub path_to_root: Vec<ArtifactNodeWire>,
+    #[serde(default)]
+    pub diagnostics: Vec<ArtifactDoctorIssueWire>,
+    pub children_page: ArtifactRelationPageWire,
+    #[serde(default)]
+    pub outbound_pages: Vec<ArtifactRelationPageWire>,
+    #[serde(default)]
+    pub inbound_pages: Vec<ArtifactRelationPageWire>,
+    #[serde(default)]
+    pub type_counts: Vec<ArtifactTypeCountWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactQueryWire {
     pub schema_version: u32,
     #[serde(default)]
@@ -509,6 +583,10 @@ fn default_schema_version() -> u32 {
     ARTIFACT_WIRE_SCHEMA_VERSION
 }
 
+fn default_page_limit() -> u32 {
+    10
+}
+
 fn default_stale_cleanup() -> String {
     ARTIFACT_STALE_CLEANUP_NONE.to_string()
 }
@@ -596,6 +674,18 @@ mod tests {
                 "include_tombstoned": false,
                 "limit": 200,
                 "offset": 0
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(ArtifactPageRequestWire::default()).unwrap(),
+            json!({
+                "schema_version": 1,
+                "group_key": null,
+                "relation": null,
+                "link_type": null,
+                "offset": 0,
+                "limit": 10
             })
         );
     }

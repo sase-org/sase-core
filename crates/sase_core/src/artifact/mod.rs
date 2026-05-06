@@ -28,7 +28,7 @@ pub use query::{
     artifact_children, artifact_detail, artifact_doctor,
     artifact_inbound_neighbors, artifact_is_reachable_to_root, artifact_list,
     artifact_outbound_neighbors, artifact_path_to_root, artifact_search,
-    artifact_show,
+    artifact_show, artifact_show_paged,
 };
 pub use store::{
     deterministic_artifact_link_id, open_artifact_store, remove_artifact_link,
@@ -37,13 +37,15 @@ pub use store::{
 };
 pub use wire::{
     canonical_file_artifact_types, file_artifact_type, set_file_artifact_type,
-    validate_file_artifact_type, ArtifactDetailWire, ArtifactDoctorIssueWire,
-    ArtifactDoctorOptionsWire, ArtifactDoctorWire, ArtifactGraphOptionsWire,
-    ArtifactGraphWire, ArtifactKindWire, ArtifactLinkRemoveWire,
-    ArtifactLinkTypeWire, ArtifactLinkUpsertWire, ArtifactLinkWire,
-    ArtifactMutationResultWire, ArtifactNodeRemoveWire, ArtifactNodeUpsertWire,
-    ArtifactNodeWire, ArtifactPathUpsertRequestWire, ArtifactPayloadWire,
-    ArtifactQueryWire, ArtifactRebuildRequestWire, ARTIFACT_FILE_TYPE_CHAT,
+    validate_file_artifact_type, ArtifactDetailPagedWire, ArtifactDetailWire,
+    ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
+    ArtifactGraphOptionsWire, ArtifactGraphWire, ArtifactGroupSummaryWire,
+    ArtifactKindWire, ArtifactLinkRemoveWire, ArtifactLinkTypeWire,
+    ArtifactLinkUpsertWire, ArtifactLinkWire, ArtifactMutationResultWire,
+    ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
+    ArtifactPageRequestWire, ArtifactPathUpsertRequestWire,
+    ArtifactPayloadWire, ArtifactQueryWire, ArtifactRebuildRequestWire,
+    ArtifactRelationPageWire, ArtifactTypeCountWire, ARTIFACT_FILE_TYPE_CHAT,
     ARTIFACT_FILE_TYPE_DIFF, ARTIFACT_FILE_TYPE_METADATA_KEY,
     ARTIFACT_FILE_TYPE_MISC, ARTIFACT_FILE_TYPE_PLAN,
     ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_FILE_TYPE_PROMPT, ARTIFACT_KIND_AGENT,

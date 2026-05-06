@@ -52,6 +52,7 @@
 //! - `artifact_remove(index_path: str, request: dict) -> dict`
 //! - `artifact_list(index_path: str, query: dict | None = None) -> list[dict]`
 //! - `artifact_show(index_path: str, artifact_id: str) -> dict`
+//! - `artifact_show_paged(index_path: str, artifact_id: str, request: dict | None = None) -> dict`
 //! - `artifact_graph(index_path: str, options: dict | None = None) -> dict`
 //! - `artifact_export(index_path: str, options: dict | None = None, format: str = "json") -> str`
 //! - `artifact_rebuild(index_path: str, request: dict | None = None) -> dict`
@@ -123,6 +124,7 @@ use sase_core::artifact::{
     artifact_materialize_graph as core_artifact_materialize_graph,
     artifact_rebuild as core_artifact_rebuild,
     artifact_show as core_artifact_show,
+    artifact_show_paged as core_artifact_show_paged,
     artifact_upsert_path as core_artifact_upsert_path,
     open_artifact_store as core_open_artifact_store,
     remove_artifact_link as core_remove_artifact_link,
@@ -132,8 +134,9 @@ use sase_core::artifact::{
     upsert_artifact_payload as core_upsert_artifact_payload,
     ArtifactDoctorOptionsWire, ArtifactGraphOptionsWire,
     ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
-    ArtifactNodeUpsertWire, ArtifactPathUpsertRequestWire, ArtifactPayloadWire,
-    ArtifactQueryWire, ArtifactRebuildRequestWire,
+    ArtifactNodeUpsertWire, ArtifactPageRequestWire,
+    ArtifactPathUpsertRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
+    ArtifactRebuildRequestWire,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -614,6 +617,33 @@ fn py_artifact_show<'py>(
         .allow_threads(|| {
             let store = core_open_artifact_store(&index)?;
             core_artifact_show(&store, artifact_id)
+        })
+        .map_err(artifact_store_error_to_pyerr)?;
+    json_serializable_to_py(py, &detail)
+}
+
+/// Show one artifact detail record with paged relationship groups.
+#[pyfunction]
+#[pyo3(name = "artifact_show_paged", signature = (index_path, artifact_id, request = None))]
+fn py_artifact_show_paged<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    artifact_id: &str,
+    request: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let request = match request {
+        Some(dict) => artifact_wire_from_pydict::<ArtifactPageRequestWire>(
+            dict,
+            "request",
+            "ArtifactPageRequestWire",
+        )?,
+        None => ArtifactPageRequestWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let detail = py
+        .allow_threads(|| {
+            let store = core_open_artifact_store(&index)?;
+            core_artifact_show_paged(&store, artifact_id, request)
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &detail)
@@ -2616,6 +2646,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_show_paged, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_graph, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_export, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_rebuild, m)?)?;
@@ -3120,6 +3151,37 @@ mod tests {
             assert_eq!(
                 detail_value["node"]["metadata"]["lang"],
                 json!("markdown")
+            );
+            let page_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "group_key": null,
+                    "relation": "children",
+                    "link_type": null,
+                    "offset": 0,
+                    "limit": 10
+                }),
+            )
+            .unwrap();
+            let page_request =
+                page_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let paged_detail = py_artifact_show_paged(
+                py,
+                index_str,
+                "/tmp/artifact-binding.md",
+                Some(page_request),
+            )
+            .unwrap();
+            let paged_detail_value =
+                py_to_json_value(paged_detail.bind(py)).unwrap();
+            assert_eq!(
+                paged_detail_value["node"]["metadata"]["lang"],
+                json!("markdown")
+            );
+            assert_eq!(
+                paged_detail_value["children_page"]["summary"]["group_key"],
+                json!("children")
             );
 
             let graph_options_obj = json_value_to_py(

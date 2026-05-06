@@ -1,26 +1,67 @@
 //! Deterministic read APIs for the unified artifact graph.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::store::ArtifactStore;
 use super::wire::{
-    file_artifact_type, validate_file_artifact_type, ArtifactDetailWire,
-    ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
-    ArtifactLinkWire, ArtifactNodeWire, ArtifactPayloadWire, ArtifactQueryWire,
+    file_artifact_type, validate_file_artifact_type, ArtifactDetailPagedWire,
+    ArtifactDetailWire, ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire,
+    ArtifactDoctorWire, ArtifactGroupSummaryWire, ArtifactLinkWire,
+    ArtifactNodeWire, ArtifactPageRequestWire, ArtifactPayloadWire,
+    ArtifactQueryWire, ArtifactRelationPageWire, ArtifactTypeCountWire,
     ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT,
     ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
     ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_DERIVED_REASON: &str = "stale_derived";
+const RELATION_CHILDREN: &str = "children";
+const RELATION_OUTBOUND: &str = "outbound";
+const RELATION_INBOUND: &str = "inbound";
 
 pub fn artifact_show(
     store: &ArtifactStore,
     artifact_id: &str,
 ) -> Result<ArtifactDetailWire, String> {
     artifact_detail(store, artifact_id)
+}
+
+pub fn artifact_show_paged(
+    store: &ArtifactStore,
+    artifact_id: &str,
+    request: ArtifactPageRequestWire,
+) -> Result<ArtifactDetailPagedWire, String> {
+    validate_schema_version(request.schema_version)?;
+    validate_page_request(&request)?;
+    let conn = store.connection();
+    let node = load_visible_node(conn, artifact_id)?;
+    let payloads = load_payloads(conn, artifact_id)?;
+    let path_to_root = artifact_path_to_root(store, artifact_id)?;
+    let diagnostics = path_diagnostics(conn, artifact_id)?;
+    let children_page = artifact_children_page(conn, artifact_id, &request)?;
+    let outbound_pages = artifact_relation_pages(
+        conn,
+        artifact_id,
+        RELATION_OUTBOUND,
+        &request,
+    )?;
+    let inbound_pages =
+        artifact_relation_pages(conn, artifact_id, RELATION_INBOUND, &request)?;
+    let type_counts = artifact_type_counts(conn)?;
+
+    Ok(ArtifactDetailPagedWire {
+        schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+        node,
+        payloads,
+        path_to_root,
+        diagnostics,
+        children_page,
+        outbound_pages,
+        inbound_pages,
+        type_counts,
+    })
 }
 
 pub fn artifact_detail(
@@ -320,6 +361,331 @@ fn validate_schema_version(schema_version: u32) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn validate_page_request(
+    request: &ArtifactPageRequestWire,
+) -> Result<(), String> {
+    if request.limit == 0 {
+        return Err("artifact page limit must be greater than zero".to_string());
+    }
+    if let Some(relation) = request.relation.as_deref() {
+        if !matches!(
+            relation,
+            RELATION_CHILDREN | RELATION_OUTBOUND | RELATION_INBOUND
+        ) {
+            return Err(format!(
+                "unsupported artifact relation {relation:?}; expected one of children, outbound, inbound"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn relation_group_key(relation: &str, link_type: Option<&str>) -> String {
+    match link_type {
+        Some(link_type) => format!("{relation}:{link_type}"),
+        None => relation.to_string(),
+    }
+}
+
+fn should_load_page(
+    request: &ArtifactPageRequestWire,
+    relation: &str,
+    link_type: Option<&str>,
+) -> bool {
+    if let Some(group_key) = request.group_key.as_deref() {
+        return group_key == relation_group_key(relation, link_type);
+    }
+    if let Some(request_relation) = request.relation.as_deref() {
+        if request_relation != relation {
+            return false;
+        }
+        return match (request.link_type.as_deref(), link_type) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+    }
+    true
+}
+
+fn empty_relation_page(
+    relation: &str,
+    link_type: Option<&str>,
+    total_count: u64,
+) -> ArtifactRelationPageWire {
+    ArtifactRelationPageWire {
+        summary: ArtifactGroupSummaryWire {
+            group_key: relation_group_key(relation, link_type),
+            direction: relation.to_string(),
+            link_type: link_type.map(str::to_string),
+            total_count,
+            loaded_count: 0,
+        },
+        nodes: Vec::new(),
+        links: Vec::new(),
+    }
+}
+
+fn artifact_children_page(
+    conn: &Connection,
+    artifact_id: &str,
+    request: &ArtifactPageRequestWire,
+) -> Result<ArtifactRelationPageWire, String> {
+    let total_count = count_children(conn, artifact_id)?;
+    if !should_load_page(request, RELATION_CHILDREN, None) {
+        return Ok(empty_relation_page(RELATION_CHILDREN, None, total_count));
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT a.node_json, l.link_json
+            FROM artifact_links l
+            JOIN artifacts a ON a.id = l.source_id
+            WHERE l.link_type = ?1
+              AND l.target_id = ?2
+              AND NOT EXISTS (
+                  SELECT 1 FROM manual_tombstones t
+                  WHERE (t.tombstone_type = ?3 AND t.artifact_id = a.id)
+                     OR (t.tombstone_type = ?4 AND t.link_id = l.id)
+              )
+            ORDER BY a.kind, a.display_title, a.id
+            LIMIT ?5 OFFSET ?6
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![
+                ARTIFACT_LINK_PARENT,
+                artifact_id,
+                ARTIFACT_TOMBSTONE_NODE,
+                ARTIFACT_TOMBSTONE_LINK,
+                request.limit,
+                request.offset,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+    for row in rows {
+        let (node_json, link_json) = row.map_err(|e| e.to_string())?;
+        nodes
+            .push(serde_json::from_str(&node_json).map_err(|e| e.to_string())?);
+        links
+            .push(serde_json::from_str(&link_json).map_err(|e| e.to_string())?);
+    }
+
+    Ok(ArtifactRelationPageWire {
+        summary: ArtifactGroupSummaryWire {
+            group_key: relation_group_key(RELATION_CHILDREN, None),
+            direction: RELATION_CHILDREN.to_string(),
+            link_type: None,
+            total_count,
+            loaded_count: nodes.len() as u64,
+        },
+        nodes,
+        links,
+    })
+}
+
+fn count_children(conn: &Connection, artifact_id: &str) -> Result<u64, String> {
+    conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM artifact_links l
+        JOIN artifacts a ON a.id = l.source_id
+        WHERE l.link_type = ?1
+          AND l.target_id = ?2
+          AND NOT EXISTS (
+              SELECT 1 FROM manual_tombstones t
+              WHERE (t.tombstone_type = ?3 AND t.artifact_id = a.id)
+                 OR (t.tombstone_type = ?4 AND t.link_id = l.id)
+          )
+        "#,
+        params![
+            ARTIFACT_LINK_PARENT,
+            artifact_id,
+            ARTIFACT_TOMBSTONE_NODE,
+            ARTIFACT_TOMBSTONE_LINK,
+        ],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn artifact_relation_pages(
+    conn: &Connection,
+    artifact_id: &str,
+    relation: &str,
+    request: &ArtifactPageRequestWire,
+) -> Result<Vec<ArtifactRelationPageWire>, String> {
+    let counts = relation_link_type_counts(conn, artifact_id, relation)?;
+    let mut pages = Vec::new();
+    for (link_type, total_count) in counts {
+        if should_load_page(request, relation, Some(&link_type)) {
+            pages.push(load_relation_page(
+                conn,
+                artifact_id,
+                relation,
+                &link_type,
+                total_count,
+                request,
+            )?);
+        } else {
+            pages.push(empty_relation_page(
+                relation,
+                Some(&link_type),
+                total_count,
+            ));
+        }
+    }
+    Ok(pages)
+}
+
+fn relation_link_type_counts(
+    conn: &Connection,
+    artifact_id: &str,
+    relation: &str,
+) -> Result<BTreeMap<String, u64>, String> {
+    let (predicate, linked_column) = match relation {
+        RELATION_OUTBOUND => ("l.source_id = ?1", "l.target_id"),
+        RELATION_INBOUND => ("l.target_id = ?1", "l.source_id"),
+        _ => return Err(format!("unsupported relation {relation:?}")),
+    };
+    let sql = format!(
+        r#"
+        SELECT l.link_type, COUNT(*)
+        FROM artifact_links l
+        JOIN artifacts a ON a.id = {linked_column}
+        WHERE {predicate}
+          AND NOT EXISTS (
+              SELECT 1 FROM manual_tombstones t
+              WHERE (t.tombstone_type = ?2 AND t.artifact_id = a.id)
+                 OR (t.tombstone_type = ?3 AND t.link_id = l.id)
+          )
+        GROUP BY l.link_type
+        ORDER BY l.link_type
+        "#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![
+                artifact_id,
+                ARTIFACT_TOMBSTONE_NODE,
+                ARTIFACT_TOMBSTONE_LINK,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let (link_type, count) = row.map_err(|e| e.to_string())?;
+        counts.insert(link_type, count);
+    }
+    Ok(counts)
+}
+
+fn load_relation_page(
+    conn: &Connection,
+    artifact_id: &str,
+    relation: &str,
+    link_type: &str,
+    total_count: u64,
+    request: &ArtifactPageRequestWire,
+) -> Result<ArtifactRelationPageWire, String> {
+    let (artifact_column, linked_column) = match relation {
+        RELATION_OUTBOUND => ("l.source_id", "l.target_id"),
+        RELATION_INBOUND => ("l.target_id", "l.source_id"),
+        _ => return Err(format!("unsupported relation {relation:?}")),
+    };
+    let sql = format!(
+        r#"
+        SELECT a.node_json, l.link_json
+        FROM artifact_links l
+        JOIN artifacts a ON a.id = {linked_column}
+        WHERE {artifact_column} = ?1
+          AND l.link_type = ?2
+          AND NOT EXISTS (
+              SELECT 1 FROM manual_tombstones t
+              WHERE (t.tombstone_type = ?3 AND t.artifact_id = a.id)
+                 OR (t.tombstone_type = ?4 AND t.link_id = l.id)
+          )
+        ORDER BY l.link_type, l.source_id, l.target_id, l.id
+        LIMIT ?5 OFFSET ?6
+        "#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![
+                artifact_id,
+                link_type,
+                ARTIFACT_TOMBSTONE_NODE,
+                ARTIFACT_TOMBSTONE_LINK,
+                request.limit,
+                request.offset,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+    for row in rows {
+        let (node_json, link_json) = row.map_err(|e| e.to_string())?;
+        nodes
+            .push(serde_json::from_str(&node_json).map_err(|e| e.to_string())?);
+        links
+            .push(serde_json::from_str(&link_json).map_err(|e| e.to_string())?);
+    }
+
+    Ok(ArtifactRelationPageWire {
+        summary: ArtifactGroupSummaryWire {
+            group_key: relation_group_key(relation, Some(link_type)),
+            direction: relation.to_string(),
+            link_type: Some(link_type.to_string()),
+            total_count,
+            loaded_count: nodes.len() as u64,
+        },
+        nodes,
+        links,
+    })
+}
+
+fn artifact_type_counts(
+    conn: &Connection,
+) -> Result<Vec<ArtifactTypeCountWire>, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT a.kind, COUNT(*)
+            FROM artifacts a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM manual_tombstones t
+                WHERE t.tombstone_type = ?1 AND t.artifact_id = a.id
+            )
+            GROUP BY a.kind
+            ORDER BY a.kind
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![ARTIFACT_TOMBSTONE_NODE], |row| {
+            Ok(ArtifactTypeCountWire {
+                artifact_type: row.get(0)?,
+                total_count: row.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut counts = Vec::new();
+    for row in rows {
+        counts.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(counts)
 }
 
 fn load_visible_node(
@@ -1501,6 +1867,97 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/tmp/a.md", "/tmp", "/"]
         );
+    }
+
+    #[test]
+    fn paged_detail_returns_counts_and_requested_relation_page() {
+        let mut store = fixture_store();
+        for index in 0..15 {
+            let child_id = format!("/tmp/page-{index:02}.md");
+            upsert_node(
+                &mut store,
+                manual_node(
+                    &child_id,
+                    ARTIFACT_KIND_FILE,
+                    &format!("page {index:02}"),
+                ),
+            );
+            upsert_link(
+                &mut store,
+                manual_link(ARTIFACT_LINK_PARENT, &child_id, "/tmp"),
+            );
+        }
+        for index in 0..12 {
+            let target_id = format!("agent-target-{index:02}");
+            upsert_node(
+                &mut store,
+                manual_node(
+                    &target_id,
+                    ARTIFACT_KIND_AGENT,
+                    &format!("target {index:02}"),
+                ),
+            );
+            upsert_link(
+                &mut store,
+                manual_link(ARTIFACT_LINK_RELATED, "/tmp", &target_id),
+            );
+        }
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_WORKER, "/tmp", "agent-1"),
+        );
+
+        let detail = artifact_show_paged(
+            &store,
+            "/tmp",
+            ArtifactPageRequestWire {
+                relation: Some("outbound".to_string()),
+                link_type: Some(ARTIFACT_LINK_RELATED.to_string()),
+                offset: 10,
+                limit: 2,
+                ..ArtifactPageRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(detail.node.unwrap().id, "/tmp");
+        assert_eq!(detail.children_page.summary.total_count, 17);
+        assert_eq!(detail.children_page.summary.loaded_count, 0);
+        let related_page = detail
+            .outbound_pages
+            .iter()
+            .find(|page| {
+                page.summary.link_type.as_deref() == Some(ARTIFACT_LINK_RELATED)
+            })
+            .unwrap();
+        assert_eq!(related_page.summary.group_key, "outbound:related");
+        assert_eq!(related_page.summary.total_count, 12);
+        assert_eq!(related_page.summary.loaded_count, 2);
+        assert_eq!(
+            related_page
+                .nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-target-10", "agent-target-11"]
+        );
+        let worker_page = detail
+            .outbound_pages
+            .iter()
+            .find(|page| {
+                page.summary.link_type.as_deref() == Some(ARTIFACT_LINK_WORKER)
+            })
+            .unwrap();
+        assert_eq!(worker_page.summary.total_count, 1);
+        assert_eq!(worker_page.summary.loaded_count, 0);
+        assert!(detail
+            .type_counts
+            .iter()
+            .any(|count| count.artifact_type == ARTIFACT_KIND_FILE));
+
+        let full_detail = artifact_show(&store, "/tmp").unwrap();
+        assert_eq!(full_detail.children.len(), 17);
+        assert!(full_detail.outbound_links.len() > related_page.links.len());
     }
 
     #[test]
