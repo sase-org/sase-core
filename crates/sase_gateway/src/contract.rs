@@ -83,6 +83,22 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "errors": ["ApiErrorWire"]
             },
             {
+                "method": "POST",
+                "path": "/api/v1/notifications/{id}/mark-read",
+                "auth": true,
+                "success": "NotificationStateMutationResponseWire",
+                "events_on_success": ["notifications_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/notifications/{id}/dismiss",
+                "auth": true,
+                "success": "NotificationStateMutationResponseWire",
+                "events_on_success": ["notifications_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
                 "method": "GET",
                 "path": "/api/v1/attachments/{token}",
                 "auth": true,
@@ -321,6 +337,13 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "notifications": "MobileNotificationCardWire[]",
                 "total_count": "u64",
                 "next_high_water": "string|null"
+            },
+            "NotificationStateMutationResponseWire": {
+                "schema_version": "u32",
+                "notification_id": "string",
+                "read": "bool",
+                "dismissed": "bool",
+                "changed": "bool; false when the requested state was already set"
             },
             "PairFinishRequestWire": {
                 "schema_version": "u32",

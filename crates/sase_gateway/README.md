@@ -37,6 +37,10 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `GET /api/v1/notifications/{id}` requires auth and returns one notification with full notes, action detail, and
   attachment manifests. Detail responses mint short-lived attachment tokens for regular declared files that pass path
   and size checks; list cards only expose counts and kinds.
+- `POST /api/v1/notifications/{id}/mark-read` requires auth, marks one notification read, returns the resulting state,
+  audits the attempt, and publishes `notifications_changed` on success.
+- `POST /api/v1/notifications/{id}/dismiss` requires auth, marks one notification dismissed, returns the resulting
+  state, audits the attempt, and publishes `notifications_changed` on success.
 - `GET /api/v1/attachments/{token}` requires auth and streams the declared attachment bytes. Tokens are bound to the
   device that inspected the detail response, expire after a short TTL, are never stored in the audit log, and are
   rejected if the target path disappears, changes size, crosses a symlink, contains traversal, is not a regular file, or
@@ -53,8 +57,9 @@ Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/dev
 returned only from the pairing finish response. Audit records are appended to `<sase_home>/mobile_gateway/audit.jsonl`
 without secrets.
 
-The gateway currently reads notifications by polling the host JSONL store on each request. Successful action mutations
-publish `notifications_changed` SSE events; passive file watching is intentionally left out of the MVP.
+The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
+and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
+MVP.
 
 ## Curl Examples
 
@@ -79,6 +84,16 @@ Inspect one plan approval notification and mint attachment tokens for its detail
 NOTIFICATION_ID="abcdef12-plan"
 
 curl -sS "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID" \
+  -H "$AUTH_HEADER"
+```
+
+Mark one notification read or dismissed:
+
+```bash
+curl -sS -X POST "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID/mark-read" \
+  -H "$AUTH_HEADER"
+
+curl -sS -X POST "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID/dismiss" \
   -H "$AUTH_HEADER"
 ```
 

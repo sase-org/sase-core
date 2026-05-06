@@ -134,6 +134,15 @@ pub struct EventRecordWire {
     pub payload: EventPayloadWire,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationStateMutationResponseWire {
+    pub schema_version: u32,
+    pub notification_id: String,
+    pub read: bool,
+    pub dismissed: bool,
+    pub changed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

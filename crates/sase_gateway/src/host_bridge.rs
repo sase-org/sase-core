@@ -19,6 +19,10 @@ use sase_core::notifications::{
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use crate::wire::{
+    NotificationStateMutationResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+};
+
 #[derive(Clone)]
 pub struct DynNotificationHostBridge(Arc<dyn NotificationHostBridge>);
 
@@ -46,6 +50,20 @@ impl DynNotificationHostBridge {
         notification: &NotificationWire,
     ) -> MobileActionStateWire {
         self.0.action_state(notification)
+    }
+
+    pub fn mark_notification_read(
+        &self,
+        id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        self.0.mark_notification_read(id)
+    }
+
+    pub fn dismiss_notification(
+        &self,
+        id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        self.0.dismiss_notification(id)
     }
 
     pub fn execute_plan_action(
@@ -110,6 +128,26 @@ pub trait NotificationHostBridge: Send + Sync {
             None,
             current_unix_time(),
         )
+    }
+
+    fn mark_notification_read(
+        &self,
+        _id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "notification state mutations are not supported by this bridge"
+                .to_string(),
+        ))
+    }
+
+    fn dismiss_notification(
+        &self,
+        _id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "notification state mutations are not supported by this bridge"
+                .to_string(),
+        ))
     }
 
     fn execute_plan_action(
@@ -250,6 +288,28 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
                 )
             }
         }
+    }
+
+    fn mark_notification_read(
+        &self,
+        id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        apply_notification_state_mutation(
+            &self.notifications_path,
+            id,
+            NotificationStateUpdateWire::MarkRead { id: id.to_string() },
+        )
+    }
+
+    fn dismiss_notification(
+        &self,
+        id: &str,
+    ) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+        apply_notification_state_mutation(
+            &self.notifications_path,
+            id,
+            NotificationStateUpdateWire::MarkDismissed { id: id.to_string() },
+        )
     }
 
     fn execute_plan_action(
@@ -503,10 +563,36 @@ fn dismiss_notification_best_effort(
     );
 }
 
+fn apply_notification_state_mutation(
+    notifications_path: &Path,
+    id: &str,
+    update: NotificationStateUpdateWire,
+) -> Result<NotificationStateMutationResponseWire, HostBridgeError> {
+    let outcome = apply_notification_state_update(notifications_path, &update)
+        .map_err(HostBridgeError::ReadNotifications)?;
+    if outcome.matched_count == 0 {
+        return Err(HostBridgeError::NotificationMissing(id.to_string()));
+    }
+    let notification = outcome
+        .notifications
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or_else(|| HostBridgeError::NotificationMissing(id.to_string()))?;
+    Ok(NotificationStateMutationResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        notification_id: notification.id,
+        read: notification.read,
+        dismissed: notification.dismissed,
+        changed: outcome.changed_count > 0,
+    })
+}
+
 #[derive(Debug, Error)]
 pub enum HostBridgeError {
     #[error("failed to read notifications: {0}")]
     ReadNotifications(String),
+    #[error("notification not found: {0}")]
+    NotificationMissing(String),
     #[error("failed to read pending actions: {0}")]
     ReadPendingActions(String),
     #[error("action prefix not found: {0}")]

@@ -43,8 +43,9 @@ use crate::storage::{
 use crate::wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
     EventRecordWire, GatewayBindWire, GatewayBuildWire, HealthResponseWire,
-    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
-    PairStartResponseWire, SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    NotificationStateMutationResponseWire, PairFinishRequestWire,
+    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
+    SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
@@ -362,6 +363,14 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/notifications", get(list_notifications))
         .route("/api/v1/notifications/:id", get(notification_detail))
+        .route(
+            "/api/v1/notifications/:id/mark-read",
+            post(mark_notification_read),
+        )
+        .route(
+            "/api/v1/notifications/:id/dismiss",
+            post(dismiss_notification),
+        )
         .route("/api/v1/attachments/:token", get(download_attachment))
         .route("/api/v1/actions/plan/:prefix/approve", post(plan_approve))
         .route("/api/v1/actions/plan/:prefix/run", post(plan_run))
@@ -500,6 +509,7 @@ async fn session(
             "session.read".to_string(),
             "events.read".to_string(),
             "attachments.download".to_string(),
+            "notifications.state.write".to_string(),
         ],
     }))
 }
@@ -615,6 +625,81 @@ async fn notification_detail(
             state.notification_bridge.action_state(&notification),
         ),
     }))
+}
+
+async fn mark_notification_read(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<NotificationStateMutationResponseWire>, ApiError> {
+    mutate_notification_state(
+        state,
+        headers,
+        id,
+        "/api/v1/notifications/{id}/mark-read",
+        "mark_read",
+        |bridge, id| bridge.mark_notification_read(id),
+    )
+    .await
+}
+
+async fn dismiss_notification(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<NotificationStateMutationResponseWire>, ApiError> {
+    mutate_notification_state(
+        state,
+        headers,
+        id,
+        "/api/v1/notifications/{id}/dismiss",
+        "dismiss",
+        |bridge, id| bridge.dismiss_notification(id),
+    )
+    .await
+}
+
+async fn mutate_notification_state(
+    state: GatewayState,
+    headers: HeaderMap,
+    id: String,
+    endpoint: &'static str,
+    event_reason: &'static str,
+    mutation: impl FnOnce(
+        &DynNotificationHostBridge,
+        &str,
+    ) -> Result<
+        NotificationStateMutationResponseWire,
+        HostBridgeError,
+    >,
+) -> Result<Json<NotificationStateMutationResponseWire>, ApiError> {
+    let device = authenticate(&state, &headers, endpoint).await?;
+    match mutation(&state.notification_bridge, &id) {
+        Ok(result) => {
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(result.notification_id.clone()),
+                "success",
+            );
+            publish_notifications_changed(
+                &state,
+                event_reason,
+                Some(result.notification_id.clone()),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(id),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
 }
 
 async fn download_attachment(
@@ -1647,6 +1732,11 @@ impl ApiError {
 
     fn from_host_bridge(error: HostBridgeError) -> Self {
         let (status, code, target) = match &error {
+            HostBridgeError::NotificationMissing(target) => (
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::NotFound,
+                target.clone(),
+            ),
             HostBridgeError::ActionMissing(target) => (
                 StatusCode::NOT_FOUND,
                 ApiErrorCodeWire::NotFound,
@@ -1816,6 +1906,18 @@ mod tests {
 
     fn notifications_request(token: Option<&str>, uri: &str) -> Request<Body> {
         let mut builder = Request::builder().uri(uri);
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn notification_state_request(
+        token: Option<&str>,
+        uri: &str,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method("POST").uri(uri);
         if let Some(token) = token {
             builder =
                 builder.header("authorization", format!("Bearer {token}"));
@@ -2059,6 +2161,16 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_store_notification(tmp: &TempDir, notification: &NotificationWire) {
+        let store_path =
+            tmp.path().join("notifications").join("notifications.jsonl");
+        sase_core::notifications::append_notification(
+            &store_path,
+            notification,
+        )
+        .unwrap();
+    }
+
     async fn pair_device(
         state: GatewayState,
     ) -> (Value, Value, String, String) {
@@ -2273,7 +2385,12 @@ mod tests {
         assert_eq!(value["device"]["device_id"], device_id);
         assert_eq!(
             value["capabilities"],
-            json!(["session.read", "events.read", "attachments.download"])
+            json!([
+                "session.read",
+                "events.read",
+                "attachments.download",
+                "notifications.state.write"
+            ])
         );
     }
 
@@ -2772,6 +2889,132 @@ mod tests {
         assert_eq!(value["code"], "not_found");
         assert_eq!(value["message"], "notification not found");
         assert_eq!(value["target"], "missing-row");
+    }
+
+    #[tokio::test]
+    async fn notification_state_mutation_without_token_returns_typed_unauthorized_error(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+
+        let (status, value) = json_response_with_state(
+            state,
+            notification_state_request(
+                None,
+                "/api/v1/notifications/state-row/mark-read",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+        assert_eq!(value["target"], "authorization");
+    }
+
+    #[tokio::test]
+    async fn notification_state_mutation_not_found_returns_typed_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notification_state_request(
+                Some(&token),
+                "/api/v1/notifications/missing-row/dismiss",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["code"], "not_found");
+        assert_eq!(value["message"], "notification not found: missing-row");
+        assert_eq!(value["target"], "missing-row");
+    }
+
+    #[tokio::test]
+    async fn notification_mark_read_updates_store_and_audits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let row = notification("state-row", "2026-05-06T15:00:00Z", None);
+        seed_store_notification(&tmp, &row);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state.clone(),
+            notification_state_request(
+                Some(&token),
+                "/api/v1/notifications/state-row/mark-read",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notification_id"], "state-row");
+        assert_eq!(value["read"], true);
+        assert_eq!(value["dismissed"], false);
+        assert_eq!(value["changed"], true);
+        let snapshot = sase_core::notifications::read_notifications_snapshot(
+            &tmp.path().join("notifications").join("notifications.jsonl"),
+            true,
+        )
+        .unwrap();
+        assert!(snapshot.notifications[0].read);
+        let audit = std::fs::read_to_string(
+            tmp.path().join("mobile_gateway").join("audit.jsonl"),
+        )
+        .unwrap();
+        assert!(audit.lines().any(|line| {
+            let entry: Value = serde_json::from_str(line).unwrap();
+            entry["endpoint"] == "/api/v1/notifications/{id}/mark-read"
+                && entry["target_id"] == "state-row"
+                && entry["outcome"] == "success"
+        }));
+    }
+
+    #[tokio::test]
+    async fn notification_dismiss_updates_store_and_emits_refresh_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let row = notification("dismiss-row", "2026-05-06T15:00:00Z", None);
+        seed_store_notification(&tmp, &row);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state.clone(),
+            notification_state_request(
+                Some(&token),
+                "/api/v1/notifications/dismiss-row/dismiss",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notification_id"], "dismiss-row");
+        assert_eq!(value["read"], false);
+        assert_eq!(value["dismissed"], true);
+        assert_eq!(value["changed"], true);
+        let snapshot = sase_core::notifications::read_notifications_snapshot(
+            &tmp.path().join("notifications").join("notifications.jsonl"),
+            true,
+        )
+        .unwrap();
+        assert!(snapshot.notifications[0].dismissed);
+        let events = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            event.payload
+                == EventPayloadWire::NotificationsChanged {
+                    reason: "dismiss".to_string(),
+                    notification_id: Some("dismiss-row".to_string()),
+                }
+        }));
     }
 
     #[tokio::test]

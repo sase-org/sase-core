@@ -22,7 +22,8 @@ pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
 pub use wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
     EventRecordWire, GatewayBindWire, GatewayBuildWire, HealthResponseWire,
-    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
-    PairStartResponseWire, PairingDeviceMetadataWire, SessionResponseWire,
+    NotificationStateMutationResponseWire, PairFinishRequestWire,
+    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
+    PairingDeviceMetadataWire, SessionResponseWire,
     GATEWAY_WIRE_SCHEMA_VERSION,
 };
