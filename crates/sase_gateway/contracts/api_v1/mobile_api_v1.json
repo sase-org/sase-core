@@ -52,6 +52,17 @@
       "revoked_at": "rfc3339|null",
       "schema_version": "u32"
     },
+    "EventPayloadWire": {
+      "heartbeat": {
+        "sequence": "u64"
+      },
+      "resync_required": {
+        "reason": "string"
+      },
+      "session": {
+        "device_id": "string"
+      }
+    },
     "EventRecordWire": {
       "created_at": "rfc3339",
       "id": "string",
@@ -160,7 +171,8 @@
       ],
       "method": "GET",
       "path": "/api/v1/events",
-      "status": "placeholder_until_sse_phase",
+      "protocol": "server_sent_events",
+      "resume_header": "Last-Event-ID",
       "success": "EventRecordWire stream"
     }
   ],

@@ -63,7 +63,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "path": "/api/v1/events",
                 "auth": true,
                 "success": "EventRecordWire stream",
-                "status": "placeholder_until_sse_phase",
+                "protocol": "server_sent_events",
+                "resume_header": "Last-Event-ID",
                 "errors": ["ApiErrorWire"]
             }
         ],
@@ -97,6 +98,17 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "id": "string",
                 "created_at": "rfc3339",
                 "payload": "EventPayloadWire"
+            },
+            "EventPayloadWire": {
+                "heartbeat": {
+                    "sequence": "u64"
+                },
+                "session": {
+                    "device_id": "string"
+                },
+                "resync_required": {
+                    "reason": "string"
+                }
             },
             "GatewayBindWire": {
                 "address": "host:port",

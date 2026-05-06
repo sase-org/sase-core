@@ -1,18 +1,23 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration as StdDuration,
 };
 
 use axum::{
     extract::{rejection::JsonRejection, State},
     http::{header, HeaderMap, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use tower_http::trace::TraceLayer;
 
 use crate::storage::{
@@ -20,11 +25,14 @@ use crate::storage::{
     AuditLogEntryWire, DeviceTokenStore, StoreError,
 };
 use crate::wire::{
-    ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, GatewayBindWire,
-    GatewayBuildWire, HealthResponseWire, PairFinishRequestWire,
-    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
-    SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
+    EventRecordWire, GatewayBindWire, GatewayBuildWire, HealthResponseWire,
+    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
+    PairStartResponseWire, SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
+
+const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
+const DEFAULT_HEARTBEAT_INTERVAL: StdDuration = StdDuration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct GatewayState {
@@ -32,8 +40,10 @@ pub struct GatewayState {
     build: GatewayBuildWire,
     token_store: DeviceTokenStore,
     pairings: Arc<Mutex<HashMap<String, PairingChallenge>>>,
-    pairing_ttl: Duration,
+    pairing_ttl: ChronoDuration,
     host_label: String,
+    event_hub: EventHub,
+    heartbeat_interval: StdDuration,
 }
 
 impl GatewayState {
@@ -48,8 +58,10 @@ impl GatewayState {
         Self::new_with_options(GatewayStateOptions {
             bind_addr,
             sase_home: sase_home.into(),
-            pairing_ttl: Duration::minutes(5),
+            pairing_ttl: ChronoDuration::minutes(5),
             host_label: default_host_label(),
+            event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
         })
     }
 
@@ -73,6 +85,8 @@ impl GatewayState {
             pairings: Arc::new(Mutex::new(HashMap::new())),
             pairing_ttl: options.pairing_ttl,
             host_label: options.host_label,
+            event_hub: EventHub::new(options.event_buffer_capacity),
+            heartbeat_interval: options.heartbeat_interval,
         }
     }
 
@@ -85,14 +99,97 @@ impl GatewayState {
 pub struct GatewayStateOptions {
     pub bind_addr: String,
     pub sase_home: PathBuf,
-    pub pairing_ttl: Duration,
+    pub pairing_ttl: ChronoDuration,
     pub host_label: String,
+    pub event_buffer_capacity: usize,
+    pub heartbeat_interval: StdDuration,
 }
 
 #[derive(Clone, Debug)]
 struct PairingChallenge {
     code: String,
     expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct EventHub {
+    inner: Arc<Mutex<EventHubInner>>,
+    buffer_capacity: usize,
+}
+
+#[derive(Debug)]
+struct EventHubInner {
+    next_id: u64,
+    buffer: VecDeque<EventRecordWire>,
+}
+
+impl EventHub {
+    fn new(buffer_capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(EventHubInner {
+                next_id: 1,
+                buffer: VecDeque::new(),
+            })),
+            buffer_capacity,
+        }
+    }
+
+    fn append(
+        &self,
+        make_payload: impl FnOnce(u64) -> EventPayloadWire,
+    ) -> Result<EventRecordWire, ApiError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("events"))?;
+        let sequence = inner.next_id;
+        inner.next_id += 1;
+        let record = EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: format_event_id(sequence),
+            created_at: format_time(Utc::now()),
+            payload: make_payload(sequence),
+        };
+        inner.buffer.push_back(record.clone());
+        while inner.buffer.len() > self.buffer_capacity {
+            inner.buffer.pop_front();
+        }
+        Ok(record)
+    }
+
+    fn replay_after(
+        &self,
+        last_event_id: &str,
+    ) -> Result<Option<Vec<EventRecordWire>>, ApiError> {
+        let Some(last_seen) = parse_event_id(last_event_id) else {
+            return Ok(None);
+        };
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("events"))?;
+        let Some(oldest) = inner
+            .buffer
+            .front()
+            .and_then(|record| parse_event_id(&record.id))
+        else {
+            return Ok(Some(Vec::new()));
+        };
+        if last_seen.saturating_add(1) < oldest {
+            return Ok(None);
+        }
+        let events = inner
+            .buffer
+            .iter()
+            .filter(|record| {
+                parse_event_id(&record.id)
+                    .map(|id| id > last_seen)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        Ok(Some(events))
+    }
 }
 
 pub fn default_sase_home() -> PathBuf {
@@ -123,7 +220,7 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/session/pair/start", post(pair_start))
         .route("/api/v1/session/pair/finish", post(pair_finish))
         .route("/api/v1/session", get(session))
-        .route("/api/v1/events", get(events_placeholder))
+        .route("/api/v1/events", get(events))
         .fallback(unknown_route)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -247,21 +344,30 @@ async fn session(
     }))
 }
 
-async fn events_placeholder(
+async fn events(
     State(state): State<GatewayState>,
     headers: HeaderMap,
-) -> Result<ApiError, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let device = authenticate(&state, &headers, "/api/v1/events").await?;
-    state.audit(
-        Some(device.device_id),
-        "/api/v1/events",
-        None,
-        "not_implemented",
-    );
-    Ok(ApiError::invalid_request(
-        "events",
-        "event stream is not implemented yet",
-    ))
+    let initial_events = initial_events_for_stream(&state, &headers, &device)?;
+    let stream_state = state.clone();
+    let stream = async_stream::stream! {
+        for record in initial_events {
+            yield Ok::<_, Infallible>(sse_event(record));
+        }
+        let mut interval = tokio::time::interval(stream_state.heartbeat_interval);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Ok(record) = stream_state.event_hub.append(|sequence| {
+                EventPayloadWire::Heartbeat { sequence }
+            }) else {
+                break;
+            };
+            yield Ok::<_, Infallible>(sse_event(record));
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn unknown_route(uri: Uri) -> ApiError {
@@ -312,6 +418,71 @@ fn validate_schema(schema_version: u32) -> Result<(), ApiError> {
         "schema_version",
         "unsupported schema_version",
     ))
+}
+
+fn initial_events_for_stream(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    device: &DeviceRecordWire,
+) -> Result<Vec<EventRecordWire>, ApiError> {
+    let mut events = Vec::new();
+    if let Some(last_event_id) = last_event_id(headers)? {
+        match state.event_hub.replay_after(last_event_id)? {
+            Some(replay) => events.extend(replay),
+            None => events.push(state.event_hub.append(|_| {
+                EventPayloadWire::ResyncRequired {
+                    reason: "last_event_id_not_available".to_string(),
+                }
+            })?),
+        }
+    } else {
+        events.push(state.event_hub.append(|_| EventPayloadWire::Session {
+            device_id: device.device_id.clone(),
+        })?);
+    }
+    events.push(
+        state
+            .event_hub
+            .append(|sequence| EventPayloadWire::Heartbeat { sequence })?,
+    );
+    Ok(events)
+}
+
+fn last_event_id(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
+    headers
+        .get("last-event-id")
+        .map(|value| {
+            value.to_str().map_err(|_| {
+                ApiError::invalid_request(
+                    "last-event-id",
+                    "invalid Last-Event-ID header",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn sse_event(record: EventRecordWire) -> Event {
+    let event_name = event_name(&record.payload);
+    let data = serde_json::to_string(&record)
+        .expect("EventRecordWire serialization should be infallible");
+    Event::default().id(record.id).event(event_name).data(data)
+}
+
+fn event_name(payload: &EventPayloadWire) -> &'static str {
+    match payload {
+        EventPayloadWire::Heartbeat { .. } => "heartbeat",
+        EventPayloadWire::Session { .. } => "session",
+        EventPayloadWire::ResyncRequired { .. } => "resync_required",
+    }
+}
+
+fn format_event_id(id: u64) -> String {
+    format!("{id:016}")
+}
+
+fn parse_event_id(id: &str) -> Option<u64> {
+    id.parse::<u64>().ok()
 }
 
 impl GatewayState {
@@ -483,6 +654,8 @@ mod tests {
             sase_home: tmp.path().to_path_buf(),
             pairing_ttl,
             host_label: "test-host".to_string(),
+            event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+            heartbeat_interval: StdDuration::from_secs(60),
         })
     }
 
@@ -500,6 +673,21 @@ mod tests {
         if let Some(token) = token {
             builder =
                 builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn events_request(
+        token: Option<&str>,
+        last_event_id: Option<&str>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().uri("/api/v1/events");
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some(last_event_id) = last_event_id {
+            builder = builder.header("last-event-id", last_event_id);
         }
         builder.body(Body::empty()).unwrap()
     }
@@ -752,6 +940,104 @@ mod tests {
                 .await;
         assert_eq!(revoked_status, StatusCode::UNAUTHORIZED);
         assert_eq!(revoked["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn events_without_token_returns_typed_unauthorized_error() {
+        let (status, value) = json_response(events_request(None, None)).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+        assert_eq!(value["target"], "authorization");
+    }
+
+    #[tokio::test]
+    async fn events_with_token_returns_sse_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let response = app_with_state(state)
+            .oneshot(events_request(Some(&token), None))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn event_resume_replays_buffered_records_after_last_event_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, finish, _token, _device_id) =
+            pair_device(state.clone()).await;
+        let device: DeviceRecordWire =
+            serde_json::from_value(finish["device"].clone()).unwrap();
+
+        let first_events =
+            initial_events_for_stream(&state, &HeaderMap::new(), &device)
+                .unwrap();
+        assert_eq!(first_events.len(), 2);
+        assert_eq!(first_events[0].id, "0000000000000001");
+        assert!(matches!(
+            first_events[0].payload,
+            EventPayloadWire::Session { .. }
+        ));
+        assert_eq!(first_events[1].id, "0000000000000002");
+        assert!(matches!(
+            first_events[1].payload,
+            EventPayloadWire::Heartbeat { sequence: 2 }
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "0000000000000001".parse().unwrap());
+        let replay_events =
+            initial_events_for_stream(&state, &headers, &device).unwrap();
+
+        assert_eq!(replay_events.len(), 2);
+        assert_eq!(replay_events[0], first_events[1]);
+        assert_eq!(replay_events[1].id, "0000000000000003");
+        assert!(matches!(
+            replay_events[1].payload,
+            EventPayloadWire::Heartbeat { sequence: 3 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_resume_outside_buffer_returns_resync_required() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = GatewayState::new_with_options(GatewayStateOptions {
+            bind_addr: "127.0.0.1:0".to_string(),
+            sase_home: tmp.path().to_path_buf(),
+            pairing_ttl: Duration::minutes(5),
+            host_label: "test-host".to_string(),
+            event_buffer_capacity: 1,
+            heartbeat_interval: StdDuration::from_secs(60),
+        });
+        let (_start, finish, _token, _device_id) =
+            pair_device(state.clone()).await;
+        let device: DeviceRecordWire =
+            serde_json::from_value(finish["device"].clone()).unwrap();
+
+        let _first_events =
+            initial_events_for_stream(&state, &HeaderMap::new(), &device)
+                .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "0000000000000000".parse().unwrap());
+        let events =
+            initial_events_for_stream(&state, &headers, &device).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].payload,
+            EventPayloadWire::ResyncRequired { .. }
+        ));
+        assert!(matches!(
+            events[1].payload,
+            EventPayloadWire::Heartbeat { .. }
+        ));
     }
 
     #[tokio::test]

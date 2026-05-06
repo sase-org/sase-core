@@ -76,6 +76,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
+        time::{timeout, Duration},
     };
 
     use super::*;
@@ -196,6 +197,22 @@ mod tests {
             finish["device"]["device_id"]
         );
 
+        let (events_status, events) =
+            request_sse_events(addr, Some(&token), None, 2).await;
+        assert_eq!(events_status, 200);
+        assert_eq!(events[0]["payload"]["type"], "session");
+        assert_eq!(events[1]["payload"]["type"], "heartbeat");
+        assert_eq!(events[0]["id"], "0000000000000001");
+        assert_eq!(events[1]["id"], "0000000000000002");
+
+        let (resume_status, resume_events) =
+            request_sse_events(addr, Some(&token), events[0]["id"].as_str(), 2)
+                .await;
+        assert_eq!(resume_status, 200);
+        assert_eq!(resume_events[0], events[1]);
+        assert_eq!(resume_events[1]["payload"]["type"], "heartbeat");
+        assert_eq!(resume_events[1]["id"], "0000000000000003");
+
         handle.abort();
     }
 
@@ -241,5 +258,63 @@ mod tests {
             .unwrap();
         let value = serde_json::from_str(body.trim()).unwrap();
         (status, value)
+    }
+
+    async fn request_sse_events(
+        addr: SocketAddr,
+        bearer_token: Option<&str>,
+        last_event_id: Option<&str>,
+        event_count: usize,
+    ) -> (u16, Vec<serde_json::Value>) {
+        let mut request = String::from(
+            "GET /api/v1/events HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: text/event-stream\r\n",
+        );
+        if let Some(token) = bearer_token {
+            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        if let Some(last_event_id) = last_event_id {
+            request.push_str(&format!("Last-Event-ID: {last_event_id}\r\n"));
+        }
+        request.push_str("\r\n");
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let mut buffer = [0; 1024];
+                let n = stream.read(&mut buffer).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                response.push_str(std::str::from_utf8(&buffer[..n]).unwrap());
+                if response.contains("\r\n\r\n")
+                    && parse_sse_data(&response).len() >= event_count
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let status = response
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        (status, parse_sse_data(&response))
+    }
+
+    fn parse_sse_data(response: &str) -> Vec<serde_json::Value> {
+        response
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 }

@@ -1,7 +1,7 @@
 # sase_gateway
 
-`sase_gateway` is the local workstation HTTP gateway for future SASE mobile clients. It provides health, pairing, and
-authenticated session routes; SSE delivery is added by a later phase.
+`sase_gateway` is the local workstation HTTP gateway for future SASE mobile clients. It provides health, pairing,
+authenticated session routes, and an authenticated SSE event stream.
 
 ## Response Shape
 
@@ -28,7 +28,10 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `POST /api/v1/session/pair/start` returns a short-lived one-time pairing code and no long-lived credential.
 - `POST /api/v1/session/pair/finish` exchanges the one-time code and device metadata for a bearer token exactly once.
 - `GET /api/v1/session` requires `Authorization: Bearer <token>` and returns the authenticated device.
-- `GET /api/v1/events` requires auth but remains a typed placeholder until the SSE phase.
+- `GET /api/v1/events` requires auth and streams `EventRecordWire` records over SSE. Heartbeat events use monotonic
+  IDs, and reconnects may pass `Last-Event-ID` to replay buffered newer events. The first implementation keeps an
+  in-memory ring buffer, so clients should handle `resync_required` after a restart or buffer overflow by fetching full
+  state.
 - Unknown routes return typed `not_found`.
 
 Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
