@@ -176,6 +176,7 @@
       "status": "launched|dry_run|failed"
     },
     "MobileAgentListRequestWire": {
+      "device_id": "string|null; host-injected before bridge dispatch",
       "include_recent": "bool",
       "limit": "u32|null",
       "project": "string|null",
@@ -235,6 +236,7 @@
       "workspace_number": "u32|null"
     },
     "MobileAgentTextLaunchRequestWire": {
+      "device_id": "string|null; host-injected before bridge dispatch",
       "display_name": "string|null",
       "dry_run": "bool|null",
       "model": "string|null",

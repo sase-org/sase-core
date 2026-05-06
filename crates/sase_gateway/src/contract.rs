@@ -418,6 +418,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "include_recent": "bool",
                 "status": "string|null",
                 "project": "string|null",
+                "device_id": "string|null; host-injected before bridge dispatch",
                 "limit": "u32|null"
             },
             "MobileAgentListResponseWire": {
@@ -481,6 +482,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "provider": "string|null",
                 "runtime": "string|null",
                 "project": "string|null",
+                "device_id": "string|null; host-injected before bridge dispatch",
                 "dry_run": "bool|null"
             },
             "MobileNotificationCardWire": {

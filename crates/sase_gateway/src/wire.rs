@@ -160,6 +160,7 @@ pub struct MobileAgentListRequestWire {
     pub include_recent: bool,
     pub status: Option<String>,
     pub project: Option<String>,
+    pub device_id: Option<String>,
     pub limit: Option<u32>,
 }
 
@@ -245,6 +246,7 @@ pub struct MobileAgentTextLaunchRequestWire {
     pub provider: Option<String>,
     pub runtime: Option<String>,
     pub project: Option<String>,
+    pub device_id: Option<String>,
     pub dry_run: Option<bool>,
 }
 

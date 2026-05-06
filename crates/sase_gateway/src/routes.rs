@@ -623,12 +623,13 @@ async fn list_agents(
     headers: HeaderMap,
     Query(query): Query<AgentListQuery>,
 ) -> Result<Json<MobileAgentListResponseWire>, ApiError> {
-    authenticate(&state, &headers, "/api/v1/agents").await?;
+    let device = authenticate(&state, &headers, "/api/v1/agents").await?;
     let request = MobileAgentListRequestWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         include_recent: query.include_recent,
         status: query.status,
         project: query.project,
+        device_id: Some(device.device_id),
         limit: query.limit,
     };
     state
@@ -657,8 +658,9 @@ async fn agent_launch(
 ) -> Result<Json<MobileAgentLaunchResultWire>, ApiError> {
     let device =
         authenticate(&state, &headers, "/api/v1/agents/launch").await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let Json(mut payload) = payload.map_err(ApiError::from_json_rejection)?;
     validate_schema(payload.schema_version)?;
+    payload.device_id = Some(device.device_id.clone());
     match state.agent_bridge.launch_text(&payload) {
         Ok(result) => {
             let primary_name = launch_primary_name(&result);

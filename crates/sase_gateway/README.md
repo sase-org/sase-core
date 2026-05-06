@@ -51,11 +51,25 @@ The HTTP status code carries transport status, while `code` is the stable client
   notification.
 - `POST /api/v1/actions/question/{prefix}/answer|custom` validates `question_request.json` and writes
   `question_response.json` for a pending user-question notification.
+- `GET /api/v1/agents` lists running agents by default, with optional recent/status/project/limit filters.
+- `GET /api/v1/agents/resume-options` returns native copy/share/direct-launch resume and wait prompt options.
+- `POST /api/v1/agents/launch` launches text agents through the fixed Python bridge and host-injects the authenticated
+  device ID before dispatch.
+- `POST /api/v1/agents/launch-image` validates and stores base64 image uploads under SASE-owned gateway state, then
+  launches an agent whose prompt references the saved host path.
+- `POST /api/v1/agents/{name}/kill` kills an exact agent name and persists mobile retry context.
+- `POST /api/v1/agents/{name}/retry` retries an agent from durable mobile launch/kill context or artifact prompt data.
 - Unknown routes return typed `not_found`.
 
 Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
 returned only from the pairing finish response. Audit records are appended to `<sase_home>/mobile_gateway/audit.jsonl`
 without secrets.
+
+Mobile agent state is kept under `<sase_home>/mobile_gateway/`: launch contexts in `agent_launch_contexts.jsonl`, kill
+contexts in `agent_kill_contexts/`, image uploads in `uploads/images/<device_id>/`, and last per-device project context
+in `device_project_contexts/`. Project context IDs are product-shaped (`home`, `project:<name>`, or a persisted
+`<project-context>:<workflow>:<ref>` VCS context) and are derived from known SASE projects, not arbitrary
+client-supplied host paths.
 
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
 and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
@@ -157,6 +171,38 @@ curl -sS "$BASE_URL/api/v1/attachments/$ATTACHMENT_TOKEN" \
   -o attachment.bin
 ```
 
+List, launch, kill, and retry agents:
+
+```bash
+curl -sS "$BASE_URL/api/v1/agents?include_recent=true&limit=25" \
+  -H "$AUTH_HEADER"
+
+curl -sS "$BASE_URL/api/v1/agents/resume-options" \
+  -H "$AUTH_HEADER"
+
+curl -sS -X POST "$BASE_URL/api/v1/agents/launch" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"project":"sase","prompt":"Run the focused tests","name":"mobile.tests"}'
+
+IMAGE_B64="$(base64 -w0 screenshot.png)"
+IMAGE_BYTES="$(wc -c < screenshot.png)"
+curl -sS -X POST "$BASE_URL/api/v1/agents/launch-image" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d "{\"schema_version\":1,\"prompt\":\"Review this screenshot\",\"name\":\"mobile.image\",\"original_filename\":\"screenshot.png\",\"content_type\":\"image/png\",\"byte_length\":$IMAGE_BYTES,\"base64_image\":\"$IMAGE_B64\"}"
+
+curl -sS -X POST "$BASE_URL/api/v1/agents/mobile.tests/kill" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"reason":"mobile"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/agents/mobile.tests/retry" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1}'
+```
+
 Duplicate, stale, ambiguous-prefix, already-handled, unsupported, and missing-target cases return typed `ApiErrorWire`
 records and never overwrite existing response files.
 
@@ -184,6 +230,7 @@ payloads for future mobile/client phases. Regenerate it after route or wire-shap
 cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
 ```
 
-MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish
-`notifications_changed` SSE events; oversized or path-unsafe attachments are listed without tokens; and legacy Telegram
-pending-action JSON remains a compatibility source while Telegram adoption of the shared store is incremental.
+MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish state-change SSE
+events; oversized or path-unsafe attachments are listed without tokens; agent project context selects only known SASE
+projects or prompt-declared VCS refs; and legacy Telegram pending-action JSON remains a compatibility source while
+Telegram adoption of the shared store is incremental.
