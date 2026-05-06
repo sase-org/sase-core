@@ -33,10 +33,11 @@ use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
 use crate::host_bridge::{
-    AgentHostBridge, CommandAgentHostBridge, DynAgentHostBridge,
-    DynHelperHostBridge, DynNotificationHostBridge, HelperHostBridge,
-    HostBridgeError, LocalJsonlNotificationBridge, NotificationHostBridge,
-    UnavailableAgentHostBridge, UnavailableHelperHostBridge,
+    AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
+    DynAgentHostBridge, DynHelperHostBridge, DynNotificationHostBridge,
+    HelperHostBridge, HostBridgeError, LocalJsonlNotificationBridge,
+    NotificationHostBridge, UnavailableAgentHostBridge,
+    UnavailableHelperHostBridge,
 };
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
@@ -107,10 +108,33 @@ impl GatewayState {
         sase_home: impl Into<PathBuf>,
         command: Vec<String>,
     ) -> Self {
+        Self::new_with_sase_home_and_bridge_commands(
+            bind_addr,
+            sase_home,
+            command,
+            CommandHelperHostBridge::default_command(),
+        )
+    }
+
+    pub fn new_with_sase_home_and_bridge_commands(
+        bind_addr: String,
+        sase_home: impl Into<PathBuf>,
+        agent_command: Vec<String>,
+        helper_command: Vec<String>,
+    ) -> Self {
         let sase_home = sase_home.into();
         let mut state = Self::new_with_sase_home(bind_addr, sase_home.clone());
         state.agent_bridge = DynAgentHostBridge::new(Arc::new(
-            CommandAgentHostBridge::new_with_sase_home(command, sase_home),
+            CommandAgentHostBridge::new_with_sase_home(
+                agent_command,
+                sase_home.clone(),
+            ),
+        ));
+        state.helper_bridge = DynHelperHostBridge::new(Arc::new(
+            CommandHelperHostBridge::new_with_sase_home(
+                helper_command,
+                sase_home,
+            ),
         ));
         state
     }
@@ -189,6 +213,19 @@ impl GatewayState {
         Self::new_with_agent_bridge(
             options,
             Arc::new(CommandAgentHostBridge::new_with_sase_home(
+                command, sase_home,
+            )),
+        )
+    }
+
+    pub fn new_with_helper_bridge_command(
+        options: GatewayStateOptions,
+        command: Vec<String>,
+    ) -> Self {
+        let sase_home = options.sase_home.clone();
+        Self::new_with_helper_bridge(
+            options,
+            Arc::new(CommandHelperHostBridge::new_with_sase_home(
                 command, sase_home,
             )),
         )
@@ -2942,6 +2979,152 @@ esac
             },
             vec![script.to_string_lossy().to_string()],
         )
+    }
+
+    #[cfg(unix)]
+    fn state_for_command_helper_bridge(
+        tmp: &TempDir,
+        mode: &str,
+    ) -> GatewayState {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = tmp.path().join(format!("mobile-helper-bridge-{mode}"));
+        let script_body = match mode {
+            "success" => {
+                r##"#!/bin/sh
+operation="$3"
+request_path="$0.$operation.json"
+cat >"$request_path"
+case "$operation" in
+  changespec-tags)
+    printf '%s\n' '{"schema_version":1,"result":{"status":"partial_success","message":"loaded tags","warnings":[],"skipped":[{"target":"sase/skipped","reason":"could not detect workflow type"}],"partial_failure_count":1},"context":{"project":"sase","scope":"explicit"},"tags":[{"tag":"#gh:feature","project":"sase","changespec":"feature","title":null,"status":"WIP","workflow":"gh","source_path_display":null}],"total_count":1}'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"##
+            }
+            "invalid-json" => {
+                r##"#!/bin/sh
+cat >/dev/null
+printf '%s\n' 'not-json'
+"##
+            }
+            "exit-failure" => {
+                r##"#!/bin/sh
+cat >/dev/null
+exit 2
+"##
+            }
+            _ => panic!("unknown helper bridge script mode: {mode}"),
+        };
+        std::fs::write(&script, script_body).unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        GatewayState::new_with_helper_bridge_command(
+            GatewayStateOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                sase_home: tmp.path().to_path_buf(),
+                pairing_ttl: Duration::minutes(5),
+                host_label: "test-host".to_string(),
+                event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+                heartbeat_interval: StdDuration::from_secs(60),
+                attachment_token_ttl: default_attachment_token_ttl(),
+                max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            },
+            vec![script.to_string_lossy().to_string()],
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_changespec_tags_returns_command_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "success");
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/changespec-tags?project=sase&limit=2")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["result"]["status"], "partial_success");
+        assert_eq!(value["tags"][0]["tag"], "#gh:feature");
+        assert_eq!(value["result"]["skipped"][0]["target"], "sase/skipped");
+
+        let bridge_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path()
+                    .join("mobile-helper-bridge-success.changespec-tags.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bridge_request["project"], "sase");
+        assert_eq!(bridge_request["limit"], 2);
+        assert_eq!(
+            bridge_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_malformed_json_maps_to_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "invalid-json");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/changespec-tags")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value["code"], "bridge_unavailable");
+        assert_eq!(
+            value["target"],
+            "helper_bridge:changespec-tags:invalid_json"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_exit_failure_maps_to_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "exit-failure");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/changespec-tags")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(value["code"], "bridge_unavailable");
+        assert_eq!(value["target"], "helper_bridge:changespec-tags");
     }
 
     fn seed_plan_notification(

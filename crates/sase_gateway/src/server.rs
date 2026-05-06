@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::{
-    host_bridge::CommandAgentHostBridge,
+    host_bridge::{CommandAgentHostBridge, CommandHelperHostBridge},
     routes::{app_with_state, default_sase_home, GatewayState},
 };
 
@@ -15,6 +15,7 @@ pub struct GatewayConfig {
     pub sase_home: PathBuf,
     pub allow_non_loopback: bool,
     pub agent_bridge_command: Vec<String>,
+    pub helper_bridge_command: Vec<String>,
 }
 
 impl Default for GatewayConfig {
@@ -24,6 +25,7 @@ impl Default for GatewayConfig {
             sase_home: default_sase_home(),
             allow_non_loopback: false,
             agent_bridge_command: CommandAgentHostBridge::default_command(),
+            helper_bridge_command: CommandHelperHostBridge::default_command(),
         }
     }
 }
@@ -56,6 +58,7 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayRunError> {
         listener,
         config.sase_home,
         config.agent_bridge_command,
+        config.helper_bridge_command,
     )
     .await
 }
@@ -85,12 +88,14 @@ pub async fn serve_listener_with_agent_bridge_command(
     listener: TcpListener,
     sase_home: impl Into<PathBuf>,
     agent_bridge_command: Vec<String>,
+    helper_bridge_command: Vec<String>,
 ) -> Result<(), GatewayRunError> {
     let local_addr = listener.local_addr().map_err(GatewayRunError::Serve)?;
-    let state = GatewayState::new_with_sase_home_and_agent_bridge_command(
+    let state = GatewayState::new_with_sase_home_and_bridge_commands(
         local_addr.to_string(),
         sase_home,
         agent_bridge_command,
+        helper_bridge_command,
     );
     axum_serve(listener, app_with_state(state))
         .await
@@ -122,6 +127,7 @@ mod tests {
             sase_home: default_sase_home(),
             allow_non_loopback: false,
             agent_bridge_command: vec!["sase".to_string()],
+            helper_bridge_command: vec!["sase".to_string()],
         };
 
         let err = validate_bind_policy(&config).unwrap_err();
@@ -138,6 +144,7 @@ mod tests {
             sase_home: default_sase_home(),
             allow_non_loopback: true,
             agent_bridge_command: vec!["sase".to_string()],
+            helper_bridge_command: vec!["sase".to_string()],
         };
 
         validate_bind_policy(&config).unwrap();

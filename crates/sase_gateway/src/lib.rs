@@ -15,9 +15,9 @@ pub use contract::{
 };
 pub use host_bridge::{
     split_command_words, AgentHostBridge, CommandAgentHostBridge,
-    DynAgentHostBridge, DynHelperHostBridge, DynNotificationHostBridge,
-    HelperHostBridge, HostBridgeError, HostFileMetadataWire,
-    LocalJsonlNotificationBridge, NotificationHostBridge,
+    CommandHelperHostBridge, DynAgentHostBridge, DynHelperHostBridge,
+    DynNotificationHostBridge, HelperHostBridge, HostBridgeError,
+    HostFileMetadataWire, LocalJsonlNotificationBridge, NotificationHostBridge,
     StaticAgentHostBridge, StaticHelperHostBridge,
     StaticNotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,

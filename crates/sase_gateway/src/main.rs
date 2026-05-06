@@ -39,6 +39,8 @@ fn parse_args(
     let mut allow_non_loopback = GatewayConfig::default().allow_non_loopback;
     let mut agent_bridge_command =
         GatewayConfig::default().agent_bridge_command;
+    let mut helper_bridge_command =
+        GatewayConfig::default().helper_bridge_command;
     let mut contract_out = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -76,9 +78,19 @@ fn parse_args(
                     return Err(format!("{arg} requires a command path"));
                 }
             }
+            "--helper-bridge-command" | "-J" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a command path"))?;
+                helper_bridge_command = split_command_words(&value)
+                    .map_err(|err| format!("invalid {arg} value: {err}"))?;
+                if helper_bridge_command.is_empty() {
+                    return Err(format!("{arg} requires a command path"));
+                }
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND]"
+                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND]"
                 );
                 std::process::exit(0);
             }
@@ -91,6 +103,7 @@ fn parse_args(
             sase_home,
             allow_non_loopback,
             agent_bridge_command,
+            helper_bridge_command,
         },
         contract_out,
     })
@@ -152,6 +165,16 @@ mod tests {
             parse_args(["-A".to_string(), "/tmp/sase".to_string()]).unwrap();
         assert_eq!(
             config.config.agent_bridge_command,
+            vec!["/tmp/sase".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_helper_bridge_command_short_flag() {
+        let config =
+            parse_args(["-J".to_string(), "/tmp/sase".to_string()]).unwrap();
+        assert_eq!(
+            config.config.helper_bridge_command,
             vec!["/tmp/sase".to_string()]
         );
     }

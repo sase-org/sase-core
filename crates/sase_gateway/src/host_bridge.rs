@@ -457,6 +457,151 @@ impl AgentHostBridge for CommandAgentHostBridge {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandHelperHostBridge {
+    command: Vec<String>,
+    sase_home: Option<PathBuf>,
+}
+
+impl CommandHelperHostBridge {
+    pub fn new(command: Vec<String>) -> Self {
+        Self {
+            command,
+            sase_home: None,
+        }
+    }
+
+    pub fn new_with_sase_home(
+        command: Vec<String>,
+        sase_home: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            command,
+            sase_home: Some(sase_home.into()),
+        }
+    }
+
+    pub fn default_command() -> Vec<String> {
+        std::env::var("SASE_MOBILE_HELPER_BRIDGE_COMMAND")
+            .ok()
+            .and_then(|raw| split_command_words(&raw).ok())
+            .filter(|parts| !parts.is_empty())
+            .or_else(|| {
+                std::env::var("SASE_MOBILE_AGENT_BRIDGE_COMMAND")
+                    .ok()
+                    .and_then(|raw| split_command_words(&raw).ok())
+                    .filter(|parts| !parts.is_empty())
+            })
+            .unwrap_or_else(|| vec!["sase".to_string()])
+    }
+
+    fn invoke<Request, Response>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> Result<Response, HostBridgeError>
+    where
+        Request: Serialize,
+        Response: DeserializeOwned,
+    {
+        let (program, fixed_args) =
+            self.command.split_first().ok_or_else(|| {
+                HostBridgeError::BridgeUnavailable("helper_bridge".to_string())
+            })?;
+        let mut command = Command::new(program);
+        command
+            .args(fixed_args)
+            .args(["mobile", "helper-bridge", operation])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(sase_home) = &self.sase_home {
+            command.env("SASE_HOME", sase_home);
+        }
+        let mut child = command.spawn().map_err(|_| {
+            HostBridgeError::BridgeUnavailable("helper_bridge".to_string())
+        })?;
+
+        {
+            let Some(mut stdin) = child.stdin.take() else {
+                return Err(HostBridgeError::BridgeUnavailable(format!(
+                    "helper_bridge:{operation}:stdin"
+                )));
+            };
+            serde_json::to_writer(&mut stdin, request).map_err(|_| {
+                HostBridgeError::BridgeUnavailable(format!(
+                    "helper_bridge:{operation}:encode"
+                ))
+            })?;
+            stdin.write_all(b"\n").map_err(|_| {
+                HostBridgeError::BridgeUnavailable(format!(
+                    "helper_bridge:{operation}:stdin"
+                ))
+            })?;
+        }
+
+        let output = child.wait_with_output().map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "helper_bridge:{operation}:exit"
+            ))
+        })?;
+        if !output.status.success() {
+            return Err(HostBridgeError::BridgeUnavailable(format!(
+                "helper_bridge:{operation}"
+            )));
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "helper_bridge:{operation}:invalid_json"
+            ))
+        })
+    }
+}
+
+impl HelperHostBridge for CommandHelperHostBridge {
+    fn list_changespec_tags(
+        &self,
+        request: &MobileChangeSpecTagListRequestWire,
+    ) -> Result<MobileChangeSpecTagListResponseWire, HostBridgeError> {
+        self.invoke("changespec-tags", request)
+    }
+
+    fn xprompt_catalog(
+        &self,
+        request: &MobileXpromptCatalogRequestWire,
+    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        self.invoke("xprompt-catalog", request)
+    }
+
+    fn list_beads(
+        &self,
+        request: &MobileBeadListRequestWire,
+    ) -> Result<MobileBeadListResponseWire, HostBridgeError> {
+        self.invoke("beads-list", request)
+    }
+
+    fn show_bead(
+        &self,
+        request: &MobileBeadShowRequestWire,
+    ) -> Result<MobileBeadShowResponseWire, HostBridgeError> {
+        self.invoke("beads-show", request)
+    }
+
+    fn update_start(
+        &self,
+        request: &MobileUpdateStartRequestWire,
+    ) -> Result<MobileUpdateStartResponseWire, HostBridgeError> {
+        self.invoke("update-start", request)
+    }
+
+    fn update_status(
+        &self,
+        request: &MobileUpdateStatusRequestWire,
+    ) -> Result<MobileUpdateStatusResponseWire, HostBridgeError> {
+        self.invoke("update-status", request)
+    }
+}
+
 #[derive(Clone)]
 pub struct DynNotificationHostBridge(Arc<dyn NotificationHostBridge>);
 
