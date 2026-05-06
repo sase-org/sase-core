@@ -25,6 +25,14 @@ pub const ARTIFACT_KIND_AGENT: &str = "agent";
 pub const ARTIFACT_KIND_THOUGHT: &str = "thought";
 pub const ARTIFACT_KIND_UNKNOWN: &str = "unknown";
 
+pub const ARTIFACT_FILE_TYPE_METADATA_KEY: &str = "artifact_type";
+pub const ARTIFACT_FILE_TYPE_PLAN: &str = "plan";
+pub const ARTIFACT_FILE_TYPE_DIFF: &str = "diff";
+pub const ARTIFACT_FILE_TYPE_CHAT: &str = "chat";
+pub const ARTIFACT_FILE_TYPE_PROJECT: &str = "project";
+pub const ARTIFACT_FILE_TYPE_PROMPT: &str = "prompt";
+pub const ARTIFACT_FILE_TYPE_MISC: &str = "misc";
+
 pub const ARTIFACT_LINK_PARENT: &str = "parent";
 pub const ARTIFACT_LINK_CREATED: &str = "created";
 pub const ARTIFACT_LINK_WORKER: &str = "worker";
@@ -80,6 +88,48 @@ impl ArtifactNodeWire {
             updated_at: None,
         }
     }
+}
+
+pub fn validate_file_artifact_type(file_type: &str) -> Result<(), String> {
+    if canonical_file_artifact_types().contains(&file_type) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported file artifact type {file_type:?}; expected one of {}",
+            canonical_file_artifact_types().join(", ")
+        ))
+    }
+}
+
+pub fn file_artifact_type(node: &ArtifactNodeWire) -> &str {
+    node.metadata
+        .get(ARTIFACT_FILE_TYPE_METADATA_KEY)
+        .and_then(Value::as_str)
+        .filter(|file_type| validate_file_artifact_type(file_type).is_ok())
+        .unwrap_or(ARTIFACT_FILE_TYPE_MISC)
+}
+
+pub fn set_file_artifact_type(
+    metadata: &mut Map<String, Value>,
+    file_type: &str,
+) -> Result<(), String> {
+    validate_file_artifact_type(file_type)?;
+    metadata.insert(
+        ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+        Value::String(file_type.to_string()),
+    );
+    Ok(())
+}
+
+pub fn canonical_file_artifact_types() -> [&'static str; 6] {
+    [
+        ARTIFACT_FILE_TYPE_PLAN,
+        ARTIFACT_FILE_TYPE_DIFF,
+        ARTIFACT_FILE_TYPE_CHAT,
+        ARTIFACT_FILE_TYPE_PROJECT,
+        ARTIFACT_FILE_TYPE_PROMPT,
+        ARTIFACT_FILE_TYPE_MISC,
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +276,8 @@ pub struct ArtifactQueryWire {
     #[serde(default)]
     pub kinds: Vec<ArtifactKindWire>,
     #[serde(default)]
+    pub file_types: Vec<String>,
+    #[serde(default)]
     pub link_types: Vec<ArtifactLinkTypeWire>,
     #[serde(default)]
     pub provenance: Option<String>,
@@ -249,6 +301,7 @@ impl Default for ArtifactQueryWire {
             schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
             text: None,
             kinds: Vec::new(),
+            file_types: Vec::new(),
             link_types: Vec::new(),
             provenance: None,
             source_kinds: Vec::new(),
@@ -534,6 +587,7 @@ mod tests {
                 "schema_version": 1,
                 "text": null,
                 "kinds": [],
+                "file_types": [],
                 "link_types": [],
                 "provenance": null,
                 "source_kinds": [],

@@ -6,11 +6,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::store::ArtifactStore;
 use super::wire::{
-    ArtifactDetailWire, ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire,
-    ArtifactDoctorWire, ArtifactLinkWire, ArtifactNodeWire,
-    ArtifactPayloadWire, ArtifactQueryWire, ARTIFACT_LINK_PARENT,
-    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
-    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
+    file_artifact_type, validate_file_artifact_type, ArtifactDetailWire,
+    ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
+    ArtifactLinkWire, ArtifactNodeWire, ArtifactPayloadWire, ArtifactQueryWire,
+    ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED,
+    ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
+    ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_DERIVED_REASON: &str = "stale_derived";
@@ -78,6 +79,17 @@ pub fn artifact_list(
         let kinds: BTreeSet<_> =
             query.kinds.iter().map(String::as_str).collect();
         nodes.retain(|node| kinds.contains(node.kind.as_str()));
+    }
+    if !query.file_types.is_empty() {
+        for file_type in &query.file_types {
+            validate_file_artifact_type(file_type)?;
+        }
+        let file_types: BTreeSet<_> =
+            query.file_types.iter().map(String::as_str).collect();
+        nodes.retain(|node| {
+            node.kind == ARTIFACT_KIND_FILE
+                && file_types.contains(file_artifact_type(node))
+        });
     }
     if let Some(provenance) = query
         .provenance
@@ -1047,10 +1059,11 @@ mod tests {
     };
     use crate::artifact::wire::{
         ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
-        ArtifactNodeUpsertWire, ArtifactPayloadWire, ARTIFACT_KIND_AGENT,
-        ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED,
-        ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
-        ARTIFACT_PROVENANCE_MANUAL,
+        ArtifactNodeUpsertWire, ArtifactPayloadWire, ARTIFACT_FILE_TYPE_CHAT,
+        ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_MISC,
+        ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_FILE,
+        ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED,
+        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_MANUAL,
     };
 
     use super::*;
@@ -1280,6 +1293,103 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["project:alpha"]
         );
+    }
+
+    #[test]
+    fn file_type_filters_use_file_metadata_with_misc_compatibility() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let mut store = open_artifact_store(&db).unwrap();
+
+        let mut project_file =
+            manual_node("file:project", ARTIFACT_KIND_FILE, "project file");
+        project_file.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!(ARTIFACT_FILE_TYPE_PROJECT),
+        );
+        upsert_node(&mut store, project_file);
+
+        let mut chat_file =
+            manual_node("file:chat", ARTIFACT_KIND_FILE, "chat file");
+        chat_file.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!(ARTIFACT_FILE_TYPE_CHAT),
+        );
+        upsert_node(&mut store, chat_file);
+
+        upsert_node(
+            &mut store,
+            manual_node("file:missing", ARTIFACT_KIND_FILE, "missing file"),
+        );
+
+        let mut unknown_file =
+            manual_node("file:unknown", ARTIFACT_KIND_FILE, "unknown file");
+        unknown_file.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!("surprise"),
+        );
+        upsert_node(&mut store, unknown_file);
+
+        let mut project_node =
+            manual_node("project:alpha", ARTIFACT_KIND_PROJECT, "alpha");
+        project_node.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!(ARTIFACT_FILE_TYPE_PROJECT),
+        );
+        upsert_node(&mut store, project_node);
+
+        let project_ids = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                file_types: vec![ARTIFACT_FILE_TYPE_PROJECT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+        assert_eq!(project_ids, vec!["file:project"]);
+
+        let chat_ids = artifact_search(
+            &store,
+            ArtifactQueryWire {
+                text: Some("chat".to_string()),
+                file_types: vec![ARTIFACT_FILE_TYPE_CHAT.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+        assert_eq!(chat_ids, vec!["file:chat"]);
+
+        let misc_ids = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                file_types: vec![ARTIFACT_FILE_TYPE_MISC.to_string()],
+                limit: None,
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|node| node.id)
+        .collect::<Vec<_>>();
+        assert_eq!(misc_ids, vec!["file:missing", "file:unknown"]);
+
+        let error = artifact_list(
+            &store,
+            ArtifactQueryWire {
+                file_types: vec!["invalid".to_string()],
+                ..ArtifactQueryWire::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("unsupported file artifact type"));
     }
 
     #[test]

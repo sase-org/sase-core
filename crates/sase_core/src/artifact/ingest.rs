@@ -24,17 +24,17 @@ use super::store::{
     upsert_artifact_payload, ArtifactStore,
 };
 use super::wire::{
-    ArtifactLinkUpsertWire, ArtifactLinkWire, ArtifactMutationResultWire,
-    ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactPathUpsertRequestWire,
-    ArtifactPayloadWire, ArtifactRebuildRequestWire, ARTIFACT_KIND_AGENT,
-    ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
-    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
-    ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED,
-    ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
-    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
-    ARTIFACT_STALE_CLEANUP_MARK, ARTIFACT_STALE_CLEANUP_NONE,
-    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
-    ARTIFACT_WIRE_SCHEMA_VERSION,
+    file_artifact_type, set_file_artifact_type, ArtifactLinkUpsertWire,
+    ArtifactLinkWire, ArtifactMutationResultWire, ArtifactNodeUpsertWire,
+    ArtifactNodeWire, ArtifactPathUpsertRequestWire, ArtifactPayloadWire,
+    ArtifactRebuildRequestWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_BEAD,
+    ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_DIRECTORY,
+    ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_KIND_ROOT,
+    ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
+    ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
+    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_STALE_CLEANUP_MARK,
+    ARTIFACT_STALE_CLEANUP_NONE, ARTIFACT_TOMBSTONE_LINK,
+    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 pub const ARTIFACT_SOURCE_PROJECT_FILE: &str = "project_file";
@@ -251,7 +251,16 @@ pub fn file_node_for_path(
     path: &Path,
     request: &ArtifactPathUpsertRequestWire,
 ) -> Result<ArtifactNodeWire, String> {
-    node_for_path(path, ARTIFACT_KIND_FILE, request)
+    let mut node = node_for_path(path, ARTIFACT_KIND_FILE, request)?;
+    if node.kind == ARTIFACT_KIND_FILE {
+        let file_type = file_artifact_type(&node).to_string();
+        set_file_artifact_type(&mut node.metadata, &file_type)?;
+        if request.search_text.is_none() {
+            node.search_text =
+                format!("{} file {}", node.search_text, file_type);
+        }
+    }
+    Ok(node)
 }
 
 pub fn directory_node_for_path(
@@ -3675,7 +3684,8 @@ mod tests {
     use super::super::wire::{
         ArtifactDoctorOptionsWire, ArtifactGraphOptionsWire,
         ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-        ArtifactQueryWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC,
+        ArtifactQueryWire, ARTIFACT_FILE_TYPE_METADATA_KEY,
+        ARTIFACT_FILE_TYPE_MISC, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC,
         ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_FILE, ARTIFACT_KIND_THOUGHT,
         ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
         ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
@@ -3703,6 +3713,12 @@ mod tests {
         assert!(result.links_added >= 4, "{result:?}");
 
         let detail = artifact_show(&store, file.to_str().unwrap()).unwrap();
+        let node = detail.node.as_ref().unwrap();
+        assert_eq!(
+            node.metadata[ARTIFACT_FILE_TYPE_METADATA_KEY],
+            json!(ARTIFACT_FILE_TYPE_MISC)
+        );
+        assert!(node.search_text.contains("file misc"));
         let path_ids: Vec<_> = detail
             .path_to_root
             .into_iter()
