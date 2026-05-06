@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/sase_core",
     "crates/sase_core_py",
+    "crates/sase_gateway",
 ]
 
 [workspace.package]
@@ -20,6 +21,9 @@ regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["trace"] }
 
 [profile.release]
 lto = "thin"

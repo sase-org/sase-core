@@ -11,10 +11,14 @@ Python `sase_100` repo remains the product shell; this crate owns deterministic 
 crates/
   sase_core/      # pure-Rust core: wire types + full-file parser
   sase_core_py/   # PyO3 binding placeholder (filled in in Phase 1D)
+  sase_gateway/   # local host HTTP gateway for SASE mobile clients
 ```
 
 The pure crate has no PyO3 dependency. This is deliberate — later UniFFI, WASM, or server crates need to consume
 `sase_core` without dragging a Python toolchain into their build.
+
+`sase_gateway` is also pure Rust. It owns the mobile gateway HTTP wire contract and server skeleton without depending on
+the Python binding crate.
 
 ## Build & test
 
