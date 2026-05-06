@@ -91,6 +91,11 @@ pub enum ApiErrorCodeWire {
     InvalidRequest,
     PairingExpired,
     PairingRejected,
+    ConflictAlreadyHandled,
+    GoneStale,
+    AmbiguousPrefix,
+    UnsupportedAction,
+    AttachmentExpired,
     Internal,
 }
 
@@ -253,22 +258,99 @@ mod tests {
 
     #[test]
     fn error_wire_json_snapshot() {
-        let error = ApiErrorWire {
-            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
-            code: ApiErrorCodeWire::Unauthorized,
-            message: "authentication is required for this endpoint".to_string(),
-            target: Some("authorization".to_string()),
-            details: None,
-        };
+        let errors = vec![
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::Unauthorized,
+                message: "authentication is required for this endpoint"
+                    .to_string(),
+                target: Some("authorization".to_string()),
+                details: None,
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::ConflictAlreadyHandled,
+                message: "action was already handled".to_string(),
+                target: Some("abcdef12".to_string()),
+                details: Some(json!({"notification_id": "abcdef1234567890"})),
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::GoneStale,
+                message: "action request is stale".to_string(),
+                target: Some("abcdef12".to_string()),
+                details: None,
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::AmbiguousPrefix,
+                message: "notification prefix matches multiple actions"
+                    .to_string(),
+                target: Some("abcd".to_string()),
+                details: Some(json!({"matches": 2})),
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::UnsupportedAction,
+                message: "notification action is not supported by mobile"
+                    .to_string(),
+                target: Some("JumpToChangeSpec".to_string()),
+                details: None,
+            },
+            ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::AttachmentExpired,
+                message: "attachment token is expired".to_string(),
+                target: Some("token".to_string()),
+                details: None,
+            },
+        ];
         assert_eq!(
-            serde_json::to_value(error).unwrap(),
-            json!({
-                "schema_version": 1,
-                "code": "unauthorized",
-                "message": "authentication is required for this endpoint",
-                "target": "authorization",
-                "details": null
-            })
+            serde_json::to_value(errors).unwrap(),
+            json!([
+                {
+                    "schema_version": 1,
+                    "code": "unauthorized",
+                    "message": "authentication is required for this endpoint",
+                    "target": "authorization",
+                    "details": null
+                },
+                {
+                    "schema_version": 1,
+                    "code": "conflict_already_handled",
+                    "message": "action was already handled",
+                    "target": "abcdef12",
+                    "details": {"notification_id": "abcdef1234567890"}
+                },
+                {
+                    "schema_version": 1,
+                    "code": "gone_stale",
+                    "message": "action request is stale",
+                    "target": "abcdef12",
+                    "details": null
+                },
+                {
+                    "schema_version": 1,
+                    "code": "ambiguous_prefix",
+                    "message": "notification prefix matches multiple actions",
+                    "target": "abcd",
+                    "details": {"matches": 2}
+                },
+                {
+                    "schema_version": 1,
+                    "code": "unsupported_action",
+                    "message": "notification action is not supported by mobile",
+                    "target": "JumpToChangeSpec",
+                    "details": null
+                },
+                {
+                    "schema_version": 1,
+                    "code": "attachment_expired",
+                    "message": "attachment token is expired",
+                    "target": "token",
+                    "details": null
+                }
+            ])
         );
     }
 

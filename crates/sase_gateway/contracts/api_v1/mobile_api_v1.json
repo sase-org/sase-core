@@ -28,6 +28,17 @@
     }
   },
   "records": {
+    "ActionResultWire": {
+      "action_kind": "plan_approval|hitl|user_question|non_action|unsupported",
+      "defined_by": "sase_core::notifications::mobile",
+      "message": "string|null",
+      "notification_id": "string|null",
+      "prefix": "string",
+      "response_file": "plan_response.json|hitl_response.json|question_response.json",
+      "response_json": "json",
+      "schema_version": "u32",
+      "state": "available|already_handled|stale|missing_request|missing_target|unsupported"
+    },
     "ApiErrorWire": {
       "code": [
         "unauthorized",
@@ -35,6 +46,11 @@
         "invalid_request",
         "pairing_expired",
         "pairing_rejected",
+        "conflict_already_handled",
+        "gone_stale",
+        "ambiguous_prefix",
+        "unsupported_action",
+        "attachment_expired",
         "internal"
       ],
       "details": "json|null",
@@ -85,6 +101,66 @@
       "status": "ok",
       "version": "string"
     },
+    "HitlActionRequestWire": {
+      "choice": "accept|reject|feedback",
+      "defined_by": "sase_core::notifications::mobile",
+      "feedback": "string|null",
+      "prefix": "string",
+      "schema_version": "u32"
+    },
+    "MobileAttachmentManifestWire": {
+      "byte_size": "u64|null",
+      "can_inline": "bool",
+      "content_type": "string|null",
+      "defined_by": "sase_core::notifications::mobile",
+      "display_name": "string",
+      "download_requires_auth": "bool",
+      "downloadable": "bool",
+      "id": "string",
+      "kind": "markdown|pdf|diff|image|text|json|directory|unknown",
+      "path_available": "bool",
+      "source_notification_id": "string",
+      "token": "string|null"
+    },
+    "MobileNotificationCardWire": {
+      "action_summary": "MobileActionSummaryWire|null",
+      "actionable": "bool",
+      "defined_by": "sase_core::notifications::mobile",
+      "dismissed": "bool",
+      "file_count": "u64",
+      "id": "string",
+      "muted": "bool",
+      "notes_summary": "string",
+      "priority": "bool",
+      "read": "bool",
+      "sender": "string",
+      "silent": "bool",
+      "timestamp": "rfc3339"
+    },
+    "MobileNotificationDetailResponseWire": {
+      "action": "MobileActionDetailWire",
+      "attachments": "MobileAttachmentManifestWire[]",
+      "defined_by": "sase_core::notifications::mobile",
+      "notes": "string[]",
+      "notification": "MobileNotificationCardWire",
+      "schema_version": "u32"
+    },
+    "MobileNotificationListRequestWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "include_dismissed": "bool",
+      "include_silent": "bool",
+      "limit": "u32|null",
+      "newer_than": "string|null",
+      "schema_version": "u32",
+      "unread_only": "bool"
+    },
+    "MobileNotificationListResponseWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "next_high_water": "string|null",
+      "notifications": "MobileNotificationCardWire[]",
+      "schema_version": "u32",
+      "total_count": "u64"
+    },
     "PairFinishRequestWire": {
       "code": "string",
       "device": "PairingDeviceMetadataWire",
@@ -113,6 +189,29 @@
       "app_version": "string|null",
       "display_name": "string",
       "platform": "string"
+    },
+    "PlanActionRequestWire": {
+      "choice": "approve|run|reject|epic|legend|feedback",
+      "coder_model": "string|null",
+      "coder_prompt": "string|null",
+      "commit_plan": "bool|null",
+      "defined_by": "sase_core::notifications::mobile",
+      "feedback": "string|null",
+      "prefix": "string",
+      "run_coder": "bool|null",
+      "schema_version": "u32"
+    },
+    "QuestionActionRequestWire": {
+      "choice": "answer|custom",
+      "custom_answer": "string|null",
+      "defined_by": "sase_core::notifications::mobile",
+      "global_note": "string|null",
+      "prefix": "string",
+      "question_index": "u32|null",
+      "schema_version": "u32",
+      "selected_option_id": "string|null",
+      "selected_option_index": "u32|null",
+      "selected_option_label": "string|null"
     },
     "SessionResponseWire": {
       "capabilities": "string[]",

@@ -77,11 +77,27 @@ pub fn api_v1_contract_snapshot() -> Value {
                     "invalid_request",
                     "pairing_expired",
                     "pairing_rejected",
+                    "conflict_already_handled",
+                    "gone_stale",
+                    "ambiguous_prefix",
+                    "unsupported_action",
+                    "attachment_expired",
                     "internal"
                 ],
                 "message": "string",
                 "target": "string|null",
                 "details": "json|null"
+            },
+            "ActionResultWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "action_kind": "plan_approval|hitl|user_question|non_action|unsupported",
+                "prefix": "string",
+                "notification_id": "string|null",
+                "state": "available|already_handled|stale|missing_request|missing_target|unsupported",
+                "response_file": "plan_response.json|hitl_response.json|question_response.json",
+                "response_json": "json",
+                "message": "string|null"
             },
             "DeviceRecordWire": {
                 "schema_version": "u32",
@@ -126,6 +142,66 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "build": "GatewayBuildWire",
                 "bind": "GatewayBindWire"
             },
+            "HitlActionRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "prefix": "string",
+                "choice": "accept|reject|feedback",
+                "feedback": "string|null"
+            },
+            "MobileAttachmentManifestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "id": "string",
+                "token": "string|null",
+                "display_name": "string",
+                "kind": "markdown|pdf|diff|image|text|json|directory|unknown",
+                "content_type": "string|null",
+                "byte_size": "u64|null",
+                "source_notification_id": "string",
+                "downloadable": "bool",
+                "download_requires_auth": "bool",
+                "can_inline": "bool",
+                "path_available": "bool"
+            },
+            "MobileNotificationCardWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "id": "string",
+                "timestamp": "rfc3339",
+                "sender": "string",
+                "priority": "bool",
+                "actionable": "bool",
+                "read": "bool",
+                "dismissed": "bool",
+                "silent": "bool",
+                "muted": "bool",
+                "notes_summary": "string",
+                "file_count": "u64",
+                "action_summary": "MobileActionSummaryWire|null"
+            },
+            "MobileNotificationDetailResponseWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "notification": "MobileNotificationCardWire",
+                "notes": "string[]",
+                "attachments": "MobileAttachmentManifestWire[]",
+                "action": "MobileActionDetailWire"
+            },
+            "MobileNotificationListRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "unread_only": "bool",
+                "include_dismissed": "bool",
+                "include_silent": "bool",
+                "limit": "u32|null",
+                "newer_than": "string|null"
+            },
+            "MobileNotificationListResponseWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "notifications": "MobileNotificationCardWire[]",
+                "total_count": "u64",
+                "next_high_water": "string|null"
+            },
             "PairFinishRequestWire": {
                 "schema_version": "u32",
                 "pairing_id": "string",
@@ -154,6 +230,29 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "display_name": "string",
                 "platform": "string",
                 "app_version": "string|null"
+            },
+            "PlanActionRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "prefix": "string",
+                "choice": "approve|run|reject|epic|legend|feedback",
+                "feedback": "string|null",
+                "commit_plan": "bool|null",
+                "run_coder": "bool|null",
+                "coder_prompt": "string|null",
+                "coder_model": "string|null"
+            },
+            "QuestionActionRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "prefix": "string",
+                "choice": "answer|custom",
+                "question_index": "u32|null",
+                "selected_option_id": "string|null",
+                "selected_option_label": "string|null",
+                "selected_option_index": "u32|null",
+                "custom_answer": "string|null",
+                "global_note": "string|null"
             },
             "SessionResponseWire": {
                 "schema_version": "u32",

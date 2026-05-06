@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "notification": {
+    "id": "abcdef1234567890",
+    "timestamp": "2026-05-06T15:30:00Z",
+    "sender": "planner",
+    "priority": true,
+    "actionable": true,
+    "read": false,
+    "dismissed": false,
+    "silent": false,
+    "muted": false,
+    "notes_summary": "Plan ready for review",
+    "file_count": 1,
+    "action_summary": {
+      "kind": "plan_approval",
+      "state": "available",
+      "label": "Plan approval"
+    }
+  },
+  "notes": [
+    "Plan ready for review"
+  ],
+  "attachments": [
+    {
+      "id": "att_000",
+      "token": null,
+      "display_name": "plan.md",
+      "kind": "markdown",
+      "content_type": "text/markdown",
+      "byte_size": 42,
+      "source_notification_id": "abcdef1234567890",
+      "downloadable": true,
+      "download_requires_auth": true,
+      "can_inline": true,
+      "path_available": true
+    }
+  ],
+  "action": {
+    "kind": "plan_approval",
+    "identity": {
+      "notification_id": "abcdef1234567890",
+      "prefix": "abcdef12",
+      "prefix_len": 8,
+      "resolution": "unique_prefix"
+    },
+    "state": "available",
+    "response_dir": "/tmp/agent",
+    "plan_file": "/tmp/plan.md",
+    "choices": [
+      "approve",
+      "run",
+      "reject",
+      "epic",
+      "legend",
+      "feedback"
+    ]
+  }
+}

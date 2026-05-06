@@ -1,0 +1,53 @@
+{
+  "plan": {
+    "schema_version": 1,
+    "action_kind": "plan_approval",
+    "prefix": "abcdef12",
+    "notification_id": null,
+    "state": "available",
+    "response_file": "plan_response.json",
+    "response_json": {
+      "action": "approve",
+      "commit_plan": false,
+      "run_coder": true,
+      "coder_prompt": "Focus tests",
+      "coder_model": "gpt-5.2"
+    },
+    "message": "Running coder"
+  },
+  "hitl": {
+    "schema_version": 1,
+    "action_kind": "hitl",
+    "prefix": "hitl0001",
+    "notification_id": null,
+    "state": "available",
+    "response_file": "hitl_response.json",
+    "response_json": {
+      "action": "feedback",
+      "approved": false,
+      "feedback": "Please revise"
+    },
+    "message": "Feedback received"
+  },
+  "question": {
+    "schema_version": 1,
+    "action_kind": "user_question",
+    "prefix": "ques0001",
+    "notification_id": null,
+    "state": "available",
+    "response_file": "question_response.json",
+    "response_json": {
+      "answers": [
+        {
+          "question": "Which DB?",
+          "selected": [
+            "PostgreSQL"
+          ],
+          "custom_feedback": null
+        }
+      ],
+      "global_note": "Answered via mobile"
+    },
+    "message": "Question answered"
+  }
+}

@@ -109,11 +109,26 @@ pub use git_query::{
 };
 pub use notifications::{
     append_notification, apply_notification_state_update,
-    read_notifications_snapshot, read_notifications_snapshot_with_options,
-    rewrite_notifications, NotificationAgentKeyWire, NotificationCountsWire,
-    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
-    NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
-    NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    mobile_action_detail_from_notification,
+    mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
+    pending_action_identity, plan_hitl_action_response,
+    plan_plan_action_response, plan_question_action_response,
+    plan_question_action_response_from_bytes, read_notifications_snapshot,
+    read_notifications_snapshot_with_options, resolve_notification_prefix,
+    rewrite_notifications, ActionResultWire, HitlActionChoiceWire,
+    HitlActionRequestWire, MobileActionDetailWire, MobileActionKindWire,
+    MobileActionPlanErrorCodeWire, MobileActionPlanErrorWire,
+    MobileActionStateWire, MobileActionSummaryWire, MobileAttachmentKindWire,
+    MobileAttachmentManifestWire, MobileNotificationCardWire,
+    MobileNotificationDetailResponseWire, MobileNotificationListRequestWire,
+    MobileNotificationListResponseWire, NotificationAgentKeyWire,
+    NotificationCountsWire, NotificationStateUpdateWire,
+    NotificationStoreSnapshotWire, NotificationStoreStatsWire,
+    NotificationUpdateOutcomeWire, NotificationWire, PendingActionIdentityWire,
+    PendingActionPrefixResolutionWire, PlanActionChoiceWire,
+    PlanActionRequestWire, QuestionActionChoiceWire, QuestionActionRequestWire,
+    MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+    NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::parse_project_bytes;
 pub use query::{
