@@ -24,17 +24,21 @@ use super::store::{
     upsert_artifact_payload, ArtifactStore,
 };
 use super::wire::{
-    file_artifact_type, set_file_artifact_type, ArtifactLinkUpsertWire,
-    ArtifactLinkWire, ArtifactMutationResultWire, ArtifactNodeUpsertWire,
-    ArtifactNodeWire, ArtifactPathUpsertRequestWire, ArtifactPayloadWire,
-    ArtifactRebuildRequestWire, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_BEAD,
-    ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_DIRECTORY,
-    ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT, ARTIFACT_KIND_ROOT,
-    ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
-    ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_STALE_CLEANUP_MARK,
-    ARTIFACT_STALE_CLEANUP_NONE, ARTIFACT_TOMBSTONE_LINK,
-    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
+    set_file_artifact_type, validate_file_artifact_type,
+    ArtifactLinkUpsertWire, ArtifactLinkWire, ArtifactMutationResultWire,
+    ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactPathUpsertRequestWire,
+    ArtifactPayloadWire, ArtifactRebuildRequestWire, ARTIFACT_FILE_TYPE_CHAT,
+    ARTIFACT_FILE_TYPE_DIFF, ARTIFACT_FILE_TYPE_METADATA_KEY,
+    ARTIFACT_FILE_TYPE_MISC, ARTIFACT_FILE_TYPE_PLAN,
+    ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_FILE_TYPE_PROMPT, ARTIFACT_KIND_AGENT,
+    ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
+    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
+    ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED,
+    ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+    ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID,
+    ARTIFACT_STALE_CLEANUP_MARK, ARTIFACT_STALE_CLEANUP_NONE,
+    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
+    ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
 pub const ARTIFACT_SOURCE_PROJECT_FILE: &str = "project_file";
@@ -253,7 +257,7 @@ pub fn file_node_for_path(
 ) -> Result<ArtifactNodeWire, String> {
     let mut node = node_for_path(path, ARTIFACT_KIND_FILE, request)?;
     if node.kind == ARTIFACT_KIND_FILE {
-        let file_type = file_artifact_type(&node).to_string();
+        let file_type = classify_file_artifact(path, request).to_string();
         set_file_artifact_type(&mut node.metadata, &file_type)?;
         if request.search_text.is_none() {
             node.search_text =
@@ -261,6 +265,122 @@ pub fn file_node_for_path(
         }
     }
     Ok(node)
+}
+
+fn classify_file_artifact(
+    path: &Path,
+    request: &ArtifactPathUpsertRequestWire,
+) -> &'static str {
+    if let Some(explicit) = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(ARTIFACT_FILE_TYPE_METADATA_KEY))
+        .and_then(Value::as_str)
+        .filter(|file_type| validate_file_artifact_type(file_type).is_ok())
+    {
+        return canonical_file_type(explicit);
+    }
+
+    let metadata = request.metadata.as_ref();
+    for signal in [
+        metadata
+            .and_then(|metadata| metadata.get("marker_key"))
+            .and_then(Value::as_str),
+        metadata
+            .and_then(|metadata| metadata.get("reason"))
+            .and_then(Value::as_str),
+        request.source_kind.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(file_type) = classify_file_artifact_signal(signal) {
+            return file_type;
+        }
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if let Some(file_type) = classify_file_artifact_signal(&file_name) {
+        return file_type;
+    }
+
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("diff" | "patch") => ARTIFACT_FILE_TYPE_DIFF,
+        Some("gp") => ARTIFACT_FILE_TYPE_PROJECT,
+        _ => ARTIFACT_FILE_TYPE_MISC,
+    }
+}
+
+fn classify_file_artifact_signal(signal: &str) -> Option<&'static str> {
+    let signal = signal.trim().to_ascii_lowercase();
+    if signal.is_empty() {
+        return None;
+    }
+    match signal.as_str() {
+        "plan_path" | "sdd_plan_path" | "plan_path_marker"
+        | "plan_feedback_path" | "feedback_path" | "done_plan" => {
+            Some(ARTIFACT_FILE_TYPE_PLAN)
+        }
+        "diff_path" | "commit_diff_path" | "done_diff" | "prompt_step_diff" => {
+            Some(ARTIFACT_FILE_TYPE_DIFF)
+        }
+        "chat_path"
+        | "response_path"
+        | "live_reply_path"
+        | "question_request_path"
+        | "question_response_path"
+        | "output_path"
+        | "done_response"
+        | "done_output"
+        | "prompt_step_response"
+        | "thought_source" => Some(ARTIFACT_FILE_TYPE_CHAT),
+        "sdd_prompt_path" | "prompt_markdown" => {
+            Some(ARTIFACT_FILE_TYPE_PROMPT)
+        }
+        "plan_path.json" | "plan_feedback.jsonl" => {
+            Some(ARTIFACT_FILE_TYPE_PLAN)
+        }
+        "raw_xprompt.md" | "prompt.md" => Some(ARTIFACT_FILE_TYPE_PROMPT),
+        "live_reply.md"
+        | "live_reply_timestamps.jsonl"
+        | "qa_log.jsonl"
+        | "question_request.json"
+        | "question_response.json" => Some(ARTIFACT_FILE_TYPE_CHAT),
+        _ if signal.ends_with("_prompt.md") => Some(ARTIFACT_FILE_TYPE_PROMPT),
+        _ if signal.ends_with("_prompt_path") => {
+            Some(ARTIFACT_FILE_TYPE_PROMPT)
+        }
+        _ if signal.ends_with("_plan_path") => Some(ARTIFACT_FILE_TYPE_PLAN),
+        _ if signal.ends_with("_diff_path") => Some(ARTIFACT_FILE_TYPE_DIFF),
+        _ if signal.ends_with("_response_path") => {
+            Some(ARTIFACT_FILE_TYPE_CHAT)
+        }
+        _ if signal.ends_with(".diff") || signal.ends_with(".patch") => {
+            Some(ARTIFACT_FILE_TYPE_DIFF)
+        }
+        _ if signal.ends_with(".gp") => Some(ARTIFACT_FILE_TYPE_PROJECT),
+        _ => None,
+    }
+}
+
+fn canonical_file_type(file_type: &str) -> &'static str {
+    match file_type {
+        ARTIFACT_FILE_TYPE_PLAN => ARTIFACT_FILE_TYPE_PLAN,
+        ARTIFACT_FILE_TYPE_DIFF => ARTIFACT_FILE_TYPE_DIFF,
+        ARTIFACT_FILE_TYPE_CHAT => ARTIFACT_FILE_TYPE_CHAT,
+        ARTIFACT_FILE_TYPE_PROJECT => ARTIFACT_FILE_TYPE_PROJECT,
+        ARTIFACT_FILE_TYPE_PROMPT => ARTIFACT_FILE_TYPE_PROMPT,
+        _ => ARTIFACT_FILE_TYPE_MISC,
+    }
 }
 
 pub fn directory_node_for_path(
@@ -1027,9 +1147,9 @@ fn ingest_agent_artifacts(
         )?);
 
         if created_files_selected {
-            for (path, reason) in created_files {
+            for (path, context) in created_files {
                 mutations.merge(upsert_created_file(
-                    store, &agent_id, &source_id, &path, &reason,
+                    store, &agent_id, &source_id, &path, &context,
                 )?);
             }
         }
@@ -1041,7 +1161,7 @@ fn ingest_agent_artifacts(
                     &agent_id,
                     &source_id,
                     source_file,
-                    "thought_source",
+                    &AgentCreatedFilePathContext::new("thought_source"),
                 )?);
             }
             for error in &thought_extraction.errors {
@@ -1903,9 +2023,31 @@ fn load_json_object(path: &Path) -> Option<Map<String, Value>> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentCreatedFilePathContext {
+    reason: String,
+    marker_key: Option<String>,
+}
+
+impl AgentCreatedFilePathContext {
+    fn new(reason: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+            marker_key: None,
+        }
+    }
+
+    fn with_marker_key(reason: &str, marker_key: &str) -> Self {
+        Self {
+            reason: reason.to_string(),
+            marker_key: Some(marker_key.to_string()),
+        }
+    }
+}
+
 fn collect_agent_created_file_paths(
     record: &AgentArtifactRecordWire,
-) -> BTreeMap<PathBuf, String> {
+) -> BTreeMap<PathBuf, AgentCreatedFilePathContext> {
     let artifact_dir = Path::new(&record.artifact_dir);
     let mut paths = BTreeMap::new();
 
@@ -1947,6 +2089,7 @@ fn collect_agent_created_file_paths(
             artifact_dir,
             plan_path.plan_path.as_ref(),
             "plan_path_marker",
+            Some("plan_path"),
         );
     }
     for marker_name in [
@@ -1962,7 +2105,7 @@ fn collect_agent_created_file_paths(
 }
 
 fn insert_done_marker_paths(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     done: &DoneMarkerWire,
 ) {
@@ -1971,27 +2114,39 @@ fn insert_done_marker_paths(
         artifact_dir,
         done.plan_path.as_ref(),
         "done_plan",
+        Some("plan_path"),
     );
     insert_optional_marker_path(
         paths,
         artifact_dir,
         done.diff_path.as_ref(),
         "done_diff",
+        Some("diff_path"),
     );
     insert_optional_marker_path(
         paths,
         artifact_dir,
         done.response_path.as_ref(),
         "done_response",
+        Some("response_path"),
     );
     insert_optional_marker_path(
         paths,
         artifact_dir,
         done.output_path.as_ref(),
         "done_output",
+        Some("output_path"),
     );
     for path in &done.markdown_pdf_paths {
-        insert_marker_path(paths, artifact_dir, path, "done_markdown_pdf");
+        insert_marker_path(
+            paths,
+            artifact_dir,
+            path,
+            AgentCreatedFilePathContext::with_marker_key(
+                "done_markdown_pdf",
+                "markdown_pdf_paths",
+            ),
+        );
     }
     if let Some(step_output) = &done.step_output {
         insert_typed_output_paths(
@@ -2005,7 +2160,7 @@ fn insert_done_marker_paths(
 }
 
 fn insert_prompt_step_paths(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     prompt_step: &PromptStepMarkerWire,
 ) {
@@ -2014,12 +2169,14 @@ fn insert_prompt_step_paths(
         artifact_dir,
         prompt_step.diff_path.as_ref(),
         "prompt_step_diff",
+        Some("diff_path"),
     );
     insert_optional_marker_path(
         paths,
         artifact_dir,
         prompt_step.response_path.as_ref(),
         "prompt_step_response",
+        Some("response_path"),
     );
     if let Some(output) = &prompt_step.output {
         insert_typed_output_paths(
@@ -2033,7 +2190,7 @@ fn insert_prompt_step_paths(
 }
 
 fn insert_typed_output_paths(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     output: &Map<String, Value>,
     output_types: Option<&BTreeMap<String, String>>,
@@ -2047,18 +2204,25 @@ fn insert_typed_output_paths(
                     artifact_dir,
                     output.get(key),
                     reason,
+                    Some(key.as_str()),
                 );
             }
         }
     } else {
         for key in ["path", "file", "diff_path", "response_path", "plan_path"] {
-            insert_value_paths(paths, artifact_dir, output.get(key), reason);
+            insert_value_paths(
+                paths,
+                artifact_dir,
+                output.get(key),
+                reason,
+                Some(key),
+            );
         }
     }
 }
 
 fn insert_artifact_dir_prompt_files(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
 ) {
     let Ok(read_dir) = fs::read_dir(artifact_dir) else {
@@ -2073,15 +2237,18 @@ fn insert_artifact_dir_prompt_files(
             continue;
         };
         if name.ends_with("_prompt.md") || name == "prompt.md" {
-            paths
-                .entry(path)
-                .or_insert_with(|| "prompt_markdown".to_string());
+            paths.entry(path).or_insert_with(|| {
+                AgentCreatedFilePathContext::with_marker_key(
+                    "prompt_markdown",
+                    "prompt_markdown",
+                )
+            });
         }
     }
 }
 
 fn insert_raw_marker_paths(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     marker_name: &str,
 ) {
@@ -2109,27 +2276,48 @@ fn insert_raw_marker_paths(
         "question_response_path",
         "commit_diff_path",
     ] {
-        insert_value_paths(paths, artifact_dir, map.get(key), marker_name);
+        insert_value_paths(
+            paths,
+            artifact_dir,
+            map.get(key),
+            marker_name,
+            Some(key),
+        );
     }
     for key in ["markdown_pdf_paths", "image_paths", "file_paths"] {
-        insert_value_paths(paths, artifact_dir, map.get(key), marker_name);
+        insert_value_paths(
+            paths,
+            artifact_dir,
+            map.get(key),
+            marker_name,
+            Some(key),
+        );
     }
 }
 
 fn insert_value_paths(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     value: Option<&Value>,
     reason: &str,
+    marker_key: Option<&str>,
 ) {
     match value {
-        Some(Value::String(path)) => {
-            insert_marker_path(paths, artifact_dir, path, reason)
-        }
+        Some(Value::String(path)) => insert_marker_path(
+            paths,
+            artifact_dir,
+            path,
+            agent_created_file_context(reason, marker_key),
+        ),
         Some(Value::Array(items)) => {
             for item in items {
                 if let Value::String(path) = item {
-                    insert_marker_path(paths, artifact_dir, path, reason);
+                    insert_marker_path(
+                        paths,
+                        artifact_dir,
+                        path,
+                        agent_created_file_context(reason, marker_key),
+                    );
                 }
             }
         }
@@ -2138,38 +2326,58 @@ fn insert_value_paths(
 }
 
 fn insert_if_exists(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     path: PathBuf,
     reason: &str,
 ) {
     if path.exists() {
-        paths.entry(path).or_insert_with(|| reason.to_string());
+        paths
+            .entry(path)
+            .or_insert_with(|| AgentCreatedFilePathContext::new(reason));
     }
 }
 
 fn insert_optional_marker_path(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     maybe_path: Option<&String>,
     reason: &str,
+    marker_key: Option<&str>,
 ) {
     if let Some(path) = maybe_path {
-        insert_marker_path(paths, artifact_dir, path, reason);
+        insert_marker_path(
+            paths,
+            artifact_dir,
+            path,
+            agent_created_file_context(reason, marker_key),
+        );
     }
 }
 
 fn insert_marker_path(
-    paths: &mut BTreeMap<PathBuf, String>,
+    paths: &mut BTreeMap<PathBuf, AgentCreatedFilePathContext>,
     artifact_dir: &Path,
     path: &str,
-    reason: &str,
+    context: AgentCreatedFilePathContext,
 ) {
     if path.trim().is_empty() {
         return;
     }
     paths
         .entry(resolve_agent_path(artifact_dir, path))
-        .or_insert_with(|| reason.to_string());
+        .or_insert(context);
+}
+
+fn agent_created_file_context(
+    reason: &str,
+    marker_key: Option<&str>,
+) -> AgentCreatedFilePathContext {
+    match marker_key {
+        Some(marker_key) => {
+            AgentCreatedFilePathContext::with_marker_key(reason, marker_key)
+        }
+        None => AgentCreatedFilePathContext::new(reason),
+    }
 }
 
 fn upsert_created_file(
@@ -2177,7 +2385,7 @@ fn upsert_created_file(
     agent_id: &str,
     agent_source_id: &str,
     path: &Path,
-    reason: &str,
+    context: &AgentCreatedFilePathContext,
 ) -> Result<ArtifactMutationResultWire, String> {
     let normalized = normalize_artifact_path(path)?;
     let artifact_id = path_to_artifact_id(&normalized);
@@ -2188,7 +2396,16 @@ fn upsert_created_file(
         "created_by".to_string(),
         Value::String(agent_id.to_string()),
     );
-    metadata.insert("reason".to_string(), Value::String(reason.to_string()));
+    metadata.insert(
+        "reason".to_string(),
+        Value::String(context.reason.to_string()),
+    );
+    if let Some(marker_key) = &context.marker_key {
+        metadata.insert(
+            "marker_key".to_string(),
+            Value::String(marker_key.clone()),
+        );
+    }
 
     mutations.merge(artifact_upsert_path(
         store,
@@ -2215,7 +2432,7 @@ fn upsert_created_file(
                 json!({
                     "path": artifact_id,
                     "created_by": agent_id,
-                    "reason": reason,
+                    "reason": &context.reason,
                 }),
             ),
         )?);
@@ -3682,16 +3899,67 @@ mod tests {
     use super::super::query::{artifact_doctor, artifact_list, artifact_show};
     use super::super::store::{open_artifact_store, remove_artifact_node};
     use super::super::wire::{
-        ArtifactDoctorOptionsWire, ArtifactGraphOptionsWire,
-        ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-        ArtifactQueryWire, ARTIFACT_FILE_TYPE_METADATA_KEY,
-        ARTIFACT_FILE_TYPE_MISC, ARTIFACT_KIND_AGENT, ARTIFACT_KIND_CHANGESPEC,
-        ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_FILE, ARTIFACT_KIND_THOUGHT,
-        ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
-        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-        ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_TOMBSTONE_NODE,
+        file_artifact_type, ArtifactDoctorOptionsWire,
+        ArtifactGraphOptionsWire, ArtifactNodeRemoveWire,
+        ArtifactNodeUpsertWire, ArtifactNodeWire, ArtifactQueryWire,
+        ARTIFACT_FILE_TYPE_CHAT, ARTIFACT_FILE_TYPE_DIFF,
+        ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_MISC,
+        ARTIFACT_FILE_TYPE_PLAN, ARTIFACT_FILE_TYPE_PROJECT,
+        ARTIFACT_FILE_TYPE_PROMPT, ARTIFACT_KIND_AGENT,
+        ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT, ARTIFACT_KIND_FILE,
+        ARTIFACT_KIND_THOUGHT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT,
+        ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
+        ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_PROVENANCE_MANUAL,
+        ARTIFACT_TOMBSTONE_NODE,
     };
     use super::*;
+
+    #[test]
+    fn file_artifact_classifier_uses_marker_keys_reasons_and_names() {
+        let tmp = tempdir().unwrap();
+        let cases = [
+            ("plan_path", "note.md", ARTIFACT_FILE_TYPE_PLAN),
+            ("sdd_plan_path", "note.md", ARTIFACT_FILE_TYPE_PLAN),
+            ("plan_path_marker", "external.md", ARTIFACT_FILE_TYPE_PLAN),
+            (
+                "plan_feedback_path",
+                "feedback.jsonl",
+                ARTIFACT_FILE_TYPE_PLAN,
+            ),
+            ("diff_path", "note.md", ARTIFACT_FILE_TYPE_DIFF),
+            ("commit_diff_path", "note.md", ARTIFACT_FILE_TYPE_DIFF),
+            ("prompt_step_diff", "note.md", ARTIFACT_FILE_TYPE_DIFF),
+            ("response_path", "note.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("chat_path", "note.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("live_reply_path", "note.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("question_response_path", "note.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("prompt_step_response", "note.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("sdd_prompt_path", "note.md", ARTIFACT_FILE_TYPE_PROMPT),
+            ("prompt_markdown", "note.md", ARTIFACT_FILE_TYPE_PROMPT),
+            ("misc_marker", "myproj.gp", ARTIFACT_FILE_TYPE_PROJECT),
+            ("misc_marker", "change.patch", ARTIFACT_FILE_TYPE_DIFF),
+            ("misc_marker", "raw_xprompt.md", ARTIFACT_FILE_TYPE_PROMPT),
+            ("misc_marker", "prompt.md", ARTIFACT_FILE_TYPE_PROMPT),
+            ("misc_marker", "review_prompt.md", ARTIFACT_FILE_TYPE_PROMPT),
+            ("misc_marker", "plan_path.json", ARTIFACT_FILE_TYPE_PLAN),
+            ("misc_marker", "live_reply.md", ARTIFACT_FILE_TYPE_CHAT),
+            ("misc_marker", "unknown.txt", ARTIFACT_FILE_TYPE_MISC),
+        ];
+
+        for (signal, file_name, expected) in cases {
+            let mut metadata = Map::new();
+            metadata.insert("marker_key".to_string(), json!(signal));
+            let request = ArtifactPathUpsertRequestWire {
+                metadata: Some(metadata),
+                ..ArtifactPathUpsertRequestWire::default()
+            };
+            assert_eq!(
+                classify_file_artifact(&tmp.path().join(file_name), &request),
+                expected,
+                "{signal} {file_name}"
+            );
+        }
+    }
 
     #[test]
     fn path_upsert_creates_file_directories_and_parent_links_to_root() {
@@ -4111,8 +4379,33 @@ mod tests {
             Some(ARTIFACT_KIND_FILE)
         );
         assert_eq!(
+            diff.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_DIFF)
+        );
+        assert_eq!(
             diff.path_to_root.first().map(|node| node.id.as_str()),
             Some(diff_path.to_str().unwrap())
+        );
+
+        let plan = artifact_show(&store, plan_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            plan.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_PLAN)
+        );
+        let response =
+            artifact_show(&store, response_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            response.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_CHAT)
+        );
+        let prompt = artifact_show(
+            &store,
+            artifact_dir.join("raw_xprompt.md").to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            prompt.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_PROMPT)
         );
     }
 
@@ -4208,6 +4501,69 @@ mod tests {
                     && link.target_id == id.as_ref()
             }));
         }
+    }
+
+    #[test]
+    fn targeted_agent_rebuild_backfills_file_artifact_types() {
+        let tmp = tempdir().unwrap();
+        let db = tmp.path().join("artifacts.sqlite");
+        let projects_root = tmp.path().join("projects");
+        let artifact_dir =
+            projects_root.join("acme/artifacts/ace-run/20260505120000");
+        let response_path = artifact_dir.join("response.md");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(&response_path, "done").unwrap();
+        std::fs::write(
+            artifact_dir.join("agent_meta.json"),
+            json!({"name": "agent-alpha"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact_dir.join("done.json"),
+            json!({
+                "name": "agent-alpha",
+                "response_path": response_path
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut store = open_artifact_store(&db).unwrap();
+        artifact_upsert_path(
+            &mut store,
+            &response_path,
+            ArtifactPathUpsertRequestWire::default(),
+        )
+        .unwrap();
+        let before =
+            artifact_show(&store, response_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            before.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_MISC)
+        );
+
+        artifact_rebuild(
+            &mut store,
+            ArtifactRebuildRequestWire {
+                projects_root: Some(
+                    projects_root.to_string_lossy().into_owned(),
+                ),
+                artifact_dir: Some(artifact_dir.to_string_lossy().into_owned()),
+                include_sources: vec![
+                    ARTIFACT_SOURCE_AGENT_ARTIFACT.to_string(),
+                    ARTIFACT_SOURCE_AGENT_CREATED_FILE.to_string(),
+                ],
+                ..ArtifactRebuildRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        let after =
+            artifact_show(&store, response_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            after.node.as_ref().map(file_artifact_type),
+            Some(ARTIFACT_FILE_TYPE_CHAT)
+        );
     }
 
     #[test]
