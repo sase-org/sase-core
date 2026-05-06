@@ -47,7 +47,16 @@ cargo run -p sase_gateway -- --bind 127.0.0.1:0 --sase-home /tmp/sase
 The binary binds `127.0.0.1:7629` by default. Non-loopback binds such as `0.0.0.0:7629`, LAN addresses, or tailnet
 addresses fail unless `--allow-non-loopback` / `-L` is passed explicitly.
 
-Generate the committed mobile API contract snapshot with:
+## Contract Snapshot
+
+The committed mobile API contract snapshot lives at:
+
+```text
+crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
+```
+
+It records the API base path, auth scheme, route list, wire-record field names, event resume header, and example pairing
+payloads for future mobile/client phases. Regenerate it after route or wire-shape changes with:
 
 ```bash
 cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json

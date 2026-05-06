@@ -173,7 +173,7 @@ impl EventHub {
             .front()
             .and_then(|record| parse_event_id(&record.id))
         else {
-            return Ok(Some(Vec::new()));
+            return Ok(None);
         };
         if last_seen.saturating_add(1) < oldest {
             return Ok(None);
@@ -1028,6 +1028,36 @@ mod tests {
         headers.insert("last-event-id", "0000000000000000".parse().unwrap());
         let events =
             initial_events_for_stream(&state, &headers, &device).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].payload,
+            EventPayloadWire::ResyncRequired { .. }
+        ));
+        assert!(matches!(
+            events[1].payload,
+            EventPayloadWire::Heartbeat { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_resume_after_restart_returns_resync_required() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, finish, _token, _device_id) =
+            pair_device(first_state.clone()).await;
+        let device: DeviceRecordWire =
+            serde_json::from_value(finish["device"].clone()).unwrap();
+        let first_events =
+            initial_events_for_stream(&first_state, &HeaderMap::new(), &device)
+                .unwrap();
+
+        let restarted_state = state_for_tmp(&tmp, Duration::minutes(5));
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", first_events[1].id.parse().unwrap());
+        let events =
+            initial_events_for_stream(&restarted_state, &headers, &device)
+                .unwrap();
 
         assert_eq!(events.len(), 2);
         assert!(matches!(
