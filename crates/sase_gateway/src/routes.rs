@@ -2999,6 +2999,12 @@ case "$operation" in
   changespec-tags)
     printf '%s\n' '{"schema_version":1,"result":{"status":"partial_success","message":"loaded tags","warnings":[],"skipped":[{"target":"sase/skipped","reason":"could not detect workflow type"}],"partial_failure_count":1},"context":{"project":"sase","scope":"explicit"},"tags":[{"tag":"#gh:feature","project":"sase","changespec":"feature","title":null,"status":"WIP","workflow":"gh","source_path_display":null}],"total_count":1}'
     ;;
+  update-start)
+    printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":"Update worker started.","warnings":[],"skipped":[],"partial_failure_count":null},"job":{"job_id":"job_123","status":"running","started_at":"2026-05-06T15:00:00Z","finished_at":null,"message":"Update worker started.","log_path_display":"~/.sase/chat_install/logs/install_job_123.log","completion_path_display":"~/.sase/chat_install/completions/job_123.json"}}'
+    ;;
+  update-status)
+    printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":"Update completed successfully.","warnings":[],"skipped":[],"partial_failure_count":null},"job":{"job_id":"job_123","status":"succeeded","started_at":"2026-05-06T15:00:00Z","finished_at":"2026-05-06T15:01:00Z","message":"Update completed successfully.","log_path_display":"~/.sase/chat_install/logs/install_job_123.log","completion_path_display":"~/.sase/chat_install/completions/job_123.json"}}'
+    ;;
   *)
     exit 2
     ;;
@@ -3015,6 +3021,12 @@ printf '%s\n' 'not-json'
                 r##"#!/bin/sh
 cat >/dev/null
 exit 2
+"##
+            }
+            "not-found" => {
+                r##"#!/bin/sh
+cat >/dev/null
+exit 4
 "##
             }
             _ => panic!("unknown helper bridge script mode: {mode}"),
@@ -3080,6 +3092,124 @@ exit 2
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn command_helper_bridge_update_start_returns_command_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "success");
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/update/start")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"schema_version":1,"request_id":"req_1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["result"]["status"], "success");
+        assert_eq!(value["job"]["job_id"], "job_123");
+        assert_eq!(value["job"]["status"], "running");
+
+        let bridge_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path()
+                    .join("mobile-helper-bridge-success.update-start.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bridge_request["request_id"], "req_1");
+        assert_eq!(
+            bridge_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
+        assert!(bridge_request.get("command").is_none());
+        assert!(bridge_request.get("workspace").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_update_status_returns_command_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "success");
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/update/job_123")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["result"]["status"], "success");
+        assert_eq!(value["job"]["job_id"], "job_123");
+        assert_eq!(value["job"]["status"], "succeeded");
+
+        let bridge_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path()
+                    .join("mobile-helper-bridge-success.update-status.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bridge_request["job_id"], "job_123");
+        assert_eq!(
+            bridge_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_update_exit_codes_map_to_stable_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "not-found");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+        let auth = format!("Bearer {token}");
+
+        let (start_status, start_value) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/update/start")
+                .header("authorization", auth.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"schema_version":1}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(start_status, StatusCode::CONFLICT);
+        assert_eq!(start_value["code"], "update_already_running");
+
+        let (status_status, status_value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/update/missing")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status_status, StatusCode::NOT_FOUND);
+        assert_eq!(status_value["code"], "update_job_not_found");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn command_helper_bridge_malformed_json_maps_to_unavailable() {
         let tmp = tempfile::tempdir().unwrap();
         let state = state_for_command_helper_bridge(&tmp, "invalid-json");
@@ -3125,6 +3255,29 @@ exit 2
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(value["code"], "bridge_unavailable");
         assert_eq!(value["target"], "helper_bridge:changespec-tags");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_not_found_maps_to_helper_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "not-found");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/beads/missing")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["code"], "helper_not_found");
+        assert_eq!(value["target"], "helper_bridge:beads-show");
     }
 
     fn seed_plan_notification(

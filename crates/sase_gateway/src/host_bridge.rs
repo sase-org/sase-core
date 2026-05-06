@@ -546,6 +546,21 @@ impl CommandHelperHostBridge {
             ))
         })?;
         if !output.status.success() {
+            if output.status.code() == Some(4) {
+                if operation == "update-start" {
+                    return Err(HostBridgeError::UpdateAlreadyRunning(
+                        "update".to_string(),
+                    ));
+                }
+                if operation == "update-status" {
+                    return Err(HostBridgeError::UpdateJobNotFound(
+                        "update".to_string(),
+                    ));
+                }
+                return Err(HostBridgeError::HelperNotFound(format!(
+                    "helper_bridge:{operation}"
+                )));
+            }
             return Err(HostBridgeError::BridgeUnavailable(format!(
                 "helper_bridge:{operation}"
             )));
