@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use sase_gateway::{serve, GatewayConfig};
 
@@ -21,6 +21,7 @@ fn parse_args(
     args: impl IntoIterator<Item = String>,
 ) -> Result<GatewayConfig, String> {
     let mut bind = GatewayConfig::default().bind;
+    let mut sase_home = GatewayConfig::default().sase_home;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -32,14 +33,22 @@ fn parse_args(
                     format!("invalid {arg} value {value:?}: {err}")
                 })?;
             }
+            "--sase-home" | "-H" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("{arg} requires a directory path")
+                })?;
+                sase_home = PathBuf::from(value);
+            }
             "--help" | "-h" => {
-                println!("Usage: sase_gateway [--bind|-b HOST:PORT]");
+                println!(
+                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR]"
+                );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
-    Ok(GatewayConfig { bind })
+    Ok(GatewayConfig { bind, sase_home })
 }
 
 #[cfg(test)]
@@ -62,5 +71,13 @@ mod tests {
             config.bind,
             "127.0.0.1:7629".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn parse_sase_home_short_flag() {
+        let config =
+            parse_args(["-H".to_string(), "/tmp/sase-home".to_string()])
+                .unwrap();
+        assert_eq!(config.sase_home, PathBuf::from("/tmp/sase-home"));
     }
 }

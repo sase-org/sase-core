@@ -1,8 +1,7 @@
 # sase_gateway
 
-`sase_gateway` is the local workstation HTTP gateway for future SASE mobile clients. Phase 1 provides the Rust crate,
-wire records, and route skeleton only; pairing, token storage, auth middleware, and SSE delivery are added by later
-phases.
+`sase_gateway` is the local workstation HTTP gateway for future SASE mobile clients. It provides health, pairing, and
+authenticated session routes; SSE delivery is added by a later phase.
 
 ## Response Shape
 
@@ -23,19 +22,23 @@ Errors use a single `ApiErrorWire` record:
 
 The HTTP status code carries transport status, while `code` is the stable client-facing error identifier.
 
-## Phase 1 Routes
+## Routes
 
 - `GET /api/v1/health` returns an unauthenticated `HealthResponseWire`.
-- `GET /api/v1/session` is registered as authenticated-route scaffolding and returns typed `unauthorized`.
-- `GET /api/v1/events` is registered as authenticated-route scaffolding and returns typed `unauthorized`.
+- `POST /api/v1/session/pair/start` returns a short-lived one-time pairing code and no long-lived credential.
+- `POST /api/v1/session/pair/finish` exchanges the one-time code and device metadata for a bearer token exactly once.
+- `GET /api/v1/session` requires `Authorization: Bearer <token>` and returns the authenticated device.
+- `GET /api/v1/events` requires auth but remains a typed placeholder until the SSE phase.
 - Unknown routes return typed `not_found`.
 
-No mutating route is registered in Phase 1.
+Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
+returned only from the pairing finish response. Audit records are appended to `<sase_home>/mobile_gateway/audit.jsonl`
+without secrets.
 
 ## Local Run
 
 ```bash
-cargo run -p sase_gateway -- --bind 127.0.0.1:0
+cargo run -p sase_gateway -- --bind 127.0.0.1:0 --sase-home /tmp/sase
 ```
 
 The binary binds loopback by default. Bind-policy hardening and user-facing CLI integration live in later phases.

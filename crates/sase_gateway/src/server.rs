@@ -1,20 +1,22 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use axum::serve as axum_serve;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
-use crate::routes::app;
+use crate::routes::{app_with_state, default_sase_home, GatewayState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub bind: SocketAddr,
+    pub sase_home: PathBuf,
 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([127, 0, 0, 1], 7629)),
+            sase_home: default_sase_home(),
         }
     }
 }
@@ -38,14 +40,17 @@ pub async fn serve(config: GatewayConfig) -> Result<(), GatewayRunError> {
             source,
         }
     })?;
-    serve_listener(listener).await
+    serve_listener(listener, config.sase_home).await
 }
 
 pub async fn serve_listener(
     listener: TcpListener,
+    sase_home: impl Into<PathBuf>,
 ) -> Result<(), GatewayRunError> {
     let local_addr = listener.local_addr().map_err(GatewayRunError::Serve)?;
-    axum_serve(listener, app(local_addr.to_string()))
+    let state =
+        GatewayState::new_with_sase_home(local_addr.to_string(), sase_home);
+    axum_serve(listener, app_with_state(state))
         .await
         .map_err(GatewayRunError::Serve)
 }
@@ -66,10 +71,13 @@ mod tests {
 
     #[tokio::test]
     async fn listener_serves_health_over_http() {
+        let tmp = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle =
-            tokio::spawn(async move { serve_listener(listener).await });
+            tokio::spawn(
+                async move { serve_listener(listener, tmp.path()).await },
+            );
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream
