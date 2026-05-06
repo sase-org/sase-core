@@ -471,12 +471,7 @@ fn counts_for(notifications: &[NotificationWire]) -> NotificationCountsWire {
 }
 
 fn is_priority(notification: &NotificationWire) -> bool {
-    matches!(
-        notification.action.as_deref(),
-        Some("PlanApproval" | "UserQuestion" | "JumpToMentorReview")
-    ) || matches!(notification.sender.as_str(), "axe" | "crs")
-        || (notification.sender == "user-agent"
-            && notification.action.as_deref() == Some("ViewErrorReport"))
+    super::mobile::mobile_notification_priority_from_wire(notification)
 }
 
 fn matches_agent_notification(

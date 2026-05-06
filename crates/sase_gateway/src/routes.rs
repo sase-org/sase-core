@@ -8,7 +8,7 @@ use std::{
 };
 
 use axum::{
-    extract::{rejection::JsonRejection, State},
+    extract::{rejection::JsonRejection, Path as AxumPath, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -18,8 +18,20 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sase_core::notifications::{
+    mobile_action_detail_from_notification,
+    mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
+    mobile_notification_priority_from_wire, MobileActionStateWire,
+    MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
+    NotificationWire, MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+};
+use serde::Deserialize;
 use tower_http::trace::TraceLayer;
 
+use crate::host_bridge::{
+    DynNotificationHostBridge, HostBridgeError, LocalJsonlNotificationBridge,
+    NotificationHostBridge,
+};
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
     AuditLogEntryWire, DeviceTokenStore, StoreError,
@@ -44,6 +56,7 @@ pub struct GatewayState {
     host_label: String,
     event_hub: EventHub,
     heartbeat_interval: StdDuration,
+    notification_bridge: DynNotificationHostBridge,
 }
 
 impl GatewayState {
@@ -87,7 +100,20 @@ impl GatewayState {
             host_label: options.host_label,
             event_hub: EventHub::new(options.event_buffer_capacity),
             heartbeat_interval: options.heartbeat_interval,
+            notification_bridge: DynNotificationHostBridge::new(Arc::new(
+                LocalJsonlNotificationBridge::new(&options.sase_home),
+            )),
         }
+    }
+
+    pub fn new_with_notification_bridge(
+        options: GatewayStateOptions,
+        notification_bridge: Arc<dyn NotificationHostBridge>,
+    ) -> Self {
+        let mut state = Self::new_with_options(options);
+        state.notification_bridge =
+            DynNotificationHostBridge::new(notification_bridge);
+        state
     }
 
     pub fn token_store(&self) -> DeviceTokenStore {
@@ -221,6 +247,8 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/session/pair/finish", post(pair_finish))
         .route("/api/v1/session", get(session))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/notifications", get(list_notifications))
+        .route("/api/v1/notifications/:id", get(notification_detail))
         .fallback(unknown_route)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -370,6 +398,105 @@ async fn events(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct NotificationListQuery {
+    #[serde(default)]
+    unread: bool,
+    #[serde(default)]
+    unread_only: bool,
+    #[serde(default)]
+    include_dismissed: bool,
+    #[serde(default)]
+    include_silent: bool,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    newer_than: Option<String>,
+}
+
+async fn list_notifications(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<NotificationListQuery>,
+) -> Result<Json<MobileNotificationListResponseWire>, ApiError> {
+    authenticate(&state, &headers, "/api/v1/notifications").await?;
+    let snapshot = state
+        .notification_bridge
+        .list_notifications(query.include_dismissed)
+        .map_err(ApiError::from_host_bridge)?;
+    let mut rows = filtered_notifications(snapshot.notifications, &query);
+    sort_newest_first(&mut rows);
+    let total_count = rows.len() as u64;
+    if let Some(limit) = query.limit {
+        rows.truncate(limit as usize);
+    }
+    let next_high_water = rows.first().map(|row| row.timestamp.clone());
+    let notifications = rows
+        .iter()
+        .map(|row| {
+            mobile_notification_card_from_wire(
+                row,
+                MobileActionStateWire::Available,
+                mobile_notification_priority_from_wire(row),
+            )
+        })
+        .collect();
+    Ok(Json(MobileNotificationListResponseWire {
+        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+        notifications,
+        total_count,
+        next_high_water,
+    }))
+}
+
+async fn notification_detail(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<MobileNotificationDetailResponseWire>, ApiError> {
+    authenticate(&state, &headers, "/api/v1/notifications/{id}").await?;
+    let snapshot = state
+        .notification_bridge
+        .list_notifications(true)
+        .map_err(ApiError::from_host_bridge)?;
+    let Some(notification) =
+        snapshot.notifications.into_iter().find(|row| row.id == id)
+    else {
+        return Err(ApiError::notification_not_found(id));
+    };
+    let card = mobile_notification_card_from_wire(
+        &notification,
+        MobileActionStateWire::Available,
+        mobile_notification_priority_from_wire(&notification),
+    );
+    let attachments = notification
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let metadata =
+                state.notification_bridge.notification_file_metadata(path);
+            mobile_attachment_manifest_from_path(
+                &notification.id,
+                index,
+                normalize_home_path(path),
+                metadata.byte_size,
+                metadata.path_available,
+            )
+        })
+        .collect();
+    Ok(Json(MobileNotificationDetailResponseWire {
+        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+        notification: card,
+        notes: notification.notes.clone(),
+        attachments,
+        action: mobile_action_detail_from_notification(
+            &notification,
+            MobileActionStateWire::Available,
+        ),
+    }))
+}
+
 async fn unknown_route(uri: Uri) -> ApiError {
     ApiError::not_found(uri.path())
 }
@@ -474,7 +601,61 @@ fn event_name(payload: &EventPayloadWire) -> &'static str {
         EventPayloadWire::Heartbeat { .. } => "heartbeat",
         EventPayloadWire::Session { .. } => "session",
         EventPayloadWire::ResyncRequired { .. } => "resync_required",
+        EventPayloadWire::NotificationsChanged { .. } => {
+            "notifications_changed"
+        }
     }
+}
+
+fn filtered_notifications(
+    notifications: Vec<NotificationWire>,
+    query: &NotificationListQuery,
+) -> Vec<NotificationWire> {
+    notifications
+        .into_iter()
+        .filter(|row| !query.unread && !query.unread_only || !row.read)
+        .filter(|row| query.include_silent || !row.silent)
+        .filter(|row| {
+            query
+                .newer_than
+                .as_deref()
+                .map(|high_water| {
+                    timestamp_is_newer(&row.timestamp, high_water)
+                })
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+fn sort_newest_first(notifications: &mut [NotificationWire]) {
+    notifications.sort_by(|left, right| {
+        timestamp_sort_key(&right.timestamp)
+            .cmp(&timestamp_sort_key(&left.timestamp))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+}
+
+fn timestamp_sort_key(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc).to_rfc3339())
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn timestamp_is_newer(candidate: &str, high_water: &str) -> bool {
+    timestamp_sort_key(candidate) > timestamp_sort_key(high_water)
+}
+
+fn normalize_home_path(path: &str) -> String {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return path.to_string();
+    };
+    let home = home.to_string_lossy();
+    if path == home {
+        return "~".to_string();
+    }
+    path.strip_prefix(&format!("{home}/"))
+        .map(|rest| format!("~/{rest}"))
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn format_event_id(id: u64) -> String {
@@ -534,6 +715,19 @@ impl ApiError {
                 code: ApiErrorCodeWire::NotFound,
                 message: "route not found".to_string(),
                 target: Some(path.into()),
+                details: None,
+            },
+        }
+    }
+
+    fn notification_not_found(id: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            wire: ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::NotFound,
+                message: "notification not found".to_string(),
+                target: Some(id.into()),
                 details: None,
             },
         }
@@ -602,6 +796,19 @@ impl ApiError {
                 code: ApiErrorCodeWire::Internal,
                 message: error.to_string(),
                 target: Some("device_store".to_string()),
+                details: None,
+            },
+        }
+    }
+
+    fn from_host_bridge(error: HostBridgeError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            wire: ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::Internal,
+                message: error.to_string(),
+                target: Some("notification_bridge".to_string()),
                 details: None,
             },
         }
@@ -690,6 +897,59 @@ mod tests {
             builder = builder.header("last-event-id", last_event_id);
         }
         builder.body(Body::empty()).unwrap()
+    }
+
+    fn notifications_request(token: Option<&str>, uri: &str) -> Request<Body> {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn notification(
+        id: &str,
+        timestamp: &str,
+        action: Option<&str>,
+    ) -> NotificationWire {
+        NotificationWire {
+            id: id.to_string(),
+            timestamp: timestamp.to_string(),
+            sender: if action == Some("PlanApproval") {
+                "plan".to_string()
+            } else {
+                "user-workflow".to_string()
+            },
+            notes: vec![format!("note {id}")],
+            files: Vec::new(),
+            action: action.map(str::to_string),
+            action_data: Default::default(),
+            read: false,
+            dismissed: false,
+            silent: false,
+            muted: false,
+            snooze_until: None,
+        }
+    }
+
+    fn state_for_notifications(
+        tmp: &TempDir,
+        notifications: Vec<NotificationWire>,
+    ) -> GatewayState {
+        GatewayState::new_with_notification_bridge(
+            GatewayStateOptions {
+                bind_addr: "127.0.0.1:0".to_string(),
+                sase_home: tmp.path().to_path_buf(),
+                pairing_ttl: Duration::minutes(5),
+                host_label: "test-host".to_string(),
+                event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+                heartbeat_interval: StdDuration::from_secs(60),
+            },
+            Arc::new(crate::host_bridge::StaticNotificationHostBridge::new(
+                notifications,
+            )),
+        )
     }
 
     async fn pair_device(
@@ -965,6 +1225,148 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn notifications_without_token_returns_typed_unauthorized_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_notifications(&tmp, Vec::new());
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(None, "/api/v1/notifications"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+        assert_eq!(value["target"], "authorization");
+    }
+
+    #[tokio::test]
+    async fn notifications_list_filters_and_orders_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut read = notification(
+            "read-row",
+            "2026-05-06T15:00:00Z",
+            Some("PlanApproval"),
+        );
+        read.read = true;
+        let mut silent =
+            notification("silent-row", "2026-05-06T16:00:00Z", None);
+        silent.silent = true;
+        let newest = notification(
+            "newest-row",
+            "2026-05-06T17:00:00Z",
+            Some("PlanApproval"),
+        );
+        let older = notification("older-row", "2026-05-06T14:00:00Z", None);
+        let state =
+            state_for_notifications(&tmp, vec![older, newest, silent, read]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications?unread=true&limit=1",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["total_count"], 2);
+        assert_eq!(value["next_high_water"], "2026-05-06T17:00:00Z");
+        assert_eq!(value["notifications"][0]["id"], "newest-row");
+        assert_eq!(value["notifications"][0]["priority"], true);
+        assert_eq!(value["notifications"][0]["actionable"], true);
+    }
+
+    #[tokio::test]
+    async fn notifications_list_can_include_dismissed_and_silent_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut dismissed =
+            notification("dismissed-row", "2026-05-06T15:00:00Z", None);
+        dismissed.dismissed = true;
+        let mut silent =
+            notification("silent-row", "2026-05-06T16:00:00Z", None);
+        silent.silent = true;
+        let state = state_for_notifications(&tmp, vec![dismissed, silent]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications?include_dismissed=true&include_silent=true",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total_count"], 2);
+        assert_eq!(value["notifications"][0]["id"], "silent-row");
+        assert_eq!(value["notifications"][1]["id"], "dismissed-row");
+    }
+
+    #[tokio::test]
+    async fn notification_detail_returns_notes_action_and_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attachment = tmp.path().join("plan.md");
+        std::fs::write(&attachment, "plan").unwrap();
+        let mut row = notification(
+            "detail-row",
+            "2026-05-06T15:00:00Z",
+            Some("PlanApproval"),
+        );
+        row.files = vec![attachment.to_string_lossy().to_string()];
+        row.action_data
+            .insert("response_dir".to_string(), "/tmp/response".to_string());
+        let state = state_for_notifications(&tmp, vec![row]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/detail-row",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notification"]["id"], "detail-row");
+        assert_eq!(value["notes"], json!(["note detail-row"]));
+        assert_eq!(value["attachments"][0]["byte_size"], 4);
+        assert_eq!(value["attachments"][0]["downloadable"], true);
+        assert_eq!(value["action"]["kind"], "plan_approval");
+        assert_eq!(value["action"]["response_dir"], "/tmp/response");
+    }
+
+    #[tokio::test]
+    async fn notification_detail_not_found_returns_typed_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_notifications(&tmp, Vec::new());
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/missing-row",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["code"], "not_found");
+        assert_eq!(value["message"], "notification not found");
+        assert_eq!(value["target"], "missing-row");
     }
 
     #[tokio::test]

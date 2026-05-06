@@ -360,6 +360,17 @@ pub fn mobile_notification_card_from_wire(
     }
 }
 
+pub fn mobile_notification_priority_from_wire(
+    notification: &NotificationWire,
+) -> bool {
+    matches!(
+        notification.action.as_deref(),
+        Some("PlanApproval" | "UserQuestion" | "JumpToMentorReview")
+    ) || matches!(notification.sender.as_str(), "axe" | "crs")
+        || (notification.sender == "user-agent"
+            && notification.action.as_deref() == Some("ViewErrorReport"))
+}
+
 pub fn mobile_action_detail_from_notification(
     notification: &NotificationWire,
     state: MobileActionStateWire,

@@ -21,6 +21,7 @@ axum = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 hex = { workspace = true }
 rand = { workspace = true }
+sase_core = { path = "../sase_core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

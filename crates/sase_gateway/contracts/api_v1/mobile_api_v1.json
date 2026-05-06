@@ -72,6 +72,10 @@
       "heartbeat": {
         "sequence": "u64"
       },
+      "notifications_changed": {
+        "notification_id": "string|null",
+        "reason": "string"
+      },
       "resync_required": {
         "reason": "string"
       },
@@ -273,6 +277,25 @@
       "protocol": "server_sent_events",
       "resume_header": "Last-Event-ID",
       "success": "EventRecordWire stream"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/notifications",
+      "query": "MobileNotificationListRequestWire fields as URL query parameters",
+      "success": "MobileNotificationListResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/notifications/{id}",
+      "success": "MobileNotificationDetailResponseWire"
     }
   ],
   "schema_version": 1

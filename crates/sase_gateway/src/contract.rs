@@ -66,6 +66,21 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "protocol": "server_sent_events",
                 "resume_header": "Last-Event-ID",
                 "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/notifications",
+                "auth": true,
+                "query": "MobileNotificationListRequestWire fields as URL query parameters",
+                "success": "MobileNotificationListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/v1/notifications/{id}",
+                "auth": true,
+                "success": "MobileNotificationDetailResponseWire",
+                "errors": ["ApiErrorWire"]
             }
         ],
         "records": {
@@ -124,6 +139,10 @@ pub fn api_v1_contract_snapshot() -> Value {
                 },
                 "resync_required": {
                     "reason": "string"
+                },
+                "notifications_changed": {
+                    "reason": "string",
+                    "notification_id": "string|null"
                 }
             },
             "GatewayBindWire": {

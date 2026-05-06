@@ -32,11 +32,20 @@ The HTTP status code carries transport status, while `code` is the stable client
   IDs, and reconnects may pass `Last-Event-ID` to replay buffered newer events. The first implementation keeps an
   in-memory ring buffer, so clients should handle `resync_required` after a restart or buffer overflow by fetching full
   state.
+- `GET /api/v1/notifications` requires auth and returns newest-first mobile notification cards from
+  `<sase_home>/notifications/notifications.jsonl`. Supported query fields are `unread`/`unread_only`,
+  `include_dismissed`, `include_silent`, `limit`, and `newer_than`.
+- `GET /api/v1/notifications/{id}` requires auth and returns one notification with full notes, action detail, and
+  attachment manifest placeholders. Phase 2 manifests include display metadata and no download tokens yet.
 - Unknown routes return typed `not_found`.
 
 Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
 returned only from the pairing finish response. Audit records are appended to `<sase_home>/mobile_gateway/audit.jsonl`
 without secrets.
+
+The gateway currently reads notifications by polling the host JSONL store on each request. Mutating notification routes
+in later phases should publish `notifications_changed` SSE events; passive file watching is intentionally left out of
+Phase 2.
 
 ## Local Run
 

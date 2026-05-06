@@ -111,9 +111,19 @@ pub struct ApiErrorWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "data")]
 pub enum EventPayloadWire {
-    Heartbeat { sequence: u64 },
-    Session { device_id: String },
-    ResyncRequired { reason: String },
+    Heartbeat {
+        sequence: u64,
+    },
+    Session {
+        device_id: String,
+    },
+    ResyncRequired {
+        reason: String,
+    },
+    NotificationsChanged {
+        reason: String,
+        notification_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

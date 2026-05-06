@@ -903,6 +903,7 @@ dependencies = [
  "chrono",
  "hex",
  "rand",
+ "sase_core",
  "serde",
  "serde_json",
  "sha2",
