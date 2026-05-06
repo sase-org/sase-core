@@ -81,6 +81,54 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "auth": true,
                 "success": "MobileNotificationDetailResponseWire",
                 "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/approve",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/run",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/reject",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/epic",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/legend",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/plan/{prefix}/feedback",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
             }
         ],
         "records": {

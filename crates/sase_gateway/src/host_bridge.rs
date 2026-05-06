@@ -5,11 +5,15 @@ use std::{
 };
 
 use sase_core::notifications::{
-    current_unix_time, legacy_telegram_pending_actions_path,
-    pending_action_state_from_store, pending_action_store_path,
-    read_notifications_snapshot_with_options, MobileActionStateWire,
-    NotificationStoreSnapshotWire, NotificationWire,
+    apply_notification_state_update, current_unix_time,
+    legacy_telegram_pending_actions_path, pending_action_state_from_store,
+    pending_action_store_path, plan_plan_action_response,
+    read_notifications_snapshot_with_options, read_pending_action_store,
+    resolve_pending_action_prefix, ActionResultWire, MobileActionStateWire,
+    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
+    NotificationWire, PendingActionPrefixResolutionWire, PlanActionRequestWire,
 };
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 #[derive(Clone)]
@@ -39,6 +43,13 @@ impl DynNotificationHostBridge {
         notification: &NotificationWire,
     ) -> MobileActionStateWire {
         self.0.action_state(notification)
+    }
+
+    pub fn execute_plan_action(
+        &self,
+        request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.0.execute_plan_action(request)
     }
 }
 
@@ -82,6 +93,16 @@ pub trait NotificationHostBridge: Send + Sync {
             None,
             current_unix_time(),
         )
+    }
+
+    fn execute_plan_action(
+        &self,
+        _request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "plan action mutations are not supported by this bridge"
+                .to_string(),
+        ))
     }
 }
 
@@ -146,6 +167,117 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
                 )
             }
         }
+    }
+
+    fn execute_plan_action(
+        &self,
+        request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        let store = read_pending_action_store(
+            &self.pending_actions_path,
+            Some(&self.legacy_telegram_pending_actions_path),
+        )
+        .map_err(HostBridgeError::ReadPendingActions)?;
+        let identity = resolve_pending_action_prefix(&store, &request.prefix);
+        match identity.resolution {
+            PendingActionPrefixResolutionWire::Exact
+            | PendingActionPrefixResolutionWire::UniquePrefix => {}
+            PendingActionPrefixResolutionWire::Missing => {
+                return Err(HostBridgeError::ActionMissing(
+                    request.prefix.clone(),
+                ));
+            }
+            PendingActionPrefixResolutionWire::AmbiguousPrefix
+            | PendingActionPrefixResolutionWire::DuplicateFullId => {
+                return Err(HostBridgeError::AmbiguousPrefix(
+                    request.prefix.clone(),
+                ));
+            }
+        }
+
+        let snapshot = self.list_notifications(true)?;
+        let notification = snapshot
+            .notifications
+            .into_iter()
+            .find(|row| row.id == identity.notification_id)
+            .ok_or_else(|| {
+                HostBridgeError::ActionMissing(identity.notification_id.clone())
+            })?;
+        if notification.action.as_deref() != Some("PlanApproval") {
+            return Err(HostBridgeError::UnsupportedAction(
+                notification
+                    .action
+                    .clone()
+                    .unwrap_or_else(|| "non_action".to_string()),
+            ));
+        }
+
+        let state = pending_action_state_from_store(
+            &store,
+            &notification,
+            current_unix_time(),
+        );
+        match state {
+            MobileActionStateWire::Available => {}
+            MobileActionStateWire::AlreadyHandled => {
+                return Err(HostBridgeError::ActionAlreadyHandled(
+                    notification.id,
+                ));
+            }
+            MobileActionStateWire::Stale => {
+                return Err(HostBridgeError::ActionStale(notification.id));
+            }
+            MobileActionStateWire::MissingRequest
+            | MobileActionStateWire::MissingTarget => {
+                return Err(HostBridgeError::MissingTarget(notification.id));
+            }
+            MobileActionStateWire::Unsupported => {
+                return Err(HostBridgeError::UnsupportedAction(
+                    "PlanApproval".to_string(),
+                ));
+            }
+        }
+
+        let response_dir = action_path(&notification, "response_dir")
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                HostBridgeError::MissingTarget("response_dir".into())
+            })?;
+        if !response_dir.join("plan_request.json").is_file() {
+            return Err(HostBridgeError::ActionAlreadyHandled(
+                notification.id.clone(),
+            ));
+        }
+        if notification.files.is_empty() {
+            return Err(HostBridgeError::MissingTarget("plan_file".into()));
+        }
+
+        let mut result = plan_plan_action_response(request).map_err(|err| {
+            HostBridgeError::InvalidActionRequest(err.message)
+        })?;
+        result.notification_id = Some(notification.id.clone());
+        result.state = MobileActionStateWire::Available;
+
+        let response_path = response_dir.join(&result.response_file);
+        write_response_file_once(&response_path, &result.response_json)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    HostBridgeError::ActionAlreadyHandled(
+                        notification.id.clone(),
+                    )
+                } else {
+                    HostBridgeError::WriteResponse(err.to_string())
+                }
+            })?;
+
+        let _ = apply_notification_state_update(
+            &self.notifications_path,
+            &NotificationStateUpdateWire::MarkDismissed {
+                id: notification.id.clone(),
+            },
+        );
+        persist_plan_approval_metadata(&notification, request);
+        Ok(result)
     }
 }
 
@@ -221,6 +353,24 @@ impl NotificationHostBridge for StaticNotificationHostBridge {
 pub enum HostBridgeError {
     #[error("failed to read notifications: {0}")]
     ReadNotifications(String),
+    #[error("failed to read pending actions: {0}")]
+    ReadPendingActions(String),
+    #[error("action prefix not found: {0}")]
+    ActionMissing(String),
+    #[error("action prefix is ambiguous: {0}")]
+    AmbiguousPrefix(String),
+    #[error("unsupported action: {0}")]
+    UnsupportedAction(String),
+    #[error("action already handled: {0}")]
+    ActionAlreadyHandled(String),
+    #[error("action is stale: {0}")]
+    ActionStale(String),
+    #[error("missing action target: {0}")]
+    MissingTarget(String),
+    #[error("invalid action request: {0}")]
+    InvalidActionRequest(String),
+    #[error("failed to write response: {0}")]
+    WriteResponse(String),
 }
 
 fn expand_home_path(path: &str) -> PathBuf {
@@ -235,4 +385,79 @@ fn expand_home_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+fn action_path(notification: &NotificationWire, key: &str) -> Option<PathBuf> {
+    let raw = notification.action_data.get(key)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(expand_home_path(raw))
+}
+
+fn write_response_file_once(
+    path: &Path,
+    value: &JsonValue,
+) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "response path has no parent",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    serde_json::to_writer_pretty(&mut file, value)
+        .map_err(std::io::Error::other)?;
+    use std::io::Write;
+    file.write_all(b"\n")?;
+    file.flush()
+}
+
+fn persist_plan_approval_metadata(
+    notification: &NotificationWire,
+    request: &PlanActionRequestWire,
+) {
+    let Some(response_dir) = action_path(notification, "response_dir") else {
+        return;
+    };
+    let Some(parent) = response_dir.parent() else {
+        return;
+    };
+    let meta_path = parent.join("agent_meta.json");
+    let mut meta = match std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<JsonValue>(&content).ok())
+    {
+        Some(JsonValue::Object(object)) => object,
+        _ => serde_json::Map::new(),
+    };
+    let action = match request.choice {
+        sase_core::notifications::PlanActionChoiceWire::Approve => {
+            if request.commit_plan.unwrap_or(true)
+                && !request.run_coder.unwrap_or(true)
+            {
+                "commit"
+            } else {
+                "approve"
+            }
+        }
+        sase_core::notifications::PlanActionChoiceWire::Epic => "epic",
+        sase_core::notifications::PlanActionChoiceWire::Legend => "legend",
+        _ => return,
+    };
+    meta.insert("plan_approved".to_string(), JsonValue::Bool(true));
+    meta.insert(
+        "plan_action".to_string(),
+        JsonValue::String(action.to_string()),
+    );
+    if let Ok(mut file) = std::fs::File::create(&meta_path) {
+        let _ =
+            serde_json::to_writer_pretty(&mut file, &JsonValue::Object(meta));
+        use std::io::Write;
+        let _ = file.write_all(b"\n");
+    }
 }

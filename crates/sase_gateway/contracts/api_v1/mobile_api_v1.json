@@ -296,6 +296,66 @@
       "method": "GET",
       "path": "/api/v1/notifications/{id}",
       "success": "MobileNotificationDetailResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/approve",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/run",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/reject",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/epic",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/legend",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/plan/{prefix}/feedback",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
     }
   ],
   "schema_version": 1
