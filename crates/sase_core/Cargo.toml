@@ -19,9 +19,7 @@ regex = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 rusqlite = { workspace = true }
-petgraph = { workspace = true }
 tempfile = "3"
-sha2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

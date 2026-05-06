@@ -11,7 +11,6 @@
 pub mod agent_cleanup;
 pub mod agent_launch;
 pub mod agent_scan;
-pub mod artifact;
 pub mod bead;
 pub mod git_query;
 pub mod notifications;
@@ -71,31 +70,6 @@ pub use agent_scan::{
     AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, AGENT_SCAN_WIRE_SCHEMA_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
-};
-pub use artifact::{
-    artifact_children, artifact_detail, artifact_doctor, artifact_export_dot,
-    artifact_export_json, artifact_export_mermaid, artifact_inbound_neighbors,
-    artifact_is_reachable_to_root, artifact_list, artifact_materialize_graph,
-    artifact_outbound_neighbors, artifact_path_to_root, artifact_search,
-    artifact_show, artifact_show_paged, artifact_summary,
-    deterministic_artifact_link_id, open_artifact_store, remove_artifact_link,
-    remove_artifact_node, upsert_artifact_link, upsert_artifact_node,
-    upsert_artifact_payload, ArtifactDetailPagedWire, ArtifactDetailWire,
-    ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
-    ArtifactGraphOptionsWire, ArtifactGraphWire, ArtifactGroupSummaryWire,
-    ArtifactKindWire, ArtifactLinkRemoveWire, ArtifactLinkTypeWire,
-    ArtifactLinkUpsertWire, ArtifactLinkWire, ArtifactMutationResultWire,
-    ArtifactNodeRemoveWire, ArtifactNodeUpsertWire, ArtifactNodeWire,
-    ArtifactPageRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
-    ArtifactRelationPageWire, ArtifactStore, ArtifactSummaryRequestWire,
-    ArtifactSummaryWire, ArtifactTypeCountWire, ARTIFACT_KIND_AGENT,
-    ARTIFACT_KIND_BEAD, ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_COMMIT,
-    ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
-    ARTIFACT_KIND_ROOT, ARTIFACT_KIND_THOUGHT, ARTIFACT_KIND_UNKNOWN,
-    ARTIFACT_LINK_CREATED, ARTIFACT_LINK_PARENT, ARTIFACT_LINK_RELATED,
-    ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_PROVENANCE_MANUAL, ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK,
-    ARTIFACT_TOMBSTONE_NODE, ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 pub use bead::{
     add_dependency as bead_add_dependency,
