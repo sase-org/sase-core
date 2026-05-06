@@ -60,6 +60,16 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `POST /api/v1/agents/{name}/kill` kills an exact agent name and persists mobile retry context.
 - `POST /api/v1/agents/{name}/retry` retries an agent from durable mobile launch/kill context or artifact prompt data
   and preserves an optional `request_id` on the new launch context.
+- `GET /api/v1/changespec-tags` lists active ChangeSpec workflow tags, optionally filtered by known project and limit.
+- `GET /api/v1/xprompts/catalog` returns structured xprompt picker records, with optional best-effort PDF attachment
+  metadata when `include_pdf=true`.
+- `GET /api/v1/beads` lists open/in-progress beads by default, with known-project, cross-project, status/type/tier,
+  closed, and limit filters.
+- `GET /api/v1/beads/{id}` returns a structured bead detail record, including linked plan/design path display metadata
+  when available.
+- `POST /api/v1/update/start` starts the fixed SASE update worker and publishes `helpers_changed` on success.
+- `GET /api/v1/update/{job_id}` reads structured update status and publishes `helpers_changed` when a status check
+  observes the job.
 - Unknown routes return typed `not_found`.
 
 Device tokens are stored as SHA-256 hashes under `<sase_home>/mobile_gateway/devices.json`; raw bearer tokens are
@@ -71,6 +81,11 @@ contexts in `agent_kill_contexts/`, image uploads in `uploads/images/<device_id>
 in `device_project_contexts/`. Project context IDs are product-shaped (`home`, `project:<name>`, or a persisted
 `<project-context>:<workflow>:<ref>` VCS context) and are derived from known SASE projects, not arbitrary
 client-supplied host paths.
+
+Workflow helper routes call fixed `sase mobile helper-bridge <operation>` commands through the helper host bridge. They
+do not accept mobile-supplied shell commands, cwd values, environment variables, project file paths, or arbitrary bridge
+argv. ChangeSpec, xprompt, and bead helpers are read-only; the only mutating helper route starts the preconfigured
+update worker.
 
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
 and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
@@ -204,6 +219,35 @@ curl -sS -X POST "$BASE_URL/api/v1/agents/mobile.tests/retry" \
   -d '{"schema_version":1}'
 ```
 
+Use workflow helper APIs for native mobile pickers and update status:
+
+```bash
+curl -sS "$BASE_URL/api/v1/changespec-tags?project=sase&limit=25" \
+  -H "$AUTH_HEADER"
+
+curl -sS "$BASE_URL/api/v1/xprompts/catalog?project=sase&tag=changespec&limit=50" \
+  -H "$AUTH_HEADER"
+
+curl -sS "$BASE_URL/api/v1/beads?project=sase&status=in_progress&limit=25" \
+  -H "$AUTH_HEADER"
+
+curl -sS "$BASE_URL/api/v1/beads/sase-26.4.6?project=sase" \
+  -H "$AUTH_HEADER"
+
+curl -sS -X POST "$BASE_URL/api/v1/update/start" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1,"request_id":"mobile-update-1"}'
+
+curl -sS "$BASE_URL/api/v1/update/job_123" \
+  -H "$AUTH_HEADER"
+```
+
+Every helper success response includes a common `result` object with `status`, `message`, `warnings`, `skipped`, and
+`partial_failure_count`. Clients should use the structured status and skipped rows for control flow; `message` is display
+text. Update status polling is authoritative in the MVP, even though update start/status checks also publish
+`helpers_changed` events.
+
 Duplicate, stale, ambiguous-prefix, already-handled, unsupported, and missing-target cases return typed `ApiErrorWire`
 records and never overwrite existing response files.
 
@@ -233,5 +277,6 @@ cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1
 
 MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish state-change SSE
 events; oversized or path-unsafe attachments are listed without tokens; agent project context selects only known SASE
-projects or prompt-declared VCS refs; and legacy Telegram pending-action JSON remains a compatibility source while
-Telegram adoption of the shared store is incremental.
+projects or prompt-declared VCS refs; helper routes are read-only except update start; xprompt PDF generation is
+optional; update status polling is authoritative; and legacy Telegram pending-action JSON remains a compatibility source
+while Telegram adoption of the shared store is incremental.
