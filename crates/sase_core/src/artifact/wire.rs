@@ -322,6 +322,42 @@ pub struct ArtifactTypeCountWire {
     pub total_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSummaryRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+}
+
+impl Default for ArtifactSummaryRequestWire {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_WIRE_SCHEMA_VERSION,
+            artifact_ids: Vec::new(),
+        }
+    }
+}
+
+/// Batched immediate-neighbor summary for list-row artifact indicators.
+///
+/// `artifact_summary` counts distinct visible artifacts connected to each
+/// requested id by visible non-parent links in either direction. Parent links
+/// are intentionally excluded so containment/root relationships do not pollute
+/// CL and Agent row indicators; created, worker, and related links are counted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSummaryWire {
+    pub artifact_id: String,
+    pub state: String,
+    pub total_linked_count: u64,
+    #[serde(default)]
+    pub file_type_counts: Vec<ArtifactTypeCountWire>,
+    #[serde(default)]
+    pub kind_counts: Vec<ArtifactTypeCountWire>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactDetailPagedWire {
     pub schema_version: u32,

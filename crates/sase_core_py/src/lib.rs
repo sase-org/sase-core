@@ -54,6 +54,7 @@
 //! - `artifact_search(index_path: str, query: dict | None = None) -> list[dict]`
 //! - `artifact_show(index_path: str, artifact_id: str) -> dict`
 //! - `artifact_show_paged(index_path: str, artifact_id: str, request: dict | None = None) -> dict`
+//! - `artifact_summary(index_path: str, request: dict | None = None) -> list[dict]`
 //! - `artifact_graph(index_path: str, options: dict | None = None) -> dict`
 //! - `artifact_export(index_path: str, options: dict | None = None, format: str = "json") -> str`
 //! - `artifact_rebuild(index_path: str, request: dict | None = None) -> dict`
@@ -127,6 +128,7 @@ use sase_core::artifact::{
     artifact_search as core_artifact_search,
     artifact_show as core_artifact_show,
     artifact_show_paged as core_artifact_show_paged,
+    artifact_summary as core_artifact_summary,
     artifact_upsert_path as core_artifact_upsert_path,
     open_artifact_store as core_open_artifact_store,
     remove_artifact_link as core_remove_artifact_link,
@@ -138,7 +140,7 @@ use sase_core::artifact::{
     ArtifactLinkRemoveWire, ArtifactLinkUpsertWire, ArtifactNodeRemoveWire,
     ArtifactNodeUpsertWire, ArtifactPageRequestWire,
     ArtifactPathUpsertRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
-    ArtifactRebuildRequestWire,
+    ArtifactRebuildRequestWire, ArtifactSummaryRequestWire,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -675,6 +677,32 @@ fn py_artifact_show_paged<'py>(
         })
         .map_err(artifact_store_error_to_pyerr)?;
     json_serializable_to_py(py, &detail)
+}
+
+/// Return batched immediate-neighbor summaries for list-row indicators.
+#[pyfunction]
+#[pyo3(name = "artifact_summary", signature = (index_path, request = None))]
+fn py_artifact_summary<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    request: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let request = match request {
+        Some(dict) => artifact_wire_from_pydict::<ArtifactSummaryRequestWire>(
+            dict,
+            "request",
+            "ArtifactSummaryRequestWire",
+        )?,
+        None => ArtifactSummaryRequestWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let summaries = py
+        .allow_threads(|| {
+            let store = core_open_artifact_store(&index)?;
+            core_artifact_summary(&store, request)
+        })
+        .map_err(artifact_store_error_to_pyerr)?;
+    json_serializable_to_py(py, &summaries)
 }
 
 /// Materialize an artifact graph with optional `ArtifactGraphOptionsWire`.
@@ -2676,6 +2704,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_show_paged, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_graph, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_export, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_rebuild, m)?)?;
@@ -3219,6 +3248,26 @@ mod tests {
                 paged_detail_value["children_page"]["summary"]["group_key"],
                 json!("children")
             );
+            let summary_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "artifact_ids": ["/tmp/artifact-binding.md", "missing"]
+                }),
+            )
+            .unwrap();
+            let summary_request =
+                summary_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let summaries =
+                py_artifact_summary(py, index_str, Some(summary_request))
+                    .unwrap();
+            let summaries_value = py_to_json_value(summaries.bind(py)).unwrap();
+            assert_eq!(
+                summaries_value[0]["artifact_id"],
+                json!("/tmp/artifact-binding.md")
+            );
+            assert_eq!(summaries_value[0]["state"], json!("ok"));
+            assert_eq!(summaries_value[1]["state"], json!("missing"));
 
             let graph_options_obj = json_value_to_py(
                 py,

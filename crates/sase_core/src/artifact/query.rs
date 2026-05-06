@@ -1,6 +1,6 @@
 //! Deterministic read APIs for the unified artifact graph.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection,
@@ -13,9 +13,10 @@ use super::wire::{
     ArtifactDoctorIssueWire, ArtifactDoctorOptionsWire, ArtifactDoctorWire,
     ArtifactGroupSummaryWire, ArtifactLinkWire, ArtifactNodeWire,
     ArtifactPageRequestWire, ArtifactPayloadWire, ArtifactQueryWire,
-    ArtifactRelationPageWire, ArtifactTypeCountWire, ARTIFACT_KIND_DIRECTORY,
-    ARTIFACT_KIND_FILE, ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED,
-    ARTIFACT_ROOT_ID, ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
+    ArtifactRelationPageWire, ArtifactSummaryRequestWire, ArtifactSummaryWire,
+    ArtifactTypeCountWire, ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE,
+    ARTIFACT_LINK_PARENT, ARTIFACT_PROVENANCE_DERIVED, ARTIFACT_ROOT_ID,
+    ARTIFACT_TOMBSTONE_LINK, ARTIFACT_TOMBSTONE_NODE,
     ARTIFACT_WIRE_SCHEMA_VERSION,
 };
 
@@ -104,6 +105,191 @@ pub fn artifact_search(
     query: ArtifactQueryWire,
 ) -> Result<Vec<ArtifactNodeWire>, String> {
     query_artifacts(store.connection(), query)
+}
+
+pub fn artifact_summary(
+    store: &ArtifactStore,
+    request: ArtifactSummaryRequestWire,
+) -> Result<Vec<ArtifactSummaryWire>, String> {
+    validate_schema_version(request.schema_version)?;
+    summarize_artifacts(store.connection(), &request.artifact_ids)
+}
+
+#[derive(Debug, Default)]
+struct SummaryAccumulator {
+    exists: bool,
+    linked_ids: BTreeSet<String>,
+    file_type_counts: BTreeMap<String, u64>,
+    kind_counts: BTreeMap<String, u64>,
+}
+
+impl SummaryAccumulator {
+    fn add_linked_artifact(
+        &mut self,
+        linked_id: String,
+        kind: String,
+        artifact_type: String,
+    ) {
+        if !self.linked_ids.insert(linked_id) {
+            return;
+        }
+        if kind == ARTIFACT_KIND_FILE {
+            *self.file_type_counts.entry(artifact_type).or_insert(0) += 1;
+        } else {
+            *self.kind_counts.entry(kind).or_insert(0) += 1;
+        }
+    }
+
+    fn into_wire(self, artifact_id: String) -> ArtifactSummaryWire {
+        let state = if self.exists { "ok" } else { "missing" };
+        ArtifactSummaryWire {
+            artifact_id,
+            state: state.to_string(),
+            total_linked_count: self.linked_ids.len() as u64,
+            file_type_counts: self
+                .file_type_counts
+                .into_iter()
+                .map(|(artifact_type, total_count)| ArtifactTypeCountWire {
+                    artifact_type,
+                    total_count,
+                })
+                .collect(),
+            kind_counts: self
+                .kind_counts
+                .into_iter()
+                .map(|(artifact_type, total_count)| ArtifactTypeCountWire {
+                    artifact_type,
+                    total_count,
+                })
+                .collect(),
+            error: None,
+        }
+    }
+}
+
+fn summarize_artifacts(
+    conn: &Connection,
+    artifact_ids: &[String],
+) -> Result<Vec<ArtifactSummaryWire>, String> {
+    let mut summaries: BTreeMap<usize, SummaryAccumulator> = artifact_ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| (index, SummaryAccumulator::default()))
+        .collect();
+
+    for (chunk_start, chunk) in artifact_ids.chunks(400).enumerate() {
+        summarize_artifact_chunk(
+            conn,
+            chunk_start * 400,
+            chunk,
+            &mut summaries,
+        )?;
+    }
+
+    Ok(artifact_ids
+        .iter()
+        .enumerate()
+        .map(|(index, artifact_id)| {
+            summaries
+                .remove(&index)
+                .unwrap_or_default()
+                .into_wire(artifact_id.clone())
+        })
+        .collect())
+}
+
+fn summarize_artifact_chunk(
+    conn: &Connection,
+    offset: usize,
+    artifact_ids: &[String],
+    summaries: &mut BTreeMap<usize, SummaryAccumulator>,
+) -> Result<(), String> {
+    if artifact_ids.is_empty() {
+        return Ok(());
+    }
+
+    let values_sql = vec!["(?, ?)"; artifact_ids.len()].join(", ");
+    let sql = format!(
+        r#"
+        WITH requested(id, ord) AS (VALUES {values_sql})
+        SELECT
+            r.ord,
+            CASE WHEN a.id IS NULL THEN 0 ELSE 1 END AS exists_visible,
+            linked.id,
+            linked.kind,
+            COALESCE(linked.artifact_type, '')
+        FROM requested r
+        LEFT JOIN artifacts a
+          ON a.id = r.id
+         AND NOT EXISTS (
+             SELECT 1 FROM manual_tombstones t
+             WHERE t.tombstone_type = ? AND t.artifact_id = a.id
+         )
+        LEFT JOIN artifact_links l
+          ON a.id IS NOT NULL
+         AND (l.source_id = r.id OR l.target_id = r.id)
+         AND l.link_type <> ?
+         AND NOT EXISTS (
+             SELECT 1 FROM manual_tombstones t
+             WHERE t.tombstone_type = ? AND t.link_id = l.id
+         )
+        LEFT JOIN artifacts linked
+          ON linked.id = CASE
+              WHEN l.source_id = r.id THEN l.target_id
+              ELSE l.source_id
+          END
+         AND linked.id <> r.id
+         AND NOT EXISTS (
+             SELECT 1 FROM manual_tombstones t
+             WHERE t.tombstone_type = ? AND t.artifact_id = linked.id
+         )
+        ORDER BY r.ord, linked.kind, linked.artifact_type, linked.id
+        "#
+    );
+
+    let mut values: Vec<SqlValue> =
+        Vec::with_capacity(artifact_ids.len() * 2 + 4);
+    for (index, artifact_id) in artifact_ids.iter().enumerate() {
+        values.push(SqlValue::Text(artifact_id.clone()));
+        values.push(SqlValue::Integer((offset + index) as i64));
+    }
+    values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_NODE.to_string()));
+    values.push(SqlValue::Text(ARTIFACT_LINK_PARENT.to_string()));
+    values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_LINK.to_string()));
+    values.push(SqlValue::Text(ARTIFACT_TOMBSTONE_NODE.to_string()));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    for row in rows {
+        let (ord, exists, linked_id, kind, artifact_type) =
+            row.map_err(|e| e.to_string())?;
+        let summary = summaries.entry(ord).or_default();
+        summary.exists = exists;
+        let (Some(linked_id), Some(kind)) = (linked_id, kind) else {
+            continue;
+        };
+        let artifact_type = if kind == ARTIFACT_KIND_FILE {
+            artifact_type
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "misc".to_string())
+        } else {
+            String::new()
+        };
+        summary.add_linked_artifact(linked_id, kind, artifact_type);
+    }
+
+    Ok(())
 }
 
 fn query_artifacts(
@@ -1614,9 +1800,9 @@ mod tests {
         ArtifactNodeUpsertWire, ArtifactPayloadWire, ARTIFACT_FILE_TYPE_CHAT,
         ARTIFACT_FILE_TYPE_METADATA_KEY, ARTIFACT_FILE_TYPE_MISC,
         ARTIFACT_FILE_TYPE_PROJECT, ARTIFACT_KIND_AGENT,
-        ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE, ARTIFACT_KIND_PROJECT,
-        ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED, ARTIFACT_LINK_WORKER,
-        ARTIFACT_PROVENANCE_MANUAL,
+        ARTIFACT_KIND_CHANGESPEC, ARTIFACT_KIND_DIRECTORY, ARTIFACT_KIND_FILE,
+        ARTIFACT_KIND_PROJECT, ARTIFACT_LINK_CREATED, ARTIFACT_LINK_RELATED,
+        ARTIFACT_LINK_WORKER, ARTIFACT_PROVENANCE_MANUAL,
     };
 
     use super::*;
@@ -2110,6 +2296,83 @@ mod tests {
         let full_detail = artifact_show(&store, "/tmp").unwrap();
         assert_eq!(full_detail.children.len(), 17);
         assert!(full_detail.outbound_links.len() > related_page.links.len());
+    }
+
+    #[test]
+    fn summary_batches_immediate_non_parent_neighbors() {
+        let mut store = fixture_store();
+        let mut chat_file =
+            manual_node("/tmp/chat.json", ARTIFACT_KIND_FILE, "chat");
+        chat_file.metadata.insert(
+            ARTIFACT_FILE_TYPE_METADATA_KEY.to_string(),
+            json!(ARTIFACT_FILE_TYPE_CHAT),
+        );
+        upsert_node(&mut store, chat_file);
+        upsert_node(
+            &mut store,
+            manual_node("cl-one", ARTIFACT_KIND_CHANGESPEC, "cl one"),
+        );
+        upsert_node(
+            &mut store,
+            manual_node("agent-2", ARTIFACT_KIND_AGENT, "agent two"),
+        );
+
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_CREATED, "agent-1", "/tmp/chat.json"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_PARENT, "/tmp/chat.json", "agent-1"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_RELATED, "agent-1", "cl-one"),
+        );
+        upsert_link(
+            &mut store,
+            manual_link(ARTIFACT_LINK_WORKER, "cl-one", "agent-2"),
+        );
+
+        let summaries = artifact_summary(
+            &store,
+            ArtifactSummaryRequestWire {
+                artifact_ids: vec![
+                    "agent-1".to_string(),
+                    "cl-one".to_string(),
+                    "missing".to_string(),
+                ],
+                ..ArtifactSummaryRequestWire::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summaries[0].artifact_id, "agent-1");
+        assert_eq!(summaries[0].state, "ok");
+        assert_eq!(summaries[0].total_linked_count, 3);
+        assert_eq!(
+            summaries[0].file_type_counts,
+            vec![
+                ArtifactTypeCountWire {
+                    artifact_type: ARTIFACT_FILE_TYPE_CHAT.to_string(),
+                    total_count: 1,
+                },
+                ArtifactTypeCountWire {
+                    artifact_type: ARTIFACT_FILE_TYPE_MISC.to_string(),
+                    total_count: 1,
+                }
+            ]
+        );
+        assert_eq!(
+            summaries[0].kind_counts,
+            vec![ArtifactTypeCountWire {
+                artifact_type: ARTIFACT_KIND_CHANGESPEC.to_string(),
+                total_count: 1,
+            }]
+        );
+        assert_eq!(summaries[1].total_linked_count, 2);
+        assert_eq!(summaries[2].state, "missing");
+        assert_eq!(summaries[2].total_linked_count, 0);
     }
 
     #[test]
