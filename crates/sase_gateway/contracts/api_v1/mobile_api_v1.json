@@ -119,12 +119,12 @@
       "defined_by": "sase_core::notifications::mobile",
       "display_name": "string",
       "download_requires_auth": "bool",
-      "downloadable": "bool",
+      "downloadable": "bool; false for missing, oversized, symlinked, traversal, directory, or unknown-risk files",
       "id": "string",
       "kind": "markdown|pdf|diff|image|text|json|directory|unknown",
       "path_available": "bool",
       "source_notification_id": "string",
-      "token": "string|null"
+      "token": "short-lived string|null; only detail responses mint downloadable tokens"
     },
     "MobileNotificationCardWire": {
       "action_summary": "MobileActionSummaryWire|null",
@@ -296,6 +296,21 @@
       "method": "GET",
       "path": "/api/v1/notifications/{id}",
       "success": "MobileNotificationDetailResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "headers": [
+        "Content-Length",
+        "Content-Type when known",
+        "Content-Disposition"
+      ],
+      "method": "GET",
+      "path": "/api/v1/attachments/{token}",
+      "protocol": "http_download",
+      "success": "attachment bytes"
     },
     {
       "auth": true,

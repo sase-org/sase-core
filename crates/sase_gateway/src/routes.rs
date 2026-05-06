@@ -2,14 +2,15 @@ use std::{
     collections::{HashMap, VecDeque},
     convert::Infallible,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration as StdDuration,
 };
 
 use axum::{
+    body::Body,
     extract::{rejection::JsonRejection, Path as AxumPath, Query, State},
-    http::{header, HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -48,6 +49,7 @@ use crate::wire::{
 
 const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
 const DEFAULT_HEARTBEAT_INTERVAL: StdDuration = StdDuration::from_secs(30);
+const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct GatewayState {
@@ -60,6 +62,7 @@ pub struct GatewayState {
     event_hub: EventHub,
     heartbeat_interval: StdDuration,
     notification_bridge: DynNotificationHostBridge,
+    attachment_tokens: AttachmentTokenStore,
 }
 
 impl GatewayState {
@@ -78,6 +81,8 @@ impl GatewayState {
             host_label: default_host_label(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            attachment_token_ttl: default_attachment_token_ttl(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         })
     }
 
@@ -106,6 +111,10 @@ impl GatewayState {
             notification_bridge: DynNotificationHostBridge::new(Arc::new(
                 LocalJsonlNotificationBridge::new(&options.sase_home),
             )),
+            attachment_tokens: AttachmentTokenStore::new(
+                options.attachment_token_ttl,
+                options.max_attachment_bytes,
+            ),
         }
     }
 
@@ -132,6 +141,8 @@ pub struct GatewayStateOptions {
     pub host_label: String,
     pub event_buffer_capacity: usize,
     pub heartbeat_interval: StdDuration,
+    pub attachment_token_ttl: ChronoDuration,
+    pub max_attachment_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +161,105 @@ struct EventHub {
 struct EventHubInner {
     next_id: u64,
     buffer: VecDeque<EventRecordWire>,
+}
+
+#[derive(Clone, Debug)]
+struct AttachmentTokenStore {
+    inner: Arc<Mutex<HashMap<String, AttachmentTokenRecord>>>,
+    ttl: ChronoDuration,
+    max_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AttachmentTokenRecord {
+    device_id: String,
+    canonical_path: PathBuf,
+    source_notification_id: String,
+    display_name: String,
+    content_type: Option<String>,
+    byte_size: u64,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct AttachmentMintRequest {
+    device_id: String,
+    canonical_path: PathBuf,
+    source_notification_id: String,
+    display_name: String,
+    content_type: Option<String>,
+    byte_size: u64,
+}
+
+#[derive(Debug)]
+enum AttachmentTokenLookup {
+    Found(AttachmentTokenRecord),
+    Missing,
+    Expired,
+    WrongDevice,
+}
+
+impl AttachmentTokenStore {
+    fn new(ttl: ChronoDuration, max_bytes: u64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            ttl,
+            max_bytes,
+        }
+    }
+
+    fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    fn mint(
+        &self,
+        request: AttachmentMintRequest,
+        now: DateTime<Utc>,
+    ) -> Result<String, ApiError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("attachment_tokens"))?;
+        inner.retain(|_, record| record.expires_at > now);
+        let token = generate_prefixed_id("att");
+        inner.insert(
+            token.clone(),
+            AttachmentTokenRecord {
+                device_id: request.device_id,
+                canonical_path: request.canonical_path,
+                source_notification_id: request.source_notification_id,
+                display_name: request.display_name,
+                content_type: request.content_type,
+                byte_size: request.byte_size,
+                expires_at: now + self.ttl,
+            },
+        );
+        Ok(token)
+    }
+
+    fn resolve(
+        &self,
+        token: &str,
+        device_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AttachmentTokenLookup, ApiError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("attachment_tokens"))?;
+        let Some(record) = inner.get(token).cloned() else {
+            return Ok(AttachmentTokenLookup::Missing);
+        };
+        if record.expires_at <= now {
+            inner.remove(token);
+            return Ok(AttachmentTokenLookup::Expired);
+        }
+        if record.device_id != device_id {
+            return Ok(AttachmentTokenLookup::WrongDevice);
+        }
+        Ok(AttachmentTokenLookup::Found(record))
+    }
 }
 
 impl EventHub {
@@ -252,6 +362,7 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/events", get(events))
         .route("/api/v1/notifications", get(list_notifications))
         .route("/api/v1/notifications/:id", get(notification_detail))
+        .route("/api/v1/attachments/:token", get(download_attachment))
         .route("/api/v1/actions/plan/:prefix/approve", post(plan_approve))
         .route("/api/v1/actions/plan/:prefix/run", post(plan_run))
         .route("/api/v1/actions/plan/:prefix/reject", post(plan_reject))
@@ -388,6 +499,7 @@ async fn session(
         capabilities: vec![
             "session.read".to_string(),
             "events.read".to_string(),
+            "attachments.download".to_string(),
         ],
     }))
 }
@@ -475,7 +587,8 @@ async fn notification_detail(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<MobileNotificationDetailResponseWire>, ApiError> {
-    authenticate(&state, &headers, "/api/v1/notifications/{id}").await?;
+    let device =
+        authenticate(&state, &headers, "/api/v1/notifications/{id}").await?;
     let snapshot = state
         .notification_bridge
         .list_notifications(true)
@@ -490,22 +603,8 @@ async fn notification_detail(
         state.notification_bridge.action_state(&notification),
         mobile_notification_priority_from_wire(&notification),
     );
-    let attachments = notification
-        .files
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let metadata =
-                state.notification_bridge.notification_file_metadata(path);
-            mobile_attachment_manifest_from_path(
-                &notification.id,
-                index,
-                normalize_home_path(path),
-                metadata.byte_size,
-                metadata.path_available,
-            )
-        })
-        .collect();
+    let attachments =
+        build_attachment_manifests(&state, &device, &notification)?;
     Ok(Json(MobileNotificationDetailResponseWire {
         schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
         notification: card,
@@ -516,6 +615,90 @@ async fn notification_detail(
             state.notification_bridge.action_state(&notification),
         ),
     }))
+}
+
+async fn download_attachment(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(token): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/attachments/{token}").await?;
+    let record = match state.attachment_tokens.resolve(
+        &token,
+        &device.device_id,
+        Utc::now(),
+    )? {
+        AttachmentTokenLookup::Found(record) => record,
+        AttachmentTokenLookup::Missing | AttachmentTokenLookup::Expired => {
+            return Err(ApiError::attachment_expired("token"));
+        }
+        AttachmentTokenLookup::WrongDevice => {
+            state.audit(
+                Some(device.device_id),
+                "/api/v1/attachments/{token}",
+                None,
+                "unauthorized",
+            );
+            return Err(ApiError::unauthorized("authorization"));
+        }
+    };
+    let canonical = std::fs::canonicalize(&record.canonical_path)
+        .map_err(|_| ApiError::not_found("attachment"))?;
+    if canonical != record.canonical_path {
+        return Err(ApiError::invalid_request(
+            "attachment",
+            "attachment path changed since token mint",
+        ));
+    }
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| ApiError::not_found("attachment"))?;
+    if !metadata.is_file() {
+        return Err(ApiError::invalid_request(
+            "attachment",
+            "attachment is not a regular file",
+        ));
+    }
+    if metadata.len() != record.byte_size
+        || metadata.len() > state.attachment_tokens.max_bytes()
+    {
+        return Err(ApiError::invalid_request(
+            "attachment",
+            "attachment size changed since token mint",
+        ));
+    }
+    let bytes = std::fs::read(&canonical)
+        .map_err(|_| ApiError::not_found("attachment"))?;
+    state.audit(
+        Some(device.device_id),
+        "/api/v1/attachments/{token}",
+        Some(record.source_notification_id.clone()),
+        "success",
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&record.byte_size.to_string())
+            .map_err(|_| ApiError::internal("content_length"))?,
+    );
+    if let Some(content_type) = &record.content_type {
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(content_type)
+                .map_err(|_| ApiError::internal("content_type"))?,
+        );
+    }
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        sanitize_content_disposition_filename(&record.display_name)
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition)
+            .map_err(|_| ApiError::internal("content_disposition"))?,
+    );
+    Ok((headers, Body::from(bytes)).into_response())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -942,6 +1125,10 @@ fn default_mobile_schema_version() -> u32 {
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
 }
 
+fn default_attachment_token_ttl() -> ChronoDuration {
+    ChronoDuration::minutes(5)
+}
+
 fn publish_notifications_changed(
     state: &GatewayState,
     reason: &str,
@@ -1067,6 +1254,241 @@ fn normalize_home_path(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+#[derive(Debug, Clone)]
+struct AttachmentCandidate {
+    raw_path: String,
+}
+
+fn build_attachment_manifests(
+    state: &GatewayState,
+    device: &DeviceRecordWire,
+    notification: &NotificationWire,
+) -> Result<Vec<sase_core::notifications::MobileAttachmentManifestWire>, ApiError>
+{
+    let candidates = attachment_candidates(notification);
+    let mut manifests = Vec::with_capacity(candidates.len());
+    for (index, candidate) in candidates.iter().enumerate() {
+        let metadata = state
+            .notification_bridge
+            .notification_file_metadata(&candidate.raw_path);
+        let mut manifest = mobile_attachment_manifest_from_path(
+            &notification.id,
+            index,
+            normalize_home_path(&candidate.raw_path),
+            metadata.byte_size,
+            metadata.path_available,
+        );
+        if metadata.path_available {
+            let path = expand_home_path(&candidate.raw_path);
+            match validate_attachment_path(
+                &path,
+                metadata.byte_size,
+                state.attachment_tokens.max_bytes(),
+            ) {
+                Ok((canonical, byte_size)) => {
+                    let token = state.attachment_tokens.mint(
+                        AttachmentMintRequest {
+                            device_id: device.device_id.clone(),
+                            canonical_path: canonical,
+                            source_notification_id: notification.id.clone(),
+                            display_name: manifest.display_name.clone(),
+                            content_type: manifest.content_type.clone(),
+                            byte_size,
+                        },
+                        Utc::now(),
+                    )?;
+                    manifest.token = Some(token);
+                    manifest.downloadable = true;
+                    manifest.path_available = true;
+                    manifest.byte_size = Some(byte_size);
+                }
+                Err(_) => {
+                    manifest.token = None;
+                    manifest.downloadable = false;
+                }
+            }
+        }
+        manifests.push(manifest);
+    }
+    Ok(manifests)
+}
+
+fn attachment_candidates(
+    notification: &NotificationWire,
+) -> Vec<AttachmentCandidate> {
+    let mut paths = Vec::new();
+    for path in &notification.files {
+        push_unique_path(&mut paths, path);
+    }
+    for key in [
+        "plan_file",
+        "pdf_path",
+        "plan_pdf_path",
+        "diff_path",
+        "error_report_path",
+        "project_file",
+        "agent_project_file",
+        "output_path",
+        "response_path",
+        "image_path",
+    ] {
+        if let Some(path) = notification.action_data.get(key) {
+            push_unique_path(&mut paths, path);
+        }
+    }
+    match notification.action.as_deref() {
+        Some("PlanApproval") => {
+            if let Some(dir) = action_path(notification, "response_dir") {
+                push_unique_path(
+                    &mut paths,
+                    &dir.join("plan_request.json").to_string_lossy(),
+                );
+            }
+        }
+        Some("HITL") => {
+            if let Some(dir) = action_path(notification, "artifacts_dir") {
+                let request_path = dir.join("hitl_request.json");
+                push_unique_path(&mut paths, &request_path.to_string_lossy());
+                for path in hitl_path_typed_outputs(&request_path) {
+                    push_unique_path(&mut paths, &path);
+                }
+            }
+        }
+        Some("UserQuestion") => {
+            if let Some(dir) = action_path(notification, "response_dir") {
+                push_unique_path(
+                    &mut paths,
+                    &dir.join("question_request.json").to_string_lossy(),
+                );
+            }
+        }
+        _ => {}
+    }
+    paths
+        .into_iter()
+        .map(|raw_path| AttachmentCandidate { raw_path })
+        .collect()
+}
+
+fn push_unique_path(paths: &mut Vec<String>, path: &str) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || paths.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    paths.push(trimmed.to_string());
+}
+
+fn action_path(notification: &NotificationWire, key: &str) -> Option<PathBuf> {
+    let raw = notification.action_data.get(key)?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(expand_home_path(raw))
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn hitl_path_typed_outputs(request_path: &Path) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(request_path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    let Some(output_types) = value
+        .get("output_types")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let Some(output) =
+        value.get("output").and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    output_types
+        .iter()
+        .filter_map(|(field, field_type)| {
+            if field_type.as_str() != Some("path") {
+                return None;
+            }
+            output
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn validate_attachment_path(
+    path: &Path,
+    expected_size: Option<u64>,
+    max_bytes: u64,
+) -> Result<(PathBuf, u64), ()> {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+        || contains_symlink_component(path)
+    {
+        return Err(());
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| ())?;
+    if contains_symlink_component(&canonical) {
+        return Err(());
+    }
+    let metadata = std::fs::metadata(&canonical).map_err(|_| ())?;
+    if !metadata.is_file() {
+        return Err(());
+    }
+    let byte_size = metadata.len();
+    if byte_size > max_bytes {
+        return Err(());
+    }
+    if expected_size.is_some_and(|size| size != byte_size) {
+        return Err(());
+    }
+    Ok((canonical, byte_size))
+}
+
+fn contains_symlink_component(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if std::fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn sanitize_content_disposition_filename(display_name: &str) -> String {
+    let name = Path::new(display_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
+    name.chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\r' | '\n' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
 fn format_event_id(id: u64) -> String {
     format!("{id:016}")
 }
@@ -1178,6 +1600,19 @@ impl ApiError {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::PairingRejected,
                 message: "pairing code rejected".to_string(),
+                target: Some(target.into()),
+                details: None,
+            },
+        }
+    }
+
+    fn attachment_expired(target: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            wire: ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::AttachmentExpired,
+                message: "attachment token is expired".to_string(),
                 target: Some(target.into()),
                 details: None,
             },
@@ -1322,6 +1757,17 @@ mod tests {
         (status, value)
     }
 
+    async fn raw_response_with_state(
+        state: GatewayState,
+        request: Request<Body>,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let response = app_with_state(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, headers, bytes.to_vec())
+    }
+
     fn state_for_tmp(tmp: &TempDir, pairing_ttl: Duration) -> GatewayState {
         GatewayState::new_with_options(GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
@@ -1330,6 +1776,8 @@ mod tests {
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
+            attachment_token_ttl: default_attachment_token_ttl(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         })
     }
 
@@ -1373,6 +1821,10 @@ mod tests {
                 builder.header("authorization", format!("Bearer {token}"));
         }
         builder.body(Body::empty()).unwrap()
+    }
+
+    fn attachment_request(token: Option<&str>, uri: &str) -> Request<Body> {
+        notifications_request(token, uri)
     }
 
     fn action_request(
@@ -1429,6 +1881,20 @@ mod tests {
         tmp: &TempDir,
         notifications: Vec<NotificationWire>,
     ) -> GatewayState {
+        state_for_notifications_with_attachment_options(
+            tmp,
+            notifications,
+            default_attachment_token_ttl(),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        )
+    }
+
+    fn state_for_notifications_with_attachment_options(
+        tmp: &TempDir,
+        notifications: Vec<NotificationWire>,
+        attachment_token_ttl: Duration,
+        max_attachment_bytes: u64,
+    ) -> GatewayState {
         GatewayState::new_with_notification_bridge(
             GatewayStateOptions {
                 bind_addr: "127.0.0.1:0".to_string(),
@@ -1437,6 +1903,8 @@ mod tests {
                 host_label: "test-host".to_string(),
                 event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
                 heartbeat_interval: StdDuration::from_secs(60),
+                attachment_token_ttl,
+                max_attachment_bytes,
             },
             Arc::new(crate::host_bridge::StaticNotificationHostBridge::new(
                 notifications,
@@ -1460,6 +1928,8 @@ mod tests {
                 host_label: "test-host".to_string(),
                 event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
                 heartbeat_interval: StdDuration::from_secs(60),
+                attachment_token_ttl: default_attachment_token_ttl(),
+                max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
             },
             Arc::new(
                 crate::host_bridge::StaticNotificationHostBridge::new_with_action_states(
@@ -1803,7 +2273,7 @@ mod tests {
         assert_eq!(value["device"]["device_id"], device_id);
         assert_eq!(
             value["capabilities"],
-            json!(["session.read", "events.read"])
+            json!(["session.read", "events.read", "attachments.download"])
         );
     }
 
@@ -2015,6 +2485,271 @@ mod tests {
         assert_eq!(value["attachments"][0]["downloadable"], true);
         assert_eq!(value["action"]["kind"], "plan_approval");
         assert_eq!(value["action"]["response_dir"], "/tmp/response");
+    }
+
+    #[tokio::test]
+    async fn notification_detail_mints_short_lived_download_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attachment = tmp.path().join("plan.md");
+        std::fs::write(&attachment, "# Plan\n").unwrap();
+        let mut row = notification(
+            "download-row",
+            "2026-05-06T15:00:00Z",
+            Some("PlanApproval"),
+        );
+        row.files = vec![attachment.to_string_lossy().to_string()];
+        let state = state_for_notifications(&tmp, vec![row]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/download-row",
+            ),
+        )
+        .await;
+        assert_eq!(detail_status, StatusCode::OK);
+        let attachment_token =
+            detail["attachments"][0]["token"].as_str().unwrap();
+        assert!(attachment_token.starts_with("att_"));
+        assert_eq!(detail["attachments"][0]["content_type"], "text/markdown");
+        assert_eq!(detail["attachments"][0]["download_requires_auth"], true);
+
+        let (download_status, headers, body) = raw_response_with_state(
+            state,
+            attachment_request(
+                Some(&token),
+                &format!("/api/v1/attachments/{attachment_token}"),
+            ),
+        )
+        .await;
+
+        assert_eq!(download_status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/markdown");
+        assert_eq!(headers["content-length"], "7");
+        assert_eq!(body, b"# Plan\n");
+    }
+
+    #[tokio::test]
+    async fn attachment_download_requires_gateway_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attachment = tmp.path().join("digest.txt");
+        std::fs::write(&attachment, "digest").unwrap();
+        let mut row = notification("digest-row", "2026-05-06T15:00:00Z", None);
+        row.files = vec![attachment.to_string_lossy().to_string()];
+        let state = state_for_notifications(&tmp, vec![row]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+        let (_detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/digest-row",
+            ),
+        )
+        .await;
+        let attachment_token =
+            detail["attachments"][0]["token"].as_str().unwrap();
+
+        let (status, value) = json_response_with_state(
+            state,
+            attachment_request(
+                None,
+                &format!("/api/v1/attachments/{attachment_token}"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn attachment_tokens_are_bound_to_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attachment = tmp.path().join("image.png");
+        std::fs::write(&attachment, b"\x89PNG\r\n").unwrap();
+        let mut row = notification("image-row", "2026-05-06T15:00:00Z", None);
+        row.files = vec![attachment.to_string_lossy().to_string()];
+        let state = state_for_notifications(&tmp, vec![row]);
+        let (_start, _finish, first_token, _first_device) =
+            pair_device(state.clone()).await;
+        let (_start2, _finish2, second_token, _second_device) =
+            pair_device(state.clone()).await;
+        let (_detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&first_token),
+                "/api/v1/notifications/image-row",
+            ),
+        )
+        .await;
+        let attachment_token =
+            detail["attachments"][0]["token"].as_str().unwrap();
+
+        let (status, value) = json_response_with_state(
+            state,
+            attachment_request(
+                Some(&second_token),
+                &format!("/api/v1/attachments/{attachment_token}"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn expired_attachment_tokens_return_typed_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attachment = tmp.path().join("artifact.json");
+        std::fs::write(&attachment, "{}").unwrap();
+        let mut row = notification("json-row", "2026-05-06T15:00:00Z", None);
+        row.files = vec![attachment.to_string_lossy().to_string()];
+        let state = state_for_notifications_with_attachment_options(
+            &tmp,
+            vec![row],
+            Duration::seconds(-1),
+            DEFAULT_MAX_ATTACHMENT_BYTES,
+        );
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+        let (_detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/json-row",
+            ),
+        )
+        .await;
+        let attachment_token =
+            detail["attachments"][0]["token"].as_str().unwrap();
+
+        let (status, value) = json_response_with_state(
+            state,
+            attachment_request(
+                Some(&token),
+                &format!("/api/v1/attachments/{attachment_token}"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(value["code"], "attachment_expired");
+    }
+
+    #[tokio::test]
+    async fn unsafe_or_oversized_attachments_do_not_receive_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let safe = tmp.path().join("safe.txt");
+        let symlink = tmp.path().join("safe-link.txt");
+        let oversized = tmp.path().join("large.diff");
+        std::fs::write(&safe, "ok").unwrap();
+        std::fs::write(&oversized, "too large").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&safe, &symlink).unwrap();
+        #[cfg(not(unix))]
+        std::fs::write(&symlink, "ok").unwrap();
+
+        let mut row = notification("unsafe-row", "2026-05-06T15:00:00Z", None);
+        row.files = vec![
+            symlink.to_string_lossy().to_string(),
+            oversized.to_string_lossy().to_string(),
+            tmp.path()
+                .join("child")
+                .join("..")
+                .join("safe.txt")
+                .to_string_lossy()
+                .to_string(),
+        ];
+        let state = state_for_notifications_with_attachment_options(
+            &tmp,
+            vec![row],
+            default_attachment_token_ttl(),
+            3,
+        );
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/unsafe-row",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["attachments"].as_array().unwrap().len(), 3);
+        #[cfg(unix)]
+        {
+            assert_eq!(value["attachments"][0]["token"], Value::Null);
+            assert_eq!(value["attachments"][0]["downloadable"], false);
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(value["attachments"][0]["token"].is_string());
+            assert_eq!(value["attachments"][0]["downloadable"], true);
+        }
+        assert_eq!(value["attachments"][1]["token"], Value::Null);
+        assert_eq!(value["attachments"][1]["downloadable"], false);
+        assert_eq!(value["attachments"][2]["token"], Value::Null);
+        assert_eq!(value["attachments"][2]["downloadable"], false);
+    }
+
+    #[tokio::test]
+    async fn action_artifacts_are_declared_as_attachments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifacts_dir = tmp.path().join("agent").join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        let output_file = tmp.path().join("output.log");
+        std::fs::write(&output_file, "step output").unwrap();
+        std::fs::write(
+            artifacts_dir.join("hitl_request.json"),
+            json!({
+                "step_name": "review",
+                "step_type": "bash",
+                "output": {"log_path": output_file},
+                "output_types": {"log_path": "path"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut row = notification(
+            "hitl-artifacts",
+            "2026-05-06T15:00:00Z",
+            Some("HITL"),
+        );
+        row.action_data.insert(
+            "artifacts_dir".to_string(),
+            artifacts_dir.to_string_lossy().to_string(),
+        );
+        let state = state_for_notifications(&tmp, vec![row]);
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications/hitl-artifacts",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = value["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attachment| attachment["display_name"].as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|name| name.ends_with("hitl_request.json")));
+        assert!(names.iter().any(|name| name.ends_with("output.log")));
     }
 
     #[tokio::test]
@@ -2454,6 +3189,8 @@ mod tests {
             host_label: "test-host".to_string(),
             event_buffer_capacity: 1,
             heartbeat_interval: StdDuration::from_secs(60),
+            attachment_token_ttl: default_attachment_token_ttl(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         });
         let (_start, finish, _token, _device_id) =
             pair_device(state.clone()).await;

@@ -83,6 +83,19 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "errors": ["ApiErrorWire"]
             },
             {
+                "method": "GET",
+                "path": "/api/v1/attachments/{token}",
+                "auth": true,
+                "success": "attachment bytes",
+                "protocol": "http_download",
+                "headers": [
+                    "Content-Length",
+                    "Content-Type when known",
+                    "Content-Disposition"
+                ],
+                "errors": ["ApiErrorWire"]
+            },
+            {
                 "method": "POST",
                 "path": "/api/v1/actions/plan/{prefix}/approve",
                 "auth": true,
@@ -259,13 +272,13 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileAttachmentManifestWire": {
                 "defined_by": "sase_core::notifications::mobile",
                 "id": "string",
-                "token": "string|null",
+                "token": "short-lived string|null; only detail responses mint downloadable tokens",
                 "display_name": "string",
                 "kind": "markdown|pdf|diff|image|text|json|directory|unknown",
                 "content_type": "string|null",
                 "byte_size": "u64|null",
                 "source_notification_id": "string",
-                "downloadable": "bool",
+                "downloadable": "bool; false for missing, oversized, symlinked, traversal, directory, or unknown-risk files",
                 "download_requires_auth": "bool",
                 "can_inline": "bool",
                 "path_available": "bool"

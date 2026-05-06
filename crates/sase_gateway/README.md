@@ -36,7 +36,12 @@ The HTTP status code carries transport status, while `code` is the stable client
   `<sase_home>/notifications/notifications.jsonl`. Supported query fields are `unread`/`unread_only`,
   `include_dismissed`, `include_silent`, `limit`, and `newer_than`.
 - `GET /api/v1/notifications/{id}` requires auth and returns one notification with full notes, action detail, and
-  attachment manifest placeholders. Phase 2 manifests include display metadata and no download tokens yet.
+  attachment manifests. Detail responses mint short-lived attachment tokens for regular declared files that pass path
+  and size checks; list cards only expose counts and kinds.
+- `GET /api/v1/attachments/{token}` requires auth and streams the declared attachment bytes. Tokens are bound to the
+  device that inspected the detail response, expire after a short TTL, are never stored in the audit log, and are
+  rejected if the target path disappears, changes size, crosses a symlink, contains traversal, is not a regular file, or
+  exceeds the MVP download limit.
 - `POST /api/v1/actions/plan/{prefix}/approve|run|reject|epic|legend|feedback` writes `plan_response.json` for a
   currently pending plan notification.
 - `POST /api/v1/actions/hitl/{prefix}/accept|reject|feedback` writes `hitl_response.json` for a pending HITL
