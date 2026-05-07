@@ -134,6 +134,8 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub markdown_pdf_paths: Vec<String>,
     #[serde(default)]
+    pub image_paths: Vec<String>,
+    #[serde(default)]
     pub response_path: Option<String>,
     #[serde(default)]
     pub output_path: Option<String>,

@@ -665,6 +665,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         plan_path: coerce_str(data.get("plan_path")),
         diff_path: coerce_str(data.get("diff_path")),
         markdown_pdf_paths: coerce_str_list(data.get("markdown_pdf_paths")),
+        image_paths: coerce_str_list(data.get("image_paths")),
         response_path: coerce_str(data.get("response_path")),
         output_path: coerce_str(data.get("output_path")),
         step_output: coerce_object(data.get("step_output")),
