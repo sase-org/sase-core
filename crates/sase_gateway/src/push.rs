@@ -481,7 +481,7 @@ fn fcm_data_payload(hint: &PushHintWire) -> JsonValue {
         "schema_version".to_string(),
         json!(hint.schema_version.to_string()),
     );
-    data.insert("hint_id".to_string(), json!(hint.id));
+    data.insert("id".to_string(), json!(hint.id));
     data.insert("created_at".to_string(), json!(hint.created_at));
     data.insert("category".to_string(), json!(category_name(&hint.category)));
     data.insert("reason".to_string(), json!(hint.reason));
@@ -563,7 +563,8 @@ mod tests {
 
         assert_eq!(body["validate_only"], true);
         assert_eq!(body["message"]["token"], "opaque-token");
-        assert_eq!(body["message"]["data"]["hint_id"], "0000000000000007");
+        assert_eq!(body["message"]["data"]["id"], "0000000000000007");
+        assert!(body["message"]["data"]["hint_id"].is_null());
         assert_eq!(body["message"]["data"]["category"], "agents");
         assert_eq!(body["message"]["data"]["agent_name"], "safe-agent");
         let serialized = serde_json::to_string(&body).unwrap();
@@ -664,7 +665,8 @@ mod tests {
         assert!(request.contains("authorization: Bearer test-access-token"));
         assert!(request.contains(r#""validate_only":true"#));
         assert!(request.contains(r#""token":"device-token"#));
-        assert!(request.contains(r#""hint_id":"0000000000000008"#));
+        assert!(request.contains(r#""id":"0000000000000008"#));
+        assert!(!request.contains("hint_id"));
         assert!(request.contains(r#""notification_id":"notif_123"#));
         assert!(!request.contains("pairing"));
         assert!(!request.contains("attachment_token"));
