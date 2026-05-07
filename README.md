@@ -30,6 +30,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release --example bench_parse   # direct-parser benchmark
 ```
 
+Mobile gateway hardening subsets:
+
+```bash
+cargo test -p sase_gateway push_subscription
+cargo test -p sase_gateway test_push_provider_records_hint_attempts
+cargo test -p sase_gateway listener_smoke_exercises_pairing_auth_and_session
+```
+
 `rust-toolchain.toml` pins the `stable` channel and installs `rustfmt` and `clippy`. `Cargo.lock` is committed so the
 workspace builds reproducibly.
 

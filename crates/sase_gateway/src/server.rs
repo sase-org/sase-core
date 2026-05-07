@@ -190,13 +190,27 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn({
             let sase_home = tmp.path().to_path_buf();
-            async move { serve_listener(listener, sase_home).await }
+            async move {
+                serve_listener_with_agent_bridge_command(
+                    listener,
+                    sase_home,
+                    vec!["sase".to_string()],
+                    vec!["sase".to_string()],
+                    PushConfig {
+                        provider: crate::push::PushProviderMode::Test,
+                        ..PushConfig::default()
+                    },
+                )
+                .await
+            }
         });
 
         let (health_status, health) =
             request_json(addr, "GET", "/api/v1/health", None, None).await;
         assert_eq!(health_status, 200);
         assert_eq!(health["service"], "sase_gateway");
+        assert_eq!(health["push"]["provider"], "test");
+        assert_eq!(health["push"]["enabled"], true);
 
         let (start_status, start) = request_json(
             addr,
@@ -239,6 +253,42 @@ mod tests {
             session["device"]["device_id"],
             finish["device"]["device_id"]
         );
+
+        let (register_push_status, register_push) = request_json(
+            addr,
+            "POST",
+            "/api/v1/session/push-subscriptions",
+            Some(&token),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "provider": "test",
+                "provider_token": "test-provider-token",
+                "app_instance_id": "listener-smoke-app",
+                "platform": "android",
+                "app_version": "0.1.0",
+                "device_display_name": "Pixel 9",
+                "hint_categories": ["notifications", "agents", "session"]
+            })),
+        )
+        .await;
+        assert_eq!(register_push_status, 200);
+        assert_eq!(register_push["created"], true);
+        assert_eq!(register_push["subscription"]["provider"], "test");
+        assert_eq!(
+            register_push["subscription"]["provider_token"],
+            "test-provider-token"
+        );
+
+        let (list_push_status, list_push) = request_json(
+            addr,
+            "GET",
+            "/api/v1/session/push-subscriptions",
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(list_push_status, 200);
+        assert_eq!(list_push["subscriptions"].as_array().unwrap().len(), 1);
 
         let (events_status, events) =
             request_sse_events(addr, Some(&token), None, 2).await;
