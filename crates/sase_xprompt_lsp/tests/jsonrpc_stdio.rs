@@ -53,6 +53,7 @@ impl HelperHostBridge for FixtureBridge {
                 content_preview: None,
                 source_path_display: None,
                 definition_path: Some(self.definition_path.clone()),
+                definition_range: None,
             }],
             stats: MobileXpromptCatalogStatsWire {
                 total_count: 1,

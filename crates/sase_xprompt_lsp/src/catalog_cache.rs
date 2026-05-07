@@ -382,6 +382,7 @@ mod tests {
                 content_preview: Some("body".to_string()),
                 source_path_display: None,
                 definition_path: None,
+                definition_range: None,
             }],
             stats: MobileXpromptCatalogStatsWire {
                 total_count: 1,

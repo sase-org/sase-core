@@ -221,6 +221,7 @@ mod tests {
                 description: None,
                 source_path_display: None,
                 definition_path: None,
+                definition_range: None,
                 is_skill: false,
             },
             XpromptAssistEntry {
@@ -238,6 +239,7 @@ mod tests {
                 description: None,
                 source_path_display: None,
                 definition_path: None,
+                definition_range: None,
                 is_skill: true,
             },
         ]

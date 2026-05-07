@@ -53,6 +53,7 @@ pub fn assist_entries_from_catalog(
                 description: entry.description.clone(),
                 source_path_display: entry.source_path_display.clone(),
                 definition_path: entry.definition_path.clone(),
+                definition_range: entry.definition_range,
                 is_skill: entry.is_skill,
             }
         })
@@ -572,6 +573,7 @@ mod tests {
                 content_preview: Some("review body".to_string()),
                 source_path_display: Some("xprompts/review.md".to_string()),
                 definition_path: Some("/tmp/xprompts/review.md".to_string()),
+                definition_range: None,
             },
             EditorXpromptCatalogEntryWire {
                 name: "run".to_string(),
@@ -589,6 +591,7 @@ mod tests {
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
+                definition_range: None,
             },
         ])
     }
@@ -690,6 +693,7 @@ mod tests {
             description: None,
             source_path_display: None,
             definition_path: None,
+            definition_range: None,
             is_skill: false,
         };
         assert!(

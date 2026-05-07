@@ -188,6 +188,7 @@ mod tests {
             description: Some("Review code".to_string()),
             source_path_display: Some("xprompts/review.md".to_string()),
             definition_path: Some("/tmp/xprompts/review.md".to_string()),
+            definition_range: None,
             is_skill: false,
         }];
         let doc = DocumentSnapshot::new("#review:");

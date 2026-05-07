@@ -20,7 +20,10 @@ pub fn definition_at_position(
     let token = extract_token_at_position(document, position)?;
     let entry = entry_for_token(&token.text, entries)?;
     let path = definition_path(entry.definition_path.as_deref()?)?;
-    Some(DefinitionTarget { path, range: None })
+    Some(DefinitionTarget {
+        path,
+        range: entry.definition_range,
+    })
 }
 
 fn entry_for_token<'a>(
@@ -111,8 +114,20 @@ mod tests {
             description: None,
             source_path_display: Some("display-only.md".to_string()),
             definition_path,
+            definition_range: None,
             is_skill,
         }
+    }
+
+    fn entry_with_range(
+        name: &str,
+        insertion: &str,
+        definition_path: Option<String>,
+        range: EditorRange,
+    ) -> XpromptAssistEntry {
+        let mut entry = entry(name, insertion, definition_path, false);
+        entry.definition_range = Some(range);
+        entry
     }
 
     #[test]
@@ -251,5 +266,38 @@ mod tests {
         assert_eq!(definition_path("plugin:module/name"), None);
         assert_eq!(definition_path("/tmp/source.md\n"), None);
         assert_eq!(definition_path(&directory_path.to_string_lossy()), None);
+    }
+
+    #[test]
+    fn preserves_catalog_definition_range() {
+        let temp = tempdir().unwrap();
+        let source_path = temp.path().join("sase.yml");
+        fs::write(&source_path, "xprompts:\n  review:\n    content: body\n")
+            .unwrap();
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 1,
+                character: 2,
+            },
+            end: EditorPosition {
+                line: 1,
+                character: 8,
+            },
+        };
+        let entries = vec![entry_with_range(
+            "review",
+            "#review",
+            Some(source_path.to_string_lossy().into_owned()),
+            range,
+        )];
+
+        let target = definition_at_position(
+            &DocumentSnapshot::new("#review"),
+            pos(3),
+            &entries,
+        )
+        .unwrap();
+
+        assert_eq!(target.range, Some(range));
     }
 }

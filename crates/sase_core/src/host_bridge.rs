@@ -15,6 +15,8 @@ use std::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::editor::wire::EditorRange;
+
 #[derive(Clone)]
 pub struct DynHelperHostBridge(Arc<dyn HelperHostBridge>);
 
@@ -545,6 +547,8 @@ pub struct MobileXpromptCatalogEntryWire {
     pub source_path_display: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_range: Option<EditorRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -778,6 +782,7 @@ mod tests {
                     definition_path: Some(
                         "/tmp/sase/xprompts/bd/work_phase_bead.md".to_string(),
                     ),
+                    definition_range: None,
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,
@@ -924,6 +929,7 @@ mod tests {
         let old_entry: MobileXpromptCatalogEntryWire =
             serde_json::from_value(old_json).unwrap();
         assert_eq!(old_entry.definition_path, None);
+        assert_eq!(old_entry.definition_range, None);
         assert_eq!(
             serde_json::to_value(&old_entry).unwrap(),
             json!({
@@ -960,12 +966,20 @@ mod tests {
                 "is_skill": false,
                 "content_preview": null,
                 "source_path_display": "xprompts/review.md",
-                "definition_path": "/workspace/xprompts/review.md"
+                "definition_path": "/workspace/xprompts/review.md",
+                "definition_range": {
+                    "start": {"line": 8, "character": 2},
+                    "end": {"line": 8, "character": 8}
+                }
             }))
             .unwrap();
         assert_eq!(
             new_entry.definition_path.as_deref(),
             Some("/workspace/xprompts/review.md")
+        );
+        assert_eq!(
+            new_entry.definition_range.map(|range| range.start.line),
+            Some(8)
         );
     }
 }

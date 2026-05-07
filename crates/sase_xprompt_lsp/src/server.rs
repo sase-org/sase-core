@@ -935,6 +935,7 @@ mod tests {
         Position, Range, TextDocumentClientCapabilities, Uri,
     };
     use sase_core::{
+        EditorPosition as CorePosition, EditorRange as CoreRange,
         MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
         MobileHelperResultWire, MobileHelperStatusWire,
         MobileXpromptCatalogEntryWire, MobileXpromptCatalogResponseWire,
@@ -1062,6 +1063,7 @@ mod tests {
             content_preview: None,
             source_path_display: Some("Cargo.toml".to_string()),
             definition_path,
+            definition_range: None,
         }
     }
 
@@ -1287,6 +1289,67 @@ mod tests {
         };
         assert_eq!(location.uri, Uri::from_file_path(source_path).unwrap());
         assert_eq!(location.range, zero_range());
+    }
+
+    #[tokio::test]
+    async fn definition_preserves_catalog_definition_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("sase.yml");
+        fs::write(&source_path, "xprompts:\n  foo:\n    content: body\n")
+            .unwrap();
+        let mut entry = catalog_entry(
+            "foo",
+            "#foo",
+            None,
+            Vec::new(),
+            Some(source_path.to_string_lossy().into_owned()),
+        );
+        entry.definition_range = Some(CoreRange {
+            start: CorePosition {
+                line: 1,
+                character: 2,
+            },
+            end: CorePosition {
+                line: 1,
+                character: 5,
+            },
+        });
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(vec![entry])),
+            )
+        });
+        let server = service.inner();
+
+        let definition = server
+            .definition_for_text(
+                "#foo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        let GotoDefinitionResponse::Scalar(location) = definition else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(
+            location.range,
+            Range {
+                start: Position {
+                    line: 1,
+                    character: 2,
+                },
+                end: Position {
+                    line: 1,
+                    character: 5,
+                },
+            }
+        );
     }
 
     #[tokio::test]

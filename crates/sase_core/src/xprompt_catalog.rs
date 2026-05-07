@@ -9,9 +9,10 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
-    EditorXpromptCatalogRequestWire, EditorXpromptCatalogResponseWire,
-    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
-    MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
+    DocumentSnapshot, EditorRange, EditorXpromptCatalogRequestWire,
+    EditorXpromptCatalogResponseWire, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire,
     MobileXpromptCatalogEntryWire, MobileXpromptCatalogStatsWire,
     MobileXpromptInputWire,
 };
@@ -100,6 +101,7 @@ struct StructuredSource {
     description: Option<String>,
     is_skill: bool,
     content: String,
+    definition_section: DefinitionSection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,21 @@ enum WorkflowKind {
     SimpleXprompt,
     EmbeddableWorkflow,
     StandaloneWorkflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefinitionSection {
+    Xprompts,
+    Workflows,
+}
+
+impl DefinitionSection {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Xprompts => "xprompts",
+            Self::Workflows => "workflows",
+        }
+    }
 }
 
 pub fn load_editor_xprompt_catalog(
@@ -232,6 +249,7 @@ fn structured_entry(
         content_preview: content_preview(&entry.content),
         source_path_display: loader.source_path_display(entry),
         definition_path: loader.definition_path(entry),
+        definition_range: loader.definition_range(entry),
     }
 }
 
@@ -437,6 +455,7 @@ impl CatalogLoader {
                     description: None,
                     is_skill: false,
                     content,
+                    definition_section: DefinitionSection::Workflows,
                 });
             }
         }
@@ -460,6 +479,7 @@ impl CatalogLoader {
                 description: xprompt.description,
                 is_skill: xprompt.is_skill,
                 content: xprompt.content,
+                definition_section: DefinitionSection::Xprompts,
             });
         }
 
@@ -482,6 +502,7 @@ impl CatalogLoader {
                         description: xprompt.description,
                         is_skill: xprompt.is_skill,
                         content: xprompt.content,
+                        definition_section: DefinitionSection::Xprompts,
                     });
                 }
             }
@@ -1016,6 +1037,29 @@ impl CatalogLoader {
         path.canonicalize()
             .ok()
             .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn definition_range(
+        &self,
+        entry: &StructuredSource,
+    ) -> Option<EditorRange> {
+        let source = entry.workflow.source_path.as_deref()?;
+        if !source_supports_config_definition_range(source) {
+            return None;
+        }
+        let path =
+            self.source_definition_path(source, entry.project.as_deref())?;
+        let text = fs::read_to_string(path).ok()?;
+        for name in definition_key_candidates(&entry.name, source) {
+            if let Some(range) = yaml_child_key_range(
+                &text,
+                entry.definition_section.as_str(),
+                &name,
+            ) {
+                return Some(range);
+            }
+        }
+        None
     }
 
     fn source_definition_path(
@@ -1568,6 +1612,160 @@ fn relative_display(path: &Path, base: &Path) -> Option<String> {
         .map(|rel| rel.to_string_lossy().replace('\\', "/"))
 }
 
+fn source_supports_config_definition_range(source: &str) -> bool {
+    matches!(source, "default_config" | "local_config" | "config")
+        || source.starts_with("plugin_config:")
+        || source.starts_with("config_overlay:")
+        || source.starts_with("project_local_config:")
+}
+
+fn definition_key_candidates(name: &str, source: &str) -> Vec<String> {
+    let mut candidates = vec![name.to_string()];
+    if let Some(project) = source.strip_prefix("project_local_config:") {
+        if let Some(rest) = name.strip_prefix(&format!("{project}/")) {
+            candidates.push(rest.to_string());
+        }
+    }
+    if matches!(source, "local_config")
+        || source.starts_with("project_local_config:")
+    {
+        if let Some((_, rest)) = name.split_once('/') {
+            candidates.push(rest.to_string());
+        }
+    }
+    candidates.dedup();
+    candidates
+}
+
+fn yaml_child_key_range(
+    text: &str,
+    section: &str,
+    child_name: &str,
+) -> Option<EditorRange> {
+    let document = DocumentSnapshot::new(text);
+    let mut section_indent = None;
+    let mut child_indent = None;
+    let mut line_start = 0usize;
+
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.trim_end_matches(['\r', '\n']);
+        let parsed = parse_yaml_mapping_key(line);
+        line_start += raw_line.len();
+
+        let Some(parsed) = parsed else {
+            continue;
+        };
+        if section_indent.is_none() {
+            if parsed.indent == 0 && parsed.key == section {
+                section_indent = Some(parsed.indent);
+            }
+            continue;
+        }
+
+        let section_indent = section_indent?;
+        if parsed.indent <= section_indent {
+            break;
+        }
+        let expected_child_indent = *child_indent.get_or_insert(parsed.indent);
+        if parsed.indent != expected_child_indent {
+            continue;
+        }
+        if parsed.key != child_name {
+            continue;
+        }
+
+        let raw_line_start = line_start - raw_line.len();
+        return document.byte_range_to_range(
+            raw_line_start + parsed.key_start,
+            raw_line_start + parsed.key_end,
+        );
+    }
+
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedYamlKey {
+    indent: usize,
+    key: String,
+    key_start: usize,
+    key_end: usize,
+}
+
+fn parse_yaml_mapping_key(line: &str) -> Option<ParsedYamlKey> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    let rest = &line[indent..];
+    if rest.is_empty() || rest.starts_with('#') || rest.starts_with('-') {
+        return None;
+    }
+    if rest.starts_with('"') || rest.starts_with('\'') {
+        return parse_quoted_yaml_key(line, indent);
+    }
+    parse_unquoted_yaml_key(line, indent)
+}
+
+fn parse_unquoted_yaml_key(line: &str, indent: usize) -> Option<ParsedYamlKey> {
+    let rest = &line[indent..];
+    let colon = rest.find(':')?;
+    let raw_key = &rest[..colon];
+    let trimmed_end = raw_key.trim_end().len();
+    let key = raw_key[..trimmed_end].trim();
+    if key.is_empty() {
+        return None;
+    }
+    let key_start = indent + raw_key[..trimmed_end].find(key)?;
+    let key_end = key_start + key.len();
+    Some(ParsedYamlKey {
+        indent,
+        key: key.to_string(),
+        key_start,
+        key_end,
+    })
+}
+
+fn parse_quoted_yaml_key(line: &str, indent: usize) -> Option<ParsedYamlKey> {
+    let quote = line[indent..].chars().next()?;
+    let mut escaped = false;
+    let mut key = String::new();
+    let mut close_end = None;
+    let content_start = indent + quote.len_utf8();
+    for (offset, ch) in line[content_start..].char_indices() {
+        let absolute = content_start + offset;
+        if quote == '"' && escaped {
+            key.push(ch);
+            escaped = false;
+            continue;
+        }
+        if quote == '"' && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if quote == '\'' && ch == '\'' {
+            let next = absolute + ch.len_utf8();
+            if line[next..].starts_with('\'') {
+                key.push('\'');
+                close_end = None;
+                continue;
+            }
+        }
+        if ch == quote {
+            close_end = Some(absolute + ch.len_utf8());
+            break;
+        }
+        key.push(ch);
+    }
+    let close_end = close_end?;
+    if !line[close_end..].trim_start().starts_with(':') {
+        return None;
+    }
+    Some(ParsedYamlKey {
+        indent,
+        key,
+        key_start: indent,
+        key_end: close_end,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1583,6 +1781,29 @@ mod tests {
             limit: None,
             device_id: None,
         }
+    }
+
+    fn definition_line(entry: &MobileXpromptCatalogEntryWire) -> Option<u32> {
+        entry.definition_range.map(|range| range.start.line)
+    }
+
+    #[test]
+    fn yaml_child_key_range_finds_immediate_quoted_children() {
+        let text = "xprompts:\n  parent:\n    child: nested\n  \"quoted/key\": body\nworkflows:\n  flow:\n    steps: []\n";
+
+        let range =
+            yaml_child_key_range(text, "xprompts", "quoted/key").unwrap();
+
+        assert_eq!(range.start.line, 3);
+        assert_eq!(range.start.character, 2);
+        assert_eq!(yaml_child_key_range(text, "xprompts", "child"), None);
+        assert_eq!(
+            yaml_child_key_range(text, "workflows", "flow")
+                .unwrap()
+                .start
+                .line,
+            5
+        );
     }
 
     #[test]
@@ -1832,6 +2053,7 @@ mod tests {
                     .unwrap()
             )
         );
+        assert_eq!(definition_line(wire_by_name["cfg"]), Some(1));
         assert_eq!(
             wire_by_name["memory/long/topic"].definition_path.as_deref(),
             Some(
@@ -1959,6 +2181,7 @@ mod tests {
                     .unwrap()
             )
         );
+        assert_eq!(definition_line(wire_by_name["plug_flow"]), Some(4));
         assert_eq!(
             wire_by_name["plug_cfg"].definition_path.as_deref(),
             Some(
@@ -1969,6 +2192,56 @@ mod tests {
                     .unwrap()
             )
         );
+        assert_eq!(definition_line(wire_by_name["plug_cfg"]), Some(1));
+    }
+
+    #[test]
+    fn computes_known_project_local_config_definition_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("sase.yml"),
+            "xprompts:\n  project_cfg:\n    content: Project body\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: None,
+            home_dir: None,
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            known_workspaces: BTreeMap::from([(
+                "app".to_string(),
+                workspace.clone(),
+            )]),
+        };
+
+        let entries = loader.gather_structured_sources(None).unwrap();
+        let wire_entries = entries
+            .iter()
+            .map(|entry| structured_entry(entry, &loader))
+            .collect::<Vec<_>>();
+        let entry = wire_entries
+            .iter()
+            .find(|entry| entry.name == "app/project_cfg")
+            .unwrap();
+
+        assert_eq!(
+            entry.definition_path.as_deref(),
+            Some(
+                workspace
+                    .join("sase.yml")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(definition_line(entry), Some(1));
     }
 
     #[test]
@@ -2003,6 +2276,7 @@ mod tests {
             description: None,
             is_skill: false,
             content: "body".to_string(),
+            definition_section: DefinitionSection::Xprompts,
         };
 
         assert_eq!(structured_entry(&entry, &loader).definition_path, None);
