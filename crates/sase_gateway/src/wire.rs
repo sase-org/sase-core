@@ -45,6 +45,89 @@ pub struct SessionResponseWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushProviderWire {
+    Fcm,
+    UnifiedPush,
+    Ntfy,
+    Test,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushHintCategoryWire {
+    Notifications,
+    Agents,
+    Helpers,
+    Update,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscriptionRequestWire {
+    pub schema_version: u32,
+    pub provider: PushProviderWire,
+    pub provider_token: String,
+    pub app_instance_id: Option<String>,
+    pub device_display_name: Option<String>,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+    pub hint_categories: Vec<PushHintCategoryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscriptionRecordWire {
+    pub schema_version: u32,
+    pub id: String,
+    pub device_id: String,
+    pub provider: PushProviderWire,
+    pub provider_token: String,
+    pub app_instance_id: Option<String>,
+    pub device_display_name: Option<String>,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+    pub hint_categories: Vec<PushHintCategoryWire>,
+    pub enabled_at: String,
+    pub disabled_at: Option<String>,
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscriptionListResponseWire {
+    pub schema_version: u32,
+    pub subscriptions: Vec<PushSubscriptionRecordWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscriptionRegisterResponseWire {
+    pub schema_version: u32,
+    pub subscription: PushSubscriptionRecordWire,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscriptionDeleteResponseWire {
+    pub schema_version: u32,
+    pub subscription: PushSubscriptionRecordWire,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushHintWire {
+    pub schema_version: u32,
+    pub id: String,
+    pub created_at: String,
+    pub category: PushHintCategoryWire,
+    pub reason: String,
+    pub notification_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub helper: Option<String>,
+    pub job_id: Option<String>,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairStartRequestWire {
     pub schema_version: u32,
     pub host_label: Option<String>,
@@ -152,6 +235,126 @@ pub struct EventRecordWire {
     pub id: String,
     pub created_at: String,
     pub payload: EventPayloadWire,
+}
+
+pub fn push_hint_from_event(record: &EventRecordWire) -> Option<PushHintWire> {
+    let (
+        category,
+        reason,
+        notification_id,
+        agent_name,
+        helper,
+        job_id,
+        title,
+        body,
+    ) = match &record.payload {
+        EventPayloadWire::Heartbeat { .. } => return None,
+        EventPayloadWire::Session { .. } => (
+            PushHintCategoryWire::Session,
+            "session".to_string(),
+            None,
+            None,
+            None,
+            None,
+            "SASE session updated".to_string(),
+            "Open SASE to refresh.".to_string(),
+        ),
+        EventPayloadWire::ResyncRequired { reason } => (
+            PushHintCategoryWire::Session,
+            reason.clone(),
+            None,
+            None,
+            None,
+            None,
+            "SASE refresh needed".to_string(),
+            "Open SASE to refresh current state.".to_string(),
+        ),
+        EventPayloadWire::NotificationsChanged {
+            reason,
+            notification_id,
+        } => (
+            PushHintCategoryWire::Notifications,
+            reason.clone(),
+            notification_id.clone(),
+            None,
+            None,
+            None,
+            "SASE notification update".to_string(),
+            "Open SASE to view current notifications.".to_string(),
+        ),
+        EventPayloadWire::AgentsChanged {
+            reason, agent_name, ..
+        } => {
+            let safe_agent_name =
+                agent_name.as_deref().and_then(safe_push_identifier);
+            let body = safe_agent_name
+                .as_ref()
+                .map(|name| format!("Agent {name} changed."))
+                .unwrap_or_else(|| "Agent state changed.".to_string());
+            (
+                PushHintCategoryWire::Agents,
+                reason.clone(),
+                None,
+                safe_agent_name,
+                None,
+                None,
+                "SASE agent update".to_string(),
+                body,
+            )
+        }
+        EventPayloadWire::HelpersChanged {
+            reason,
+            helper,
+            job_id,
+            ..
+        } => {
+            let category = if helper.as_deref() == Some("update")
+                || job_id.as_deref().is_some_and(|id| id.starts_with("update"))
+            {
+                PushHintCategoryWire::Update
+            } else {
+                PushHintCategoryWire::Helpers
+            };
+            (
+                category,
+                reason.clone(),
+                None,
+                None,
+                helper.as_deref().and_then(safe_push_identifier),
+                job_id.as_deref().and_then(safe_push_identifier),
+                "SASE helper update".to_string(),
+                "Open SASE to refresh helper state.".to_string(),
+            )
+        }
+    };
+    Some(PushHintWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        id: record.id.clone(),
+        created_at: record.created_at.clone(),
+        category,
+        reason,
+        notification_id,
+        agent_name,
+        helper,
+        job_id,
+        title,
+        body,
+    })
+}
+
+fn safe_push_identifier(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -925,6 +1128,134 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn push_subscription_wire_json_snapshot() {
+        let subscription = PushSubscriptionRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "push_123".to_string(),
+            device_id: "dev_pixel".to_string(),
+            provider: PushProviderWire::Fcm,
+            provider_token: "opaque-token".to_string(),
+            app_instance_id: Some("app_instance_pixel".to_string()),
+            device_display_name: Some("Pixel 9".to_string()),
+            platform: Some("android".to_string()),
+            app_version: Some("0.1.0".to_string()),
+            hint_categories: vec![
+                PushHintCategoryWire::Notifications,
+                PushHintCategoryWire::Agents,
+                PushHintCategoryWire::Update,
+            ],
+            enabled_at: "2026-05-06T14:30:00Z".to_string(),
+            disabled_at: None,
+            last_seen_at: Some("2026-05-06T14:31:00Z".to_string()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(PushSubscriptionListResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                subscriptions: vec![subscription.clone()],
+            })
+            .unwrap(),
+            json!({
+                "schema_version": 1,
+                "subscriptions": [{
+                    "schema_version": 1,
+                    "id": "push_123",
+                    "device_id": "dev_pixel",
+                    "provider": "fcm",
+                    "provider_token": "opaque-token",
+                    "app_instance_id": "app_instance_pixel",
+                    "device_display_name": "Pixel 9",
+                    "platform": "android",
+                    "app_version": "0.1.0",
+                    "hint_categories": ["notifications", "agents", "update"],
+                    "enabled_at": "2026-05-06T14:30:00Z",
+                    "disabled_at": null,
+                    "last_seen_at": "2026-05-06T14:31:00Z"
+                }]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(PushSubscriptionRegisterResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                subscription: subscription.clone(),
+                created: false,
+            })
+            .unwrap()["created"],
+            false
+        );
+        assert_eq!(
+            serde_json::to_value(PushSubscriptionDeleteResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                subscription,
+                revoked: true,
+            })
+            .unwrap()["revoked"],
+            true
+        );
+    }
+
+    #[test]
+    fn push_hint_mapping_uses_safe_event_projection() {
+        let notification_hint = push_hint_from_event(&EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "0000000000000001".to_string(),
+            created_at: "2026-05-06T14:30:00Z".to_string(),
+            payload: EventPayloadWire::NotificationsChanged {
+                reason: "mark_read".to_string(),
+                notification_id: Some("notif_123".to_string()),
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(notification_hint).unwrap(),
+            json!({
+                "schema_version": 1,
+                "id": "0000000000000001",
+                "created_at": "2026-05-06T14:30:00Z",
+                "category": "notifications",
+                "reason": "mark_read",
+                "notification_id": "notif_123",
+                "agent_name": null,
+                "helper": null,
+                "job_id": null,
+                "title": "SASE notification update",
+                "body": "Open SASE to view current notifications."
+            })
+        );
+
+        let unsafe_agent_hint = push_hint_from_event(&EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "0000000000000002".to_string(),
+            created_at: "2026-05-06T14:31:00Z".to_string(),
+            payload: EventPayloadWire::AgentsChanged {
+                reason: "launch".to_string(),
+                agent_name: Some("agent with prompt text".to_string()),
+                timestamp: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(unsafe_agent_hint.category, PushHintCategoryWire::Agents);
+        assert_eq!(unsafe_agent_hint.agent_name, None);
+        assert_eq!(unsafe_agent_hint.body, "Agent state changed.");
+
+        let update_hint = push_hint_from_event(&EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: "0000000000000003".to_string(),
+            created_at: "2026-05-06T14:32:00Z".to_string(),
+            payload: EventPayloadWire::HelpersChanged {
+                reason: "update_start".to_string(),
+                helper: Some("update".to_string()),
+                job_id: Some("update_job_123".to_string()),
+                timestamp: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(update_hint.category, PushHintCategoryWire::Update);
+        assert_eq!(update_hint.helper.as_deref(), Some("update"));
+        assert_eq!(update_hint.job_id.as_deref(), Some("update_job_123"));
     }
 
     #[test]

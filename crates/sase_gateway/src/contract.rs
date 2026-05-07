@@ -60,6 +60,28 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "GET",
+                "path": "/api/v1/session/push-subscriptions",
+                "auth": true,
+                "success": "PushSubscriptionListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/session/push-subscriptions",
+                "auth": true,
+                "request": "PushSubscriptionRequestWire",
+                "success": "PushSubscriptionRegisterResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "DELETE",
+                "path": "/api/v1/session/push-subscriptions/{id}",
+                "auth": true,
+                "success": "PushSubscriptionDeleteResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
                 "path": "/api/v1/events",
                 "auth": true,
                 "success": "EventRecordWire stream",
@@ -787,6 +809,58 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "display_name": "string",
                 "platform": "string",
                 "app_version": "string|null"
+            },
+            "PushHintWire": {
+                "schema_version": "u32",
+                "id": "string; event id used as push hint id",
+                "created_at": "rfc3339",
+                "category": "notifications|agents|helpers|update|session",
+                "reason": "string",
+                "notification_id": "string|null",
+                "agent_name": "string|null; only simple non-sensitive identifiers are included",
+                "helper": "string|null",
+                "job_id": "string|null",
+                "title": "short safe display text",
+                "body": "short safe display text"
+            },
+            "PushSubscriptionRequestWire": {
+                "schema_version": "u32",
+                "provider": "fcm|unified_push|ntfy|test",
+                "provider_token": "opaque provider device token or endpoint; treated as sensitive",
+                "app_instance_id": "string|null",
+                "device_display_name": "string|null",
+                "platform": "string|null",
+                "app_version": "string|null",
+                "hint_categories": "notifications|agents|helpers|update|session[]"
+            },
+            "PushSubscriptionRecordWire": {
+                "schema_version": "u32",
+                "id": "string",
+                "device_id": "string",
+                "provider": "fcm|unified_push|ntfy|test",
+                "provider_token": "opaque provider device token or endpoint; returned only to the owning authenticated device for reconciliation",
+                "app_instance_id": "string|null",
+                "device_display_name": "string|null",
+                "platform": "string|null",
+                "app_version": "string|null",
+                "hint_categories": "notifications|agents|helpers|update|session[]",
+                "enabled_at": "rfc3339",
+                "disabled_at": "rfc3339|null",
+                "last_seen_at": "rfc3339|null"
+            },
+            "PushSubscriptionListResponseWire": {
+                "schema_version": "u32",
+                "subscriptions": "PushSubscriptionRecordWire[]; active subscriptions for the authenticated device"
+            },
+            "PushSubscriptionRegisterResponseWire": {
+                "schema_version": "u32",
+                "subscription": "PushSubscriptionRecordWire",
+                "created": "bool; false when an existing provider/token/app_instance record was updated"
+            },
+            "PushSubscriptionDeleteResponseWire": {
+                "schema_version": "u32",
+                "subscription": "PushSubscriptionRecordWire",
+                "revoked": "bool; false when the subscription was already disabled"
             },
             "PlanActionRequestWire": {
                 "defined_by": "sase_core::notifications::mobile",

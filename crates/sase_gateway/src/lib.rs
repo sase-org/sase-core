@@ -1,4 +1,4 @@
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 
 //! Local host gateway skeleton for SASE mobile clients.
 
@@ -51,6 +51,9 @@ pub use wire::{
     MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
     NotificationStateMutationResponseWire, PairFinishRequestWire,
     PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
-    PairingDeviceMetadataWire, SessionResponseWire,
-    GATEWAY_WIRE_SCHEMA_VERSION,
+    PairingDeviceMetadataWire, PushHintCategoryWire, PushHintWire,
+    PushProviderWire, PushSubscriptionDeleteResponseWire,
+    PushSubscriptionListResponseWire, PushSubscriptionRecordWire,
+    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
+    SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };

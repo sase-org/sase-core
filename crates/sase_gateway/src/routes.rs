@@ -15,7 +15,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -59,6 +59,8 @@ use crate::wire::{
     MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
     NotificationStateMutationResponseWire, PairFinishRequestWire,
     PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
+    PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
+    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
     SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
@@ -474,6 +476,14 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/session/pair/start", post(pair_start))
         .route("/api/v1/session/pair/finish", post(pair_finish))
         .route("/api/v1/session", get(session))
+        .route(
+            "/api/v1/session/push-subscriptions",
+            get(list_push_subscriptions).post(register_push_subscription),
+        )
+        .route(
+            "/api/v1/session/push-subscriptions/:id",
+            delete(delete_push_subscription),
+        )
         .route("/api/v1/events", get(events))
         .route("/api/v1/agents", get(list_agents))
         .route("/api/v1/agents/resume-options", get(agent_resume_options))
@@ -641,7 +651,94 @@ async fn session(
             "update.write".to_string(),
             "attachments.download".to_string(),
             "notifications.state.write".to_string(),
+            "push_subscriptions.read".to_string(),
+            "push_subscriptions.write".to_string(),
         ],
+    }))
+}
+
+async fn list_push_subscriptions(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Result<Json<PushSubscriptionListResponseWire>, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/session/push-subscriptions")
+            .await?;
+    let subscriptions = state
+        .token_store
+        .list_push_subscriptions(&device.device_id)
+        .map_err(ApiError::from_store)?;
+    Ok(Json(PushSubscriptionListResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        subscriptions,
+    }))
+}
+
+async fn register_push_subscription(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<PushSubscriptionRequestWire>, JsonRejection>,
+) -> Result<Json<PushSubscriptionRegisterResponseWire>, ApiError> {
+    let device =
+        authenticate(&state, &headers, "/api/v1/session/push-subscriptions")
+            .await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    validate_push_subscription_request(&payload)?;
+    let (subscription, created) = state
+        .token_store
+        .register_push_subscription(&device.device_id, payload, Utc::now())
+        .map_err(ApiError::from_store)?;
+    state.audit(
+        Some(device.device_id),
+        "/api/v1/session/push-subscriptions",
+        Some(subscription.id.clone()),
+        if created { "created" } else { "updated" },
+    );
+    Ok(Json(PushSubscriptionRegisterResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        subscription,
+        created,
+    }))
+}
+
+async fn delete_push_subscription(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<PushSubscriptionDeleteResponseWire>, ApiError> {
+    let device = authenticate(
+        &state,
+        &headers,
+        "/api/v1/session/push-subscriptions/{id}",
+    )
+    .await?;
+    let Some((subscription, revoked)) = state
+        .token_store
+        .revoke_push_subscription(&device.device_id, &id, Utc::now())
+        .map_err(ApiError::from_store)?
+    else {
+        state.audit(
+            Some(device.device_id),
+            "/api/v1/session/push-subscriptions/{id}",
+            Some(id.clone()),
+            "not_found",
+        );
+        return Err(ApiError::push_subscription_not_found(id));
+    };
+    state.audit(
+        Some(device.device_id),
+        "/api/v1/session/push-subscriptions/{id}",
+        Some(subscription.id.clone()),
+        if revoked {
+            "revoked"
+        } else {
+            "already_revoked"
+        },
+    );
+    Ok(Json(PushSubscriptionDeleteResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        subscription,
+        revoked,
     }))
 }
 
@@ -1730,6 +1827,32 @@ fn validate_schema(schema_version: u32) -> Result<(), ApiError> {
     ))
 }
 
+fn validate_push_subscription_request(
+    payload: &PushSubscriptionRequestWire,
+) -> Result<(), ApiError> {
+    validate_schema(payload.schema_version)?;
+    let token = payload.provider_token.trim();
+    if token.is_empty() {
+        return Err(ApiError::invalid_request(
+            "provider_token",
+            "provider_token is required",
+        ));
+    }
+    if token.len() > 4096 {
+        return Err(ApiError::invalid_request(
+            "provider_token",
+            "provider_token is too long",
+        ));
+    }
+    if payload.hint_categories.is_empty() {
+        return Err(ApiError::invalid_request(
+            "hint_categories",
+            "at least one hint category is required",
+        ));
+    }
+    Ok(())
+}
+
 fn default_mobile_schema_version() -> u32 {
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
 }
@@ -2219,6 +2342,19 @@ impl ApiError {
         }
     }
 
+    fn push_subscription_not_found(id: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            wire: ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::NotFound,
+                message: "push subscription not found".to_string(),
+                target: Some(id.into()),
+                details: None,
+            },
+        }
+    }
+
     fn invalid_request(
         target: impl Into<String>,
         message: impl Into<String>,
@@ -2506,6 +2642,47 @@ mod tests {
 
     fn session_request(token: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder().uri("/api/v1/session");
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn push_subscription_get_request(token: Option<&str>) -> Request<Body> {
+        let mut builder =
+            Request::builder().uri("/api/v1/session/push-subscriptions");
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn push_subscription_post_request(
+        token: Option<&str>,
+        body: Value,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/v1/session/push-subscriptions")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    fn push_subscription_delete_request(
+        token: Option<&str>,
+        id: &str,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/session/push-subscriptions/{id}"));
         if let Some(token) = token {
             builder =
                 builder.header("authorization", format!("Bearer {token}"));
@@ -3632,9 +3809,201 @@ exit 4
                 "helpers.read",
                 "update.write",
                 "attachments.download",
-                "notifications.state.write"
+                "notifications.state.write",
+                "push_subscriptions.read",
+                "push_subscriptions.write"
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn push_subscriptions_require_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+
+        let (status, value) = json_response_with_state(
+            state,
+            push_subscription_get_request(None),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(value["code"], "unauthorized");
+        assert_eq!(value["target"], "authorization");
+    }
+
+    #[tokio::test]
+    async fn push_subscription_register_list_and_revoke_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+
+        let request_body = json!({
+            "schema_version": 1,
+            "provider": "fcm",
+            "provider_token": "opaque-fcm-token",
+            "app_instance_id": "app_instance_pixel",
+            "device_display_name": "Pixel 9",
+            "platform": "android",
+            "app_version": "0.1.0",
+            "hint_categories": ["notifications", "agents", "update"]
+        });
+        let (register_status, register) = json_response_with_state(
+            state.clone(),
+            push_subscription_post_request(Some(&token), request_body),
+        )
+        .await;
+        assert_eq!(register_status, StatusCode::OK);
+        assert_eq!(register["created"], true);
+        assert_eq!(register["subscription"]["schema_version"], 1);
+        assert_eq!(register["subscription"]["device_id"], device_id);
+        assert_eq!(register["subscription"]["provider"], "fcm");
+        assert_eq!(
+            register["subscription"]["provider_token"],
+            "opaque-fcm-token"
+        );
+        assert_eq!(
+            register["subscription"]["hint_categories"],
+            json!(["notifications", "agents", "update"])
+        );
+        assert!(register["subscription"]["enabled_at"].is_string());
+        assert!(register["subscription"]["disabled_at"].is_null());
+        let subscription_id =
+            register["subscription"]["id"].as_str().unwrap().to_string();
+
+        let (list_status, list) = json_response_with_state(
+            state.clone(),
+            push_subscription_get_request(Some(&token)),
+        )
+        .await;
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(list["subscriptions"].as_array().unwrap().len(), 1);
+        assert_eq!(list["subscriptions"][0]["id"], subscription_id);
+
+        let (delete_status, delete) = json_response_with_state(
+            state.clone(),
+            push_subscription_delete_request(Some(&token), &subscription_id),
+        )
+        .await;
+        assert_eq!(delete_status, StatusCode::OK);
+        assert_eq!(delete["revoked"], true);
+        assert_eq!(delete["subscription"]["id"], subscription_id);
+        assert!(delete["subscription"]["disabled_at"].is_string());
+
+        let (empty_status, empty) = json_response_with_state(
+            state,
+            push_subscription_get_request(Some(&token)),
+        )
+        .await;
+        assert_eq!(empty_status, StatusCode::OK);
+        assert_eq!(empty["subscriptions"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn push_subscription_duplicate_updates_existing_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+        let initial = json!({
+            "schema_version": 1,
+            "provider": "test",
+            "provider_token": "same-token",
+            "app_instance_id": "same-app",
+            "device_display_name": "Pixel",
+            "platform": "android",
+            "app_version": "0.1.0",
+            "hint_categories": ["notifications"]
+        });
+        let (first_status, first) = json_response_with_state(
+            state.clone(),
+            push_subscription_post_request(Some(&token), initial),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first["created"], true);
+        let id = first["subscription"]["id"].as_str().unwrap().to_string();
+
+        let update = json!({
+            "schema_version": 1,
+            "provider": "test",
+            "provider_token": "same-token",
+            "app_instance_id": "same-app",
+            "device_display_name": "Pixel",
+            "platform": "android",
+            "app_version": "0.2.0",
+            "hint_categories": ["agents", "helpers"]
+        });
+        let (second_status, second) = json_response_with_state(
+            state,
+            push_subscription_post_request(Some(&token), update),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second["created"], false);
+        assert_eq!(second["subscription"]["id"], id);
+        assert_eq!(second["subscription"]["app_version"], "0.2.0");
+        assert_eq!(
+            second["subscription"]["hint_categories"],
+            json!(["agents", "helpers"])
+        );
+        assert!(second["subscription"]["last_seen_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn push_subscription_validation_and_audit_do_not_leak_provider_token()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (invalid_status, invalid) = json_response_with_state(
+            state.clone(),
+            push_subscription_post_request(
+                Some(&token),
+                json!({
+                    "schema_version": 1,
+                    "provider": "fcm",
+                    "provider_token": "",
+                    "app_instance_id": null,
+                    "device_display_name": null,
+                    "platform": "android",
+                    "app_version": null,
+                    "hint_categories": ["notifications"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["code"], "invalid_request");
+        assert_eq!(invalid["target"], "provider_token");
+
+        let secret_token = "secret-provider-token";
+        let (status, _value) = json_response_with_state(
+            state,
+            push_subscription_post_request(
+                Some(&token),
+                json!({
+                    "schema_version": 1,
+                    "provider": "fcm",
+                    "provider_token": secret_token,
+                    "app_instance_id": null,
+                    "device_display_name": "Pixel",
+                    "platform": "android",
+                    "app_version": null,
+                    "hint_categories": ["notifications"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let audit = std::fs::read_to_string(
+            tmp.path().join("mobile_gateway").join("audit.jsonl"),
+        )
+        .unwrap();
+        assert!(!audit.contains(secret_token));
     }
 
     #[tokio::test]

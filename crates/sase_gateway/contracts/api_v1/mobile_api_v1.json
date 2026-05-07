@@ -526,6 +526,58 @@
       "run_coder": "bool|null",
       "schema_version": "u32"
     },
+    "PushHintWire": {
+      "agent_name": "string|null; only simple non-sensitive identifiers are included",
+      "body": "short safe display text",
+      "category": "notifications|agents|helpers|update|session",
+      "created_at": "rfc3339",
+      "helper": "string|null",
+      "id": "string; event id used as push hint id",
+      "job_id": "string|null",
+      "notification_id": "string|null",
+      "reason": "string",
+      "schema_version": "u32",
+      "title": "short safe display text"
+    },
+    "PushSubscriptionDeleteResponseWire": {
+      "revoked": "bool; false when the subscription was already disabled",
+      "schema_version": "u32",
+      "subscription": "PushSubscriptionRecordWire"
+    },
+    "PushSubscriptionListResponseWire": {
+      "schema_version": "u32",
+      "subscriptions": "PushSubscriptionRecordWire[]; active subscriptions for the authenticated device"
+    },
+    "PushSubscriptionRecordWire": {
+      "app_instance_id": "string|null",
+      "app_version": "string|null",
+      "device_display_name": "string|null",
+      "device_id": "string",
+      "disabled_at": "rfc3339|null",
+      "enabled_at": "rfc3339",
+      "hint_categories": "notifications|agents|helpers|update|session[]",
+      "id": "string",
+      "last_seen_at": "rfc3339|null",
+      "platform": "string|null",
+      "provider": "fcm|unified_push|ntfy|test",
+      "provider_token": "opaque provider device token or endpoint; returned only to the owning authenticated device for reconciliation",
+      "schema_version": "u32"
+    },
+    "PushSubscriptionRegisterResponseWire": {
+      "created": "bool; false when an existing provider/token/app_instance record was updated",
+      "schema_version": "u32",
+      "subscription": "PushSubscriptionRecordWire"
+    },
+    "PushSubscriptionRequestWire": {
+      "app_instance_id": "string|null",
+      "app_version": "string|null",
+      "device_display_name": "string|null",
+      "hint_categories": "notifications|agents|helpers|update|session[]",
+      "platform": "string|null",
+      "provider": "fcm|unified_push|ntfy|test",
+      "provider_token": "opaque provider device token or endpoint; treated as sensitive",
+      "schema_version": "u32"
+    },
     "QuestionActionRequestWire": {
       "choice": "answer|custom",
       "custom_answer": "string|null",
@@ -587,6 +639,34 @@
       "method": "GET",
       "path": "/api/v1/session",
       "success": "SessionResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/session/push-subscriptions",
+      "success": "PushSubscriptionListResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/session/push-subscriptions",
+      "request": "PushSubscriptionRequestWire",
+      "success": "PushSubscriptionRegisterResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "DELETE",
+      "path": "/api/v1/session/push-subscriptions/{id}",
+      "success": "PushSubscriptionDeleteResponseWire"
     },
     {
       "auth": true,
