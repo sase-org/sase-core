@@ -26,12 +26,11 @@ use sase_core::{
     editor_build_file_history_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
-    editor_classify_completion_context, editor_colon_args_skeleton,
-    editor_definition_at_position, editor_directive_argument_candidates,
-    editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, editor_named_args_skeleton, CompletionCandidate,
-    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
-    HelperHostBridge, XpromptAssistEntry,
+    editor_classify_completion_context, editor_definition_at_position,
+    editor_directive_argument_candidates, editor_directive_metadata,
+    editor_extract_token_at_position, editor_hover_at_position,
+    CompletionCandidate, CompletionContextKind, CompletionList,
+    DocumentSnapshot, EditorRange, HelperHostBridge, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -112,18 +111,16 @@ impl XpromptLspServer {
         )?;
         let list =
             self.completion_list_for_context(&context, &entries, &config);
-        let mut response = completion_response(list, context.replacement_range);
         if config.snippet_support
             && context.kind == CompletionContextKind::Xprompt
         {
-            if let CompletionResponse::Array(items) = &mut response {
-                items.extend(snippet_items(
-                    context.token.as_ref().map(|token| token.text.as_str()),
-                    entries.as_slice(),
-                    context.replacement_range,
-                ));
-            }
+            return Some(CompletionResponse::Array(xprompt_snippet_items(
+                list,
+                entries.as_slice(),
+                context.replacement_range,
+            )));
         }
+        let mut response = completion_response(list, context.replacement_range);
         if config.snippet_support
             && context.kind == CompletionContextKind::DirectiveName
         {
@@ -670,40 +667,39 @@ fn snippet_support(capabilities: &ClientCapabilities) -> bool {
         .unwrap_or(false)
 }
 
-fn snippet_items(
-    token: Option<&str>,
+fn xprompt_snippet_items(
+    list: CompletionList,
     entries: &[XpromptAssistEntry],
     replacement_range: sase_core::EditorRange,
 ) -> Vec<CompletionItem> {
-    let token = token.unwrap_or_default();
-    let partial = token
-        .strip_prefix("#!")
-        .or_else(|| token.strip_prefix('#'))
-        .unwrap_or(token)
-        .to_lowercase();
-    entries
-        .iter()
-        .filter(|entry| !entry.inputs.is_empty())
-        .filter(|entry| entry.name.to_lowercase().starts_with(&partial))
-        .flat_map(|entry| {
-            [
-                snippet_completion_item(
-                    format!("{}(...)", entry.insertion),
-                    editor_named_args_skeleton(entry),
-                    entry.input_signature.clone(),
-                    entry.description.clone(),
-                    replacement_range,
-                ),
-                snippet_completion_item(
-                    format!("{}:", entry.insertion),
-                    editor_colon_args_skeleton(entry),
-                    entry.input_signature.clone(),
-                    entry.description.clone(),
-                    replacement_range,
-                ),
-            ]
+    list.candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let entry =
+                entries.iter().find(|entry| entry.name == candidate.name)?;
+            Some(snippet_completion_item(
+                candidate.display,
+                xprompt_completion_skeleton(entry),
+                candidate.detail,
+                candidate.documentation,
+                replacement_range,
+            ))
         })
         .collect()
+}
+
+fn xprompt_completion_skeleton(entry: &XpromptAssistEntry) -> String {
+    let required = entry
+        .inputs
+        .iter()
+        .filter(|input| input.required)
+        .collect::<Vec<_>>();
+    match required.as_slice() {
+        [] => format!("{} ", entry.insertion),
+        [input] if input.r#type == "text" => format!("{}::", entry.insertion),
+        [_] => format!("{}:", entry.insertion),
+        _ => format!("{}($0)", entry.insertion),
+    }
 }
 
 fn directive_snippet_items(
@@ -934,8 +930,9 @@ mod tests {
 
     use lsp_types::{
         CodeActionOrCommand, CompletionClientCapabilities,
-        CompletionItemCapability, CompletionResponse, GotoDefinitionResponse,
-        Hover, Position, Range, TextDocumentClientCapabilities, Uri,
+        CompletionItemCapability, CompletionItemKind, CompletionResponse,
+        CompletionTextEdit, GotoDefinitionResponse, Hover, InsertTextFormat,
+        Position, Range, TextDocumentClientCapabilities, Uri,
     };
     use sase_core::{
         MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
@@ -951,6 +948,19 @@ mod tests {
     fn bridge_with_catalog(
         definition_path: Option<String>,
     ) -> StaticHelperHostBridge {
+        bridge_with_catalog_entries(vec![catalog_entry(
+            "foo",
+            "#foo",
+            Some("(path: path)".to_string()),
+            vec![input_hint("path", "path", true, 0)],
+            definition_path,
+        )])
+    }
+
+    fn bridge_with_catalog_entries(
+        entries: Vec<MobileXpromptCatalogEntryWire>,
+    ) -> StaticHelperHostBridge {
+        let total_count = entries.len() as u64;
         StaticHelperHostBridge {
             changespec_tags_response: serde_json::from_value(
                 serde_json::json!({
@@ -975,33 +985,11 @@ mod tests {
                     project: Some("sase".to_string()),
                     scope: MobileHelperProjectScopeWire::Explicit,
                 },
-                entries: vec![MobileXpromptCatalogEntryWire {
-                    name: "foo".to_string(),
-                    display_label: "foo".to_string(),
-                    insertion: Some("#foo".to_string()),
-                    reference_prefix: Some("#".to_string()),
-                    kind: Some("prompt".to_string()),
-                    description: Some("Foo prompt".to_string()),
-                    source_bucket: "builtin".to_string(),
-                    project: None,
-                    tags: Vec::new(),
-                    input_signature: Some("(path: path)".to_string()),
-                    inputs: vec![MobileXpromptInputWire {
-                        name: "path".to_string(),
-                        r#type: "path".to_string(),
-                        required: true,
-                        default_display: None,
-                        position: 0,
-                    }],
-                    is_skill: true,
-                    content_preview: None,
-                    source_path_display: Some("Cargo.toml".to_string()),
-                    definition_path,
-                }],
+                entries,
                 stats: MobileXpromptCatalogStatsWire {
-                    total_count: 1,
+                    total_count,
                     project_count: 0,
-                    skill_count: 1,
+                    skill_count: total_count,
                     pdf_requested: false,
                 },
                 catalog_attachment: None,
@@ -1047,6 +1035,51 @@ mod tests {
         }
     }
 
+    fn catalog_entry(
+        name: &str,
+        insertion: &str,
+        input_signature: Option<String>,
+        inputs: Vec<MobileXpromptInputWire>,
+        definition_path: Option<String>,
+    ) -> MobileXpromptCatalogEntryWire {
+        MobileXpromptCatalogEntryWire {
+            name: name.to_string(),
+            display_label: name.to_string(),
+            insertion: Some(insertion.to_string()),
+            reference_prefix: Some("#".to_string()),
+            kind: Some("prompt".to_string()),
+            description: Some(if name == "foo" {
+                "Foo prompt".to_string()
+            } else {
+                format!("{name} prompt")
+            }),
+            source_bucket: "builtin".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature,
+            inputs,
+            is_skill: true,
+            content_preview: None,
+            source_path_display: Some("Cargo.toml".to_string()),
+            definition_path,
+        }
+    }
+
+    fn input_hint(
+        name: &str,
+        r#type: &str,
+        required: bool,
+        position: u32,
+    ) -> MobileXpromptInputWire {
+        MobileXpromptInputWire {
+            name: name.to_string(),
+            r#type: r#type.to_string(),
+            required,
+            default_display: None,
+            position,
+        }
+    }
+
     #[tokio::test]
     async fn completes_xprompt_from_static_catalog() {
         let (service, _) = LspService::new(|client| {
@@ -1071,6 +1104,67 @@ mod tests {
             panic!("expected completion array");
         };
         assert!(items.iter().any(|item| item.label == "#foo"));
+    }
+
+    #[tokio::test]
+    async fn xprompt_snippet_completions_use_single_row_skeletons() {
+        let entries = vec![
+            catalog_entry(
+                "many",
+                "#many",
+                Some("(path: path, mode: word)".to_string()),
+                vec![
+                    input_hint("path", "path", true, 0),
+                    input_hint("mode", "word", true, 1),
+                ],
+                None,
+            ),
+            catalog_entry("none", "#none", None, Vec::new(), None),
+            catalog_entry(
+                "optional",
+                "#optional",
+                Some("(path?: path)".to_string()),
+                vec![input_hint("path", "path", false, 0)],
+                None,
+            ),
+            catalog_entry(
+                "path",
+                "#path",
+                Some("(path: path)".to_string()),
+                vec![input_hint("path", "path", true, 0)],
+                None,
+            ),
+            catalog_entry(
+                "text",
+                "#text",
+                Some("(body: text)".to_string()),
+                vec![input_hint("body", "text", true, 0)],
+                None,
+            ),
+        ];
+        let items = snippet_completion_items(entries, "#", 1).await;
+
+        assert_eq!(items.len(), 5);
+        assert_snippet_item(&items, "#many", "#many($0)");
+        assert_snippet_item(&items, "#none", "#none ");
+        assert_snippet_item(&items, "#optional", "#optional ");
+        assert_snippet_item(&items, "#path", "#path:");
+        assert_snippet_item(&items, "#text", "#text::");
+    }
+
+    #[tokio::test]
+    async fn xprompt_snippet_completion_returns_one_row_per_match() {
+        let entries = vec![catalog_entry(
+            "foo",
+            "#foo",
+            Some("(path: path)".to_string()),
+            vec![input_hint("path", "path", true, 0)],
+            None,
+        )];
+        let items = snippet_completion_items(entries, "#fo", 3).await;
+
+        assert_eq!(items.len(), 1);
+        assert_snippet_item(&items, "#foo", "#foo:");
     }
 
     #[tokio::test]
@@ -1238,5 +1332,55 @@ mod tests {
         };
 
         assert!(snippet_support(&capabilities));
+    }
+
+    async fn snippet_completion_items(
+        entries: Vec<MobileXpromptCatalogEntryWire>,
+        text: &str,
+        character: u32,
+    ) -> Vec<CompletionItem> {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(entries)),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            *config = ServerConfig {
+                snippet_support: true,
+                ..ServerConfig::default()
+            };
+        }
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position { line: 0, character },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        items
+    }
+
+    fn assert_snippet_item(
+        items: &[CompletionItem],
+        label: &str,
+        new_text: &str,
+    ) {
+        let item = items
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("missing completion item {label}"));
+        assert_eq!(item.kind, Some(CompletionItemKind::SNIPPET));
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit for {label}");
+        };
+        assert_eq!(edit.new_text.as_str(), new_text);
     }
 }
