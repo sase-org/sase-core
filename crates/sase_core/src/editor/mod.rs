@@ -1,4 +1,5 @@
 pub mod completion;
+pub mod definition;
 pub mod diagnostics;
 pub mod directive;
 pub mod file;
@@ -11,6 +12,7 @@ pub use completion::{
     build_xprompt_completion_candidates, classify_completion_context,
     colon_args_skeleton, named_args_skeleton,
 };
+pub use definition::{definition_at_position, DefinitionTarget};
 pub use diagnostics::analyze_document;
 pub use directive::{
     build_directive_completion_candidates, canonical_directive_name,
@@ -24,7 +26,8 @@ pub use file::{
 pub use hover::hover_at_position;
 pub use token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
-    is_xprompt_like_token, DocumentSnapshot,
+    is_xprompt_like_token, slash_skill_reference_name, xprompt_reference_name,
+    DocumentSnapshot,
 };
 pub use wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,

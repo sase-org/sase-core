@@ -185,6 +185,17 @@ pub fn is_path_like_token(token: &str) -> bool {
         || bare.contains('/')
 }
 
+pub fn xprompt_reference_name(token: &str) -> Option<String> {
+    token
+        .strip_prefix("#!")
+        .or_else(|| token.strip_prefix('#'))
+        .map(|name| name.replace("__", "/"))
+}
+
+pub fn slash_skill_reference_name(token: &str) -> Option<&str> {
+    token.strip_prefix('/').filter(|name| !name.is_empty())
+}
+
 fn token_info(
     document: &DocumentSnapshot,
     byte_start: usize,

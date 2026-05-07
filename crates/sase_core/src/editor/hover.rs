@@ -1,6 +1,9 @@
 use super::completion::classify_completion_context;
 use super::directive::directive_metadata;
-use super::token::{extract_token_at_position, DocumentSnapshot};
+use super::token::{
+    extract_token_at_position, slash_skill_reference_name,
+    xprompt_reference_name, DocumentSnapshot,
+};
 use super::wire::{
     CompletionContextKind, EditorPosition, HoverPayload, XpromptAssistEntry,
 };
@@ -46,19 +49,14 @@ pub fn hover_at_position(
     }
 
     let token = extract_token_at_position(document, position)?;
-    if let Some(name) = token
-        .text
-        .strip_prefix("#!")
-        .or_else(|| token.text.strip_prefix('#'))
-    {
-        let normalized = name.replace("__", "/");
-        let entry = entries.iter().find(|entry| entry.name == normalized)?;
+    if let Some(name) = xprompt_reference_name(&token.text) {
+        let entry = entries.iter().find(|entry| entry.name == name)?;
         return Some(HoverPayload {
             range: token.range,
             markdown: xprompt_markdown(entry),
         });
     }
-    if let Some(name) = token.text.strip_prefix('/') {
+    if let Some(name) = slash_skill_reference_name(&token.text) {
         let entry = entries
             .iter()
             .find(|entry| entry.is_skill && entry.name == name)?;
