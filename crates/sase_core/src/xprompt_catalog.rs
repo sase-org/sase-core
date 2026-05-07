@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::Deserialize;
 use serde_yaml::Value;
 use thiserror::Error;
 
@@ -17,6 +18,9 @@ use crate::{
 
 const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
 const SCHEMA_VERSION: u32 = 1;
+const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
+const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
+    "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
 
 #[derive(Debug, Error)]
 pub enum XpromptCatalogLoadError {
@@ -79,6 +83,12 @@ struct CatalogXprompt {
     tags: BTreeSet<String>,
     description: Option<String>,
     is_skill: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginPathEntry {
+    module: String,
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +371,8 @@ struct CatalogLoader {
     package_xprompts_dir: Option<PathBuf>,
     default_xprompts_dir: Option<PathBuf>,
     default_config_path: Option<PathBuf>,
+    plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    plugin_config_paths: BTreeMap<String, PathBuf>,
     known_workspaces: BTreeMap<String, PathBuf>,
 }
 
@@ -385,6 +397,10 @@ impl CatalogLoader {
                     .as_ref()
                     .map(|root| root.join("default_config.yml"))
             });
+        let plugin_xprompt_dirs =
+            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV);
+        let plugin_config_paths =
+            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV);
         let known_workspaces = known_project_workspaces(home_dir.as_deref());
         Self {
             root_dir,
@@ -392,6 +408,8 @@ impl CatalogLoader {
             package_xprompts_dir,
             default_xprompts_dir,
             default_config_path,
+            plugin_xprompt_dirs,
+            plugin_config_paths,
             known_workspaces,
         }
     }
@@ -495,6 +513,7 @@ impl CatalogLoader {
         if let Some(dir) = &self.default_xprompts_dir {
             all.extend(self.load_xprompts_from_dir(dir, None, false)?);
         }
+        all.extend(self.load_plugin_xprompts()?);
         all.extend(self.load_config_xprompts(project)?);
         all.extend(self.load_memory_xprompts()?);
         if let Some(project) = project {
@@ -515,6 +534,7 @@ impl CatalogLoader {
         if let Some(dir) = &self.package_xprompts_dir {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }
+        all.extend(self.load_plugin_workflows()?);
         all.extend(self.load_config_workflows(project)?);
         if let Some(project) = project {
             all.extend(self.load_project_specific_workflows(project)?);
@@ -589,6 +609,53 @@ impl CatalogLoader {
                 }
             }
             result.insert(workflow.name.clone(), workflow);
+        }
+        Ok(result)
+    }
+
+    fn load_plugin_xprompts(
+        &self,
+    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        for (module, dir) in &self.plugin_xprompt_dirs {
+            for path in files_with_extensions(dir, &["md"])? {
+                let Some(mut xprompt) = load_xprompt_from_markdown(&path)?
+                else {
+                    continue;
+                };
+                let Some(filename) =
+                    path.file_name().and_then(|name| name.to_str())
+                else {
+                    continue;
+                };
+                xprompt.source_path =
+                    Some(format!("plugin:{module}/{filename}"));
+                result.insert(xprompt.name.clone(), xprompt);
+            }
+        }
+        Ok(result)
+    }
+
+    fn load_plugin_workflows(
+        &self,
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
+    {
+        let mut result = BTreeMap::new();
+        for (module, dir) in &self.plugin_xprompt_dirs {
+            for path in files_with_extensions(dir, &["yml", "yaml"])? {
+                let Some(mut workflow) = load_workflow_from_yaml_file(&path)?
+                else {
+                    continue;
+                };
+                let Some(filename) =
+                    path.file_name().and_then(|name| name.to_str())
+                else {
+                    continue;
+                };
+                workflow.source_path =
+                    Some(format!("plugin:{module}/{filename}"));
+                result.insert(workflow.name.clone(), workflow);
+            }
         }
         Ok(result)
     }
@@ -671,6 +738,9 @@ impl CatalogLoader {
         let mut paths = Vec::new();
         if let Some(path) = &self.default_config_path {
             paths.push(("default_config".to_string(), path.clone()));
+        }
+        for (module, path) in &self.plugin_config_paths {
+            paths.push((format!("plugin_config:{module}"), path.clone()));
         }
         if let Some(home) = &self.home_dir {
             let config_dir = home.join(".config").join("sase");
@@ -948,10 +1018,17 @@ impl CatalogLoader {
         source: &str,
         project: Option<&str>,
     ) -> Option<PathBuf> {
-        if source.starts_with("plugin:")
-            || source.starts_with("plugin_config:")
-            || source.starts_with("config:")
-        {
+        if let Some(rest) = source.strip_prefix("plugin:") {
+            let (module, filename) = rest.split_once('/')?;
+            return self
+                .plugin_xprompt_dirs
+                .get(module)
+                .map(|dir| dir.join(filename));
+        }
+        if let Some(module) = source.strip_prefix("plugin_config:") {
+            return self.plugin_config_paths.get(module).cloned();
+        }
+        if source.starts_with("config:") {
             return None;
         }
         if source == "default_config" {
@@ -1006,6 +1083,23 @@ impl CatalogLoader {
 
 fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name).map(PathBuf::from)
+}
+
+fn plugin_path_map_from_env(name: &str) -> BTreeMap<String, PathBuf> {
+    let Some(raw) = env::var_os(name) else {
+        return BTreeMap::new();
+    };
+    let Some(raw) = raw.to_str() else {
+        return BTreeMap::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<PluginPathEntry>>(raw) else {
+        return BTreeMap::new();
+    };
+    entries
+        .into_iter()
+        .filter(|entry| !entry.module.is_empty())
+        .map(|entry| (entry.module, entry.path))
+        .collect()
 }
 
 fn known_project_workspaces(home: Option<&Path>) -> BTreeMap<String, PathBuf> {
@@ -1635,6 +1729,8 @@ mod tests {
             package_xprompts_dir: Some(package.join("xprompts")),
             default_xprompts_dir: Some(package.join("default_xprompts")),
             default_config_path: Some(package.join("default_config.yml")),
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::from([(
                 "app".to_string(),
                 root.clone(),
@@ -1735,6 +1831,123 @@ mod tests {
     }
 
     #[test]
+    fn loads_plugin_file_and_config_catalog_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        let package = temp.path().join("package");
+        let plugin_prompts = temp.path().join("plugin").join("xprompts");
+        let plugin_config = temp.path().join("plugin_config");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(home.join(".config/sase")).unwrap();
+        fs::create_dir_all(package.join("xprompts")).unwrap();
+        fs::create_dir_all(package.join("default_xprompts")).unwrap();
+        fs::create_dir_all(&plugin_prompts).unwrap();
+        fs::create_dir_all(&plugin_config).unwrap();
+
+        fs::write(package.join("default_config.yml"), "xprompts: {}\n")
+            .unwrap();
+        fs::write(
+            plugin_prompts.join("plug.md"),
+            "---\nname: plug\ndescription: Plugin prompt\n---\nPlugin prompt body",
+        )
+        .unwrap();
+        fs::write(
+            plugin_prompts.join("gh.yml"),
+            "steps:\n  - name: main\n    prompt_part: GitHub workflow body\n",
+        )
+        .unwrap();
+        fs::write(
+            plugin_config.join("default_config.yml"),
+            "xprompts:\n  plug_cfg:\n    content: Plugin config body\nworkflows:\n  plug_flow:\n    steps:\n      - name: run\n        prompt_part: Plugin config workflow\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase.yml"),
+            "xprompts:\n  plug_cfg:\n    content: Local override body\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root.clone()),
+            home_dir: Some(home),
+            package_xprompts_dir: Some(package.join("xprompts")),
+            default_xprompts_dir: Some(package.join("default_xprompts")),
+            default_config_path: Some(package.join("default_config.yml")),
+            plugin_xprompt_dirs: BTreeMap::from([(
+                "fake_plugin.prompts".to_string(),
+                plugin_prompts.clone(),
+            )]),
+            plugin_config_paths: BTreeMap::from([(
+                "fake_plugin.config".to_string(),
+                plugin_config.join("default_config.yml"),
+            )]),
+            known_workspaces: BTreeMap::new(),
+        };
+
+        let entries = loader.gather_structured_sources(None).unwrap();
+        let by_name = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_name["plug"].bucket, "plugin");
+        assert_eq!(by_name["gh"].bucket, "plugin");
+        assert_eq!(by_name["plug_flow"].bucket, "plugin");
+        assert_eq!(by_name["plug_cfg"].bucket, "config");
+        assert_eq!(
+            workflow_prompt_part(&by_name["plug_cfg"].workflow),
+            "Local override body"
+        );
+
+        let wire_entries = entries
+            .iter()
+            .map(|entry| structured_entry(entry, &loader))
+            .collect::<Vec<_>>();
+        let wire_by_name = wire_entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            wire_by_name["plug"].source_path_display.as_deref(),
+            Some("plugin:fake_plugin.prompts/plug.md")
+        );
+        assert_eq!(
+            wire_by_name["plug"].definition_path.as_deref(),
+            Some(
+                plugin_prompts
+                    .join("plug.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["plug_flow"].definition_path.as_deref(),
+            Some(
+                plugin_config
+                    .join("default_config.yml")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["plug_cfg"].definition_path.as_deref(),
+            Some(
+                root.join("sase.yml")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
     fn pseudo_sources_do_not_get_definition_paths() {
         let temp = tempfile::tempdir().unwrap();
         let loader = CatalogLoader {
@@ -1743,6 +1956,8 @@ mod tests {
             package_xprompts_dir: None,
             default_xprompts_dir: None,
             default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::new(),
         };
         let entry = StructuredSource {
