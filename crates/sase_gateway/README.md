@@ -91,6 +91,11 @@ do not accept mobile-supplied shell commands, cwd values, environment variables,
 argv. ChangeSpec, xprompt, and bead helpers are read-only; the only mutating helper route starts the preconfigured
 update worker.
 
+`GET /api/v1/xprompts/catalog` preserves the Python helper bridge's xprompt editor metadata. Entries may include
+`insertion`, `reference_prefix`, `kind`, and structured `inputs` records with `name`, `type`, `required`,
+`default_display`, and `position`; clients should tolerate older helper output where those additive fields are absent.
+The Rust gateway does not parse xprompt arguments itself.
+
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
 and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
 MVP.
