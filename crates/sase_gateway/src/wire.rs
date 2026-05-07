@@ -1,6 +1,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+pub use sase_core::host_bridge::{
+    MobileBeadDetailWire, MobileBeadListRequestWire,
+    MobileBeadListResponseWire, MobileBeadShowRequestWire,
+    MobileBeadShowResponseWire, MobileBeadSummaryWire,
+    MobileChangeSpecTagEntryWire, MobileChangeSpecTagListRequestWire,
+    MobileChangeSpecTagListResponseWire, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire, MobileUpdateJobStatusWire,
+    MobileUpdateJobWire, MobileUpdateStartRequestWire,
+    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
+    MobileUpdateStatusResponseWire, MobileXpromptCatalogAttachmentWire,
+    MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
+    MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
+    MobileXpromptInputWire,
+};
+
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,259 +568,6 @@ pub struct MobileAgentRetryResultWire {
     pub schema_version: u32,
     pub source_agent: String,
     pub launch: MobileAgentLaunchResultWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileHelperResultWire {
-    pub status: MobileHelperStatusWire,
-    pub message: Option<String>,
-    pub warnings: Vec<String>,
-    pub skipped: Vec<MobileHelperSkippedWire>,
-    pub partial_failure_count: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MobileHelperStatusWire {
-    Success,
-    PartialSuccess,
-    Skipped,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileHelperSkippedWire {
-    pub target: Option<String>,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileHelperProjectContextWire {
-    pub project: Option<String>,
-    pub scope: MobileHelperProjectScopeWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MobileHelperProjectScopeWire {
-    Explicit,
-    DeviceDefault,
-    AllKnown,
-    Unspecified,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileChangeSpecTagListRequestWire {
-    pub schema_version: u32,
-    pub project: Option<String>,
-    pub limit: Option<u32>,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileChangeSpecTagListResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub context: MobileHelperProjectContextWire,
-    pub tags: Vec<MobileChangeSpecTagEntryWire>,
-    pub total_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileChangeSpecTagEntryWire {
-    pub tag: String,
-    pub project: Option<String>,
-    pub changespec: String,
-    pub title: Option<String>,
-    pub status: String,
-    pub workflow: Option<String>,
-    pub source_path_display: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogRequestWire {
-    pub schema_version: u32,
-    pub project: Option<String>,
-    pub source: Option<String>,
-    pub tag: Option<String>,
-    pub query: Option<String>,
-    pub include_pdf: bool,
-    pub limit: Option<u32>,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub context: MobileHelperProjectContextWire,
-    pub entries: Vec<MobileXpromptCatalogEntryWire>,
-    pub stats: MobileXpromptCatalogStatsWire,
-    pub catalog_attachment: Option<MobileXpromptCatalogAttachmentWire>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogEntryWire {
-    pub name: String,
-    pub display_label: String,
-    pub insertion: Option<String>,
-    pub reference_prefix: Option<String>,
-    pub kind: Option<String>,
-    pub description: Option<String>,
-    pub source_bucket: String,
-    pub project: Option<String>,
-    pub tags: Vec<String>,
-    pub input_signature: Option<String>,
-    #[serde(default)]
-    pub inputs: Vec<MobileXpromptInputWire>,
-    pub is_skill: bool,
-    pub content_preview: Option<String>,
-    pub source_path_display: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptInputWire {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub r#type: String,
-    pub required: bool,
-    pub default_display: Option<String>,
-    pub position: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogStatsWire {
-    pub total_count: u64,
-    pub project_count: u64,
-    pub skill_count: u64,
-    pub pdf_requested: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogAttachmentWire {
-    pub display_name: String,
-    pub content_type: Option<String>,
-    pub byte_size: Option<u64>,
-    pub path_display: Option<String>,
-    pub generated: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadListRequestWire {
-    pub schema_version: u32,
-    pub project: Option<String>,
-    pub all_projects: bool,
-    pub status: Option<String>,
-    pub bead_type: Option<String>,
-    pub tier: Option<String>,
-    pub include_closed: bool,
-    pub limit: Option<u32>,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadListResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub context: MobileHelperProjectContextWire,
-    pub beads: Vec<MobileBeadSummaryWire>,
-    pub total_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadShowRequestWire {
-    pub schema_version: u32,
-    pub bead_id: String,
-    pub project: Option<String>,
-    pub all_projects: bool,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadShowResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub context: MobileHelperProjectContextWire,
-    pub bead: MobileBeadDetailWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadSummaryWire {
-    pub id: String,
-    pub title: String,
-    pub status: String,
-    pub bead_type: String,
-    pub tier: Option<String>,
-    pub project: Option<String>,
-    pub parent_id: Option<String>,
-    pub assignee: Option<String>,
-    pub updated_at: Option<String>,
-    pub dependency_count: u64,
-    pub block_count: u64,
-    pub child_count: u64,
-    pub plan_path_display: Option<String>,
-    pub changespec_name: Option<String>,
-    pub changespec_status: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileBeadDetailWire {
-    pub summary: MobileBeadSummaryWire,
-    pub description: Option<String>,
-    pub notes: Option<String>,
-    pub design_path_display: Option<String>,
-    pub dependencies: Vec<String>,
-    pub blocks: Vec<String>,
-    pub children: Vec<String>,
-    pub workspace_display: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileUpdateStartRequestWire {
-    pub schema_version: u32,
-    pub request_id: Option<String>,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileUpdateStartResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub job: MobileUpdateJobWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileUpdateStatusRequestWire {
-    pub schema_version: u32,
-    pub job_id: String,
-    pub device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileUpdateStatusResponseWire {
-    pub schema_version: u32,
-    pub result: MobileHelperResultWire,
-    pub job: MobileUpdateJobWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileUpdateJobWire {
-    pub job_id: String,
-    pub status: MobileUpdateJobStatusWire,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    pub message: Option<String>,
-    pub log_path_display: Option<String>,
-    pub completion_path_display: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MobileUpdateJobStatusWire {
-    Queued,
-    Running,
-    Succeeded,
-    Failed,
 }
 
 #[cfg(test)]
