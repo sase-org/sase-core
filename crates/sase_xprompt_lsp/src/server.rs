@@ -27,11 +27,11 @@ use sase_core::{
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context, editor_colon_args_skeleton,
-    editor_directive_argument_candidates, editor_directive_metadata,
-    editor_extract_token_at_position, editor_hover_at_position,
-    editor_named_args_skeleton, CompletionCandidate, CompletionContextKind,
-    CompletionList, DocumentSnapshot, EditorRange, HelperHostBridge,
-    XpromptAssistEntry,
+    editor_definition_at_position, editor_directive_argument_candidates,
+    editor_directive_metadata, editor_extract_token_at_position,
+    editor_hover_at_position, editor_named_args_skeleton, CompletionCandidate,
+    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
+    HelperHostBridge, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -219,7 +219,7 @@ impl XpromptLspServer {
                     }
                 }
                 if let Some(source_uri) =
-                    safe_source_uri(entry, config.root_dir.as_deref())
+                    definition_uri_at_position(&document, position, &entries)
                 {
                     actions.push(
                         CodeAction {
@@ -256,24 +256,15 @@ impl XpromptLspServer {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
-        let token = editor_extract_token_at_position(
+        let target = editor_definition_at_position(
             &document,
             to_editor_position(position),
+            entries.as_slice(),
         )?;
-        let entry = entry_for_token(&token.text, entries.as_slice())?;
-        let uri = safe_source_uri(entry, config.root_dir.as_deref())?;
+        let uri = Uri::from_file_path(target.path)?;
         Some(GotoDefinitionResponse::Scalar(Location {
             uri,
-            range: Range {
-                start: Position {
-                    line: 0,
-                    character: 0,
-                },
-                end: Position {
-                    line: 0,
-                    character: 0,
-                },
-            },
+            range: target.range.map(to_lsp_range).unwrap_or_else(zero_range),
         }))
     }
 
@@ -887,35 +878,26 @@ fn plain_named_args_skeleton(entry: &XpromptAssistEntry) -> String {
     }
 }
 
-fn safe_source_uri(
-    entry: &XpromptAssistEntry,
-    root_dir: Option<&Path>,
+fn definition_uri_at_position(
+    document: &DocumentSnapshot,
+    position: sase_core::EditorPosition,
+    entries: &[XpromptAssistEntry],
 ) -> Option<Uri> {
-    let display = entry.source_path_display.as_deref()?.trim();
-    if display.is_empty()
-        || display.contains("://")
-        || display.contains('\n')
-        || display.contains('\r')
-    {
-        return None;
+    let target = editor_definition_at_position(document, position, entries)?;
+    Uri::from_file_path(target.path)
+}
+
+fn zero_range() -> Range {
+    Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: 0,
+            character: 0,
+        },
     }
-    let raw = Path::new(display);
-    let candidate = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        root_dir?.join(raw)
-    };
-    let canonical = candidate.canonicalize().ok()?;
-    if let Some(root) = root_dir {
-        let root = root.canonicalize().ok()?;
-        if !canonical.starts_with(root) {
-            return None;
-        }
-    }
-    if !canonical.is_file() {
-        return None;
-    }
-    Uri::from_file_path(canonical)
 }
 
 fn should_invalidate_for_uri(uri: &Uri) -> bool {
@@ -966,7 +948,9 @@ mod tests {
 
     use super::*;
 
-    fn bridge_with_catalog() -> StaticHelperHostBridge {
+    fn bridge_with_catalog(
+        definition_path: Option<String>,
+    ) -> StaticHelperHostBridge {
         StaticHelperHostBridge {
             changespec_tags_response: serde_json::from_value(
                 serde_json::json!({
@@ -1012,7 +996,7 @@ mod tests {
                     is_skill: true,
                     content_preview: None,
                     source_path_display: Some("Cargo.toml".to_string()),
-                    definition_path: None,
+                    definition_path,
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,
@@ -1068,7 +1052,7 @@ mod tests {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
-                Arc::new(bridge_with_catalog()),
+                Arc::new(bridge_with_catalog(None)),
             )
         });
         let server = service.inner();
@@ -1096,7 +1080,9 @@ mod tests {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
-                Arc::new(bridge_with_catalog()),
+                Arc::new(bridge_with_catalog(Some(
+                    source_path.to_string_lossy().into_owned(),
+                ))),
             )
         });
         let server = service.inner();
@@ -1173,6 +1159,66 @@ mod tests {
             panic!("expected scalar definition");
         };
         assert_eq!(location.uri, uri);
+    }
+
+    #[tokio::test]
+    async fn definition_uses_definition_path_outside_workspace_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join("outside-workspace.md");
+        fs::write(&source_path, "source").unwrap();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(Some(
+                    source_path.to_string_lossy().into_owned(),
+                ))),
+            )
+        });
+        let server = service.inner();
+
+        let definition = server
+            .definition_for_text(
+                "#foo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        let GotoDefinitionResponse::Scalar(location) = definition else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(location.uri, Uri::from_file_path(source_path).unwrap());
+        assert_eq!(location.range, zero_range());
+    }
+
+    #[tokio::test]
+    async fn definition_returns_none_for_pseudo_or_missing_sources() {
+        for definition_path in [None, Some("plugin:module/name".to_string())] {
+            let (service, _) = LspService::new(|client| {
+                XpromptLspServer::with_bridge(
+                    client,
+                    Arc::new(bridge_with_catalog(definition_path.clone())),
+                )
+            });
+            let server = service.inner();
+
+            assert_eq!(
+                server
+                    .definition_for_text(
+                        "#foo".to_string(),
+                        Position {
+                            line: 0,
+                            character: 2,
+                        },
+                    )
+                    .await,
+                None
+            );
+        }
     }
 
     #[test]

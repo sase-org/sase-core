@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
+use lsp_types::Uri;
 use sase_core::{
     HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
     MobileHelperProjectScopeWire, MobileHelperResultWire,
@@ -10,10 +11,13 @@ use sase_core::{
 use sase_xprompt_lsp::XpromptLspServer;
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tower_lsp_server::UriExt;
 use tower_lsp_server::{LspService, Server};
 
 #[derive(Debug)]
-struct FixtureBridge;
+struct FixtureBridge {
+    definition_path: String,
+}
 
 impl HelperHostBridge for FixtureBridge {
     fn xprompt_catalog(
@@ -48,7 +52,7 @@ impl HelperHostBridge for FixtureBridge {
                 is_skill: false,
                 content_preview: None,
                 source_path_display: None,
-                definition_path: None,
+                definition_path: Some(self.definition_path.clone()),
             }],
             stats: MobileXpromptCatalogStatsWire {
                 total_count: 1,
@@ -63,10 +67,19 @@ impl HelperHostBridge for FixtureBridge {
 
 #[tokio::test]
 async fn stdio_jsonrpc_initialize_and_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
     let (mut client_writer, server_stdin) = duplex(8192);
     let (server_stdout, mut client_reader) = duplex(8192);
     let (service, socket) = LspService::new(|client| {
-        XpromptLspServer::with_bridge(client, Arc::new(FixtureBridge))
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
     });
     let server_task = tokio::spawn(async move {
         Server::new(server_stdin, server_stdout, socket)
@@ -109,7 +122,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
                     "uri": "file:///tmp/prompt.md",
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "#fo"
+                    "text": "#foo"
                 }
             }
         }),
@@ -147,14 +160,46 @@ async fn stdio_jsonrpc_initialize_and_completion() {
     assert!(saw_completion);
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/prompt.md"},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_definition = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            let result = &message["result"];
+            saw_definition = result["uri"]
+                == serde_json::Value::String(
+                    Uri::from_file_path(&definition_path).unwrap().to_string(),
+                )
+                && result["range"]["start"]["line"] == 0
+                && result["range"]["start"]["character"] == 0
+                && result["range"]["end"]["line"] == 0
+                && result["range"]["end"]["character"] == 0;
+            break;
+        }
+    }
+
+    assert!(saw_definition);
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(3)
+        != Some(4)
     {}
     write_message(
         &mut client_writer,
