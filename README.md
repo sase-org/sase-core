@@ -38,6 +38,10 @@ cargo test -p sase_gateway test_push_provider_records_hint_attempts
 cargo test -p sase_gateway listener_smoke_exercises_pairing_auth_and_session
 ```
 
+The mobile MVP packaging, private remote-access, rollback, and threat-model runbook is maintained in the SASE shell
+repo at `../sase_100/docs/mobile_mvp_runbook.md`. The gateway README at `crates/sase_gateway/README.md` documents the
+wire routes, push subscription endpoints, and hint-only push boundary.
+
 `rust-toolchain.toml` pins the `stable` channel and installs `rustfmt` and `clippy`. `Cargo.lock` is committed so the
 workspace builds reproducibly.
 

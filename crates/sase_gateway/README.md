@@ -28,6 +28,10 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `POST /api/v1/session/pair/start` returns a short-lived one-time pairing code and no long-lived credential.
 - `POST /api/v1/session/pair/finish` exchanges the one-time code and device metadata for a bearer token exactly once.
 - `GET /api/v1/session` requires `Authorization: Bearer <token>` and returns the authenticated device.
+- `GET /api/v1/session/push-subscriptions` lists active push subscriptions for the authenticated device.
+- `POST /api/v1/session/push-subscriptions` registers or updates one hint-only push subscription for the authenticated
+  device.
+- `DELETE /api/v1/session/push-subscriptions/{id}` disables one push subscription for the authenticated device.
 - `GET /api/v1/events` requires auth and streams `EventRecordWire` records over SSE. Heartbeat events use monotonic IDs,
   and reconnects may pass `Last-Event-ID` to replay buffered newer events. The first implementation keeps an in-memory
   ring buffer, so clients should handle `resync_required` after a restart or buffer overflow by fetching full state.
@@ -90,6 +94,18 @@ update worker.
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
 and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
 MVP.
+
+Push delivery is disabled by default. When configured with `--push-provider test` or `--push-provider fcm`, event
+emission attempts best-effort hint delivery to matching active subscriptions. Push hints contain safe IDs, categories,
+reasons, and short display text only; clients must fetch authenticated gateway state after push receipt or notification
+tap. Do not put bearer tokens, pairing codes, prompt bodies, response text, attachment contents, attachment tokens, host
+paths, service-account contents, or signing material in provider payloads.
+
+The cross-repo packaging, Tailscale Serve, troubleshooting, rollback, and threat-model runbook lives in the SASE repo:
+
+```text
+../sase_100/docs/mobile_mvp_runbook.md
+```
 
 ## Curl Examples
 
@@ -259,6 +275,17 @@ cargo run -p sase_gateway -- --bind 127.0.0.1:0 --sase-home /tmp/sase
 
 The binary binds `127.0.0.1:7629` by default. Non-loopback binds such as `0.0.0.0:7629`, LAN addresses, or tailnet
 addresses fail unless `--allow-non-loopback` / `-L` is passed explicitly.
+
+Push-provider examples:
+
+```bash
+cargo run -p sase_gateway -- --push-provider test
+cargo run -p sase_gateway -- \
+  --push-provider fcm \
+  --fcm-project-id my-firebase-project \
+  --fcm-credential-env SASE_FCM_CREDENTIAL \
+  --fcm-dry-run
+```
 
 ## Contract Snapshot
 
