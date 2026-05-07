@@ -72,6 +72,21 @@ pub fn hover_at_position(
 
 fn xprompt_markdown(entry: &XpromptAssistEntry) -> String {
     let mut lines = vec![format!("**{}**", entry.insertion)];
+    let mut meta = Vec::new();
+    if let Some(kind) = &entry.kind {
+        meta.push(kind.clone());
+    }
+    meta.push(format!("canonical `{}`", entry.reference_prefix));
+    if !entry.source_bucket.is_empty() {
+        meta.push(entry.source_bucket.clone());
+    }
+    if let Some(project) = &entry.project {
+        meta.push(format!("project `{project}`"));
+    }
+    if !meta.is_empty() {
+        lines.push(String::new());
+        lines.push(meta.join(" | "));
+    }
     if let Some(signature) = &entry.input_signature {
         lines.push(String::new());
         lines.push(format!("`{signature}`"));
@@ -87,7 +102,30 @@ fn xprompt_markdown(entry: &XpromptAssistEntry) -> String {
         lines.push(String::new());
         lines.push(format!("Source: `{source}`"));
     }
+    if !entry.tags.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("Tags: {}", entry.tags.join(", ")));
+    }
+    if entry.description.is_some() {
+        if let Some(preview) = &entry.content_preview {
+            lines.push(String::new());
+            lines.push(bounded_preview(preview));
+        }
+    }
     lines.join("\n")
+}
+
+fn bounded_preview(preview: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 600;
+    let mut out = String::new();
+    for (idx, ch) in preview.chars().enumerate() {
+        if idx == MAX_PREVIEW_CHARS {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn active_input_markdown(
@@ -133,9 +171,13 @@ mod tests {
     fn builds_xprompt_and_argument_hover() {
         let entries = vec![XpromptAssistEntry {
             name: "review".to_string(),
+            display_label: "review".to_string(),
             insertion: "#review".to_string(),
             reference_prefix: "#".to_string(),
             kind: None,
+            source_bucket: "builtin".to_string(),
+            project: None,
+            tags: Vec::new(),
             input_signature: Some("(path: path)".to_string()),
             inputs: vec![XpromptInputHint {
                 name: "path".to_string(),

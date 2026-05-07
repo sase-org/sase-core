@@ -208,9 +208,13 @@ mod tests {
         vec![
             XpromptAssistEntry {
                 name: "review".to_string(),
+                display_label: "review".to_string(),
                 insertion: "#review".to_string(),
                 reference_prefix: "#".to_string(),
                 kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
                 input_signature: None,
                 inputs: vec![],
                 content_preview: None,
@@ -220,9 +224,13 @@ mod tests {
             },
             XpromptAssistEntry {
                 name: "run".to_string(),
+                display_label: "run".to_string(),
                 insertion: "#!run".to_string(),
                 reference_prefix: "#!".to_string(),
                 kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
                 input_signature: None,
                 inputs: vec![],
                 content_preview: None,

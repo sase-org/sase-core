@@ -30,9 +30,13 @@ pub fn assist_entries_from_catalog(
                 .unwrap_or_else(|| format!("{reference_prefix}{}", entry.name));
             XpromptAssistEntry {
                 name: entry.name.clone(),
+                display_label: entry.display_label.clone(),
                 insertion,
                 reference_prefix,
                 kind: entry.kind.clone(),
+                source_bucket: entry.source_bucket.clone(),
+                project: entry.project.clone(),
+                tags: entry.tags.clone(),
                 input_signature: entry.input_signature.clone(),
                 inputs: entry
                     .inputs
@@ -664,9 +668,13 @@ mod tests {
         let doc = DocumentSnapshot::new("#ns__foo(arg=");
         let ns_entry = XpromptAssistEntry {
             name: "ns/foo".to_string(),
+            display_label: "ns/foo".to_string(),
             insertion: "#ns/foo".to_string(),
             reference_prefix: "#".to_string(),
             kind: None,
+            source_bucket: "project".to_string(),
+            project: None,
+            tags: Vec::new(),
             input_signature: None,
             inputs: vec![XpromptInputHint {
                 name: "arg".to_string(),

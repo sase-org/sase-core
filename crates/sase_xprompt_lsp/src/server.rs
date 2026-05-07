@@ -6,24 +6,32 @@ use std::{
 };
 
 use lsp_types::{
-    ClientCapabilities, CompletionItem, CompletionOptions, CompletionParams,
-    CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    ExecuteCommandOptions, ExecuteCommandParams, InitializeParams,
-    InitializeResult, InitializedParams, LSPAny, MessageType, Position,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, WorkDoneProgressOptions,
+    ClientCapabilities, CodeAction, CodeActionKind, CodeActionOptions,
+    CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
+    CodeActionResponse, Command, CompletionItem, CompletionOptions,
+    CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentChanges, ExecuteCommandOptions,
+    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, LSPAny, Location, MessageType, OneOf,
+    OptionalVersionedTextDocumentIdentifier, Position, Range,
+    ServerCapabilities, ServerInfo, TextDocumentEdit,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
+    WorkDoneProgressOptions, WorkspaceEdit,
 };
 use sase_core::{
-    editor_build_directive_completion_candidates,
+    editor_analyze_document, editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context, editor_colon_args_skeleton,
-    editor_directive_argument_candidates, editor_named_args_skeleton,
-    CompletionCandidate, CompletionContextKind, CompletionList,
-    DocumentSnapshot, HelperHostBridge, XpromptAssistEntry,
+    editor_directive_argument_candidates, editor_directive_metadata,
+    editor_extract_token_at_position, editor_hover_at_position,
+    editor_named_args_skeleton, CompletionCandidate, CompletionContextKind,
+    CompletionList, DocumentSnapshot, EditorRange, HelperHostBridge,
+    XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -31,12 +39,14 @@ use tracing::{info, warn};
 
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
-    apply_replacement, completion_response, snippet_completion_item,
-    to_editor_position,
+    apply_replacement, completion_response, diagnostic as lsp_diagnostic,
+    hover as lsp_hover, snippet_completion_item, to_editor_position,
+    to_lsp_range,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
+const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -114,7 +124,157 @@ impl XpromptLspServer {
                 ));
             }
         }
+        if config.snippet_support
+            && context.kind == CompletionContextKind::DirectiveName
+        {
+            if let CompletionResponse::Array(items) = &mut response {
+                items.extend(directive_snippet_items(
+                    context.token.as_ref().map(|token| token.text.as_str()),
+                    context.replacement_range,
+                ));
+            }
+        }
         Some(response)
+    }
+
+    pub async fn hover_for_text(
+        &self,
+        text: String,
+        position: Position,
+    ) -> Option<Hover> {
+        let config = self.current_config();
+        let entries = self.entries_for_completion(&config).await;
+        let document = DocumentSnapshot::new(text);
+        editor_hover_at_position(
+            &document,
+            to_editor_position(position),
+            entries.as_slice(),
+        )
+        .map(lsp_hover)
+    }
+
+    pub async fn diagnostics_for_text(
+        &self,
+        text: String,
+    ) -> Vec<lsp_types::Diagnostic> {
+        let config = self.current_config();
+        let entries = self.entries_for_completion(&config).await;
+        let document = DocumentSnapshot::new(text);
+        editor_analyze_document(&document, entries.as_slice())
+            .into_iter()
+            .map(lsp_diagnostic)
+            .collect()
+    }
+
+    pub async fn code_actions_for_text(
+        &self,
+        uri: Uri,
+        text: String,
+        range: Range,
+    ) -> CodeActionResponse {
+        let config = self.current_config();
+        let entries = self.entries_for_completion(&config).await;
+        let document = DocumentSnapshot::new(text);
+        let position = to_editor_position(range.start);
+        let mut actions = Vec::new();
+
+        if let Some(token) =
+            editor_extract_token_at_position(&document, position)
+        {
+            if let Some(entry) =
+                entry_for_token(&token.text, entries.as_slice())
+            {
+                if token.text.starts_with('#') {
+                    if let Some(action) = canonical_marker_action(
+                        &uri,
+                        token.range,
+                        &token.text,
+                        entry,
+                    ) {
+                        actions.push(action.into());
+                    }
+                    if !entry.inputs.is_empty() {
+                        actions.push(
+                            text_edit_action(
+                                "Insert required named args",
+                                &uri,
+                                token.range,
+                                plain_named_args_skeleton(entry),
+                                CodeActionKind::REFACTOR_REWRITE,
+                                false,
+                            )
+                            .into(),
+                        );
+                        actions.push(
+                            text_edit_action(
+                                "Insert colon arg skeleton",
+                                &uri,
+                                token.range,
+                                format!("{}:", entry.insertion),
+                                CodeActionKind::REFACTOR_REWRITE,
+                                false,
+                            )
+                            .into(),
+                        );
+                    }
+                }
+                if let Some(source_uri) =
+                    safe_source_uri(entry, config.root_dir.as_deref())
+                {
+                    actions.push(
+                        CodeAction {
+                            title: "Open xprompt source".to_string(),
+                            kind: Some(CodeActionKind::SOURCE),
+                            command: Some(Command::new(
+                                "Open xprompt source".to_string(),
+                                OPEN_SOURCE_COMMAND.to_string(),
+                                Some(vec![serde_json::json!(
+                                    source_uri.to_string()
+                                )]),
+                            )),
+                            ..Default::default()
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        actions.push(CodeActionOrCommand::Command(Command::new(
+            "Refresh xprompt catalog".to_string(),
+            REFRESH_COMMAND.to_string(),
+            None,
+        )));
+        actions
+    }
+
+    pub async fn definition_for_text(
+        &self,
+        text: String,
+        position: Position,
+    ) -> Option<GotoDefinitionResponse> {
+        let config = self.current_config();
+        let entries = self.entries_for_completion(&config).await;
+        let document = DocumentSnapshot::new(text);
+        let token = editor_extract_token_at_position(
+            &document,
+            to_editor_position(position),
+        )?;
+        let entry = entry_for_token(&token.text, entries.as_slice())?;
+        let uri = safe_source_uri(entry, config.root_dir.as_deref())?;
+        Some(GotoDefinitionResponse::Scalar(Location {
+            uri,
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        }))
     }
 
     fn current_config(&self) -> ServerConfig {
@@ -239,6 +399,13 @@ impl XpromptLspServer {
         }
     }
 
+    async fn publish_document_diagnostics(&self, uri: Uri, text: String) {
+        let diagnostics = self.diagnostics_for_text(text).await;
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
+    }
+
     async fn warn_once(&self, error: &CatalogFailure) {
         warn!("{}", error.message);
         if self.catalog_cache.should_warn(&error.class) {
@@ -288,11 +455,29 @@ impl LanguageServer for XpromptLspServer {
                     completion_item: None,
                 }),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![REFRESH_COMMAND.to_string()],
+                    commands: vec![
+                        REFRESH_COMMAND.to_string(),
+                        OPEN_SOURCE_COMMAND.to_string(),
+                    ],
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
                     },
                 }),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(
+                    CodeActionProviderCapability::Options(CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR_REWRITE,
+                            CodeActionKind::SOURCE,
+                        ]),
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: Some(false),
+                        },
+                        resolve_provider: Some(false),
+                    }),
+                ),
                 ..Default::default()
             },
         })
@@ -308,27 +493,32 @@ impl LanguageServer for XpromptLspServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let text = params.text_document.text;
         if let Ok(mut documents) = self.documents.write() {
-            documents.insert(
-                params.text_document.uri.to_string(),
-                params.text_document.text,
-            );
+            documents.insert(uri.to_string(), text.clone());
         }
+        self.publish_document_diagnostics(uri, text).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let Some(change) = params.content_changes.into_iter().last() else {
             return;
         };
+        let uri = params.text_document.uri;
+        let text = change.text;
         if let Ok(mut documents) = self.documents.write() {
-            documents.insert(params.text_document.uri.to_string(), change.text);
+            documents.insert(uri.to_string(), text.clone());
         }
+        self.publish_document_diagnostics(uri, text).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
         if let Ok(mut documents) = self.documents.write() {
-            documents.remove(&params.text_document.uri.to_string());
+            documents.remove(&uri.to_string());
         }
+        self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
     async fn completion(
@@ -356,14 +546,85 @@ impl LanguageServer for XpromptLspServer {
         Ok(params)
     }
 
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let text = self
+            .documents
+            .read()
+            .ok()
+            .and_then(|documents| documents.get(&uri.to_string()).cloned());
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        Ok(self
+            .hover_for_text(text, params.text_document_position_params.position)
+            .await)
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let text = self
+            .documents
+            .read()
+            .ok()
+            .and_then(|documents| documents.get(&uri.to_string()).cloned());
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        Ok(self
+            .definition_for_text(
+                text,
+                params.text_document_position_params.position,
+            )
+            .await)
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let text = self
+            .documents
+            .read()
+            .ok()
+            .and_then(|documents| documents.get(&uri.to_string()).cloned());
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.code_actions_for_text(uri, text, params.range).await,
+        ))
+    }
+
     async fn execute_command(
         &self,
         params: ExecuteCommandParams,
     ) -> Result<Option<LSPAny>> {
         if params.command == REFRESH_COMMAND {
             self.refresh_catalog_explicit().await;
+        } else if params.command == OPEN_SOURCE_COMMAND {
+            self.client
+                .log_message(MessageType::INFO, "open source command invoked")
+                .await;
         }
         Ok(None)
+    }
+
+    async fn did_change_watched_files(
+        &self,
+        params: DidChangeWatchedFilesParams,
+    ) {
+        if params
+            .changes
+            .iter()
+            .any(|change| should_invalidate_for_uri(&change.uri))
+        {
+            self.catalog_cache.invalidate_all();
+        }
     }
 }
 
@@ -452,6 +713,45 @@ fn snippet_items(
         .collect()
 }
 
+fn directive_snippet_items(
+    token: Option<&str>,
+    replacement_range: sase_core::EditorRange,
+) -> Vec<CompletionItem> {
+    let partial = token
+        .unwrap_or_default()
+        .strip_prefix('%')
+        .unwrap_or_default();
+    sase_core::EDITOR_DIRECTIVES
+        .iter()
+        .filter(|directive| directive.takes_argument)
+        .filter(|directive| {
+            directive.name.starts_with(partial)
+                || directive
+                    .alias
+                    .filter(|alias| *alias != "(")
+                    .is_some_and(|alias| alias.starts_with(partial))
+        })
+        .map(|directive| {
+            let syntax = if directive.name == "alt" {
+                "%(${1:variant})$0".to_string()
+            } else {
+                format!("%{}:${{1:value}}$0", directive.name)
+            };
+            snippet_completion_item(
+                format!("%{}:...", directive.name),
+                syntax,
+                Some("directive snippet".to_string()),
+                Some(
+                    editor_directive_metadata(directive.name)
+                        .map(|metadata| metadata.description.to_string())
+                        .unwrap_or_else(|| directive.description.to_string()),
+                ),
+                replacement_range,
+            )
+        })
+        .collect()
+}
+
 fn bool_completion_list() -> CompletionList {
     CompletionList {
         candidates: ["false", "true"]
@@ -501,13 +801,157 @@ fn file_history() -> Vec<String> {
         .collect()
 }
 
+fn entry_for_token<'a>(
+    token: &str,
+    entries: &'a [XpromptAssistEntry],
+) -> Option<&'a XpromptAssistEntry> {
+    if let Some(name) =
+        token.strip_prefix("#!").or_else(|| token.strip_prefix('#'))
+    {
+        let normalized = name.replace("__", "/");
+        return entries.iter().find(|entry| entry.name == normalized);
+    }
+    if let Some(name) = token.strip_prefix('/') {
+        return entries
+            .iter()
+            .find(|entry| entry.is_skill && entry.name == name);
+    }
+    None
+}
+
+fn canonical_marker_action(
+    uri: &Uri,
+    range: EditorRange,
+    token: &str,
+    entry: &XpromptAssistEntry,
+) -> Option<CodeAction> {
+    if token.starts_with(&entry.reference_prefix) {
+        return None;
+    }
+    Some(text_edit_action(
+        &format!("Use canonical `{}` marker", entry.reference_prefix),
+        uri,
+        range,
+        entry.insertion.clone(),
+        CodeActionKind::QUICKFIX,
+        true,
+    ))
+}
+
+fn text_edit_action(
+    title: &str,
+    uri: &Uri,
+    range: EditorRange,
+    new_text: String,
+    kind: CodeActionKind,
+    preferred: bool,
+) -> CodeAction {
+    let text_edit = TextEdit {
+        range: to_lsp_range(range),
+        new_text,
+    };
+    CodeAction {
+        title: title.to_string(),
+        kind: Some(kind),
+        edit: Some(WorkspaceEdit {
+            changes: None,
+            document_changes: Some(DocumentChanges::Edits(vec![
+                TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: uri.clone(),
+                        version: None,
+                    },
+                    edits: vec![OneOf::Left(text_edit)],
+                },
+            ])),
+            change_annotations: None,
+        }),
+        is_preferred: Some(preferred),
+        ..Default::default()
+    }
+}
+
+fn plain_named_args_skeleton(entry: &XpromptAssistEntry) -> String {
+    let required = entry
+        .inputs
+        .iter()
+        .filter(|input| input.required)
+        .map(|input| format!("{}=", input.name))
+        .collect::<Vec<_>>();
+    if required.is_empty() {
+        entry.insertion.clone()
+    } else {
+        format!("{}({})", entry.insertion, required.join(", "))
+    }
+}
+
+fn safe_source_uri(
+    entry: &XpromptAssistEntry,
+    root_dir: Option<&Path>,
+) -> Option<Uri> {
+    let display = entry.source_path_display.as_deref()?.trim();
+    if display.is_empty()
+        || display.contains("://")
+        || display.contains('\n')
+        || display.contains('\r')
+    {
+        return None;
+    }
+    let raw = Path::new(display);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        root_dir?.join(raw)
+    };
+    let canonical = candidate.canonicalize().ok()?;
+    if let Some(root) = root_dir {
+        let root = root.canonicalize().ok()?;
+        if !canonical.starts_with(root) {
+            return None;
+        }
+    }
+    if !canonical.is_file() {
+        return None;
+    }
+    Uri::from_file_path(canonical)
+}
+
+fn should_invalidate_for_uri(uri: &Uri) -> bool {
+    let Some(path) = uri.to_file_path().map(|path| path.into_owned()) else {
+        return false;
+    };
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    if matches!(file_name, "xprompts.yml" | "xprompts.yaml" | "sase.yml") {
+        return true;
+    }
+    if file_name == "file_reference_history.json"
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(".sase")
+    {
+        return true;
+    }
+    let extension = path.extension().and_then(|ext| ext.to_str());
+    if !matches!(extension, Some("md" | "yml" | "yaml")) {
+        return false;
+    }
+    path.components()
+        .any(|component| component.as_os_str() == "xprompts")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use lsp_types::{
-        CompletionClientCapabilities, CompletionItemCapability,
-        CompletionResponse, Position, TextDocumentClientCapabilities,
+        CodeActionOrCommand, CompletionClientCapabilities,
+        CompletionItemCapability, CompletionResponse, GotoDefinitionResponse,
+        Hover, Position, Range, TextDocumentClientCapabilities, Uri,
     };
     use sase_core::{
         MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
@@ -516,6 +960,7 @@ mod tests {
         MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
         StaticHelperHostBridge,
     };
+    use tower_lsp_server::UriExt;
 
     use super::*;
 
@@ -564,7 +1009,7 @@ mod tests {
                     }],
                     is_skill: true,
                     content_preview: None,
-                    source_path_display: None,
+                    source_path_display: Some("Cargo.toml".to_string()),
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,
@@ -639,6 +1084,92 @@ mod tests {
             panic!("expected completion array");
         };
         assert!(items.iter().any(|item| item.label == "#foo"));
+    }
+
+    #[tokio::test]
+    async fn exposes_hover_diagnostics_code_actions_and_definition() {
+        let source_path = std::env::current_dir().unwrap().join("Cargo.toml");
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog()),
+            )
+        });
+        let server = service.inner();
+
+        let hover = server
+            .hover_for_text(
+                "#foo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let Hover {
+            contents: lsp_types::HoverContents::Markup(markup),
+            ..
+        } = hover
+        else {
+            panic!("expected markdown hover");
+        };
+        assert!(markup.value.contains("Foo prompt"));
+
+        let diagnostics = server
+            .diagnostics_for_text("#missing %wat".to_string())
+            .await;
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("Unknown xprompt")));
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("Unknown directive")));
+
+        let uri = Uri::from_file_path(&source_path).unwrap();
+        let actions = server
+            .code_actions_for_text(
+                uri.clone(),
+                "#!foo".to_string(),
+                Range {
+                    start: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+            )
+            .await;
+        assert!(actions.iter().any(|action| match action {
+            CodeActionOrCommand::CodeAction(action) =>
+                action.title.contains("canonical"),
+            CodeActionOrCommand::Command(command) =>
+                command.command == REFRESH_COMMAND,
+        }));
+        assert!(actions.iter().any(|action| match action {
+            CodeActionOrCommand::CodeAction(action) =>
+                action.title == "Insert required named args",
+            CodeActionOrCommand::Command(_) => false,
+        }));
+
+        let definition = server
+            .definition_for_text(
+                "#foo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let GotoDefinitionResponse::Scalar(location) = definition else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(location.uri, uri);
     }
 
     #[test]

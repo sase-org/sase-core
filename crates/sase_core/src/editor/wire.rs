@@ -90,9 +90,13 @@ pub struct XpromptInputHint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XpromptAssistEntry {
     pub name: String,
+    pub display_label: String,
     pub insertion: String,
     pub reference_prefix: String,
     pub kind: Option<String>,
+    pub source_bucket: String,
+    pub project: Option<String>,
+    pub tags: Vec<String>,
     pub input_signature: Option<String>,
     pub inputs: Vec<XpromptInputHint>,
     pub content_preview: Option<String>,

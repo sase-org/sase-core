@@ -91,6 +91,12 @@ impl CatalogCache {
         warned.insert(class.to_string())
     }
 
+    pub fn invalidate_all(&self) {
+        if let Ok(mut catalogs) = self.catalogs.write() {
+            catalogs.clear();
+        }
+    }
+
     async fn refresh(
         &self,
         key: String,

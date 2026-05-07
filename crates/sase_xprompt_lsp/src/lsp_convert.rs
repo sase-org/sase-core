@@ -1,11 +1,12 @@
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
     CompletionItemTag, CompletionResponse, CompletionTextEdit, Documentation,
-    InsertTextFormat, MarkupContent, MarkupKind, Position, Range, TextEdit,
+    InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
+    Range, TextEdit,
 };
 use sase_core::{
-    CompletionCandidate, CompletionList, EditorPosition, EditorRange,
-    EditorTextEdit,
+    CompletionCandidate, CompletionList, DiagnosticSeverity, EditorDiagnostic,
+    EditorPosition, EditorRange, EditorTextEdit, HoverPayload,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -55,6 +56,27 @@ pub fn snippet_completion_item(
             range: to_lsp_range(replacement_range),
             new_text,
         })),
+        ..Default::default()
+    }
+}
+
+pub fn hover(payload: HoverPayload) -> lsp_types::Hover {
+    lsp_types::Hover {
+        contents: lsp_types::HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: payload.markdown,
+        }),
+        range: Some(to_lsp_range(payload.range)),
+    }
+}
+
+pub fn diagnostic(diagnostic: EditorDiagnostic) -> lsp_types::Diagnostic {
+    lsp_types::Diagnostic {
+        range: to_lsp_range(diagnostic.range),
+        severity: Some(to_lsp_diagnostic_severity(diagnostic.severity)),
+        code: Some(NumberOrString::String(diagnostic.code)),
+        source: Some("sase-xprompt".to_string()),
+        message: diagnostic.message,
         ..Default::default()
     }
 }
@@ -117,6 +139,19 @@ fn to_lsp_position(position: EditorPosition) -> Position {
     Position {
         line: position.line,
         character: position.character,
+    }
+}
+
+fn to_lsp_diagnostic_severity(
+    severity: DiagnosticSeverity,
+) -> lsp_types::DiagnosticSeverity {
+    match severity {
+        DiagnosticSeverity::Error => lsp_types::DiagnosticSeverity::ERROR,
+        DiagnosticSeverity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+        DiagnosticSeverity::Information => {
+            lsp_types::DiagnosticSeverity::INFORMATION
+        }
+        DiagnosticSeverity::Hint => lsp_types::DiagnosticSeverity::HINT,
     }
 }
 
