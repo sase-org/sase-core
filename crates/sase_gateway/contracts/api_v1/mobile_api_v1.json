@@ -449,9 +449,13 @@
       "description": "string|null",
       "display_label": "string",
       "input_signature": "string|null",
+      "inputs": "MobileXpromptInputWire[]; default [] when absent",
+      "insertion": "string|null; fallback to #<name> when absent",
       "is_skill": "bool",
+      "kind": "string|null",
       "name": "string",
       "project": "string|null",
+      "reference_prefix": "string|null",
       "source_bucket": "string",
       "source_path_display": "string|null",
       "tags": "string[]"
@@ -479,6 +483,13 @@
       "project_count": "u64",
       "skill_count": "u64",
       "total_count": "u64"
+    },
+    "MobileXpromptInputWire": {
+      "default_display": "string|null",
+      "name": "string",
+      "position": "u32",
+      "required": "bool",
+      "type": "string"
     },
     "NotificationStateMutationResponseWire": {
       "changed": "bool; false when the requested state was already set",

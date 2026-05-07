@@ -3085,11 +3085,21 @@ mod tests {
                     entries: vec![crate::wire::MobileXpromptCatalogEntryWire {
                         name: "gh".to_string(),
                         display_label: "GitHub workflow".to_string(),
+                        insertion: Some("#!gh".to_string()),
+                        reference_prefix: Some("#!".to_string()),
+                        kind: Some("workflow".to_string()),
                         description: Some("Workflow tag".to_string()),
                         source_bucket: "project".to_string(),
                         project: Some("sase".to_string()),
                         tags: vec!["changespec".to_string()],
                         input_signature: Some("topic".to_string()),
+                        inputs: vec![crate::wire::MobileXpromptInputWire {
+                            name: "topic".to_string(),
+                            r#type: "word".to_string(),
+                            required: true,
+                            default_display: None,
+                            position: 0,
+                        }],
                         is_skill: false,
                         content_preview: Some("Use gh".to_string()),
                         source_path_display: Some("xprompts/gh.md".to_string()),
@@ -3216,6 +3226,9 @@ case "$operation" in
   changespec-tags)
     printf '%s\n' '{"schema_version":1,"result":{"status":"partial_success","message":"loaded tags","warnings":[],"skipped":[{"target":"sase/skipped","reason":"could not detect workflow type"}],"partial_failure_count":1},"context":{"project":"sase","scope":"explicit"},"tags":[{"tag":"#gh:feature","project":"sase","changespec":"feature","title":null,"status":"WIP","workflow":"gh","source_path_display":null}],"total_count":1}'
     ;;
+  xprompt-catalog)
+    printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":"loaded helper records","warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"name":"bd/work_phase_bead","display_label":"bd/work_phase_bead","insertion":"#bd/work_phase_bead","reference_prefix":"#","kind":"xprompt","description":null,"source_bucket":"built_in","project":null,"tags":["work_phase_bead"],"input_signature":"(bead_id: word)","inputs":[{"name":"bead_id","type":"word","required":true,"default_display":null,"position":0}],"is_skill":false,"content_preview":"Complete a phase bead.","source_path_display":"default_config"}],"stats":{"total_count":1,"project_count":0,"skill_count":0,"pdf_requested":false},"catalog_attachment":null}'
+    ;;
   update-start)
     printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":"Update worker started.","warnings":[],"skipped":[],"partial_failure_count":null},"job":{"job_id":"job_123","status":"running","started_at":"2026-05-06T15:00:00Z","finished_at":null,"message":"Update worker started.","log_path_display":"~/.sase/chat_install/logs/install_job_123.log","completion_path_display":"~/.sase/chat_install/completions/job_123.json"}}'
     ;;
@@ -3296,6 +3309,54 @@ exit 4
             &std::fs::read_to_string(
                 tmp.path()
                     .join("mobile-helper-bridge-success.changespec-tags.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bridge_request["project"], "sase");
+        assert_eq!(bridge_request["limit"], 2);
+        assert_eq!(
+            bridge_request["device_id"].as_str(),
+            Some(device_id.as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_helper_bridge_xprompt_catalog_returns_new_helper_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_command_helper_bridge(&tmp, "success");
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/v1/xprompts/catalog?project=sase&limit=2")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["result"]["status"], "success");
+        assert_eq!(value["entries"][0]["name"], "bd/work_phase_bead");
+        assert_eq!(value["entries"][0]["insertion"], "#bd/work_phase_bead");
+        assert_eq!(value["entries"][0]["reference_prefix"], "#");
+        assert_eq!(value["entries"][0]["kind"], "xprompt");
+        assert_eq!(value["entries"][0]["inputs"][0]["name"], "bead_id");
+        assert_eq!(value["entries"][0]["inputs"][0]["type"], "word");
+        assert_eq!(value["entries"][0]["inputs"][0]["required"], true);
+        assert_eq!(
+            value["entries"][0]["inputs"][0]["default_display"],
+            Value::Null
+        );
+
+        let bridge_request: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path()
+                    .join("mobile-helper-bridge-success.xprompt-catalog.json"),
             )
             .unwrap(),
         )
@@ -4466,6 +4527,12 @@ exit 4
         .await;
         assert_eq!(catalog_status, StatusCode::OK);
         assert_eq!(catalog["entries"][0]["name"], "gh");
+        assert_eq!(catalog["entries"][0]["insertion"], "#!gh");
+        assert_eq!(catalog["entries"][0]["reference_prefix"], "#!");
+        assert_eq!(catalog["entries"][0]["kind"], "workflow");
+        assert_eq!(catalog["entries"][0]["inputs"][0]["name"], "topic");
+        assert_eq!(catalog["entries"][0]["inputs"][0]["type"], "word");
+        assert_eq!(catalog["entries"][0]["inputs"][0]["required"], true);
         assert_eq!(catalog["stats"]["total_count"], 1);
 
         let (beads_status, beads) = json_response_with_state(

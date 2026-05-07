@@ -638,14 +638,25 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileXpromptCatalogEntryWire": {
                 "name": "string",
                 "display_label": "string",
+                "insertion": "string|null; fallback to #<name> when absent",
+                "reference_prefix": "string|null",
+                "kind": "string|null",
                 "description": "string|null",
                 "source_bucket": "string",
                 "project": "string|null",
                 "tags": "string[]",
                 "input_signature": "string|null",
+                "inputs": "MobileXpromptInputWire[]; default [] when absent",
                 "is_skill": "bool",
                 "content_preview": "string|null",
                 "source_path_display": "string|null"
+            },
+            "MobileXpromptInputWire": {
+                "name": "string",
+                "type": "string",
+                "required": "bool",
+                "default_display": "string|null",
+                "position": "u32"
             },
             "MobileXpromptCatalogStatsWire": {
                 "total_count": "u64",

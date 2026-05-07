@@ -647,14 +647,29 @@ pub struct MobileXpromptCatalogResponseWire {
 pub struct MobileXpromptCatalogEntryWire {
     pub name: String,
     pub display_label: String,
+    pub insertion: Option<String>,
+    pub reference_prefix: Option<String>,
+    pub kind: Option<String>,
     pub description: Option<String>,
     pub source_bucket: String,
     pub project: Option<String>,
     pub tags: Vec<String>,
     pub input_signature: Option<String>,
+    #[serde(default)]
+    pub inputs: Vec<MobileXpromptInputWire>,
     pub is_skill: bool,
     pub content_preview: Option<String>,
     pub source_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileXpromptInputWire {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub required: bool,
+    pub default_display: Option<String>,
+    pub position: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1544,6 +1559,9 @@ mod tests {
                 entries: vec![MobileXpromptCatalogEntryWire {
                     name: "gh".to_string(),
                     display_label: "GitHub workflow".to_string(),
+                    insertion: Some("#!gh".to_string()),
+                    reference_prefix: Some("#!".to_string()),
+                    kind: Some("workflow".to_string()),
                     description: Some(
                         "Create a GitHub workflow prompt".to_string()
                     ),
@@ -1551,6 +1569,13 @@ mod tests {
                     project: Some("sase".to_string()),
                     tags: vec!["changespec".to_string()],
                     input_signature: Some("topic".to_string()),
+                    inputs: vec![MobileXpromptInputWire {
+                        name: "topic".to_string(),
+                        r#type: "word".to_string(),
+                        required: true,
+                        default_display: None,
+                        position: 0,
+                    }],
                     is_skill: false,
                     content_preview: Some("Use this workflow...".to_string()),
                     source_path_display: Some("xprompts/gh.md".to_string()),
@@ -1589,11 +1614,21 @@ mod tests {
                 "entries": [{
                     "name": "gh",
                     "display_label": "GitHub workflow",
+                    "insertion": "#!gh",
+                    "reference_prefix": "#!",
+                    "kind": "workflow",
                     "description": "Create a GitHub workflow prompt",
                     "source_bucket": "project",
                     "project": "sase",
                     "tags": ["changespec"],
                     "input_signature": "topic",
+                    "inputs": [{
+                        "name": "topic",
+                        "type": "word",
+                        "required": true,
+                        "default_display": null,
+                        "position": 0
+                    }],
                     "is_skill": false,
                     "content_preview": "Use this workflow...",
                     "source_path_display": "xprompts/gh.md"
@@ -1735,5 +1770,29 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn mobile_xprompt_catalog_entry_deserializes_legacy_shape() {
+        let entry: MobileXpromptCatalogEntryWire =
+            serde_json::from_value(json!({
+                "name": "gh",
+                "display_label": "GitHub workflow",
+                "description": "Create a GitHub workflow prompt",
+                "source_bucket": "project",
+                "project": "sase",
+                "tags": ["changespec"],
+                "input_signature": "topic",
+                "is_skill": false,
+                "content_preview": "Use this workflow...",
+                "source_path_display": "xprompts/gh.md"
+            }))
+            .unwrap();
+
+        assert_eq!(entry.name, "gh");
+        assert_eq!(entry.insertion, None);
+        assert_eq!(entry.reference_prefix, None);
+        assert_eq!(entry.kind, None);
+        assert_eq!(entry.inputs, Vec::<MobileXpromptInputWire>::new());
     }
 }
