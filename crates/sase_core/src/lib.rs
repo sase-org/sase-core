@@ -12,6 +12,7 @@ pub mod agent_cleanup;
 pub mod agent_launch;
 pub mod agent_scan;
 pub mod bead;
+pub mod editor;
 pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
@@ -101,6 +102,32 @@ pub use bead::{
     BeadError, BeadMutationOutcomeWire, BeadUpdateFieldsWire, DependencyWire,
     IssueTypeWire, IssueWire, JsonlLoadOutcome, OperationOutcomeWire,
     StatusWire, BEAD_READ_WIRE_SCHEMA_VERSION, BEAD_SQLITE_SCHEMA,
+};
+pub use editor::{
+    analyze_document as editor_analyze_document,
+    assist_entries_from_catalog as editor_assist_entries_from_catalog,
+    build_directive_completion_candidates as editor_build_directive_completion_candidates,
+    build_file_completion_candidates as editor_build_file_completion_candidates,
+    build_file_completion_candidates_with_base as editor_build_file_completion_candidates_with_base,
+    build_file_history_completion_candidates as editor_build_file_history_completion_candidates,
+    build_xprompt_arg_name_candidates as editor_build_xprompt_arg_name_candidates,
+    build_xprompt_completion_candidates as editor_build_xprompt_completion_candidates,
+    canonical_directive_name as editor_canonical_directive_name,
+    classify_completion_context as editor_classify_completion_context,
+    colon_args_skeleton as editor_colon_args_skeleton,
+    directive_argument_candidates as editor_directive_argument_candidates,
+    directive_metadata as editor_directive_metadata,
+    extract_token_at_position as editor_extract_token_at_position,
+    hover_at_position as editor_hover_at_position,
+    is_path_like_token as editor_is_path_like_token,
+    is_slash_skill_like_token as editor_is_slash_skill_like_token,
+    is_xprompt_like_token as editor_is_xprompt_like_token,
+    named_args_skeleton as editor_named_args_skeleton, CompletionCandidate,
+    CompletionContext, CompletionContextKind, CompletionList,
+    DiagnosticSeverity, DirectiveMetadata, DocumentSnapshot, EditorDiagnostic,
+    EditorPosition, EditorRange, EditorTextEdit, HoverPayload, TokenInfo,
+    XpromptAssistEntry, XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
+    EDITOR_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,
