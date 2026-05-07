@@ -4,6 +4,7 @@
 
 pub mod contract;
 pub mod host_bridge;
+pub mod push;
 pub mod routes;
 pub mod server;
 pub mod storage;
@@ -21,6 +22,9 @@ pub use host_bridge::{
     StaticAgentHostBridge, StaticHelperHostBridge,
     StaticNotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use push::{
+    PushConfig, PushDeliveryAttempt, PushDispatcher, PushProviderMode,
 };
 pub use routes::{app, app_with_state, default_sase_home, GatewayState};
 pub use server::{serve, validate_bind_policy, GatewayConfig, GatewayRunError};
@@ -51,8 +55,8 @@ pub use wire::{
     MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
     NotificationStateMutationResponseWire, PairFinishRequestWire,
     PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
-    PairingDeviceMetadataWire, PushHintCategoryWire, PushHintWire,
-    PushProviderWire, PushSubscriptionDeleteResponseWire,
+    PairingDeviceMetadataWire, PushGatewayStatusWire, PushHintCategoryWire,
+    PushHintWire, PushProviderWire, PushSubscriptionDeleteResponseWire,
     PushSubscriptionListResponseWire, PushSubscriptionRecordWire,
     PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
     SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,

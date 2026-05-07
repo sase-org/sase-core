@@ -120,6 +120,7 @@
     "HealthResponseWire": {
       "bind": "GatewayBindWire",
       "build": "GatewayBuildWire",
+      "push": "PushGatewayStatusWire",
       "schema_version": "u32",
       "service": "sase_gateway",
       "status": "ok",
@@ -525,6 +526,17 @@
       "prefix": "string",
       "run_coder": "bool|null",
       "schema_version": "u32"
+    },
+    "PushGatewayStatusWire": {
+      "attempted": "u64",
+      "enabled": "bool",
+      "failed": "u64",
+      "last_attempt_at": "rfc3339|null",
+      "last_failure": "string|null; non-secret diagnostic summary",
+      "last_failure_at": "rfc3339|null",
+      "last_success_at": "rfc3339|null",
+      "provider": "disabled|test|fcm",
+      "succeeded": "u64"
     },
     "PushHintWire": {
       "agent_name": "string|null; only simple non-sensitive identifiers are included",

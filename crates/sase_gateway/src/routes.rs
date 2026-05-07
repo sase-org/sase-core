@@ -39,6 +39,7 @@ use crate::host_bridge::{
     NotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
 };
+use crate::push::{PushConfig, PushDispatcher};
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
     AuditLogEntryWire, DeviceTokenStore, StoreError,
@@ -82,6 +83,7 @@ pub struct GatewayState {
     agent_bridge: DynAgentHostBridge,
     helper_bridge: DynHelperHostBridge,
     attachment_tokens: AttachmentTokenStore,
+    push_dispatcher: PushDispatcher,
 }
 
 impl GatewayState {
@@ -102,6 +104,7 @@ impl GatewayState {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             attachment_token_ttl: default_attachment_token_ttl(),
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config: PushConfig::default(),
         })
     }
 
@@ -115,6 +118,7 @@ impl GatewayState {
             sase_home,
             command,
             CommandHelperHostBridge::default_command(),
+            PushConfig::default(),
         )
     }
 
@@ -123,9 +127,20 @@ impl GatewayState {
         sase_home: impl Into<PathBuf>,
         agent_command: Vec<String>,
         helper_command: Vec<String>,
+        push_config: PushConfig,
     ) -> Self {
         let sase_home = sase_home.into();
-        let mut state = Self::new_with_sase_home(bind_addr, sase_home.clone());
+        let mut state = Self::new_with_options(GatewayStateOptions {
+            bind_addr,
+            sase_home: sase_home.clone(),
+            pairing_ttl: ChronoDuration::minutes(5),
+            host_label: default_host_label(),
+            event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            attachment_token_ttl: default_attachment_token_ttl(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config,
+        });
         state.agent_bridge = DynAgentHostBridge::new(Arc::new(
             CommandAgentHostBridge::new_with_sase_home(
                 agent_command,
@@ -176,6 +191,7 @@ impl GatewayState {
                 options.attachment_token_ttl,
                 options.max_attachment_bytes,
             ),
+            push_dispatcher: PushDispatcher::new(options.push_config),
         }
     }
 
@@ -248,6 +264,10 @@ impl GatewayState {
     pub fn token_store(&self) -> DeviceTokenStore {
         self.token_store.clone()
     }
+
+    pub fn push_dispatcher(&self) -> PushDispatcher {
+        self.push_dispatcher.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +280,7 @@ pub struct GatewayStateOptions {
     pub heartbeat_interval: StdDuration,
     pub attachment_token_ttl: ChronoDuration,
     pub max_attachment_bytes: u64,
+    pub push_config: PushConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -538,6 +559,7 @@ async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         build: state.build,
         bind: state.bind,
+        push: state.push_dispatcher.status(),
     })
 }
 
@@ -1870,12 +1892,16 @@ fn publish_notifications_changed(
     reason: &str,
     notification_id: Option<String>,
 ) -> Result<(), ApiError> {
+    let record =
+        state
+            .event_hub
+            .append(|_| EventPayloadWire::NotificationsChanged {
+                reason: reason.to_string(),
+                notification_id,
+            })?;
     state
-        .event_hub
-        .append(|_| EventPayloadWire::NotificationsChanged {
-            reason: reason.to_string(),
-            notification_id,
-        })?;
+        .push_dispatcher
+        .dispatch_event(state.token_store.clone(), &record);
     Ok(())
 }
 
@@ -1884,13 +1910,17 @@ fn publish_agents_changed(
     reason: &str,
     agent_name: Option<String>,
 ) -> Result<(), ApiError> {
+    let record =
+        state
+            .event_hub
+            .append(|_| EventPayloadWire::AgentsChanged {
+                reason: reason.to_string(),
+                agent_name,
+                timestamp: Some(format_time(Utc::now())),
+            })?;
     state
-        .event_hub
-        .append(|_| EventPayloadWire::AgentsChanged {
-            reason: reason.to_string(),
-            agent_name,
-            timestamp: Some(format_time(Utc::now())),
-        })?;
+        .push_dispatcher
+        .dispatch_event(state.token_store.clone(), &record);
     Ok(())
 }
 
@@ -1900,14 +1930,18 @@ fn publish_helpers_changed(
     helper: Option<String>,
     job_id: Option<String>,
 ) -> Result<(), ApiError> {
+    let record =
+        state
+            .event_hub
+            .append(|_| EventPayloadWire::HelpersChanged {
+                reason: reason.to_string(),
+                helper,
+                job_id,
+                timestamp: Some(format_time(Utc::now())),
+            })?;
     state
-        .event_hub
-        .append(|_| EventPayloadWire::HelpersChanged {
-            reason: reason.to_string(),
-            helper,
-            job_id,
-            timestamp: Some(format_time(Utc::now())),
-        })?;
+        .push_dispatcher
+        .dispatch_event(state.token_store.clone(), &record);
     Ok(())
 }
 
@@ -2628,6 +2662,7 @@ mod tests {
             heartbeat_interval: StdDuration::from_secs(60),
             attachment_token_ttl: default_attachment_token_ttl(),
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config: PushConfig::default(),
         })
     }
 
@@ -2820,6 +2855,7 @@ mod tests {
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl,
                 max_attachment_bytes,
+                push_config: PushConfig::default(),
             },
             Arc::new(crate::host_bridge::StaticNotificationHostBridge::new(
                 notifications,
@@ -2845,6 +2881,7 @@ mod tests {
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl: default_attachment_token_ttl(),
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config: PushConfig::default(),
             },
             Arc::new(
                 crate::host_bridge::StaticNotificationHostBridge::new_with_action_states(
@@ -2918,6 +2955,7 @@ mod tests {
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl: default_attachment_token_ttl(),
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+                push_config: PushConfig::default(),
             },
             Arc::new(crate::host_bridge::StaticAgentHostBridge {
                 list_response: MobileAgentListResponseWire {
@@ -3020,6 +3058,7 @@ mod tests {
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl: default_attachment_token_ttl(),
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+                push_config: PushConfig::default(),
             },
             Arc::new(crate::host_bridge::StaticHelperHostBridge {
                 changespec_tags_response: MobileChangeSpecTagListResponseWire {
@@ -3153,6 +3192,7 @@ esac
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl: default_attachment_token_ttl(),
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+                push_config: PushConfig::default(),
             },
             vec![script.to_string_lossy().to_string()],
         )
@@ -3223,6 +3263,7 @@ exit 4
                 heartbeat_interval: StdDuration::from_secs(60),
                 attachment_token_ttl: default_attachment_token_ttl(),
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+                push_config: PushConfig::default(),
             },
             vec![script.to_string_lossy().to_string()],
         )
@@ -3647,6 +3688,17 @@ exit 4
                 "bind": {
                     "address": "127.0.0.1:0",
                     "is_loopback": true
+                },
+                "push": {
+                    "provider": "disabled",
+                    "enabled": false,
+                    "attempted": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "last_attempt_at": null,
+                    "last_success_at": null,
+                    "last_failure_at": null,
+                    "last_failure": null
                 }
             })
         );
@@ -4004,6 +4056,67 @@ exit 4
         )
         .unwrap();
         assert!(!audit.contains(secret_token));
+    }
+
+    #[tokio::test]
+    async fn test_push_provider_records_hint_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = GatewayState::new_with_options(GatewayStateOptions {
+            bind_addr: "127.0.0.1:0".to_string(),
+            sase_home: tmp.path().to_path_buf(),
+            pairing_ttl: Duration::minutes(5),
+            host_label: "test-host".to_string(),
+            event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
+            heartbeat_interval: StdDuration::from_secs(60),
+            attachment_token_ttl: default_attachment_token_ttl(),
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config: PushConfig {
+                provider: crate::push::PushProviderMode::Test,
+                ..PushConfig::default()
+            },
+        });
+        let (_start, _finish, token, device_id) =
+            pair_device(state.clone()).await;
+        let (register_status, _register) = json_response_with_state(
+            state.clone(),
+            push_subscription_post_request(
+                Some(&token),
+                json!({
+                    "schema_version": 1,
+                    "provider": "test",
+                    "provider_token": "test-token",
+                    "app_instance_id": "app-1",
+                    "device_display_name": "Pixel",
+                    "platform": "android",
+                    "app_version": "0.1.0",
+                    "hint_categories": ["agents"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(register_status, StatusCode::OK);
+
+        publish_agents_changed(
+            &state,
+            "launch",
+            Some("mobile-demo".to_string()),
+        )
+        .unwrap();
+
+        let attempts = state.push_dispatcher().test_attempts();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].device_id, device_id);
+        assert_eq!(attempts[0].provider, crate::wire::PushProviderWire::Test);
+        assert_eq!(
+            attempts[0].hint.category,
+            crate::wire::PushHintCategoryWire::Agents
+        );
+        assert_eq!(attempts[0].hint.agent_name.as_deref(), Some("mobile-demo"));
+        let status = state.push_dispatcher().status();
+        assert_eq!(status.provider, "test");
+        assert_eq!(status.attempted, 1);
+        assert_eq!(status.succeeded, 1);
+        assert_eq!(status.failed, 0);
     }
 
     #[tokio::test]
@@ -5721,6 +5834,7 @@ exit 4
             heartbeat_interval: StdDuration::from_secs(60),
             attachment_token_ttl: default_attachment_token_ttl(),
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            push_config: PushConfig::default(),
         });
         let (_start, finish, _token, _device_id) =
             pair_device(state.clone()).await;

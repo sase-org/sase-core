@@ -1,7 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use sase_gateway::{
     serve, split_command_words, write_api_v1_contract_snapshot, GatewayConfig,
+    PushProviderMode,
 };
 
 #[tokio::main]
@@ -41,6 +42,7 @@ fn parse_args(
         GatewayConfig::default().agent_bridge_command;
     let mut helper_bridge_command =
         GatewayConfig::default().helper_bridge_command;
+    let mut push_config = GatewayConfig::default().push_config;
     let mut contract_out = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -88,9 +90,66 @@ fn parse_args(
                     return Err(format!("{arg} requires a command path"));
                 }
             }
+            "--push-provider" | "-P" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("{arg} requires disabled, test, or fcm")
+                })?;
+                push_config.provider = parse_push_provider(&value)?;
+            }
+            "--fcm-project-id" | "-F" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a project id"))?;
+                push_config.fcm_project_id = non_empty(value);
+            }
+            "--fcm-service-account-json" | "-S" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a JSON path"))?;
+                push_config.fcm_service_account_json_path =
+                    non_empty(value).map(PathBuf::from);
+            }
+            "--fcm-credential-env" | "-E" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires an env var name"))?;
+                push_config.fcm_credential_env = non_empty(value);
+            }
+            "--fcm-dry-run" | "-D" => {
+                push_config.fcm_dry_run = true;
+            }
+            "--push-timeout-seconds" | "-U" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a seconds value"))?;
+                let seconds = value.parse::<f64>().map_err(|err| {
+                    format!("invalid {arg} value {value:?}: {err}")
+                })?;
+                if seconds <= 0.0 {
+                    return Err(format!(
+                        "{arg} requires a positive seconds value"
+                    ));
+                }
+                push_config.timeout = Duration::from_secs_f64(seconds);
+            }
+            "--push-retry-limit" | "-R" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a retry count"))?;
+                push_config.retry_limit =
+                    value.parse::<u32>().map_err(|err| {
+                        format!("invalid {arg} value {value:?}: {err}")
+                    })?;
+            }
+            "--fcm-endpoint" | "-M" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{arg} requires a base URL"))?;
+                push_config.fcm_endpoint = non_empty(value);
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND]"
+                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND] [--push-provider|-P disabled|test|fcm]"
                 );
                 std::process::exit(0);
             }
@@ -104,9 +163,28 @@ fn parse_args(
             allow_non_loopback,
             agent_bridge_command,
             helper_bridge_command,
+            push_config,
         },
         contract_out,
     })
+}
+
+fn parse_push_provider(value: &str) -> Result<PushProviderMode, String> {
+    match value {
+        "disabled" => Ok(PushProviderMode::Disabled),
+        "test" => Ok(PushProviderMode::Test),
+        "fcm" => Ok(PushProviderMode::Fcm),
+        _ => Err(format!("invalid push provider {value:?}")),
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +255,45 @@ mod tests {
             config.config.helper_bridge_command,
             vec!["/tmp/sase".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_push_flags() {
+        let config = parse_args([
+            "-P".to_string(),
+            "fcm".to_string(),
+            "-F".to_string(),
+            "project-123".to_string(),
+            "-S".to_string(),
+            "/tmp/service-account.json".to_string(),
+            "-E".to_string(),
+            "SASE_FCM_TOKEN".to_string(),
+            "-D".to_string(),
+            "-U".to_string(),
+            "2.5".to_string(),
+            "-R".to_string(),
+            "3".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.config.push_config.provider, PushProviderMode::Fcm);
+        assert_eq!(
+            config.config.push_config.fcm_project_id.as_deref(),
+            Some("project-123")
+        );
+        assert_eq!(
+            config.config.push_config.fcm_service_account_json_path,
+            Some(PathBuf::from("/tmp/service-account.json"))
+        );
+        assert_eq!(
+            config.config.push_config.fcm_credential_env.as_deref(),
+            Some("SASE_FCM_TOKEN")
+        );
+        assert!(config.config.push_config.fcm_dry_run);
+        assert_eq!(
+            config.config.push_config.timeout,
+            Duration::from_millis(2500)
+        );
+        assert_eq!(config.config.push_config.retry_limit, 3);
     }
 }

@@ -23,6 +23,20 @@ pub struct HealthResponseWire {
     pub version: String,
     pub build: GatewayBuildWire,
     pub bind: GatewayBindWire,
+    pub push: PushGatewayStatusWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushGatewayStatusWire {
+    pub provider: String,
+    pub enabled: bool,
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub last_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -812,6 +826,17 @@ mod tests {
                 address: "127.0.0.1:7629".to_string(),
                 is_loopback: true,
             },
+            push: PushGatewayStatusWire {
+                provider: "disabled".to_string(),
+                enabled: false,
+                attempted: 0,
+                succeeded: 0,
+                failed: 0,
+                last_attempt_at: None,
+                last_success_at: None,
+                last_failure_at: None,
+                last_failure: None,
+            },
         };
 
         assert_eq!(
@@ -828,6 +853,17 @@ mod tests {
                 "bind": {
                     "address": "127.0.0.1:7629",
                     "is_loopback": true
+                },
+                "push": {
+                    "provider": "disabled",
+                    "enabled": false,
+                    "attempted": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "last_attempt_at": null,
+                    "last_success_at": null,
+                    "last_failure_at": null,
+                    "last_failure": null
                 }
             })
         );

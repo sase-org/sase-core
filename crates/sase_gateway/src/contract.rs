@@ -418,7 +418,19 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "service": "sase_gateway",
                 "version": "string",
                 "build": "GatewayBuildWire",
-                "bind": "GatewayBindWire"
+                "bind": "GatewayBindWire",
+                "push": "PushGatewayStatusWire"
+            },
+            "PushGatewayStatusWire": {
+                "provider": "disabled|test|fcm",
+                "enabled": "bool",
+                "attempted": "u64",
+                "succeeded": "u64",
+                "failed": "u64",
+                "last_attempt_at": "rfc3339|null",
+                "last_success_at": "rfc3339|null",
+                "last_failure_at": "rfc3339|null",
+                "last_failure": "string|null; non-secret diagnostic summary"
             },
             "HitlActionRequestWire": {
                 "defined_by": "sase_core::notifications::mobile",

@@ -21,9 +21,12 @@ axum = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
 hex = { workspace = true }
 rand = { workspace = true }
+jsonwebtoken = "9"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sase_core = { path = "../sase_core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = "0.7"
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

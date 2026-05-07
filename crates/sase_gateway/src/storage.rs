@@ -122,6 +122,19 @@ impl DeviceTokenStore {
             .collect())
     }
 
+    pub fn list_all_push_subscriptions(
+        &self,
+    ) -> Result<Vec<PushSubscriptionRecordWire>, StoreError> {
+        let _guard = self.lock.lock().map_err(|_| StoreError::LockPoisoned)?;
+        Ok(self
+            .read_push_subscriptions_unlocked()?
+            .subscriptions
+            .into_iter()
+            .filter(|record| record.disabled_at.is_none())
+            .map(|record| record.to_wire())
+            .collect())
+    }
+
     pub fn register_push_subscription(
         &self,
         device_id: &str,
