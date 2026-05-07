@@ -173,6 +173,12 @@ impl CatalogCache {
             }
             match self.refresh_with_helper(&request, timeout).await {
                 Ok(entries) if !entries.is_empty() => {
+                    let entries = match rust_result {
+                        Ok(rust_entries) if !rust_entries.is_empty() => {
+                            merge_catalog_entries(entries, rust_entries)
+                        }
+                        _ => entries,
+                    };
                     return Ok(self.store(key, entries));
                 }
                 Ok(_) => {
@@ -247,6 +253,26 @@ impl CatalogCache {
         }
         entries
     }
+}
+
+fn merge_catalog_entries(
+    mut helper_entries: Vec<XpromptAssistEntry>,
+    rust_entries: Vec<XpromptAssistEntry>,
+) -> Vec<XpromptAssistEntry> {
+    let mut indexes = helper_entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for rust_entry in rust_entries {
+        if let Some(index) = indexes.get(&rust_entry.name).copied() {
+            helper_entries[index] = rust_entry;
+        } else {
+            indexes.insert(rust_entry.name.clone(), helper_entries.len());
+            helper_entries.push(rust_entry);
+        }
+    }
+    helper_entries
 }
 
 async fn refresh_with_rust_catalog(
@@ -376,7 +402,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_launch_without_plugin_metadata_prefers_helper_overlay() {
+    async fn direct_launch_without_plugin_metadata_merges_helper_and_rust_catalogs(
+    ) {
         let temp = root_with_rust_entry();
         let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
             Arc::new(FixtureBridge {
@@ -395,7 +422,7 @@ mod tests {
             .unwrap();
 
         assert!(entries.iter().any(|entry| entry.name == "helper_plugin"));
-        assert!(!entries.iter().any(|entry| entry.name == "rust_builtin"));
+        assert!(entries.iter().any(|entry| entry.name == "rust_builtin"));
     }
 
     #[tokio::test]

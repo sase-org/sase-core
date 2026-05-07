@@ -509,6 +509,11 @@ impl CatalogLoader {
         let mut all = BTreeMap::new();
         if let Some(dir) = &self.package_xprompts_dir {
             all.extend(self.load_xprompts_from_dir(dir, None, false)?);
+            all.extend(self.load_xprompts_from_dir(
+                &dir.join("skills"),
+                None,
+                false,
+            )?);
         }
         if let Some(dir) = &self.default_xprompts_dir {
             all.extend(self.load_xprompts_from_dir(dir, None, false)?);
@@ -1684,11 +1689,17 @@ mod tests {
         fs::create_dir_all(root.join("memory/long")).unwrap();
         fs::create_dir_all(home.join(".config/sase/xprompts/app")).unwrap();
         fs::create_dir_all(package.join("xprompts")).unwrap();
+        fs::create_dir_all(package.join("xprompts/skills")).unwrap();
         fs::create_dir_all(package.join("default_xprompts")).unwrap();
 
         fs::write(
             package.join("xprompts/builtin.md"),
             "---\nskill: true\ntags: [mentor]\n---\nBuilt in",
+        )
+        .unwrap();
+        fs::write(
+            package.join("xprompts/skills/sase_plan.md"),
+            "---\nskill: true\n---\nPlan skill",
         )
         .unwrap();
         fs::write(
@@ -1745,6 +1756,8 @@ mod tests {
 
         assert_eq!(by_name["builtin"].bucket, "built-in");
         assert!(by_name["builtin"].is_skill);
+        assert_eq!(by_name["sase_plan"].bucket, "built-in");
+        assert!(by_name["sase_plan"].is_skill);
         assert_eq!(by_name["defaulted"].bucket, "built-in");
         assert_eq!(by_name["cfg"].bucket, "config");
         assert_eq!(by_name["memory/long/topic"].bucket, "memory");
@@ -1780,6 +1793,17 @@ mod tests {
             Some(
                 package
                     .join("xprompts/builtin.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["sase_plan"].definition_path.as_deref(),
+            Some(
+                package
+                    .join("xprompts/skills/sase_plan.md")
                     .canonicalize()
                     .unwrap()
                     .to_str()
