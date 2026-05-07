@@ -301,6 +301,7 @@ impl XpromptLspServer {
             .refresh_for_completion(
                 config.catalog_key.clone(),
                 config.project.clone(),
+                config.root_dir.clone(),
             )
             .await
         {
@@ -384,6 +385,7 @@ impl XpromptLspServer {
             .refresh_explicit(
                 config.catalog_key.clone(),
                 config.project.clone(),
+                config.root_dir.clone(),
             )
             .await
         {

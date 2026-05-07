@@ -22,6 +22,7 @@ pub mod sections;
 pub mod status;
 pub mod suffix;
 pub mod wire;
+pub mod xprompt_catalog;
 
 pub use agent_cleanup::{
     cleanup_plan_from_json_value, cleanup_request_from_json_value,
@@ -214,4 +215,8 @@ pub use wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
     HookWire, MentorStatusLineWire, MentorWire, ParseErrorWire, SourceSpanWire,
     TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+};
+pub use xprompt_catalog::{
+    load_editor_xprompt_catalog, XpromptCatalogLoadError,
+    XpromptCatalogLoadOptions,
 };

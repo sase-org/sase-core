@@ -1,13 +1,15 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    path::PathBuf,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
 use sase_core::{
-    editor_assist_entries_from_catalog, CommandHelperHostBridge,
-    DynHelperHostBridge, EditorXpromptCatalogRequestWire, HelperHostBridge,
-    HostBridgeError, XpromptAssistEntry,
+    editor_assist_entries_from_catalog, load_editor_xprompt_catalog,
+    CommandHelperHostBridge, DynHelperHostBridge,
+    EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
+    XpromptAssistEntry, XpromptCatalogLoadOptions,
 };
 use tokio::time;
 use tracing::warn;
@@ -31,20 +33,33 @@ struct CachedCatalog {
 #[derive(Debug)]
 pub struct CatalogCache {
     bridge: DynHelperHostBridge,
+    prefer_rust_catalog: bool,
     catalogs: RwLock<HashMap<String, CachedCatalog>>,
     warned_failure_classes: RwLock<BTreeSet<String>>,
 }
 
 impl CatalogCache {
     pub fn command_backed() -> Self {
-        Self::new(Arc::new(CommandHelperHostBridge::new(
+        Self::new_with_rust_catalog(Arc::new(CommandHelperHostBridge::new(
             CommandHelperHostBridge::default_command(),
         )))
     }
 
     pub fn new(bridge: Arc<dyn HelperHostBridge>) -> Self {
+        Self::new_inner(bridge, false)
+    }
+
+    fn new_with_rust_catalog(bridge: Arc<dyn HelperHostBridge>) -> Self {
+        Self::new_inner(bridge, true)
+    }
+
+    fn new_inner(
+        bridge: Arc<dyn HelperHostBridge>,
+        prefer_rust_catalog: bool,
+    ) -> Self {
         Self {
             bridge: DynHelperHostBridge::new(bridge),
+            prefer_rust_catalog,
             catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
@@ -72,16 +87,20 @@ impl CatalogCache {
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
-        self.refresh(key, project, COMPLETION_REFRESH_TIMEOUT).await
+        self.refresh(key, project, root_dir, COMPLETION_REFRESH_TIMEOUT)
+            .await
     }
 
     pub async fn refresh_explicit(
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
-        self.refresh(key, project, EXPLICIT_REFRESH_TIMEOUT).await
+        self.refresh(key, project, root_dir, EXPLICIT_REFRESH_TIMEOUT)
+            .await
     }
 
     pub fn should_warn(&self, class: &str) -> bool {
@@ -101,9 +120,9 @@ impl CatalogCache {
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
         timeout: Duration,
     ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
-        let bridge = self.bridge.clone();
         let request = EditorXpromptCatalogRequestWire {
             schema_version: 1,
             project,
@@ -114,6 +133,33 @@ impl CatalogCache {
             limit: None,
             device_id: None,
         };
+
+        if self.prefer_rust_catalog {
+            match refresh_with_rust_catalog(request.clone(), root_dir).await {
+                Ok(entries) if !entries.is_empty() => {
+                    return Ok(self.store(key, entries));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        "rust xprompt catalog loader failed: {}",
+                        error.message
+                    );
+                }
+            }
+        }
+
+        let entries = self.refresh_with_helper(&request, timeout).await?;
+        Ok(self.store(key, entries))
+    }
+
+    async fn refresh_with_helper(
+        &self,
+        request: &EditorXpromptCatalogRequestWire,
+        timeout: Duration,
+    ) -> Result<Vec<XpromptAssistEntry>, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
         let task = tokio::task::spawn_blocking(move || {
             bridge.xprompt_catalog(&request)
         });
@@ -136,8 +182,15 @@ impl CatalogCache {
             }
         };
 
-        let entries =
-            Arc::new(editor_assist_entries_from_catalog(&response.entries));
+        Ok(editor_assist_entries_from_catalog(&response.entries))
+    }
+
+    fn store(
+        &self,
+        key: String,
+        entries: Vec<XpromptAssistEntry>,
+    ) -> Arc<Vec<XpromptAssistEntry>> {
+        let entries = Arc::new(entries);
         let cached = CachedCatalog {
             entries: entries.clone(),
             refreshed_at: Instant::now(),
@@ -147,8 +200,36 @@ impl CatalogCache {
         } else {
             warn!("failed to lock xprompt catalog cache for write");
         }
-        Ok(entries)
+        entries
     }
+}
+
+async fn refresh_with_rust_catalog(
+    request: EditorXpromptCatalogRequestWire,
+    root_dir: Option<PathBuf>,
+) -> Result<Vec<XpromptAssistEntry>, CatalogFailure> {
+    let task = tokio::task::spawn_blocking(move || {
+        load_editor_xprompt_catalog(
+            &request,
+            &XpromptCatalogLoadOptions::new(root_dir),
+        )
+    });
+    let response = match task.await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(CatalogFailure {
+                class: "rust_catalog_error".to_string(),
+                message: format!("rust xprompt catalog loader failed: {error}"),
+            });
+        }
+        Err(error) => {
+            return Err(CatalogFailure {
+                class: "rust_catalog_join".to_string(),
+                message: format!("rust xprompt catalog loader failed: {error}"),
+            });
+        }
+    };
+    Ok(editor_assist_entries_from_catalog(&response.entries))
 }
 
 fn failure_from_bridge_error(error: HostBridgeError) -> CatalogFailure {
