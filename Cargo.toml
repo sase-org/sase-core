@@ -4,6 +4,7 @@ members = [
     "crates/sase_core",
     "crates/sase_core_py",
     "crates/sase_gateway",
+    "crates/sase_xprompt_lsp",
 ]
 
 [workspace.package]
@@ -21,13 +22,18 @@ regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 async-stream = "0.3"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["trace"] }
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+tower-lsp-server = "0.21.1"
+lsp-types = "0.97"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
