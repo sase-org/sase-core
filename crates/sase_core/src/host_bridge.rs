@@ -543,6 +543,8 @@ pub struct MobileXpromptCatalogEntryWire {
     pub is_skill: bool,
     pub content_preview: Option<String>,
     pub source_path_display: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -773,6 +775,9 @@ mod tests {
                     source_path_display: Some(
                         "xprompts/bd/work_phase_bead.md".to_string(),
                     ),
+                    definition_path: Some(
+                        "/tmp/sase/xprompts/bd/work_phase_bead.md".to_string(),
+                    ),
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,
@@ -884,7 +889,8 @@ mod tests {
                     }],
                     "is_skill": false,
                     "content_preview": "Complete the bead",
-                    "source_path_display": "xprompts/bd/work_phase_bead.md"
+                    "source_path_display": "xprompts/bd/work_phase_bead.md",
+                    "definition_path": "/tmp/sase/xprompts/bd/work_phase_bead.md"
                 }],
                 "stats": {
                     "total_count": 1,
@@ -894,6 +900,72 @@ mod tests {
                 },
                 "catalog_attachment": null
             })
+        );
+    }
+
+    #[test]
+    fn xprompt_catalog_entry_wire_accepts_old_and_new_definition_path_json() {
+        let old_json = json!({
+            "name": "review",
+            "display_label": "review",
+            "insertion": "#review",
+            "reference_prefix": "#",
+            "kind": "xprompt",
+            "description": null,
+            "source_bucket": "project",
+            "project": null,
+            "tags": [],
+            "input_signature": null,
+            "inputs": [],
+            "is_skill": false,
+            "content_preview": null,
+            "source_path_display": "xprompts/review.md"
+        });
+        let old_entry: MobileXpromptCatalogEntryWire =
+            serde_json::from_value(old_json).unwrap();
+        assert_eq!(old_entry.definition_path, None);
+        assert_eq!(
+            serde_json::to_value(&old_entry).unwrap(),
+            json!({
+                "name": "review",
+                "display_label": "review",
+                "insertion": "#review",
+                "reference_prefix": "#",
+                "kind": "xprompt",
+                "description": null,
+                "source_bucket": "project",
+                "project": null,
+                "tags": [],
+                "input_signature": null,
+                "inputs": [],
+                "is_skill": false,
+                "content_preview": null,
+                "source_path_display": "xprompts/review.md"
+            })
+        );
+
+        let new_entry: MobileXpromptCatalogEntryWire =
+            serde_json::from_value(json!({
+                "name": "review",
+                "display_label": "review",
+                "insertion": "#review",
+                "reference_prefix": "#",
+                "kind": "xprompt",
+                "description": null,
+                "source_bucket": "project",
+                "project": null,
+                "tags": [],
+                "input_signature": null,
+                "inputs": [],
+                "is_skill": false,
+                "content_preview": null,
+                "source_path_display": "xprompts/review.md",
+                "definition_path": "/workspace/xprompts/review.md"
+            }))
+            .unwrap();
+        assert_eq!(
+            new_entry.definition_path.as_deref(),
+            Some("/workspace/xprompts/review.md")
         );
     }
 }

@@ -1012,6 +1012,7 @@ mod tests {
                     is_skill: true,
                     content_preview: None,
                     source_path_display: Some("Cargo.toml".to_string()),
+                    definition_path: None,
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,

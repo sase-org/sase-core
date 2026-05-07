@@ -1342,6 +1342,7 @@ mod tests {
                     is_skill: false,
                     content_preview: Some("Use this workflow...".to_string()),
                     source_path_display: Some("xprompts/gh.md".to_string()),
+                    definition_path: None,
                 }],
                 stats: MobileXpromptCatalogStatsWire {
                     total_count: 1,

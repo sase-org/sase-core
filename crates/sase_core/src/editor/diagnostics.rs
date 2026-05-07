@@ -220,6 +220,7 @@ mod tests {
                 content_preview: None,
                 description: None,
                 source_path_display: None,
+                definition_path: None,
                 is_skill: false,
             },
             XpromptAssistEntry {
@@ -236,6 +237,7 @@ mod tests {
                 content_preview: None,
                 description: None,
                 source_path_display: None,
+                definition_path: None,
                 is_skill: true,
             },
         ]

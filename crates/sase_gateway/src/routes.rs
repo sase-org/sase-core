@@ -3103,6 +3103,7 @@ mod tests {
                         is_skill: false,
                         content_preview: Some("Use gh".to_string()),
                         source_path_display: Some("xprompts/gh.md".to_string()),
+                        definition_path: None,
                     }],
                     stats: crate::wire::MobileXpromptCatalogStatsWire {
                         total_count: 1,

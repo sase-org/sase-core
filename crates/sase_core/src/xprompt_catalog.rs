@@ -221,6 +221,7 @@ fn structured_entry(
         is_skill: entry.is_skill,
         content_preview: content_preview(&entry.content),
         source_path_display: loader.source_path_display(entry),
+        definition_path: loader.definition_path(entry),
     }
 }
 
@@ -930,6 +931,68 @@ impl CatalogLoader {
         None
     }
 
+    fn definition_path(&self, entry: &StructuredSource) -> Option<String> {
+        let source = entry.workflow.source_path.as_deref()?;
+        let path =
+            self.source_definition_path(source, entry.project.as_deref())?;
+        if !path.is_file() {
+            return None;
+        }
+        path.canonicalize()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    fn source_definition_path(
+        &self,
+        source: &str,
+        project: Option<&str>,
+    ) -> Option<PathBuf> {
+        if source.starts_with("plugin:")
+            || source.starts_with("plugin_config:")
+            || source.starts_with("config:")
+        {
+            return None;
+        }
+        if source == "default_config" {
+            return self.default_config_path.clone();
+        }
+        if source == "local_config" {
+            return self.root_dir.as_ref().map(|root| root.join("sase.yml"));
+        }
+        if let Some(project) = source.strip_prefix("project_local_config:") {
+            return self
+                .known_workspaces
+                .get(project)
+                .map(|workspace| workspace.join("sase.yml"));
+        }
+        if source == "config" {
+            return self.home_dir.as_ref().map(|home| {
+                home.join(".config").join("sase").join("sase.yml")
+            });
+        }
+        if let Some(filename) = source.strip_prefix("config_overlay:") {
+            return self
+                .home_dir
+                .as_ref()
+                .map(|home| home.join(".config").join("sase").join(filename));
+        }
+
+        let path = PathBuf::from(source);
+        if path.is_absolute() {
+            return Some(path);
+        }
+        if let Some(project) = project {
+            if let Some(workspace) = self.known_workspaces.get(project) {
+                let project_path = workspace.join(&path);
+                if project_path.is_file() {
+                    return Some(project_path);
+                }
+            }
+        }
+        self.root_dir.as_ref().map(|root| root.join(path))
+    }
+
     fn package_dirs(&self) -> Vec<PathBuf> {
         [
             self.package_xprompts_dir.clone(),
@@ -1616,5 +1679,93 @@ mod tests {
             wire_by_name["cfg"].input_signature.as_deref(),
             Some("(count?: int)")
         );
+        assert_eq!(
+            wire_by_name["builtin"].definition_path.as_deref(),
+            Some(
+                package
+                    .join("xprompts/builtin.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["defaulted"].definition_path.as_deref(),
+            Some(
+                package
+                    .join("default_xprompts/defaulted.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["cfg"].definition_path.as_deref(),
+            Some(
+                package
+                    .join("default_config.yml")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["memory/long/topic"].definition_path.as_deref(),
+            Some(
+                root.join("memory/long/topic.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            wire_by_name["app/local"].definition_path.as_deref(),
+            Some(
+                root.join(".xprompts/local.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn pseudo_sources_do_not_get_definition_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let loader = CatalogLoader {
+            root_dir: Some(temp.path().to_path_buf()),
+            home_dir: Some(temp.path().join("home")),
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            known_workspaces: BTreeMap::new(),
+        };
+        let entry = StructuredSource {
+            name: "plugin".to_string(),
+            workflow: CatalogWorkflow {
+                name: "plugin".to_string(),
+                inputs: Vec::new(),
+                steps: vec![CatalogStep {
+                    name: "prompt".to_string(),
+                    kind: StepKind::PromptPart,
+                    prompt_part: Some("body".to_string()),
+                    has_output: false,
+                }],
+                source_path: Some("plugin:module/plugin.md".to_string()),
+                tags: BTreeSet::new(),
+            },
+            bucket: "plugin".to_string(),
+            project: None,
+            description: None,
+            is_skill: false,
+            content: "body".to_string(),
+        };
+
+        assert_eq!(structured_entry(&entry, &loader).definition_path, None);
     }
 }

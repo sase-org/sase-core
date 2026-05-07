@@ -48,6 +48,7 @@ impl HelperHostBridge for FixtureBridge {
                 is_skill: false,
                 content_preview: None,
                 source_path_display: None,
+                definition_path: None,
             }],
             stats: MobileXpromptCatalogStatsWire {
                 total_count: 1,

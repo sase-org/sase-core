@@ -104,6 +104,8 @@ pub struct XpromptAssistEntry {
     pub description: Option<String>,
     #[serde(default)]
     pub source_path_display: Option<String>,
+    #[serde(default)]
+    pub definition_path: Option<String>,
     pub is_skill: bool,
 }
 
