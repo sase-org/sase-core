@@ -6,7 +6,7 @@ use sase_core::{
     MobileHelperProjectScopeWire, MobileHelperResultWire,
     MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
     MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-    MobileXpromptCatalogStatsWire,
+    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
 };
 use sase_xprompt_lsp::XpromptLspServer;
 use serde_json::{json, Value};
@@ -48,7 +48,13 @@ impl HelperHostBridge for FixtureBridge {
                 project: None,
                 tags: Vec::new(),
                 input_signature: None,
-                inputs: Vec::new(),
+                inputs: vec![MobileXpromptInputWire {
+                    name: "path".to_string(),
+                    r#type: "path".to_string(),
+                    required: true,
+                    default_display: None,
+                    position: 0,
+                }],
                 is_skill: false,
                 content_preview: None,
                 source_path_display: None,
@@ -129,6 +135,29 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         }),
     )
     .await;
+
+    let mut saw_missing_arg_diagnostic = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            saw_missing_arg_diagnostic = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "sase-xprompt"
+                            && diagnostic["severity"] == 1
+                            && diagnostic["code"] == "missing_required_arg"
+                    })
+                });
+            if saw_missing_arg_diagnostic {
+                break;
+            }
+        }
+    }
+    assert!(saw_missing_arg_diagnostic);
+
     write_message(
         &mut client_writer,
         json!({

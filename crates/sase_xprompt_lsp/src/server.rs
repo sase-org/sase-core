@@ -1212,6 +1212,33 @@ mod tests {
             .message
             .contains("Unknown directive")));
 
+        let missing_arg_diagnostics =
+            server.diagnostics_for_text("#foo".to_string()).await;
+        assert!(missing_arg_diagnostics.iter().any(|diagnostic| {
+            diagnostic.source.as_deref() == Some("sase-xprompt")
+                && diagnostic.severity
+                    == Some(lsp_types::DiagnosticSeverity::ERROR)
+                && matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code))
+                        if code == "missing_required_arg"
+                )
+        }));
+
+        let invalid_type_diagnostics = server
+            .diagnostics_for_text("#foo(path=\"bad value\")".to_string())
+            .await;
+        assert!(invalid_type_diagnostics.iter().any(|diagnostic| {
+            diagnostic.source.as_deref() == Some("sase-xprompt")
+                && diagnostic.severity
+                    == Some(lsp_types::DiagnosticSeverity::ERROR)
+                && matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code))
+                        if code == "invalid_xprompt_arg_type"
+                )
+        }));
+
         let uri = Uri::from_file_path(&source_path).unwrap();
         let actions = server
             .code_actions_for_text(

@@ -6,6 +6,7 @@ pub mod file;
 pub mod hover;
 pub mod token;
 pub mod wire;
+mod xprompt_args;
 
 pub use completion::{
     assist_entries_from_catalog, build_xprompt_arg_name_candidates,
