@@ -159,6 +159,21 @@ pub fn apply_notification_state_update(
     path: &Path,
     update: &NotificationStateUpdateWire,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
+    apply_notification_state_update_with_options(path, update, true)
+}
+
+pub fn apply_notification_state_update_counts(
+    path: &Path,
+    update: &NotificationStateUpdateWire,
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    apply_notification_state_update_with_options(path, update, false)
+}
+
+fn apply_notification_state_update_with_options(
+    path: &Path,
+    update: &NotificationStateUpdateWire,
+    include_notifications: bool,
+) -> Result<NotificationUpdateOutcomeWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
 
@@ -167,6 +182,15 @@ pub fn apply_notification_state_update(
             update
         {
             rewrite_notifications_unlocked(path, notifications)?;
+            if !include_notifications {
+                return Ok(outcome_without_rows(
+                    notifications.len() as u64,
+                    notifications.len() as u64,
+                    0,
+                    true,
+                    Vec::new(),
+                ));
+            }
             let (rows, stats) = read_rows_unlocked(path, true)?;
             return Ok(outcome_from_rows(
                 rows,
@@ -296,6 +320,15 @@ pub fn apply_notification_state_update(
 
         if changed_count > 0 {
             rewrite_notifications_unlocked(path, &rows)?;
+            if !include_notifications {
+                return Ok(outcome_without_rows(
+                    matched_count,
+                    changed_count,
+                    0,
+                    true,
+                    expired_ids,
+                ));
+            }
             let (rows, stats) = read_rows_unlocked(path, true)?;
             Ok(outcome_from_rows(
                 rows,
@@ -304,6 +337,14 @@ pub fn apply_notification_state_update(
                 changed_count,
                 0,
                 true,
+                expired_ids,
+            ))
+        } else if !include_notifications {
+            Ok(outcome_without_rows(
+                matched_count,
+                changed_count,
+                0,
+                false,
                 expired_ids,
             ))
         } else {
@@ -450,6 +491,26 @@ fn outcome_from_rows(
         appended_count,
         rewritten,
         expired_ids,
+    }
+}
+
+fn outcome_without_rows(
+    matched_count: u64,
+    changed_count: u64,
+    appended_count: u64,
+    rewritten: bool,
+    expired_ids: Vec<String>,
+) -> NotificationUpdateOutcomeWire {
+    NotificationUpdateOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        matched_count,
+        changed_count,
+        appended_count,
+        rewritten,
+        notifications: Vec::new(),
+        counts: NotificationCountsWire::default(),
+        expired_ids,
+        stats: NotificationStoreStatsWire::default(),
     }
 }
 

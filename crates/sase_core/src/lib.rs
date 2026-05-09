@@ -166,8 +166,8 @@ pub use host_bridge::{
 };
 pub use notifications::{
     append_notification, apply_notification_state_update,
-    cleanup_stale_pending_actions, current_unix_time,
-    legacy_telegram_pending_actions_path,
+    apply_notification_state_update_counts, cleanup_stale_pending_actions,
+    current_unix_time, legacy_telegram_pending_actions_path,
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
     pending_action_from_notification, pending_action_identity,

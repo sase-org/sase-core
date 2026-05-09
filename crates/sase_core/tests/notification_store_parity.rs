@@ -5,8 +5,9 @@ use std::thread;
 
 use sase_core::notifications::{
     append_notification, apply_notification_state_update,
-    read_notifications_snapshot, rewrite_notifications,
-    NotificationAgentKeyWire, NotificationStateUpdateWire, NotificationWire,
+    apply_notification_state_update_counts, read_notifications_snapshot,
+    rewrite_notifications, NotificationAgentKeyWire,
+    NotificationStateUpdateWire, NotificationWire,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -218,6 +219,30 @@ fn notification_state_updates_mutate_only_intended_rows() {
             .unwrap()
             .dismissed
     );
+}
+
+#[test]
+fn notification_state_update_counts_skips_returned_snapshot() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(&path, &[notification("a"), notification("b")])
+        .unwrap();
+
+    let outcome = apply_notification_state_update_counts(
+        &path,
+        &NotificationStateUpdateWire::MarkAllRead,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 2);
+    assert!(outcome.rewritten);
+    assert!(outcome.notifications.is_empty());
+    assert_eq!(outcome.counts.priority, 0);
+    assert_eq!(outcome.stats.loaded_rows, 0);
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert!(snapshot.notifications.iter().all(|n| n.read));
 }
 
 #[test]
