@@ -3,12 +3,12 @@ use std::{fs, sync::Arc};
 use lsp_types::Uri;
 use sase_core::{
     EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
-    EditorSnippetCatalogStatsWire, HelperHostBridge, HostBridgeError,
-    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
-    MobileHelperResultWire, MobileHelperStatusWire,
-    MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
-    MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
-    MobileXpromptInputWire,
+    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire, HelperHostBridge,
+    HostBridgeError, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
+    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
+    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
 };
 use sase_xprompt_lsp::XpromptLspServer;
 use serde_json::{json, Value};
@@ -90,8 +90,15 @@ impl HelperHostBridge for FixtureBridge {
                 project: Some("sase".to_string()),
                 scope: MobileHelperProjectScopeWire::Explicit,
             },
-            entries: Vec::new(),
-            stats: EditorSnippetCatalogStatsWire { total_count: 0 },
+            entries: vec![EditorSnippetEntryWire {
+                trigger: "foo".to_string(),
+                template: "body $1$0".to_string(),
+                source: "ace.snippets".to_string(),
+                xprompt_name: None,
+                description: Some("Foo snippet".to_string()),
+                source_path_display: Some("ace.snippets".to_string()),
+            }],
+            stats: EditorSnippetCatalogStatsWire { total_count: 1 },
         })
     }
 }
@@ -254,6 +261,130 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         .get("id")
         .and_then(Value::as_i64)
         != Some(4)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_bare_snippet_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {
+                    "textDocument": {
+                        "completion": {
+                            "completionItem": {"snippetSupport": true}
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/snippet-prompt.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "fo"
+                }
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/snippet-prompt.md"},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_snippet = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            let items = message["result"]
+                .as_array()
+                .or_else(|| message["result"]["items"].as_array())
+                .unwrap_or_else(|| {
+                    panic!("unexpected completion response: {message}")
+                });
+            saw_snippet = items.iter().any(|item| {
+                item["label"] == "foo"
+                    && item["kind"] == 15
+                    && item["insertTextFormat"] == 2
+                    && item["textEdit"]["newText"] == "body $1$0"
+            });
+            break;
+        }
+    }
+
+    assert!(saw_snippet);
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
     {}
     write_message(
         &mut client_writer,

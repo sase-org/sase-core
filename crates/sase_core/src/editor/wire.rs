@@ -41,6 +41,7 @@ pub enum CompletionContextKind {
     XpromptArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,
+    SnippetTrigger,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

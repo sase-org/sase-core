@@ -3,12 +3,12 @@ use std::collections::BTreeSet;
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::EditorXpromptCatalogEntryWire;
+use crate::{EditorSnippetEntryWire, EditorXpromptCatalogEntryWire};
 
 use super::directive::canonical_directive_name;
 use super::token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
-    is_xprompt_like_token, DocumentSnapshot,
+    is_snippet_trigger_token, is_xprompt_like_token, DocumentSnapshot,
 };
 use super::wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
@@ -98,6 +98,9 @@ pub fn classify_completion_context(
         Some(token) if is_path_like_token(&token.text) => {
             Some(context_for_token(CompletionContextKind::FilePath, token))
         }
+        Some(token) if is_snippet_trigger_token(&token.text) => Some(
+            context_for_token(CompletionContextKind::SnippetTrigger, token),
+        ),
         _ => None,
     }
 }
@@ -195,6 +198,37 @@ pub fn build_xprompt_arg_name_candidates(
     CompletionList {
         candidates,
         shared_extension: String::new(),
+    }
+}
+
+pub fn build_snippet_completion_candidates(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[EditorSnippetEntryWire],
+) -> CompletionList {
+    let partial_lower = token.to_lowercase();
+    let mut candidates = Vec::new();
+    for entry in entries {
+        if !entry.trigger.to_lowercase().starts_with(&partial_lower) {
+            continue;
+        }
+        candidates.push(CompletionCandidate {
+            display: entry.trigger.clone(),
+            insertion: entry.template.clone(),
+            detail: Some(entry.source.clone()),
+            documentation: snippet_documentation(entry),
+            is_dir: false,
+            name: entry.trigger.clone(),
+            replacement: replacement_range.map(|range| EditorTextEdit {
+                range,
+                new_text: entry.template.clone(),
+            }),
+        });
+    }
+    candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
     }
 }
 
@@ -479,6 +513,29 @@ fn input_label(input: &XpromptInputHint) -> String {
     format!("{}{suffix}: {}", input.name, input.r#type)
 }
 
+fn snippet_documentation(entry: &EditorSnippetEntryWire) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(description) = entry
+        .description
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(description.to_string());
+    }
+    if let Some(source_path) = entry
+        .source_path_display
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Source: {source_path}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 fn used_named_arg_names(body_prefix: &str) -> BTreeSet<String> {
     body_prefix
         .split(',')
@@ -606,6 +663,8 @@ mod tests {
             ("", 0, CompletionContextKind::FileHistory),
             ("%mo", 3, CompletionContextKind::DirectiveName),
             ("%model:", 7, CompletionContextKind::DirectiveArgument),
+            ("foo", 3, CompletionContextKind::SnippetTrigger),
+            ("foo_1", 5, CompletionContextKind::SnippetTrigger),
         ] {
             let doc = DocumentSnapshot::new(text);
             let context =
@@ -633,6 +692,56 @@ mod tests {
 
         let skill = build_xprompt_completion_candidates("/r", None, &catalog);
         assert_eq!(skill.candidates[0].insertion, "/run");
+    }
+
+    #[test]
+    fn snippet_context_does_not_steal_higher_priority_tokens() {
+        let catalog = entries();
+        for text in ["#foo", "/foo", "@foo", "%model", "./foo", ""] {
+            let doc = DocumentSnapshot::new(text);
+            let context = classify_completion_context(
+                &doc,
+                pos(text.len() as u32),
+                &catalog,
+            );
+            assert_ne!(
+                context.map(|context| context.kind),
+                Some(CompletionContextKind::SnippetTrigger),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn builds_snippet_completions_by_case_insensitive_prefix() {
+        let list = build_snippet_completion_candidates(
+            "fo",
+            None,
+            &[
+                snippet_entry("Foo", "body $1$0", "ace.snippets"),
+                snippet_entry("bar", "bar", "xprompt"),
+            ],
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].display, "Foo");
+        assert_eq!(list.candidates[0].insertion, "body $1$0");
+        assert_eq!(list.candidates[0].detail.as_deref(), Some("ace.snippets"));
+    }
+
+    fn snippet_entry(
+        trigger: &str,
+        template: &str,
+        source: &str,
+    ) -> EditorSnippetEntryWire {
+        EditorSnippetEntryWire {
+            trigger: trigger.to_string(),
+            template: template.to_string(),
+            source: source.to_string(),
+            xprompt_name: None,
+            description: None,
+            source_path_display: None,
+        }
     }
 
     #[test]

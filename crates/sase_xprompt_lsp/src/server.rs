@@ -24,13 +24,15 @@ use sase_core::{
     editor_analyze_document, editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
+    editor_build_snippet_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context, editor_definition_at_position,
     editor_directive_argument_candidates, editor_directive_metadata,
     editor_extract_token_at_position, editor_hover_at_position,
     CompletionCandidate, CompletionContextKind, CompletionList,
-    DocumentSnapshot, EditorRange, HelperHostBridge, XpromptAssistEntry,
+    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, HelperHostBridge,
+    XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -39,8 +41,8 @@ use tracing::{info, warn};
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
-    hover as lsp_hover, snippet_completion_item, to_editor_position,
-    to_lsp_range,
+    hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
+    to_editor_position, to_lsp_range,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
@@ -111,6 +113,26 @@ impl XpromptLspServer {
         )?;
         let list =
             self.completion_list_for_context(&context, &entries, &config);
+        if context.kind == CompletionContextKind::SnippetTrigger {
+            if !config.snippet_support {
+                return Some(CompletionResponse::Array(Vec::new()));
+            }
+            let snippets = self.snippets_for_completion(&config).await;
+            let token = context
+                .token
+                .as_ref()
+                .map(|token| token.text.as_str())
+                .unwrap_or_default();
+            let snippet_list = editor_build_snippet_completion_candidates(
+                token,
+                Some(context.replacement_range),
+                snippets.as_slice(),
+            );
+            return Some(CompletionResponse::Array(sase_snippet_items(
+                snippet_list,
+                context.replacement_range,
+            )));
+        }
         if config.snippet_support
             && context.kind == CompletionContextKind::Xprompt
         {
@@ -303,6 +325,40 @@ impl XpromptLspServer {
         }
     }
 
+    async fn snippets_for_completion(
+        &self,
+        config: &ServerConfig,
+    ) -> Arc<Vec<EditorSnippetEntryWire>> {
+        if !self
+            .catalog_cache
+            .snippets_stale_or_missing(&config.catalog_key)
+        {
+            if let Some(entries) = self
+                .catalog_cache
+                .cached_snippet_entries(&config.catalog_key)
+            {
+                return entries;
+            }
+        }
+
+        match self
+            .catalog_cache
+            .refresh_snippets_for_completion(
+                config.catalog_key.clone(),
+                config.project.clone(),
+            )
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.warn_once(&error).await;
+                self.catalog_cache
+                    .cached_snippet_entries(&config.catalog_key)
+                    .unwrap_or_else(|| Arc::new(Vec::new()))
+            }
+        }
+    }
+
     fn completion_list_for_context(
         &self,
         context: &sase_core::CompletionContext,
@@ -362,6 +418,7 @@ impl XpromptLspServer {
             CompletionContextKind::XpromptArgumentTypeHint => {
                 empty_completion_list()
             }
+            CompletionContextKind::SnippetTrigger => empty_completion_list(),
         };
         apply_replacement(list, context.replacement_range)
     }
@@ -774,6 +831,24 @@ fn directive_snippet_items(
         .collect()
 }
 
+fn sase_snippet_items(
+    list: CompletionList,
+    replacement_range: sase_core::EditorRange,
+) -> Vec<CompletionItem> {
+    list.candidates
+        .into_iter()
+        .map(|candidate| {
+            sase_snippet_completion_item(
+                candidate.display,
+                candidate.insertion,
+                candidate.detail,
+                candidate.documentation,
+                replacement_range,
+            )
+        })
+        .collect()
+}
+
 fn bool_completion_list() -> CompletionList {
     CompletionList {
         candidates: ["false", "true"]
@@ -969,11 +1044,12 @@ mod tests {
     };
     use sase_core::{
         EditorPosition as CorePosition, EditorRange as CoreRange,
-        MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
-        MobileHelperResultWire, MobileHelperStatusWire,
-        MobileXpromptCatalogEntryWire, MobileXpromptCatalogResponseWire,
-        MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
-        StaticHelperHostBridge,
+        EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+        EditorSnippetEntryWire, MobileHelperProjectContextWire,
+        MobileHelperProjectScopeWire, MobileHelperResultWire,
+        MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
+        MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
+        MobileXpromptInputWire, StaticHelperHostBridge,
     };
     use tower_lsp_server::UriExt;
 
@@ -994,7 +1070,15 @@ mod tests {
     fn bridge_with_catalog_entries(
         entries: Vec<MobileXpromptCatalogEntryWire>,
     ) -> StaticHelperHostBridge {
+        bridge_with_catalog_and_snippets(entries, Vec::new())
+    }
+
+    fn bridge_with_catalog_and_snippets(
+        entries: Vec<MobileXpromptCatalogEntryWire>,
+        snippets: Vec<EditorSnippetEntryWire>,
+    ) -> StaticHelperHostBridge {
         let total_count = entries.len() as u64;
+        let snippet_total_count = snippets.len() as u64;
         StaticHelperHostBridge {
             changespec_tags_response: serde_json::from_value(
                 serde_json::json!({
@@ -1028,16 +1112,24 @@ mod tests {
                 },
                 catalog_attachment: None,
             },
-            snippet_catalog_response: serde_json::from_value(
-                serde_json::json!({
-                    "schema_version": 1,
-                    "result": {"status": "success", "message": null, "warnings": [], "skipped": [], "partial_failure_count": null},
-                    "context": {"project": "sase", "scope": "explicit"},
-                    "entries": [],
-                    "stats": {"total_count": 0}
-                }),
-            )
-            .unwrap(),
+            snippet_catalog_response: EditorSnippetCatalogResponseWire {
+                schema_version: 1,
+                result: MobileHelperResultWire {
+                    status: MobileHelperStatusWire::Success,
+                    message: None,
+                    warnings: Vec::new(),
+                    skipped: Vec::new(),
+                    partial_failure_count: None,
+                },
+                context: MobileHelperProjectContextWire {
+                    project: Some("sase".to_string()),
+                    scope: MobileHelperProjectScopeWire::Explicit,
+                },
+                entries: snippets,
+                stats: EditorSnippetCatalogStatsWire {
+                    total_count: snippet_total_count,
+                },
+            },
             bead_list_response: serde_json::from_value(
                 serde_json::json!({
                     "schema_version": 1,
@@ -1122,6 +1214,21 @@ mod tests {
             required,
             default_display: None,
             position,
+        }
+    }
+
+    fn snippet_entry(
+        trigger: &str,
+        template: &str,
+        source: &str,
+    ) -> EditorSnippetEntryWire {
+        EditorSnippetEntryWire {
+            trigger: trigger.to_string(),
+            template: template.to_string(),
+            source: source.to_string(),
+            xprompt_name: None,
+            description: Some(format!("{trigger} snippet")),
+            source_path_display: Some("ace.snippets".to_string()),
         }
     }
 
@@ -1210,6 +1317,82 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_snippet_item(&items, "#foo", "#foo:");
+    }
+
+    #[tokio::test]
+    async fn bare_trigger_snippet_completion_uses_snippet_items() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_and_snippets(
+                    Vec::new(),
+                    vec![
+                        snippet_entry(
+                            "foo",
+                            r"literal $ $1 \ brace } $0",
+                            "ace.snippets",
+                        ),
+                        snippet_entry("bar", "bar", "ace.snippets"),
+                    ],
+                )),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            *config = ServerConfig {
+                snippet_support: true,
+                ..ServerConfig::default()
+            };
+        }
+
+        let response = server
+            .completion_for_text(
+                "fo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        assert_snippet_item(&items, "foo", r"literal \$ $1 \\ brace \} $0");
+        assert_eq!(items[0].detail.as_deref(), Some("ace.snippets"));
+    }
+
+    #[tokio::test]
+    async fn bare_trigger_snippets_require_client_snippet_support() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_and_snippets(
+                    Vec::new(),
+                    vec![snippet_entry("foo", "$1$0", "ace.snippets")],
+                )),
+            )
+        });
+        let server = service.inner();
+
+        let response = server
+            .completion_for_text(
+                "fo".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert!(items.is_empty());
     }
 
     #[tokio::test]

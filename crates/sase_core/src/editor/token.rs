@@ -185,6 +185,13 @@ pub fn is_path_like_token(token: &str) -> bool {
         || bare.contains('/')
 }
 
+pub fn is_snippet_trigger_token(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 pub fn xprompt_reference_name(token: &str) -> Option<String> {
     token
         .strip_prefix("#!")
@@ -305,5 +312,16 @@ mod tests {
         assert_eq!(token.text, "#foobar");
         assert_eq!(token.byte_start, 4);
         assert_eq!(token.byte_end, 11);
+    }
+
+    #[test]
+    fn recognizes_prompt_widget_snippet_trigger_tokens() {
+        assert!(is_snippet_trigger_token("foo"));
+        assert!(is_snippet_trigger_token("foo_1"));
+        assert!(!is_snippet_trigger_token("#foo"));
+        assert!(!is_snippet_trigger_token("/foo"));
+        assert!(!is_snippet_trigger_token("@foo"));
+        assert!(!is_snippet_trigger_token("foo-bar"));
+        assert!(!is_snippet_trigger_token(""));
     }
 }

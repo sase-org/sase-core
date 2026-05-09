@@ -60,6 +60,46 @@ pub fn snippet_completion_item(
     }
 }
 
+pub fn sase_snippet_completion_item(
+    label: String,
+    template: String,
+    detail: Option<String>,
+    documentation: Option<String>,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    snippet_completion_item(
+        label,
+        sase_template_to_lsp_snippet(&template),
+        detail,
+        documentation,
+        replacement_range,
+    )
+}
+
+pub fn sase_template_to_lsp_snippet(template: &str) -> String {
+    let mut converted = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '$' if chars.peek().is_some_and(|next| next.is_ascii_digit()) => {
+                converted.push('$');
+                while let Some(next) = chars.peek().copied() {
+                    if !next.is_ascii_digit() {
+                        break;
+                    }
+                    converted.push(next);
+                    chars.next();
+                }
+            }
+            '$' => converted.push_str("\\$"),
+            '}' => converted.push_str("\\}"),
+            '\\' => converted.push_str("\\\\"),
+            _ => converted.push(ch),
+        }
+    }
+    converted
+}
+
 pub fn hover(payload: HoverPayload) -> lsp_types::Hover {
     lsp_types::Hover {
         contents: lsp_types::HoverContents::Markup(MarkupContent {
@@ -216,5 +256,14 @@ mod tests {
             panic!("expected array response");
         };
         assert!(items[0].text_edit.is_some());
+    }
+
+    #[test]
+    fn converts_sase_snippet_template_to_lsp_snippet_syntax() {
+        assert_eq!(
+            sase_template_to_lsp_snippet(r"cost $5 $1 \ path } $0"),
+            r"cost $5 $1 \\ path \} $0"
+        );
+        assert_eq!(sase_template_to_lsp_snippet("$foo"), r"\$foo");
     }
 }
