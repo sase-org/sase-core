@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::wire::{
     AgentCleanupArtifactDeleteIntentWire, AgentCleanupBundleSaveIntentWire,
     AgentCleanupCountsWire, AgentCleanupDismissItemWire,
-    AgentCleanupDismissalRenameIntentWire, AgentCleanupIdentityWire,
-    AgentCleanupKillItemWire, AgentCleanupNotificationDismissIntentWire,
-    AgentCleanupPlanWire, AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
+    AgentCleanupIdentityWire, AgentCleanupKillItemWire,
+    AgentCleanupNotificationDismissIntentWire, AgentCleanupPlanWire,
+    AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
     AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
     AgentCleanupWorkspaceReleaseIntentWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
     CLEANUP_MODE_DISMISS_COMPLETED, CLEANUP_MODE_KILL_AND_DISMISS,
@@ -165,107 +165,6 @@ fn push_summary_line(lines: &mut Vec<String>, count: u64, noun: &str) {
     lines.push(format!("{count} {noun}{suffix}"));
 }
 
-fn is_dismissed_prefixed(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    bytes.len() > 7
-        && bytes[0..6].iter().all(u8::is_ascii_digit)
-        && bytes[6] == b'.'
-}
-
-fn strip_dismissed_prefix(name: &str) -> &str {
-    if is_dismissed_prefixed(name) {
-        &name[7..]
-    } else {
-        name
-    }
-}
-
-fn completion_date_prefix(target: &AgentCleanupTargetWire) -> String {
-    for value in [&target.stop_time, &target.start_time]
-        .into_iter()
-        .flatten()
-    {
-        if value.len() >= 10 {
-            let bytes = value.as_bytes();
-            if bytes[0..4].iter().all(u8::is_ascii_digit)
-                && bytes[4] == b'-'
-                && bytes[5..7].iter().all(u8::is_ascii_digit)
-                && bytes[7] == b'-'
-                && bytes[8..10].iter().all(u8::is_ascii_digit)
-            {
-                return format!(
-                    "{}{}{}",
-                    &value[2..4],
-                    &value[5..7],
-                    &value[8..10]
-                );
-            }
-        }
-    }
-    if let Some(raw_suffix) = &target.raw_suffix {
-        if raw_suffix.len() >= 8
-            && raw_suffix.as_bytes()[0..8].iter().all(u8::is_ascii_digit)
-        {
-            return format!(
-                "{}{}{}",
-                &raw_suffix[2..4],
-                &raw_suffix[4..6],
-                &raw_suffix[6..8]
-            );
-        }
-    }
-    "000101".to_string()
-}
-
-fn base_for_dismissal(target: &AgentCleanupTargetWire) -> String {
-    if let Some(name) = &target.agent_name {
-        if !name.is_empty() {
-            return strip_dismissed_prefix(name).to_string();
-        }
-    }
-    if target.identity.cl_name != "unknown"
-        && !target.identity.cl_name.is_empty()
-    {
-        return target.identity.cl_name.clone();
-    }
-    if let Some(raw_suffix) = &target.raw_suffix {
-        if !raw_suffix.is_empty() {
-            return raw_suffix.clone();
-        }
-    }
-    "agent".to_string()
-}
-
-fn add_dismissed_prefix(name: &str, date_prefix: &str) -> String {
-    if is_dismissed_prefixed(name) {
-        name.to_string()
-    } else {
-        format!("{date_prefix}.{name}")
-    }
-}
-
-fn allocate_dismissed_name(
-    base: &str,
-    date_prefix: &str,
-    taken: &mut BTreeSet<String>,
-) -> String {
-    let stripped = strip_dismissed_prefix(base);
-    let primary = add_dismissed_prefix(stripped, date_prefix);
-    if !taken.contains(&primary) {
-        taken.insert(primary.clone());
-        return primary;
-    }
-    let mut n = 2;
-    loop {
-        let candidate = format!("{primary}_{n}");
-        if !taken.contains(&candidate) {
-            taken.insert(candidate.clone());
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
 fn target_by_identity(
     targets: &[AgentCleanupTargetWire],
 ) -> BTreeMap<AgentCleanupIdentityWire, &AgentCleanupTargetWire> {
@@ -416,57 +315,6 @@ fn related_workflow_targets<'a>(
     related
 }
 
-fn add_dismissal_renames(
-    side_effects: &mut AgentCleanupSideEffectsWire,
-    related: &[&AgentCleanupTargetWire],
-    taken_names: &mut BTreeSet<String>,
-) {
-    let Some(parent) = related.first() else {
-        return;
-    };
-    let date_prefix = completion_date_prefix(parent);
-    let old_name = parent.agent_name.clone();
-    let base = base_for_dismissal(parent);
-    let new_name = allocate_dismissed_name(&base, &date_prefix, taken_names);
-    side_effects.dismissal_rename_allocations.push(
-        AgentCleanupDismissalRenameIntentWire {
-            identity: parent.identity.clone(),
-            old_name: old_name.clone(),
-            new_name: new_name.clone(),
-        },
-    );
-    if let Some(old) = old_name {
-        if old != new_name {
-            side_effects
-                .wait_reference_rewrite_map
-                .push((old, new_name));
-        }
-    }
-
-    if parent.agent_type != "workflow" || is_workflow_child(parent) {
-        return;
-    }
-    for child in related.iter().skip(1) {
-        let Some(old_child_name) = &child.agent_name else {
-            continue;
-        };
-        let new_child_name = add_dismissed_prefix(old_child_name, &date_prefix);
-        if old_child_name == &new_child_name {
-            continue;
-        }
-        side_effects.dismissal_rename_allocations.push(
-            AgentCleanupDismissalRenameIntentWire {
-                identity: child.identity.clone(),
-                old_name: Some(old_child_name.clone()),
-                new_name: new_child_name.clone(),
-            },
-        );
-        side_effects
-            .wait_reference_rewrite_map
-            .push((old_child_name.clone(), new_child_name));
-    }
-}
-
 fn build_side_effects(
     targets: &[AgentCleanupTargetWire],
     request: &AgentCleanupRequestWire,
@@ -483,8 +331,6 @@ fn build_side_effects(
 
     let by_id = target_by_identity(targets);
     let mut side_effects = AgentCleanupSideEffectsWire::default();
-    let mut taken_names: BTreeSet<String> =
-        request.taken_dismissed_names.iter().cloned().collect();
     let mut seen_index = BTreeSet::new();
     let mut seen_bundle = BTreeSet::new();
     let mut seen_artifacts = BTreeSet::new();
@@ -496,7 +342,6 @@ fn build_side_effects(
             continue;
         };
         let related = related_workflow_targets(target, children_by_parent);
-        add_dismissal_renames(&mut side_effects, &related, &mut taken_names);
         for item in related {
             add_index_identity(&mut side_effects, &mut seen_index, item);
             add_bundle_candidate(&mut side_effects, &mut seen_bundle, item);
@@ -949,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_side_effects_allocate_names_and_children() {
+    fn dismiss_side_effects_do_not_allocate_renames() {
         let mut parent =
             target("workflow", "wf", Some("20260428100000"), "DONE", None);
         parent.workflow = Some("deploy".to_string());
@@ -968,28 +813,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            plan.side_effects.dismissal_rename_allocations[0].new_name,
-            "260428.root"
-        );
-        assert_eq!(
-            plan.side_effects.dismissal_rename_allocations[1].new_name,
-            "260428.root.plan"
-        );
-        assert_eq!(
-            plan.side_effects.wait_reference_rewrite_map,
-            vec![
-                ("root".to_string(), "260428.root".to_string()),
-                ("root.plan".to_string(), "260428.root.plan".to_string())
-            ]
-        );
+        assert!(plan.side_effects.dismissal_rename_allocations.is_empty());
+        assert!(plan.side_effects.wait_reference_rewrite_map.is_empty());
         assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
         assert_eq!(plan.side_effects.bundle_save_candidates.len(), 2);
         assert_eq!(plan.side_effects.artifact_delete_paths.len(), 2);
     }
 
     #[test]
-    fn dismissed_name_allocation_uses_taken_names() {
+    fn dismiss_side_effects_ignore_taken_names_for_renames() {
         let mut first =
             target("run", "cl_a", Some("20260428100000"), "DONE", None);
         first.agent_name = Some("foo".to_string());
@@ -1002,12 +834,8 @@ mod tests {
 
         let plan = plan_agent_cleanup(&[first, second], &request).unwrap();
 
-        let names: Vec<String> = plan
-            .side_effects
-            .dismissal_rename_allocations
-            .iter()
-            .map(|intent| intent.new_name.clone())
-            .collect();
-        assert_eq!(names, vec!["260428.foo_2", "260428.foo_3"]);
+        assert!(plan.side_effects.dismissal_rename_allocations.is_empty());
+        assert!(plan.side_effects.wait_reference_rewrite_map.is_empty());
+        assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
     }
 }
