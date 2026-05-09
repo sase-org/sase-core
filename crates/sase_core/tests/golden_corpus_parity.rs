@@ -63,7 +63,6 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": "BUG-100",
             "description": "Initial feature work.\nSpans multiple lines.",
             "test_targets": ["tests/test_alpha.py"],
-            "kickstart": "Kick this off carefully.",
             "commits": [
                 {
                     "number": 1,
@@ -138,8 +137,8 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "file_path": "myproj.gp",
             "source_span": {
                 "file_path": "myproj.gp",
-                "start_line": 32,
-                "end_line": 32
+                "start_line": 30,
+                "end_line": 30
             },
             "status": "WIP",
             "parent": "alpha",
@@ -147,7 +146,6 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": null,
             "description": "Sibling feature.",
             "test_targets": [],
-            "kickstart": null,
             "commits": [],
             "hooks": [],
             "comments": [],
@@ -162,8 +160,8 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "file_path": "myproj.gp",
             "source_span": {
                 "file_path": "myproj.gp",
-                "start_line": 39,
-                "end_line": 39
+                "start_line": 37,
+                "end_line": 37
             },
             "status": "Reverted",
             "parent": "alpha",
@@ -171,7 +169,6 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": null,
             "description": "Reverted retry of beta.",
             "test_targets": [],
-            "kickstart": null,
             "commits": [],
             "hooks": [],
             "comments": [],
@@ -186,8 +183,8 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "file_path": "myproj.gp",
             "source_span": {
                 "file_path": "myproj.gp",
-                "start_line": 46,
-                "end_line": 46
+                "start_line": 44,
+                "end_line": 44
             },
             "status": "Ready",
             "parent": null,
@@ -195,7 +192,6 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": null,
             "description": "Ready feature with running agent.",
             "test_targets": [],
-            "kickstart": null,
             "commits": [],
             "hooks": [
                 {
@@ -243,7 +239,6 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": null,
             "description": "An archived spec.",
             "test_targets": [],
-            "kickstart": null,
             "commits": [
                 {
                     "number": 1,
@@ -279,7 +274,6 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "bug": null,
             "description": "A reverted spec.",
             "test_targets": [],
-            "kickstart": null,
             "commits": [],
             "hooks": [],
             "comments": [],

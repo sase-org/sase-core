@@ -24,7 +24,6 @@
 //!     bug=None,
 //!     description='first line\\nsecond line',
 //!     test_targets=['//foo:bar'],
-//!     kickstart='ks',
 //!     commits=[CommitWire(number=1, note='init', suffix='@', suffix_type='running', body=['body line'])],
 //!     hooks=[HookWire(command='just lint', status_lines=[HookStatusLineWire(commit_entry_num='1', timestamp='20260429_010101', status='OK', duration='3s')])],
 //!     comments=[CommentWire(reviewer='alice', file_path='src/foo.rs')],
@@ -63,7 +62,6 @@ const PYTHON_FIXTURE: &str = r#"{
     "bug": null,
     "description": "first line\nsecond line",
     "test_targets": ["//foo:bar"],
-    "kickstart": "ks",
     "commits": [
         {
             "number": 1,
@@ -151,7 +149,6 @@ fn rust_changespec() -> ChangeSpecWire {
         bug: None,
         description: "first line\nsecond line".to_string(),
         test_targets: vec!["//foo:bar".to_string()],
-        kickstart: Some("ks".to_string()),
         commits: vec![CommitWire {
             number: 1,
             note: "init".to_string(),

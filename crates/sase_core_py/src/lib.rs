@@ -2248,7 +2248,6 @@ mod tests {
             "bug": null,
             "description": format!("description for {name}"),
             "test_targets": [],
-            "kickstart": null,
             "commits": [],
             "hooks": [],
             "comments": [],

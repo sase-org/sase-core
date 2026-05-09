@@ -7,13 +7,13 @@
 //!   end-on-next-header, end-on-two-blank-lines, end-on-new-NAME.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
 //! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`,
-//!   `STATUS`, `TEST TARGETS`, `KICKSTART`.
+//!   `STATUS`, `TEST TARGETS`.
 //! - Section bodies: `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
 //!   `TIMESTAMPS`, `DELTAS`. The wire records produced here match Python
 //!   parser output for the golden corpus.
 //! - Whitespace: inline header content stripped, two-space continuation
 //!   strips the first two spaces, blank lines preserved inside
-//!   description/kickstart before the final trim.
+//!   description before the final trim.
 //! - `project_basename` matches Python's `ChangeSpec.project_basename`
 //!   (basename minus extension, with a trailing `-archive` suffix removed).
 //! - `source_span.start_line` and `end_line` are inclusive 1-based. Unlike
@@ -112,7 +112,6 @@ struct ParserState {
     bug: Option<String>,
     status: Option<String>,
     test_targets: Vec<String>,
-    kickstart_lines: Vec<String>,
 
     commits: Vec<CommitWire>,
     current_commit: Option<CommitWire>,
@@ -125,7 +124,6 @@ struct ParserState {
     deltas: Vec<DeltaWire>,
 
     in_description: bool,
-    in_kickstart: bool,
     in_test_targets: bool,
     in_commits: bool,
     in_hooks: bool,
@@ -138,7 +136,6 @@ struct ParserState {
 impl ParserState {
     fn reset_section_flags(&mut self) {
         self.in_description = false;
-        self.in_kickstart = false;
         self.in_test_targets = false;
         self.in_commits = false;
         self.in_hooks = false;
@@ -171,11 +168,6 @@ impl ParserState {
         let name = self.name?;
         let status = self.status?;
         let description = trim_block(&self.description_lines);
-        let kickstart = if self.kickstart_lines.is_empty() {
-            None
-        } else {
-            Some(trim_block(&self.kickstart_lines))
-        };
         Some(ChangeSpecWire {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name,
@@ -192,7 +184,6 @@ impl ParserState {
             bug: self.bug,
             description,
             test_targets: self.test_targets,
-            kickstart,
             commits: self.commits,
             hooks: self.hooks,
             comments: self.comments,
@@ -231,16 +222,6 @@ fn try_field_header(state: &mut ParserState, line: &str) -> FieldHeaderOutcome {
         let inline = rest.trim();
         if !inline.is_empty() {
             state.description_lines.push(inline.to_string());
-        }
-        return FieldHeaderOutcome::Parsed;
-    }
-    if let Some(rest) = line.strip_prefix("KICKSTART:") {
-        state.save_pending_entries();
-        state.reset_section_flags();
-        state.in_kickstart = true;
-        let inline = rest.trim();
-        if !inline.is_empty() {
-            state.kickstart_lines.push(inline.to_string());
         }
         return FieldHeaderOutcome::Parsed;
     }
@@ -331,7 +312,7 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
     let stripped = line.trim();
 
     // Section-specific parsing takes priority. Inside a section we never
-    // fall through to description/kickstart/test_targets handling, even if
+    // fall through to description/test_targets handling, even if
     // the line looks like a continuation.
     if state.in_timestamps {
         parse_timestamps_line(line, stripped, &mut state.timestamps);
@@ -377,10 +358,6 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
         state.description_lines.push(line[2..].to_string());
         return;
     }
-    if state.in_kickstart && line.starts_with("  ") {
-        state.kickstart_lines.push(line[2..].to_string());
-        return;
-    }
     if state.in_test_targets && line.starts_with("  ") {
         if !stripped.is_empty() {
             state.test_targets.push(stripped.to_string());
@@ -390,8 +367,6 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
     if stripped.is_empty() {
         if state.in_description {
             state.description_lines.push(String::new());
-        } else if state.in_kickstart {
-            state.kickstart_lines.push(String::new());
         }
         return;
     }
@@ -504,7 +479,6 @@ mod tests {
         assert_eq!(s.source_span.end_line, 4);
         assert_eq!(s.project_basename, "myproj");
         assert_eq!(s.file_path, "myproj.gp");
-        assert_eq!(s.kickstart, None);
     }
 
     #[test]
@@ -563,23 +537,6 @@ STATUS: Submitted
             specs[0].description,
             "First paragraph.\n\nSecond paragraph."
         );
-    }
-
-    #[test]
-    fn kickstart_inline_and_continuation() {
-        let src_inline = "NAME: a\nKICKSTART: do it\nSTATUS: WIP\n";
-        let s = &parse(src_inline)[0];
-        assert_eq!(s.kickstart.as_deref(), Some("do it"));
-
-        let src_block = "\
-NAME: a
-KICKSTART:
-  step one
-  step two
-STATUS: WIP
-";
-        let s = &parse(src_block)[0];
-        assert_eq!(s.kickstart.as_deref(), Some("step one\nstep two"));
     }
 
     #[test]
@@ -719,8 +676,6 @@ PR: https://example.test/repo/pull/1
 BUG: BUG-100
 STATUS: Submitted
 TEST TARGETS: tests/test_alpha.py
-KICKSTART:
-  Kick this off.
 COMMITS:
   (1) [run] Initial Commit
       | CHAT: ~/.sase/chats/alpha.md (0s)

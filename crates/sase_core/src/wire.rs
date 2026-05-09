@@ -135,8 +135,6 @@ pub struct ChangeSpecWire {
     #[serde(default)]
     pub test_targets: Vec<String>,
     #[serde(default)]
-    pub kickstart: Option<String>,
-    #[serde(default)]
     pub commits: Vec<CommitWire>,
     #[serde(default)]
     pub hooks: Vec<HookWire>,
@@ -211,7 +209,6 @@ mod tests {
             bug: None,
             description: "".to_string(),
             test_targets: vec![],
-            kickstart: None,
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -251,7 +248,6 @@ mod tests {
             bug: None,
             description: "".to_string(),
             test_targets: vec![],
-            kickstart: None,
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -260,7 +256,7 @@ mod tests {
             deltas: vec![],
         };
         let json = serde_json::to_value(&cs).unwrap();
-        for key in ["parent", "cl_or_pr", "bug", "kickstart"] {
+        for key in ["parent", "cl_or_pr", "bug"] {
             assert_eq!(json.get(key), Some(&Value::Null), "{key} must be null");
         }
     }
@@ -281,7 +277,6 @@ mod tests {
             bug: None,
             description: "".to_string(),
             test_targets: vec![],
-            kickstart: None,
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -302,7 +297,6 @@ mod tests {
             "bug",
             "description",
             "test_targets",
-            "kickstart",
             "commits",
             "hooks",
             "comments",
@@ -338,7 +332,6 @@ mod tests {
             bug: None,
             description: "first line\nsecond line".to_string(),
             test_targets: vec!["//foo:bar".to_string()],
-            kickstart: Some("ks".to_string()),
             commits: vec![CommitWire {
                 number: 1,
                 note: "init".to_string(),

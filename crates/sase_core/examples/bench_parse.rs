@@ -43,7 +43,6 @@ fn build_synthetic(num_specs: usize) -> String {
              BUG: BUG-{i}\n\
              STATUS: WIP\n\
              TEST TARGETS: tests/test_spec_{i}.py\n\
-             KICKSTART:\n  Kick this off carefully.\n\
              COMMITS:\n  (1) [run] Initial Commit {i}\n      | CHAT: ~/.sase/chats/spec_{i}.md (0s)\n      | DIFF: ~/.sase/diffs/spec_{i}.diff\n\
              HOOKS:\n  just lint\n      | (1) [260101_120000] PASSED (3s)\n\
              COMMENTS:\n  [critique] ~/.sase/comments/spec_{i}.json - (1)\n\

@@ -94,10 +94,6 @@ pub fn get_searchable_text(cs: &ChangeSpecWire) -> String {
     if let Some(cl) = &cs.cl_or_pr {
         parts.push(cl.clone());
     }
-    if let Some(ks) = &cs.kickstart {
-        parts.push(ks.clone());
-    }
-
     for entry in &cs.commits {
         parts.push(entry.note.clone());
         if let Some(suf) = &entry.suffix {
