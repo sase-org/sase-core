@@ -344,6 +344,10 @@ pub struct WorkflowStateWire {
     #[serde(default)]
     pub traceback: Option<String>,
     #[serde(default)]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub pdf_status: Option<Map<String, Value>>,
+    #[serde(default)]
     pub steps: Vec<WorkflowStepStateWire>,
 }
 
@@ -360,6 +364,8 @@ impl Default for WorkflowStateWire {
             start_time: None,
             error: None,
             traceback: None,
+            activity: None,
+            pdf_status: None,
             steps: Vec::new(),
         }
     }

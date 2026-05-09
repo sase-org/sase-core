@@ -263,6 +263,14 @@ fn build_workflow(root: &Path) {
             "is_anonymous": false,
             "current_step_index": 2,
             "start_time": "2026-04-27T15:00:00",
+            "activity": "PDF 2/5 docs/notes.md",
+            "pdf_status": {
+                "stage": "engine_started",
+                "index": 2,
+                "total": 5,
+                "source_path": "docs/notes.md",
+                "engine": "wkhtmltopdf",
+            },
             "steps": [
                 {
                     "name": "plan",
@@ -659,6 +667,13 @@ fn workflow_root_record_has_state_and_steps() {
     assert_eq!(state.status, "completed");
     assert!(state.appears_as_agent);
     assert!(!state.is_anonymous);
+    assert_eq!(state.activity.as_deref(), Some("PDF 2/5 docs/notes.md"));
+    let pdf_status = state.pdf_status.as_ref().unwrap();
+    assert_eq!(
+        pdf_status.get("stage").and_then(Value::as_str),
+        Some("engine_started")
+    );
+    assert_eq!(pdf_status.get("index").and_then(Value::as_i64), Some(2));
     assert_eq!(state.steps.len(), 3);
     assert_eq!(state.steps[0].name, "plan");
     assert_eq!(state.steps[0].status, "completed");

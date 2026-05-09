@@ -741,6 +741,11 @@ fn workflow_state_from_object(data: &Map<String, Value>) -> WorkflowStateWire {
         start_time: coerce_str(data.get("start_time")),
         error: coerce_str(data.get("error")),
         traceback: coerce_str(data.get("traceback")),
+        activity: coerce_str(data.get("activity")),
+        pdf_status: match data.get("pdf_status") {
+            Some(Value::Object(map)) => Some(map.clone()),
+            _ => None,
+        },
         steps,
     }
 }
