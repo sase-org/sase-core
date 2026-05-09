@@ -123,6 +123,7 @@ use sase_core::bead::{
     list_merged_issues as core_bead_list_merged_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merged_stats as core_bead_merged_stats, open_issue as core_bead_open_issue,
+    preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     ready_issues as core_bead_ready_issues,
     ready_merged_issues as core_bead_ready_merged_issues,
     remove_issue as core_bead_remove_issue, show_issue as core_bead_show_issue,
@@ -130,7 +131,7 @@ use sase_core::bead::{
     sync_is_clean as core_bead_sync_is_clean,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
-    BeadUpdateFieldsWire, IssueWire,
+    BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -1098,6 +1099,30 @@ fn py_bead_update<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_preclaim_epic_work", signature = (beads_dir, epic_id, assignments, now=None))]
+fn py_bead_preclaim_epic_work<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    epic_id: &str,
+    assignments: &Bound<'py, PyList>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let assignments = bead_preclaim_assignments_from_py_list(assignments)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_preclaim_epic_work_plan(
+                &beads_dir,
+                epic_id,
+                &assignments,
+                now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_open")]
 #[pyo3(signature = (beads_dir, issue_id, now=None))]
 fn py_bead_open<'py>(
@@ -1350,6 +1375,23 @@ fn bead_update_fields_from_pydict(
             "fields is not a valid BeadUpdateFieldsWire dict: {e}"
         ))
     })
+}
+
+fn bead_preclaim_assignments_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<BeadPreclaimAssignmentWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let assignment: BeadPreclaimAssignmentWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "assignments[{idx}] is not a valid BeadPreclaimAssignmentWire dict: {e}"
+                ))
+            })?;
+        values.push(assignment);
+    }
+    Ok(values)
 }
 
 fn issues_from_py_list(list: &Bound<'_, PyList>) -> PyResult<Vec<IssueWire>> {
@@ -2169,6 +2211,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_preclaim_epic_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;

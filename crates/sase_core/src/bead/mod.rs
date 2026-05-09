@@ -27,9 +27,10 @@ pub use jsonl::{
 };
 pub use mutation::{
     add_dependency, close_issues, create_issue, export_jsonl, init_store,
-    mark_ready_to_work, open_issue, remove_issue, sync_is_clean,
-    unmark_ready_to_work, update_issue, BeadCreateRequestWire,
-    BeadMutationOutcomeWire, BeadUpdateFieldsWire,
+    mark_ready_to_work, open_issue, preclaim_epic_work_plan, remove_issue,
+    sync_is_clean, unmark_ready_to_work, update_issue, BeadCreateRequestWire,
+    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
+    BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
     blocked_issues, blocked_merged_issues, doctor, get_epic_children,

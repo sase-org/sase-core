@@ -78,6 +78,19 @@ pub struct BeadUpdateFieldsWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadPreclaimAssignmentWire {
+    pub bead_id: String,
+    pub agent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadPreclaimRollbackWire {
+    pub bead_id: String,
+    pub status: StatusWire,
+    pub assignee: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadMutationOutcomeWire {
     pub operation: String,
     pub changed: bool,
@@ -93,6 +106,8 @@ pub struct BeadMutationOutcomeWire {
     pub dependency: Option<DependencyWire>,
     #[serde(default)]
     pub next_counter: Option<u64>,
+    #[serde(default)]
+    pub rollback_preclaims: Vec<BeadPreclaimRollbackWire>,
 }
 
 pub fn init_store(
@@ -191,6 +206,92 @@ pub fn update_issue(
 
     let mut result = outcome("update", true, vec![issue.id.clone()]);
     result.issue = Some(issue);
+    Ok(result)
+}
+
+pub fn preclaim_epic_work_plan(
+    beads_dir: &Path,
+    epic_id: &str,
+    assignments: &[BeadPreclaimAssignmentWire],
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let mut store = MutableStore::load(beads_dir)?;
+    let epic = store.get_issue(epic_id)?;
+    if epic.issue_type != IssueTypeWire::Plan {
+        return Err(BeadError {
+            kind: "not_a_plan".to_string(),
+            message: format!(
+                "sase bead work preclaim only applies to epic plan beads (got phase for {epic_id})"
+            ),
+        });
+    }
+    if !matches!(epic.tier.as_ref(), Some(BeadTierWire::Epic)) {
+        return Err(BeadError {
+            kind: "not_workable_plan".to_string(),
+            message: format!(
+                "sase bead work preclaim only applies to epic plan beads (got {} for {epic_id})",
+                tier_label(epic.tier.as_ref())
+            ),
+        });
+    }
+
+    let mut seen = HashSet::new();
+    let mut indexes = Vec::with_capacity(assignments.len());
+    let mut rollback = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        if !seen.insert(assignment.bead_id.as_str()) {
+            return Err(BeadError::validation(format!(
+                "duplicate preclaim target: {}",
+                assignment.bead_id
+            )));
+        }
+        let index = store.issue_index(&assignment.bead_id)?;
+        let issue = &store.issues[index];
+        if issue.issue_type != IssueTypeWire::Phase {
+            return Err(BeadError::validation(format!(
+                "preclaim target is not a phase bead: {}",
+                assignment.bead_id
+            )));
+        }
+        if issue.parent_id.as_deref() != Some(epic_id) {
+            return Err(BeadError::validation(format!(
+                "preclaim target {} is not a child of epic {}",
+                assignment.bead_id, epic_id
+            )));
+        }
+        if issue.status == StatusWire::Closed {
+            return Err(BeadError::validation(format!(
+                "preclaim target is closed: {}",
+                assignment.bead_id
+            )));
+        }
+        indexes.push(index);
+        rollback.push(BeadPreclaimRollbackWire {
+            bead_id: issue.id.clone(),
+            status: issue.status.clone(),
+            assignee: issue.assignee.clone(),
+        });
+    }
+
+    let now = now.unwrap_or_else(now_utc);
+    let mut updated = Vec::with_capacity(assignments.len());
+    for (assignment, index) in assignments.iter().zip(indexes) {
+        let issue = &mut store.issues[index];
+        issue.status = StatusWire::InProgress;
+        issue.assignee = assignment.agent_name.clone();
+        issue.updated_at = now.clone();
+        issue.validate()?;
+        updated.push(issue.clone());
+    }
+
+    store.save()?;
+    let mut result = outcome(
+        "preclaim_epic_work",
+        !assignments.is_empty(),
+        updated.iter().map(|issue| issue.id.clone()).collect(),
+    );
+    result.issues = updated;
+    result.rollback_preclaims = rollback;
     Ok(result)
 }
 
@@ -747,6 +848,7 @@ fn outcome(
         issues: Vec::new(),
         dependency: None,
         next_counter: None,
+        rollback_preclaims: Vec::new(),
     }
 }
 
@@ -1001,6 +1103,189 @@ mod tests {
         .unwrap_err();
 
         assert!(err.message.contains("Only legend plan beads"));
+    }
+
+    #[test]
+    fn preclaim_epic_work_plan_updates_once_and_returns_rollback() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let p1 = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "P1".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                assignee: "previous".to_string(),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        update_issue(
+            &beads_dir,
+            &p1.id,
+            BeadUpdateFieldsWire {
+                status: Some("in_progress".to_string()),
+                assignee: Some("previous".to_string()),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p2 = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "P2".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:03:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let outcome = preclaim_epic_work_plan(
+            &beads_dir,
+            &epic.id,
+            &[
+                BeadPreclaimAssignmentWire {
+                    bead_id: p1.id.clone(),
+                    agent_name: "agent-1".to_string(),
+                },
+                BeadPreclaimAssignmentWire {
+                    bead_id: p2.id.clone(),
+                    agent_name: "agent-2".to_string(),
+                },
+            ],
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.operation, "preclaim_epic_work");
+        assert_eq!(outcome.issue_ids, vec![p1.id.clone(), p2.id.clone()]);
+        assert_eq!(
+            outcome.rollback_preclaims,
+            vec![
+                BeadPreclaimRollbackWire {
+                    bead_id: p1.id.clone(),
+                    status: StatusWire::InProgress,
+                    assignee: "previous".to_string(),
+                },
+                BeadPreclaimRollbackWire {
+                    bead_id: p2.id.clone(),
+                    status: StatusWire::Open,
+                    assignee: String::new(),
+                },
+            ]
+        );
+
+        let store = MutableStore::load(&beads_dir).unwrap();
+        let updated_p1 = store.get_issue(&p1.id).unwrap();
+        assert_eq!(updated_p1.status, StatusWire::InProgress);
+        assert_eq!(updated_p1.assignee, "agent-1");
+        assert_eq!(updated_p1.updated_at, "2026-01-01T00:04:00Z");
+        let updated_p2 = store.get_issue(&p2.id).unwrap();
+        assert_eq!(updated_p2.status, StatusWire::InProgress);
+        assert_eq!(updated_p2.assignee, "agent-2");
+    }
+
+    #[test]
+    fn preclaim_epic_work_plan_validation_is_all_or_nothing() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let p1 = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "P1".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let p2 = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "P2".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        close_issues(
+            &beads_dir,
+            std::slice::from_ref(&p2.id),
+            Some("done".to_string()),
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+
+        let err = preclaim_epic_work_plan(
+            &beads_dir,
+            &epic.id,
+            &[
+                BeadPreclaimAssignmentWire {
+                    bead_id: p1.id.clone(),
+                    agent_name: "agent-1".to_string(),
+                },
+                BeadPreclaimAssignmentWire {
+                    bead_id: p2.id.clone(),
+                    agent_name: "agent-2".to_string(),
+                },
+            ],
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("preclaim target is closed"));
+        let store = MutableStore::load(&beads_dir).unwrap();
+        let unchanged_p1 = store.get_issue(&p1.id).unwrap();
+        assert_eq!(unchanged_p1.status, StatusWire::Open);
+        assert_eq!(unchanged_p1.assignee, "");
+        assert_eq!(store.get_issue(&p2.id).unwrap().status, StatusWire::Closed);
     }
 
     fn issue(
