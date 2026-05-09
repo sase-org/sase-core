@@ -9,7 +9,9 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
-    DocumentSnapshot, EditorRange, EditorXpromptCatalogRequestWire,
+    DocumentSnapshot, EditorRange, EditorSnippetCatalogRequestWire,
+    EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+    EditorSnippetEntryWire, EditorXpromptCatalogRequestWire,
     EditorXpromptCatalogResponseWire, MobileHelperProjectContextWire,
     MobileHelperProjectScopeWire, MobileHelperResultWire,
     MobileHelperSkippedWire, MobileHelperStatusWire,
@@ -46,6 +48,7 @@ struct CatalogInput {
     type_name: String,
     required: bool,
     default_display: Option<String>,
+    default_snippet_value: Option<String>,
     is_step_input: bool,
 }
 
@@ -84,6 +87,13 @@ struct CatalogXprompt {
     tags: BTreeSet<String>,
     description: Option<String>,
     is_skill: bool,
+    snippet: Option<CatalogSnippet>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CatalogSnippet {
+    Enabled,
+    Trigger(String),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +186,69 @@ pub fn load_editor_xprompt_catalog(
         },
         entries: wire_entries,
         catalog_attachment: None,
+    })
+}
+
+pub fn load_editor_snippet_catalog(
+    request: &EditorSnippetCatalogRequestWire,
+    options: &XpromptCatalogLoadOptions,
+) -> Result<EditorSnippetCatalogResponseWire, XpromptCatalogLoadError> {
+    let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
+    let loader = CatalogLoader::new(root_dir);
+    let mut entries_by_trigger =
+        BTreeMap::<String, EditorSnippetEntryWire>::new();
+
+    for xprompt in loader
+        .load_all_xprompts(request.project.as_deref())?
+        .values()
+    {
+        let Some(entry) = snippet_entry_from_xprompt(xprompt) else {
+            continue;
+        };
+        entries_by_trigger
+            .entry(entry.trigger.clone())
+            .or_insert(entry);
+    }
+
+    for (trigger, template) in loader.load_user_snippets()? {
+        if !is_valid_snippet_trigger(&trigger) {
+            continue;
+        }
+        entries_by_trigger.insert(
+            trigger.clone(),
+            EditorSnippetEntryWire {
+                trigger,
+                template,
+                source: "user_config".to_string(),
+                xprompt_name: None,
+                description: None,
+                source_path_display: Some("ace.snippets".to_string()),
+            },
+        );
+    }
+
+    let entries = entries_by_trigger.into_values().collect::<Vec<_>>();
+    Ok(EditorSnippetCatalogResponseWire {
+        schema_version: SCHEMA_VERSION,
+        result: MobileHelperResultWire {
+            status: MobileHelperStatusWire::Success,
+            message: Some(format!("loaded {} snippet(s)", entries.len())),
+            warnings: Vec::new(),
+            skipped: Vec::<MobileHelperSkippedWire>::new(),
+            partial_failure_count: None,
+        },
+        context: MobileHelperProjectContextWire {
+            project: request.project.clone(),
+            scope: if request.project.is_some() {
+                MobileHelperProjectScopeWire::Explicit
+            } else {
+                MobileHelperProjectScopeWire::AllKnown
+            },
+        },
+        stats: EditorSnippetCatalogStatsWire {
+            total_count: entries.len() as u64,
+        },
+        entries,
     })
 }
 
@@ -380,6 +453,120 @@ fn content_has_segment_separators(content: &str) -> bool {
         }
     }
     false
+}
+
+fn snippet_entry_from_xprompt(
+    xprompt: &CatalogXprompt,
+) -> Option<EditorSnippetEntryWire> {
+    let snippet = xprompt.snippet.as_ref()?;
+    let trigger = match snippet {
+        CatalogSnippet::Enabled => xprompt
+            .name
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(xprompt.name.as_str())
+            .to_string(),
+        CatalogSnippet::Trigger(trigger) => trigger.clone(),
+    };
+    if !is_valid_snippet_trigger(&trigger) {
+        return None;
+    }
+    let template =
+        xprompt_to_snippet_template(&xprompt.content, &xprompt.inputs)?;
+    Some(EditorSnippetEntryWire {
+        trigger,
+        template,
+        source: "xprompt".to_string(),
+        xprompt_name: Some(xprompt.name.clone()),
+        description: xprompt.description.clone(),
+        source_path_display: xprompt.source_path.clone(),
+    })
+}
+
+fn is_valid_snippet_trigger(trigger: &str) -> bool {
+    !trigger.is_empty()
+        && trigger
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn xprompt_to_snippet_template(
+    content: &str,
+    inputs: &[CatalogInput],
+) -> Option<String> {
+    if content.contains("{%") || content.contains("{#") {
+        return None;
+    }
+
+    let mut tabstop = 1usize;
+    let mut input_values = BTreeMap::<&str, String>::new();
+    for input in inputs.iter().filter(|input| !input.is_step_input) {
+        let value = if input.required {
+            let value = format!("${tabstop}");
+            tabstop += 1;
+            value
+        } else {
+            input.default_snippet_value.clone().unwrap_or_default()
+        };
+        input_values.insert(input.name.as_str(), value);
+    }
+
+    let mut rendered = String::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("{{") {
+        rendered.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let end = after_start.find("}}")?;
+        let expr = after_start[..end].trim();
+        if expr.is_empty() {
+            return None;
+        }
+        let value = input_values.get(expr)?;
+        rendered.push_str(value);
+        rest = &after_start[end + 2..];
+    }
+    rendered.push_str(rest);
+
+    Some(format!("{}$0", replace_legacy_placeholders(&rendered)))
+}
+
+fn replace_legacy_placeholders(content: &str) -> String {
+    let mut rendered = String::new();
+    let mut rest = content;
+    while let Some(start) = rest.find('{') {
+        rendered.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            rendered.push_str(&rest[start..]);
+            return rendered;
+        };
+        let placeholder = &after_start[..end];
+        if let Some(replacement) = legacy_placeholder_replacement(placeholder) {
+            rendered.push_str(&replacement);
+        } else {
+            rendered.push('{');
+            rendered.push_str(placeholder);
+            rendered.push('}');
+        }
+        rest = &after_start[end + 1..];
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+fn legacy_placeholder_replacement(placeholder: &str) -> Option<String> {
+    let (number, default) = placeholder
+        .split_once(':')
+        .map(|(number, default)| (number, Some(default)))
+        .unwrap_or((placeholder, None));
+    if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(
+        default
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("${number}")),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -917,11 +1104,45 @@ impl CatalogLoader {
                         tags: BTreeSet::from(["memory".to_string()]),
                         description: None,
                         is_skill: false,
+                        snippet: None,
                     },
                 );
             }
         }
         Ok(result)
+    }
+
+    fn load_user_snippets(
+        &self,
+    ) -> Result<BTreeMap<String, String>, XpromptCatalogLoadError> {
+        let mut snippets = BTreeMap::new();
+        for (_source, path) in self.config_paths() {
+            let Some(data) = load_yaml_mapping(&path)? else {
+                continue;
+            };
+            let Some(ace) = mapping_get(&data, "ace") else {
+                continue;
+            };
+            let Some(ace_mapping) = ace.as_mapping() else {
+                continue;
+            };
+            let Some(raw_snippets) = mapping_get(ace_mapping, "snippets")
+            else {
+                continue;
+            };
+            let Some(snippet_mapping) = raw_snippets.as_mapping() else {
+                continue;
+            };
+            for (trigger, template) in snippet_mapping {
+                let (Some(trigger), Some(template)) =
+                    (value_as_string(trigger), template.as_str())
+                else {
+                    continue;
+                };
+                snippets.insert(trigger, template.to_string());
+            }
+        }
+        Ok(snippets)
     }
 
     fn memory_search_dirs_low_to_high(&self) -> Vec<(PathBuf, bool)> {
@@ -1253,6 +1474,10 @@ fn load_xprompt_from_markdown(
         .and_then(|data| mapping_get(data, "skill"))
         .map(value_is_truthy)
         .unwrap_or(false);
+    let snippet = front_matter
+        .as_ref()
+        .and_then(|data| mapping_get(data, "snippet"))
+        .and_then(parse_snippet);
     Ok(Some(CatalogXprompt {
         name,
         content: body,
@@ -1261,6 +1486,7 @@ fn load_xprompt_from_markdown(
         tags,
         description,
         is_skill,
+        snippet,
     }))
 }
 
@@ -1359,6 +1585,7 @@ fn workflow_from_mapping(
                 type_name: "line".to_string(),
                 required: true,
                 default_display: None,
+                default_snippet_value: None,
                 is_step_input: true,
             });
         }
@@ -1415,6 +1642,7 @@ fn xprompt_from_config_entry(
             tags: BTreeSet::new(),
             description: None,
             is_skill: false,
+            snippet: None,
         });
     }
     let data = value.as_mapping()?;
@@ -1433,6 +1661,7 @@ fn xprompt_from_config_entry(
         is_skill: mapping_get(data, "skill")
             .map(value_is_truthy)
             .unwrap_or(false),
+        snippet: mapping_get(data, "snippet").and_then(parse_snippet),
     })
 }
 
@@ -1457,13 +1686,18 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
             .iter()
             .filter_map(|(name, raw)| {
                 let name = value_as_string(name)?;
-                let (type_name, required, default_display) =
-                    parse_short_input_value(raw);
+                let (
+                    type_name,
+                    required,
+                    default_display,
+                    default_snippet_value,
+                ) = parse_short_input_value(raw);
                 Some(CatalogInput {
                     name,
                     type_name,
                     required,
                     default_display,
+                    default_snippet_value,
                     is_step_input: false,
                 })
             })
@@ -1486,6 +1720,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     type_name,
                     required: default.is_none(),
                     default_display: default.and_then(default_display),
+                    default_snippet_value: default.map(snippet_default_value),
                     is_step_input: false,
                 })
             })
@@ -1494,7 +1729,9 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
     Vec::new()
 }
 
-fn parse_short_input_value(value: &Value) -> (String, bool, Option<String>) {
+fn parse_short_input_value(
+    value: &Value,
+) -> (String, bool, Option<String>, Option<String>) {
     if let Some(mapping) = value.as_mapping() {
         let type_name = mapping_get(mapping, "type")
             .and_then(value_as_string)
@@ -1505,6 +1742,7 @@ fn parse_short_input_value(value: &Value) -> (String, bool, Option<String>) {
             type_name,
             default.is_none(),
             default.and_then(default_display),
+            default.map(snippet_default_value),
         )
     } else {
         (
@@ -1512,6 +1750,7 @@ fn parse_short_input_value(value: &Value) -> (String, bool, Option<String>) {
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
             ),
             true,
+            None,
             None,
         )
     }
@@ -1544,6 +1783,22 @@ fn default_display(value: &Value) -> Option<String> {
         return Some(value.to_string());
     }
     None
+}
+
+fn snippet_default_value(value: &Value) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    value_as_string(value).unwrap_or_default()
+}
+
+fn parse_snippet(value: &Value) -> Option<CatalogSnippet> {
+    if value.as_bool() == Some(true) {
+        return Some(CatalogSnippet::Enabled);
+    }
+    value
+        .as_str()
+        .map(|trigger| CatalogSnippet::Trigger(trigger.to_string()))
 }
 
 fn parse_tags(value: &Value) -> BTreeSet<String> {
@@ -1898,6 +2153,88 @@ mod tests {
                 ("enabled", "bool", false, Some("false"), 4),
             ]
         );
+    }
+
+    #[test]
+    fn loads_native_snippet_catalog_with_user_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join(".xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("review.md"),
+            "---\nsnippet: true\ndescription: Review code\ninput:\n  language: word\n  focus:\n    type: line\n    default: correctness\n---\nReview this {{ language }} code for {{ focus }}.\nLegacy {2:done} {3}",
+        )
+        .unwrap();
+        fs::write(
+            xprompts.join("skip.md"),
+            "---\nsnippet: bad-trigger!\n---\nBody",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase.yml"),
+            "ace:\n  snippets:\n    review: User review $0\n    plan: Plan $1$0\n",
+        )
+        .unwrap();
+
+        let response = load_editor_snippet_catalog(
+            &EditorSnippetCatalogRequestWire {
+                schema_version: 1,
+                project: None,
+            },
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let by_trigger = response
+            .entries
+            .iter()
+            .map(|entry| (entry.trigger.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(response.stats.total_count >= 2);
+        assert_eq!(by_trigger["review"].source, "user_config");
+        assert_eq!(by_trigger["review"].template, "User review $0");
+        assert_eq!(by_trigger["plan"].template, "Plan $1$0");
+        assert!(!by_trigger.contains_key("bad-trigger!"));
+    }
+
+    #[test]
+    fn converts_native_xprompt_snippet_templates() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join("xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("fix.md"),
+            "---\nsnippet: fixit\ninput:\n  bug: word\n  area:\n    type: line\n    default: parser\n  empty:\n    type: line\n    default:\n---\nFix {{ bug }} in {{ area }}{{ empty }}. Then {2} or {3:done}.",
+        )
+        .unwrap();
+        fs::write(
+            xprompts.join("complex.md"),
+            "---\nsnippet: true\n---\n{% if enabled %}skip{% endif %}",
+        )
+        .unwrap();
+
+        let response = load_editor_snippet_catalog(
+            &EditorSnippetCatalogRequestWire {
+                schema_version: 1,
+                project: None,
+            },
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let by_trigger = response
+            .entries
+            .iter()
+            .map(|entry| (entry.trigger.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            by_trigger["fixit"].template,
+            "Fix $1 in parser. Then $2 or done.$0"
+        );
+        assert_eq!(by_trigger["fixit"].xprompt_name.as_deref(), Some("fix"));
+        assert!(!by_trigger.contains_key("complex"));
     }
 
     #[test]

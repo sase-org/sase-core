@@ -7,8 +7,8 @@ use std::{
 };
 
 use sase_core::{
-    editor_assist_entries_from_catalog, load_editor_xprompt_catalog,
-    CommandHelperHostBridge, DynHelperHostBridge,
+    editor_assist_entries_from_catalog, load_editor_snippet_catalog,
+    load_editor_xprompt_catalog, CommandHelperHostBridge, DynHelperHostBridge,
     EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
     EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
     XpromptAssistEntry, XpromptCatalogLoadOptions,
@@ -155,9 +155,15 @@ impl CatalogCache {
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
         match self
-            .refresh_snippets(key.clone(), project, COMPLETION_REFRESH_TIMEOUT)
+            .refresh_snippets(
+                key.clone(),
+                project,
+                root_dir,
+                COMPLETION_REFRESH_TIMEOUT,
+            )
             .await
         {
             Ok(entries) => Ok(entries),
@@ -169,8 +175,9 @@ impl CatalogCache {
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
-        self.refresh_snippets(key, project, EXPLICIT_REFRESH_TIMEOUT)
+        self.refresh_snippets(key, project, root_dir, EXPLICIT_REFRESH_TIMEOUT)
             .await
     }
 
@@ -262,14 +269,50 @@ impl CatalogCache {
         &self,
         key: String,
         project: Option<String>,
+        root_dir: Option<PathBuf>,
         timeout: Duration,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
         let request = EditorSnippetCatalogRequestWire {
             schema_version: 1,
             project,
         };
+        let rust_result = if self.prefer_rust_catalog {
+            Some(
+                refresh_snippets_with_rust_catalog(request.clone(), root_dir)
+                    .await,
+            )
+        } else {
+            None
+        };
         let entries =
-            self.refresh_snippets_with_helper(&request, timeout).await?;
+            match self.refresh_snippets_with_helper(&request, timeout).await {
+                Ok(helper_entries) => match rust_result {
+                    Some(Ok(rust_entries)) if !rust_entries.is_empty() => {
+                        merge_snippet_entries(helper_entries, rust_entries)
+                    }
+                    Some(Err(error)) => {
+                        warn!(
+                            "rust snippet catalog loader failed: {}",
+                            error.message
+                        );
+                        helper_entries
+                    }
+                    _ => helper_entries,
+                },
+                Err(helper_error) => match rust_result {
+                    Some(Ok(rust_entries)) if !rust_entries.is_empty() => {
+                        rust_entries
+                    }
+                    Some(Err(error)) => {
+                        warn!(
+                            "rust snippet catalog loader failed: {}",
+                            error.message
+                        );
+                        return Err(helper_error);
+                    }
+                    _ => return Err(helper_error),
+                },
+            };
         Ok(self.store_snippets(key, entries))
     }
 
@@ -400,6 +443,24 @@ fn merge_catalog_entries(
     helper_entries
 }
 
+fn merge_snippet_entries(
+    mut helper_entries: Vec<EditorSnippetEntryWire>,
+    rust_entries: Vec<EditorSnippetEntryWire>,
+) -> Vec<EditorSnippetEntryWire> {
+    let mut indexes = helper_entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.trigger.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for rust_entry in rust_entries {
+        if !indexes.contains_key(&rust_entry.trigger) {
+            indexes.insert(rust_entry.trigger.clone(), helper_entries.len());
+            helper_entries.push(rust_entry);
+        }
+    }
+    helper_entries
+}
+
 async fn refresh_with_rust_catalog(
     request: EditorXpromptCatalogRequestWire,
     root_dir: Option<PathBuf>,
@@ -426,6 +487,34 @@ async fn refresh_with_rust_catalog(
         }
     };
     Ok(editor_assist_entries_from_catalog(&response.entries))
+}
+
+async fn refresh_snippets_with_rust_catalog(
+    request: EditorSnippetCatalogRequestWire,
+    root_dir: Option<PathBuf>,
+) -> Result<Vec<EditorSnippetEntryWire>, CatalogFailure> {
+    let task = tokio::task::spawn_blocking(move || {
+        load_editor_snippet_catalog(
+            &request,
+            &XpromptCatalogLoadOptions::new(root_dir),
+        )
+    });
+    let response = match task.await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(CatalogFailure {
+                class: "rust_snippet_catalog_error".to_string(),
+                message: format!("rust snippet catalog loader failed: {error}"),
+            });
+        }
+        Err(error) => {
+            return Err(CatalogFailure {
+                class: "rust_snippet_catalog_join".to_string(),
+                message: format!("rust snippet catalog loader failed: {error}"),
+            });
+        }
+    };
+    Ok(response.entries)
 }
 
 fn failure_from_bridge_error(
@@ -597,6 +686,7 @@ mod tests {
             .refresh_snippets_for_completion(
                 "test".to_string(),
                 Some("sase".to_string()),
+                None,
             )
             .await
             .unwrap();
@@ -617,16 +707,47 @@ mod tests {
             }));
 
         let first = cache
-            .refresh_snippets_for_completion("test".to_string(), None)
+            .refresh_snippets_for_completion("test".to_string(), None, None)
             .await
             .unwrap();
         let second = cache
-            .refresh_snippets_for_completion("test".to_string(), None)
+            .refresh_snippets_for_completion("test".to_string(), None, None)
             .await
             .unwrap();
 
         assert_eq!(first[0].trigger, "cached");
         assert_eq!(second[0].trigger, "cached");
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_uses_rust_fallback_when_helper_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let xprompts = temp.path().join("xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("nativezz.md"),
+            "---\nsnippet: nativezz\ninput: {target: word}\n---\nFix {{ target }}.",
+        )
+        .unwrap();
+        let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
+            Arc::new(UnavailableBridge),
+            false,
+        );
+
+        let entries = cache
+            .refresh_snippets_for_completion(
+                "test".to_string(),
+                None,
+                Some(temp.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.trigger == "nativezz")
+            .unwrap();
+        assert_eq!(entry.template, "Fix $1.$0");
     }
 
     fn root_with_rust_entry() -> tempfile::TempDir {
