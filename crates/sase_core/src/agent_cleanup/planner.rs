@@ -648,7 +648,6 @@ mod tests {
             tag: None,
             identities: vec![],
             include_pidless_as_dismissable: false,
-            taken_dismissed_names: vec![],
         }
     }
 
@@ -794,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_side_effects_do_not_allocate_renames() {
+    fn dismiss_side_effects_preserve_names() {
         let mut parent =
             target("workflow", "wf", Some("20260428100000"), "DONE", None);
         parent.workflow = Some("deploy".to_string());
@@ -813,29 +812,25 @@ mod tests {
         )
         .unwrap();
 
-        assert!(plan.side_effects.dismissal_rename_allocations.is_empty());
-        assert!(plan.side_effects.wait_reference_rewrite_map.is_empty());
         assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
         assert_eq!(plan.side_effects.bundle_save_candidates.len(), 2);
         assert_eq!(plan.side_effects.artifact_delete_paths.len(), 2);
     }
 
     #[test]
-    fn dismiss_side_effects_ignore_taken_names_for_renames() {
+    fn dismiss_side_effects_allow_duplicate_historical_names() {
         let mut first =
             target("run", "cl_a", Some("20260428100000"), "DONE", None);
         first.agent_name = Some("foo".to_string());
         let mut second =
             target("run", "cl_b", Some("20260428110000"), "DONE", None);
         second.agent_name = Some("foo".to_string());
-        let mut request =
-            req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED);
-        request.taken_dismissed_names = vec!["260428.foo".to_string()];
+        let plan = plan_agent_cleanup(
+            &[first, second],
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED),
+        )
+        .unwrap();
 
-        let plan = plan_agent_cleanup(&[first, second], &request).unwrap();
-
-        assert!(plan.side_effects.dismissal_rename_allocations.is_empty());
-        assert!(plan.side_effects.wait_reference_rewrite_map.is_empty());
         assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
     }
 }

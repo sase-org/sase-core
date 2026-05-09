@@ -107,8 +107,6 @@ pub struct AgentCleanupRequestWire {
     pub identities: Vec<AgentCleanupIdentityWire>,
     #[serde(default)]
     pub include_pidless_as_dismissable: bool,
-    #[serde(default)]
-    pub taken_dismissed_names: Vec<String>,
 }
 
 /// One process/workflow kill decision.
@@ -151,15 +149,6 @@ pub struct AgentCleanupCountsWire {
     pub running: u64,
     pub completed: u64,
     pub failed: u64,
-}
-
-/// Rename allocation for dismissal-time name prefixing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentCleanupDismissalRenameIntentWire {
-    pub identity: AgentCleanupIdentityWire,
-    #[serde(default)]
-    pub old_name: Option<String>,
-    pub new_name: String,
 }
 
 /// Candidate whose agent bundle should be saved by the host.
@@ -214,11 +203,6 @@ pub struct AgentCleanupSideEffectsWire {
     #[serde(default)]
     pub notification_dismiss_candidates:
         Vec<AgentCleanupNotificationDismissIntentWire>,
-    #[serde(default)]
-    pub dismissal_rename_allocations:
-        Vec<AgentCleanupDismissalRenameIntentWire>,
-    #[serde(default)]
-    pub wait_reference_rewrite_map: Vec<(String, String)>,
 }
 
 /// Complete pure plan. The host may use it for preview only or execute its
