@@ -368,24 +368,57 @@ impl XpromptLspServer {
 
     async fn refresh_catalog_explicit(&self) {
         let config = self.current_config();
-        match self
+        let xprompt_result = self
             .catalog_cache
             .refresh_explicit(
                 config.catalog_key.clone(),
                 config.project.clone(),
                 config.root_dir.clone(),
             )
-            .await
-        {
-            Ok(entries) => {
+            .await;
+        let snippet_result = self
+            .catalog_cache
+            .refresh_snippets_explicit(
+                config.catalog_key.clone(),
+                config.project.clone(),
+            )
+            .await;
+
+        match (xprompt_result, snippet_result) {
+            (Ok(entries), Ok(snippets)) => {
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "refreshed {} xprompt entries and {} snippets",
+                            entries.len(),
+                            snippets.len()
+                        ),
+                    )
+                    .await;
+            }
+            (Ok(entries), Err(snippet_error)) => {
                 self.client
                     .log_message(
                         MessageType::INFO,
                         format!("refreshed {} xprompt entries", entries.len()),
                     )
                     .await;
+                self.warn_once(&snippet_error).await;
             }
-            Err(error) => self.warn_once(&error).await,
+            (Err(xprompt_error), Ok(snippets)) => {
+                self.warn_once(&xprompt_error).await;
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("refreshed {} snippets", snippets.len()),
+                    )
+                    .await;
+            }
+            (Err(xprompt_error), Err(snippet_error)) => {
+                self.warn_once(&xprompt_error).await;
+                self.warn_once(&snippet_error).await;
+            }
         }
     }
 
@@ -995,6 +1028,16 @@ mod tests {
                 },
                 catalog_attachment: None,
             },
+            snippet_catalog_response: serde_json::from_value(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "result": {"status": "success", "message": null, "warnings": [], "skipped": [], "partial_failure_count": null},
+                    "context": {"project": "sase", "scope": "explicit"},
+                    "entries": [],
+                    "stats": {"total_count": 0}
+                }),
+            )
+            .unwrap(),
             bead_list_response: serde_json::from_value(
                 serde_json::json!({
                     "schema_version": 1,

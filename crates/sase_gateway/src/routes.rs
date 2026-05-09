@@ -3114,6 +3114,16 @@ mod tests {
                     },
                     catalog_attachment: None,
                 },
+                snippet_catalog_response: serde_json::from_value(
+                    serde_json::json!({
+                        "schema_version": GATEWAY_WIRE_SCHEMA_VERSION,
+                        "result": {"status": "success", "message": null, "warnings": [], "skipped": [], "partial_failure_count": null},
+                        "context": {"project": "sase", "scope": "explicit"},
+                        "entries": [],
+                        "stats": {"total_count": 0}
+                    }),
+                )
+                .unwrap(),
                 bead_list_response: MobileBeadListResponseWire {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                     result: result.clone(),

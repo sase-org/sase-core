@@ -9,6 +9,7 @@ use std::{
 use sase_core::{
     editor_assist_entries_from_catalog, load_editor_xprompt_catalog,
     CommandHelperHostBridge, DynHelperHostBridge,
+    EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
     EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
     XpromptAssistEntry, XpromptCatalogLoadOptions,
 };
@@ -34,12 +35,19 @@ struct CachedCatalog {
     refreshed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CachedSnippetCatalog {
+    entries: Arc<Vec<EditorSnippetEntryWire>>,
+    refreshed_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct CatalogCache {
     bridge: DynHelperHostBridge,
     prefer_rust_catalog: bool,
     plugin_metadata_present: bool,
     catalogs: RwLock<HashMap<String, CachedCatalog>>,
+    snippet_catalogs: RwLock<HashMap<String, CachedSnippetCatalog>>,
     warned_failure_classes: RwLock<BTreeSet<String>>,
 }
 
@@ -67,6 +75,7 @@ impl CatalogCache {
             prefer_rust_catalog,
             plugin_metadata_present: plugin_metadata_env_present(),
             catalogs: RwLock::new(HashMap::new()),
+            snippet_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -81,6 +90,7 @@ impl CatalogCache {
             prefer_rust_catalog: true,
             plugin_metadata_present,
             catalogs: RwLock::new(HashMap::new()),
+            snippet_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -95,6 +105,24 @@ impl CatalogCache {
 
     pub fn stale_or_missing(&self, key: &str) -> bool {
         let Ok(catalogs) = self.catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(key)
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub fn cached_snippet_entries(
+        &self,
+        key: &str,
+    ) -> Option<Arc<Vec<EditorSnippetEntryWire>>> {
+        let catalogs = self.snippet_catalogs.read().ok()?;
+        catalogs.get(key).map(|catalog| catalog.entries.clone())
+    }
+
+    pub fn snippets_stale_or_missing(&self, key: &str) -> bool {
+        let Ok(catalogs) = self.snippet_catalogs.read() else {
             return true;
         };
         catalogs
@@ -123,6 +151,29 @@ impl CatalogCache {
             .await
     }
 
+    pub async fn refresh_snippets_for_completion(
+        &self,
+        key: String,
+        project: Option<String>,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        match self
+            .refresh_snippets(key.clone(), project, COMPLETION_REFRESH_TIMEOUT)
+            .await
+        {
+            Ok(entries) => Ok(entries),
+            Err(error) => self.cached_snippet_entries(&key).ok_or(error),
+        }
+    }
+
+    pub async fn refresh_snippets_explicit(
+        &self,
+        key: String,
+        project: Option<String>,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        self.refresh_snippets(key, project, EXPLICIT_REFRESH_TIMEOUT)
+            .await
+    }
+
     pub fn should_warn(&self, class: &str) -> bool {
         let Ok(mut warned) = self.warned_failure_classes.write() else {
             return false;
@@ -132,6 +183,9 @@ impl CatalogCache {
 
     pub fn invalidate_all(&self) {
         if let Ok(mut catalogs) = self.catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.snippet_catalogs.write() {
             catalogs.clear();
         }
     }
@@ -204,6 +258,21 @@ impl CatalogCache {
         Ok(self.store(key, entries))
     }
 
+    async fn refresh_snippets(
+        &self,
+        key: String,
+        project: Option<String>,
+        timeout: Duration,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let request = EditorSnippetCatalogRequestWire {
+            schema_version: 1,
+            project,
+        };
+        let entries =
+            self.refresh_snippets_with_helper(&request, timeout).await?;
+        Ok(self.store_snippets(key, entries))
+    }
+
     async fn refresh_with_helper(
         &self,
         request: &EditorXpromptCatalogRequestWire,
@@ -217,7 +286,10 @@ impl CatalogCache {
         let response = match time::timeout(timeout, task).await {
             Ok(Ok(Ok(response))) => response,
             Ok(Ok(Err(error))) => {
-                return Err(failure_from_bridge_error(error));
+                return Err(failure_from_bridge_error(
+                    error,
+                    "xprompt catalog",
+                ));
             }
             Ok(Err(error)) => {
                 return Err(CatalogFailure {
@@ -236,6 +308,41 @@ impl CatalogCache {
         Ok(editor_assist_entries_from_catalog(&response.entries))
     }
 
+    async fn refresh_snippets_with_helper(
+        &self,
+        request: &EditorSnippetCatalogRequestWire,
+        timeout: Duration,
+    ) -> Result<Vec<EditorSnippetEntryWire>, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.snippet_catalog(&request)
+        });
+        let response = match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(
+                    error,
+                    "snippet catalog",
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!("snippet catalog helper failed: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "snippet catalog helper timed out".to_string(),
+                });
+            }
+        };
+
+        Ok(response.entries)
+    }
+
     fn store(
         &self,
         key: String,
@@ -250,6 +357,24 @@ impl CatalogCache {
             catalogs.insert(key, cached);
         } else {
             warn!("failed to lock xprompt catalog cache for write");
+        }
+        entries
+    }
+
+    fn store_snippets(
+        &self,
+        key: String,
+        entries: Vec<EditorSnippetEntryWire>,
+    ) -> Arc<Vec<EditorSnippetEntryWire>> {
+        let entries = Arc::new(entries);
+        let cached = CachedSnippetCatalog {
+            entries: entries.clone(),
+            refreshed_at: Instant::now(),
+        };
+        if let Ok(mut catalogs) = self.snippet_catalogs.write() {
+            catalogs.insert(key, cached);
+        } else {
+            warn!("failed to lock snippet catalog cache for write");
         }
         entries
     }
@@ -303,7 +428,10 @@ async fn refresh_with_rust_catalog(
     Ok(editor_assist_entries_from_catalog(&response.entries))
 }
 
-fn failure_from_bridge_error(error: HostBridgeError) -> CatalogFailure {
+fn failure_from_bridge_error(
+    error: HostBridgeError,
+    operation: &str,
+) -> CatalogFailure {
     let class = match &error {
         HostBridgeError::BridgeUnavailable(_) => "helper_unavailable",
         HostBridgeError::HelperNotFound(_) => "helper_not_found",
@@ -312,7 +440,7 @@ fn failure_from_bridge_error(error: HostBridgeError) -> CatalogFailure {
     .to_string();
     CatalogFailure {
         class,
-        message: format!("xprompt catalog helper failed: {error}"),
+        message: format!("{operation} helper failed: {error}"),
     }
 }
 
@@ -325,6 +453,8 @@ fn plugin_metadata_env_present() -> bool {
 mod tests {
     use super::*;
     use sase_core::{
+        EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+        EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
         HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
         MobileHelperProjectScopeWire, MobileHelperResultWire,
         MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
@@ -332,6 +462,7 @@ mod tests {
         MobileXpromptCatalogStatsWire,
     };
     use std::fs;
+    use std::sync::Mutex;
 
     #[derive(Debug)]
     struct FixtureBridge {
@@ -351,6 +482,42 @@ mod tests {
     struct UnavailableBridge;
 
     impl HelperHostBridge for UnavailableBridge {}
+
+    #[derive(Debug)]
+    struct SnippetFixtureBridge {
+        trigger: String,
+    }
+
+    impl HelperHostBridge for SnippetFixtureBridge {
+        fn snippet_catalog(
+            &self,
+            _request: &EditorSnippetCatalogRequestWire,
+        ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+            Ok(snippet_response(&self.trigger))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstSnippetBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstSnippetBridge {
+        fn snippet_catalog(
+            &self,
+            _request: &EditorSnippetCatalogRequestWire,
+        ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(snippet_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
 
     fn catalog_response(name: &str) -> MobileXpromptCatalogResponseWire {
         MobileXpromptCatalogResponseWire {
@@ -392,6 +559,74 @@ mod tests {
             },
             catalog_attachment: None,
         }
+    }
+
+    fn snippet_response(trigger: &str) -> EditorSnippetCatalogResponseWire {
+        EditorSnippetCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: None,
+                scope: MobileHelperProjectScopeWire::AllKnown,
+            },
+            entries: vec![EditorSnippetEntryWire {
+                trigger: trigger.to_string(),
+                template: format!("{trigger} $1$0"),
+                source: "user_config".to_string(),
+                xprompt_name: None,
+                description: None,
+                source_path_display: Some("ace.snippets".to_string()),
+            }],
+            stats: EditorSnippetCatalogStatsWire { total_count: 1 },
+        }
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(SnippetFixtureBridge {
+            trigger: "fix".to_string(),
+        }));
+
+        let entries = cache
+            .refresh_snippets_for_completion(
+                "test".to_string(),
+                Some("sase".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entries[0].trigger, "fix");
+        assert!(!cache.snippets_stale_or_missing("test"));
+        assert_eq!(
+            cache.cached_snippet_entries("test").unwrap()[0].template,
+            "fix $1$0"
+        );
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_returns_stale_entries_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstSnippetBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache
+            .refresh_snippets_for_completion("test".to_string(), None)
+            .await
+            .unwrap();
+        let second = cache
+            .refresh_snippets_for_completion("test".to_string(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(first[0].trigger, "cached");
+        assert_eq!(second[0].trigger, "cached");
     }
 
     fn root_with_rust_entry() -> tempfile::TempDir {

@@ -2,11 +2,13 @@ use std::{fs, sync::Arc};
 
 use lsp_types::Uri;
 use sase_core::{
-    HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
-    MobileHelperProjectScopeWire, MobileHelperResultWire,
-    MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
-    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
+    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+    EditorSnippetCatalogStatsWire, HelperHostBridge, HostBridgeError,
+    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
+    MobileHelperResultWire, MobileHelperStatusWire,
+    MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
+    MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
+    MobileXpromptInputWire,
 };
 use sase_xprompt_lsp::XpromptLspServer;
 use serde_json::{json, Value};
@@ -68,6 +70,28 @@ impl HelperHostBridge for FixtureBridge {
                 pdf_requested: false,
             },
             catalog_attachment: None,
+        })
+    }
+
+    fn snippet_catalog(
+        &self,
+        _request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        Ok(EditorSnippetCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: Some("sase".to_string()),
+                scope: MobileHelperProjectScopeWire::Explicit,
+            },
+            entries: Vec::new(),
+            stats: EditorSnippetCatalogStatsWire { total_count: 0 },
         })
     }
 }

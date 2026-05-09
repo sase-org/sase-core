@@ -139,6 +139,8 @@ pub use git_query::{
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,
+    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
     EditorXpromptCatalogEntryWire, EditorXpromptCatalogRequestWire,
     EditorXpromptCatalogResponseWire, EditorXpromptCatalogStatsWire,
     EditorXpromptInputWire, HelperHostBridge, HostBridgeError,

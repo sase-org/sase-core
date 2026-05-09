@@ -39,6 +39,13 @@ impl DynHelperHostBridge {
         self.0.xprompt_catalog(request)
     }
 
+    pub fn snippet_catalog(
+        &self,
+        request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        self.0.snippet_catalog(request)
+    }
+
     pub fn list_beads(
         &self,
         request: &MobileBeadListRequestWire,
@@ -89,6 +96,15 @@ pub trait HelperHostBridge: Send + Sync {
         &self,
         _request: &MobileXpromptCatalogRequestWire,
     ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn snippet_catalog(
+        &self,
+        _request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
@@ -176,6 +192,7 @@ impl CommandHelperHostBridge {
 
     fn invoke<Request, Response>(
         &self,
+        namespace: &str,
         operation: &str,
         request: &Request,
     ) -> Result<Response, HostBridgeError>
@@ -190,7 +207,7 @@ impl CommandHelperHostBridge {
         let mut command = Command::new(program);
         command
             .args(fixed_args)
-            .args(["mobile", "helper-bridge", operation])
+            .args([namespace, "helper-bridge", operation])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -250,6 +267,30 @@ impl CommandHelperHostBridge {
             ))
         })
     }
+
+    fn invoke_mobile<Request, Response>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> Result<Response, HostBridgeError>
+    where
+        Request: Serialize,
+        Response: DeserializeOwned,
+    {
+        self.invoke("mobile", operation, request)
+    }
+
+    fn invoke_editor<Request, Response>(
+        &self,
+        operation: &str,
+        request: &Request,
+    ) -> Result<Response, HostBridgeError>
+    where
+        Request: Serialize,
+        Response: DeserializeOwned,
+    {
+        self.invoke("editor", operation, request)
+    }
 }
 
 impl HelperHostBridge for CommandHelperHostBridge {
@@ -257,42 +298,49 @@ impl HelperHostBridge for CommandHelperHostBridge {
         &self,
         request: &MobileChangeSpecTagListRequestWire,
     ) -> Result<MobileChangeSpecTagListResponseWire, HostBridgeError> {
-        self.invoke("changespec-tags", request)
+        self.invoke_mobile("changespec-tags", request)
     }
 
     fn xprompt_catalog(
         &self,
         request: &MobileXpromptCatalogRequestWire,
     ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
-        self.invoke("xprompt-catalog", request)
+        self.invoke_mobile("xprompt-catalog", request)
+    }
+
+    fn snippet_catalog(
+        &self,
+        request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        self.invoke_editor("snippet-catalog", request)
     }
 
     fn list_beads(
         &self,
         request: &MobileBeadListRequestWire,
     ) -> Result<MobileBeadListResponseWire, HostBridgeError> {
-        self.invoke("beads-list", request)
+        self.invoke_mobile("beads-list", request)
     }
 
     fn show_bead(
         &self,
         request: &MobileBeadShowRequestWire,
     ) -> Result<MobileBeadShowResponseWire, HostBridgeError> {
-        self.invoke("beads-show", request)
+        self.invoke_mobile("beads-show", request)
     }
 
     fn update_start(
         &self,
         request: &MobileUpdateStartRequestWire,
     ) -> Result<MobileUpdateStartResponseWire, HostBridgeError> {
-        self.invoke("update-start", request)
+        self.invoke_mobile("update-start", request)
     }
 
     fn update_status(
         &self,
         request: &MobileUpdateStatusRequestWire,
     ) -> Result<MobileUpdateStatusResponseWire, HostBridgeError> {
-        self.invoke("update-status", request)
+        self.invoke_mobile("update-status", request)
     }
 }
 
@@ -300,6 +348,7 @@ impl HelperHostBridge for CommandHelperHostBridge {
 pub struct StaticHelperHostBridge {
     pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
     pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
+    pub snippet_catalog_response: EditorSnippetCatalogResponseWire,
     pub bead_list_response: MobileBeadListResponseWire,
     pub bead_show_response: MobileBeadShowResponseWire,
     pub update_start_response: MobileUpdateStartResponseWire,
@@ -319,6 +368,13 @@ impl HelperHostBridge for StaticHelperHostBridge {
         _request: &MobileXpromptCatalogRequestWire,
     ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
         Ok(self.xprompt_catalog_response.clone())
+    }
+
+    fn snippet_catalog(
+        &self,
+        _request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        Ok(self.snippet_catalog_response.clone())
     }
 
     fn list_beads(
@@ -527,6 +583,39 @@ pub type EditorXpromptCatalogResponseWire = MobileXpromptCatalogResponseWire;
 pub type EditorXpromptCatalogEntryWire = MobileXpromptCatalogEntryWire;
 pub type EditorXpromptInputWire = MobileXpromptInputWire;
 pub type EditorXpromptCatalogStatsWire = MobileXpromptCatalogStatsWire;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorSnippetCatalogRequestWire {
+    pub schema_version: u32,
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorSnippetCatalogResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub entries: Vec<EditorSnippetEntryWire>,
+    pub stats: EditorSnippetCatalogStatsWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorSnippetEntryWire {
+    pub trigger: String,
+    pub template: String,
+    pub source: String,
+    #[serde(default)]
+    pub xprompt_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub source_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorSnippetCatalogStatsWire {
+    pub total_count: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileXpromptCatalogEntryWire {
@@ -792,6 +881,20 @@ mod tests {
                 },
                 catalog_attachment: None,
             },
+            snippet_catalog_response: EditorSnippetCatalogResponseWire {
+                schema_version: 1,
+                result: helper_result(),
+                context: helper_context(),
+                entries: vec![EditorSnippetEntryWire {
+                    trigger: "fix".to_string(),
+                    template: "Fix $1$0".to_string(),
+                    source: "user_config".to_string(),
+                    xprompt_name: None,
+                    description: Some("Fix snippet".to_string()),
+                    source_path_display: Some("ace.snippets".to_string()),
+                }],
+                stats: EditorSnippetCatalogStatsWire { total_count: 1 },
+            },
             bead_list_response: MobileBeadListResponseWire {
                 schema_version: 1,
                 result: helper_result(),
@@ -906,6 +1009,135 @@ mod tests {
                 "catalog_attachment": null
             })
         );
+    }
+
+    #[test]
+    fn static_helper_bridge_returns_snippet_catalog_response() {
+        let bridge = DynHelperHostBridge::new(Arc::new(static_bridge()));
+        let response = bridge
+            .snippet_catalog(&EditorSnippetCatalogRequestWire {
+                schema_version: 1,
+                project: Some("sase".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "success",
+                    "message": null,
+                    "warnings": [],
+                    "skipped": [],
+                    "partial_failure_count": null
+                },
+                "context": {
+                    "project": "sase",
+                    "scope": "explicit"
+                },
+                "entries": [{
+                    "trigger": "fix",
+                    "template": "Fix $1$0",
+                    "source": "user_config",
+                    "xprompt_name": null,
+                    "description": "Fix snippet",
+                    "source_path_display": "ace.snippets"
+                }],
+                "stats": {"total_count": 1}
+            })
+        );
+    }
+
+    #[test]
+    fn snippet_catalog_wire_accepts_minimal_entry_json() {
+        let response: EditorSnippetCatalogResponseWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "success",
+                    "message": "loaded 1 snippet(s)",
+                    "warnings": [],
+                    "skipped": [],
+                    "partial_failure_count": null
+                },
+                "context": {
+                    "project": null,
+                    "scope": "all_known"
+                },
+                "entries": [{
+                    "trigger": "ship",
+                    "template": "Ship $1$0",
+                    "source": "xprompt"
+                }],
+                "stats": {"total_count": 1}
+            }))
+            .unwrap();
+
+        assert_eq!(response.entries[0].trigger, "ship");
+        assert_eq!(response.entries[0].xprompt_name, None);
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            json!({
+                "schema_version": 1,
+                "result": {
+                    "status": "success",
+                    "message": "loaded 1 snippet(s)",
+                    "warnings": [],
+                    "skipped": [],
+                    "partial_failure_count": null
+                },
+                "context": {
+                    "project": null,
+                    "scope": "all_known"
+                },
+                "entries": [{
+                    "trigger": "ship",
+                    "template": "Ship $1$0",
+                    "source": "xprompt",
+                    "xprompt_name": null,
+                    "description": null,
+                    "source_path_display": null
+                }],
+                "stats": {"total_count": 1}
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_bridge_invokes_editor_snippet_catalog() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("helper");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" != "editor" ] || [ "$2" != "helper-bridge" ] || [ "$3" != "snippet-catalog" ]; then
+  exit 7
+fi
+cat >/dev/null
+printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"trigger":"fix","template":"Fix $1$0","source":"user_config","xprompt_name":null,"description":null,"source_path_display":"ace.snippets"}],"stats":{"total_count":1}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let bridge = CommandHelperHostBridge::new(vec![script
+            .to_string_lossy()
+            .into_owned()]);
+        let response = bridge
+            .snippet_catalog(&EditorSnippetCatalogRequestWire {
+                schema_version: 1,
+                project: Some("sase".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(response.entries[0].trigger, "fix");
     }
 
     #[test]
