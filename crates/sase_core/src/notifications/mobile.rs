@@ -360,15 +360,23 @@ pub fn mobile_notification_card_from_wire(
     }
 }
 
+pub fn mobile_notification_error_from_wire(
+    notification: &NotificationWire,
+) -> bool {
+    notification.action.as_deref() == Some("ViewErrorReport")
+        && matches!(notification.sender.as_str(), "axe" | "user-agent")
+}
+
 pub fn mobile_notification_priority_from_wire(
     notification: &NotificationWire,
 ) -> bool {
+    if mobile_notification_error_from_wire(notification) {
+        return false;
+    }
     matches!(
         notification.action.as_deref(),
         Some("PlanApproval" | "UserQuestion" | "JumpToMentorReview")
     ) || matches!(notification.sender.as_str(), "axe" | "crs")
-        || (notification.sender == "user-agent"
-            && notification.action.as_deref() == Some("ViewErrorReport"))
 }
 
 pub fn mobile_action_detail_from_notification(
@@ -1159,5 +1167,32 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, MobileActionPlanErrorCodeWire::InvalidOption);
         assert_eq!(err.target.as_deref(), Some("selected_option_index"));
+    }
+
+    #[test]
+    fn priority_and_error_classifiers_are_disjoint() {
+        let mut axe_error = NotificationWire::default();
+        axe_error.sender = "axe".to_string();
+        axe_error.action = Some("ViewErrorReport".to_string());
+        assert!(mobile_notification_error_from_wire(&axe_error));
+        assert!(!mobile_notification_priority_from_wire(&axe_error));
+
+        let mut user_agent_error = NotificationWire::default();
+        user_agent_error.sender = "user-agent".to_string();
+        user_agent_error.action = Some("ViewErrorReport".to_string());
+        assert!(mobile_notification_error_from_wire(&user_agent_error));
+        assert!(!mobile_notification_priority_from_wire(&user_agent_error));
+
+        let mut axe_other = NotificationWire::default();
+        axe_other.sender = "axe".to_string();
+        axe_other.action = Some("JumpToChangeSpec".to_string());
+        assert!(!mobile_notification_error_from_wire(&axe_other));
+        assert!(mobile_notification_priority_from_wire(&axe_other));
+
+        let mut plan_approval = NotificationWire::default();
+        plan_approval.sender = "plan".to_string();
+        plan_approval.action = Some("PlanApproval".to_string());
+        assert!(!mobile_notification_error_from_wire(&plan_approval));
+        assert!(mobile_notification_priority_from_wire(&plan_approval));
     }
 }

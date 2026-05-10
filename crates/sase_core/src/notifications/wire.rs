@@ -32,6 +32,8 @@ pub struct NotificationWire {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationCountsWire {
     pub priority: u64,
+    #[serde(default)]
+    pub errors: u64,
     pub rest: u64,
     pub muted: u64,
 }

@@ -522,6 +522,8 @@ fn counts_for(notifications: &[NotificationWire]) -> NotificationCountsWire {
         }
         if n.muted {
             counts.muted += 1;
+        } else if is_error(n) {
+            counts.errors += 1;
         } else if is_priority(n) {
             counts.priority += 1;
         } else {
@@ -533,6 +535,10 @@ fn counts_for(notifications: &[NotificationWire]) -> NotificationCountsWire {
 
 fn is_priority(notification: &NotificationWire) -> bool {
     super::mobile::mobile_notification_priority_from_wire(notification)
+}
+
+fn is_error(notification: &NotificationWire) -> bool {
+    super::mobile::mobile_notification_error_from_wire(notification)
 }
 
 fn matches_agent_notification(

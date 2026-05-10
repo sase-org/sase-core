@@ -22,7 +22,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sase_core::notifications::{
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
-    mobile_notification_priority_from_wire, ActionResultWire,
+    mobile_notification_error_from_wire, mobile_notification_priority_from_wire,
+    ActionResultWire,
     HitlActionChoiceWire, HitlActionRequestWire,
     MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
     NotificationWire, PlanActionChoiceWire, PlanActionRequestWire,
@@ -1223,7 +1224,8 @@ async fn list_notifications(
             mobile_notification_card_from_wire(
                 row,
                 action_state,
-                mobile_notification_priority_from_wire(row),
+                mobile_notification_priority_from_wire(row)
+                    || mobile_notification_error_from_wire(row),
             )
         })
         .collect();
@@ -1254,7 +1256,8 @@ async fn notification_detail(
     let card = mobile_notification_card_from_wire(
         &notification,
         state.notification_bridge.action_state(&notification),
-        mobile_notification_priority_from_wire(&notification),
+        mobile_notification_priority_from_wire(&notification)
+            || mobile_notification_error_from_wire(&notification),
     );
     let attachments =
         build_attachment_manifests(&state, &device, &notification)?;

@@ -109,7 +109,8 @@ fn notification_phase1_contract_fixture_loads_with_expected_counts() {
     assert!(!legacy.muted);
     assert_eq!(legacy.snooze_until, None);
 
-    assert_eq!(active.counts.priority, 6);
+    assert_eq!(active.counts.priority, 4);
+    assert_eq!(active.counts.errors, 2);
     assert_eq!(active.counts.rest, 2);
     assert_eq!(active.counts.muted, 2);
 }
@@ -157,7 +158,8 @@ fn notification_counts_match_python_priority_rules() {
     .unwrap();
 
     let snapshot = read_notifications_snapshot(&path, false).unwrap();
-    assert_eq!(snapshot.counts.priority, 3);
+    assert_eq!(snapshot.counts.priority, 2);
+    assert_eq!(snapshot.counts.errors, 1);
     assert_eq!(snapshot.counts.rest, 1);
     assert_eq!(snapshot.counts.muted, 1);
 }
