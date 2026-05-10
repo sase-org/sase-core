@@ -133,6 +133,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            model: String::new(),
             is_ready_to_work: false,
             epic_count: None,
             changespec_name: String::new(),
@@ -203,6 +204,34 @@ mod tests {
         );
 
         assert_eq!(outcome.issues[0].epic_count, None);
+    }
+
+    #[test]
+    fn import_defaults_missing_model_to_empty() {
+        let outcome = parse_issues_jsonl(
+            r#"{"id":"epic","title":"Epic","status":"open","issue_type":"plan","parent_id":null,"created_at":"","updated_at":"","dependencies":[]}"#,
+        );
+
+        assert_eq!(outcome.issues[0].model, "");
+    }
+
+    #[test]
+    fn import_preserves_model() {
+        let outcome = parse_issues_jsonl(
+            r##"{"id":"epic","title":"Epic","status":"open","issue_type":"plan","parent_id":null,"created_at":"","updated_at":"","model":"#pro","dependencies":[]}"##,
+        );
+
+        assert_eq!(outcome.issues[0].model, "#pro");
+    }
+
+    #[test]
+    fn import_rejects_model_control_characters() {
+        let outcome = parse_issues_jsonl(
+            "{\"id\":\"epic\",\"title\":\"Epic\",\"status\":\"open\",\"issue_type\":\"plan\",\"parent_id\":null,\"created_at\":\"\",\"updated_at\":\"\",\"model\":\"bad\\n%tag:x\",\"dependencies\":[]}",
+        );
+
+        assert_eq!(outcome.issues.len(), 0);
+        assert_eq!(outcome.invalid_record_lines, 1);
     }
 
     #[test]

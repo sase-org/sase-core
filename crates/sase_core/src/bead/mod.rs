@@ -42,13 +42,13 @@ pub use read::{
 pub use schema::{
     changespec_metadata_migration_sql, epic_count_migration_sql,
     is_ready_to_work_migration_sql, issue_type_migration_sql,
-    missing_changespec_metadata_columns, needs_epic_count_migration,
-    needs_is_ready_to_work_migration, needs_issue_type_migration,
-    BEAD_SQLITE_SCHEMA,
+    missing_changespec_metadata_columns, model_migration_sql,
+    needs_epic_count_migration, needs_is_ready_to_work_migration,
+    needs_issue_type_migration, needs_model_migration, BEAD_SQLITE_SCHEMA,
 };
 pub use wire::{
-    BeadError, DependencyWire, IssueTypeWire, IssueWire, OperationOutcomeWire,
-    StatusWire,
+    validate_model_value, BeadError, DependencyWire, IssueTypeWire, IssueWire,
+    OperationOutcomeWire, StatusWire,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues,

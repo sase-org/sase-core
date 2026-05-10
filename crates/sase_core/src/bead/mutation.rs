@@ -13,8 +13,8 @@ use serde_json::Value;
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::jsonl::{export_issues_to_jsonl, import_issues_from_jsonl};
 use super::wire::{
-    BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    StatusWire,
+    validate_model_value, BeadError, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, StatusWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -31,6 +31,8 @@ pub struct BeadCreateRequestWire {
     pub notes: String,
     #[serde(default)]
     pub design: String,
+    #[serde(default)]
+    pub model: String,
     #[serde(default)]
     pub assignee: String,
     #[serde(default)]
@@ -59,6 +61,8 @@ pub struct BeadUpdateFieldsWire {
     pub notes: Option<String>,
     #[serde(default)]
     pub design: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
@@ -170,6 +174,7 @@ pub fn create_issue(
         description: request.description,
         notes: request.notes,
         design: request.design,
+        model: normalize_model(request.model)?,
         is_ready_to_work: false,
         epic_count: request.epic_count,
         changespec_name: request.changespec_name,
@@ -543,6 +548,9 @@ fn apply_update_fields(
     if let Some(value) = fields.design {
         issue.design = value;
     }
+    if let Some(value) = fields.model {
+        issue.model = normalize_model(value)?;
+    }
     if let Some(value) = fields.closed_at {
         issue.closed_at = value;
     }
@@ -574,6 +582,12 @@ fn default_create_tier(
         }
         IssueTypeWire::Phase => request.tier.clone(),
     }
+}
+
+fn normalize_model(value: String) -> Result<String, BeadError> {
+    let model = value.trim().to_string();
+    validate_model_value(&model)?;
+    Ok(model)
 }
 
 fn tier_label(tier: Option<&BeadTierWire>) -> &'static str {
@@ -1079,6 +1093,67 @@ mod tests {
         .issue
         .unwrap();
         assert_eq!(updated.epic_count, Some(5));
+    }
+
+    #[test]
+    fn create_and_update_model() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let created = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                model: " codex/gpt-5.5 ".to_string(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(created.model, "codex/gpt-5.5");
+
+        let updated = update_issue(
+            &beads_dir,
+            &created.id,
+            BeadUpdateFieldsWire {
+                model: Some("#pro".to_string()),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(updated.model, "#pro");
+    }
+
+    #[test]
+    fn create_rejects_model_control_characters() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let err = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                model: "codex/gpt-5.5\n%tag:bad".to_string(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("model cannot contain"));
     }
 
     #[test]

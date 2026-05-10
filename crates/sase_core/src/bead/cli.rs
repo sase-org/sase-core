@@ -164,6 +164,10 @@ fn handle_show(
         writeln!(stdout, "Assignee: {}", issue.assignee)
             .expect("writing to String cannot fail");
     }
+    if !issue.model.is_empty() {
+        writeln!(stdout, "Model: {}", issue.model)
+            .expect("writing to String cannot fail");
+    }
     if let Some(epic_count) = issue.epic_count {
         writeln!(stdout, "Epic Count: {epic_count}")
             .expect("writing to String cannot fail");
@@ -563,6 +567,8 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
                 | "--notes"
                 | "-D"
                 | "--design"
+                | "-m"
+                | "--model"
                 | "-a"
                 | "--assignee"
                 | "-E"
@@ -581,6 +587,8 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             ("--notes", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--design=") {
             ("--design", value.to_string())
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            ("--model", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--epic-count=") {
@@ -599,6 +607,7 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             "-d" | "--description" => fields.description = Some(value),
             "-n" | "--notes" => fields.notes = Some(value),
             "-D" | "--design" => fields.design = Some(value),
+            "-m" | "--model" => fields.model = Some(value),
             "-a" | "--assignee" => fields.assignee = Some(value),
             "-E" | "--epic-count" => {
                 fields.epic_count = Some(parse_positive_i64(&value)?);

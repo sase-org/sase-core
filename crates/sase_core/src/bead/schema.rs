@@ -23,6 +23,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     description TEXT,
     notes       TEXT,
     design      TEXT,
+    model       TEXT NOT NULL DEFAULT '',
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     epic_count  INTEGER,
     changespec_name TEXT NOT NULL DEFAULT '',
@@ -81,6 +82,7 @@ CREATE TABLE _issues_new (
   created_at TEXT NOT NULL, created_by TEXT,
   updated_at TEXT NOT NULL, closed_at TEXT,
   close_reason TEXT, description TEXT, notes TEXT, design TEXT,
+  model TEXT NOT NULL DEFAULT '',
   CHECK((issue_type='phase' AND parent_id IS NOT NULL)
     OR (issue_type='plan')),
   CHECK(issue_type='plan' OR tier IS NULL)
@@ -95,7 +97,7 @@ SELECT id, title, status,
     WHEN 'plan' THEN 'epic'
     ELSE NULL END,
   parent_id, owner, assignee, created_at, created_by,
-  updated_at, closed_at, close_reason, description, notes, design
+  updated_at, closed_at, close_reason, description, notes, design, ''
 FROM issues;
 DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
@@ -128,6 +130,17 @@ pub fn needs_epic_count_migration(create_table_sql: Option<&str>) -> bool {
 
 pub fn epic_count_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN epic_count INTEGER"
+}
+
+pub fn needs_model_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("model"),
+    }
+}
+
+pub fn model_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''"
 }
 
 pub fn missing_changespec_metadata_columns<'a, I>(
@@ -185,6 +198,7 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("epic_count  INTEGER"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("model       TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
@@ -213,6 +227,10 @@ mod tests {
             "CREATE TABLE issues(id TEXT)"
         )));
         assert!(!needs_epic_count_migration(Some("epic_count INTEGER")));
+
+        assert!(!needs_model_migration(None));
+        assert!(needs_model_migration(Some("CREATE TABLE issues(id TEXT)")));
+        assert!(!needs_model_migration(Some("model TEXT")));
 
         assert!(!needs_tier_migration(None));
         assert!(needs_tier_migration(Some("CREATE TABLE issues(id TEXT)")));

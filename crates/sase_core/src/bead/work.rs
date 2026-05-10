@@ -14,6 +14,7 @@ use super::wire::{
 pub struct PhaseAssignmentWire {
     pub bead_id: String,
     pub agent_name: String,
+    pub model: String,
     pub waits_on: Vec<String>,
     pub wave: usize,
 }
@@ -24,6 +25,7 @@ pub struct EpicWorkPlanWire {
     pub launch_tag_id: String,
     pub waves: Vec<Vec<PhaseAssignmentWire>>,
     pub land_agent_name: String,
+    pub land_model: String,
     pub land_waits_on: Vec<String>,
 }
 
@@ -38,6 +40,7 @@ pub struct LegendEpicAssignmentWire {
 pub struct LegendWorkPlanWire {
     pub legend_id: String,
     pub plan_file: String,
+    pub land_model: String,
     pub assignments: Vec<LegendEpicAssignmentWire>,
 }
 
@@ -192,6 +195,8 @@ pub fn build_epic_work_plan_from_issues(
             wave_ids
                 .iter()
                 .map(|pid| {
+                    let phase =
+                        issue_by_id.get(*pid).expect("open phase id exists");
                     let waits_on = deps
                         .get(pid)
                         .into_iter()
@@ -201,6 +206,7 @@ pub fn build_epic_work_plan_from_issues(
                     PhaseAssignmentWire {
                         bead_id: (*pid).to_string(),
                         agent_name: phase_agent_name(pid),
+                        model: phase.model.clone(),
                         waits_on,
                         wave: wave_index,
                     }
@@ -221,6 +227,7 @@ pub fn build_epic_work_plan_from_issues(
         launch_tag_id: launch_tag_id.to_string(),
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
+        land_model: epic.model.clone(),
         land_waits_on,
     })
 }
@@ -275,6 +282,7 @@ pub fn build_legend_work_plan_from_issues(
     Ok(LegendWorkPlanWire {
         legend_id: legend_id.to_string(),
         plan_file: legend.design.clone(),
+        land_model: legend.model.clone(),
         assignments,
     })
 }
@@ -361,6 +369,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            model: String::new(),
             is_ready_to_work: false,
             epic_count: None,
             changespec_name: String::new(),
@@ -476,6 +485,24 @@ mod tests {
     }
 
     #[test]
+    fn epic_work_plan_copies_phase_and_land_models() {
+        let mut epic = epic("e1");
+        epic.model = "claude/opus".to_string();
+        let mut p1 = phase("p1", "e1");
+        p1.model = "codex/gpt-5.5".to_string();
+        let p2 = phase("p2", "e1");
+
+        let plan =
+            build_epic_work_plan_from_issues(vec![epic, p1, p2], "e1").unwrap();
+
+        assert_eq!(plan.waves[0][0].bead_id, "p1");
+        assert_eq!(plan.waves[0][0].model, "codex/gpt-5.5");
+        assert_eq!(plan.waves[0][1].bead_id, "p2");
+        assert_eq!(plan.waves[0][1].model, "");
+        assert_eq!(plan.land_model, "claude/opus");
+    }
+
+    #[test]
     fn rejects_open_out_of_epic_blocker() {
         let mut p1 = phase("p1", "e1");
         depends(&mut p1, "ext");
@@ -514,6 +541,7 @@ mod tests {
 
         assert_eq!(plan.legend_id, "l1");
         assert_eq!(plan.plan_file, "sdd/legends/l1.md");
+        assert_eq!(plan.land_model, "");
         assert_eq!(plan.assignments.len(), 3);
         assert_eq!(plan.assignments[0].epic_number, 1);
         assert_eq!(plan.assignments[0].agent_name, "l1.1.0");
@@ -522,6 +550,17 @@ mod tests {
         assert_eq!(plan.assignments[1].waits_on, vec!["l1.1"]);
         assert_eq!(plan.assignments[2].agent_name, "l1.3.0");
         assert_eq!(plan.assignments[2].waits_on, vec!["l1.2"]);
+    }
+
+    #[test]
+    fn copies_legend_model_to_land_model() {
+        let mut legend = legend("l1", Some(1), "sdd/legends/l1.md");
+        legend.model = "codex/gpt-5.5".to_string();
+
+        let plan =
+            build_legend_work_plan_from_issues(vec![legend], "l1").unwrap();
+
+        assert_eq!(plan.land_model, "codex/gpt-5.5");
     }
 
     #[test]

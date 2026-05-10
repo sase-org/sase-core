@@ -88,6 +88,15 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+pub fn validate_model_value(model: &str) -> Result<(), BeadError> {
+    if model.chars().any(char::is_control) {
+        return Err(BeadError::validation(
+            "model cannot contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn deserialize_option_non_empty_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
@@ -168,6 +177,11 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub design: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub model: String,
     #[serde(default = "false_value")]
     pub is_ready_to_work: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +248,7 @@ impl IssueWire {
                 "changespec_bug_id requires changespec_name",
             ));
         }
+        validate_model_value(&self.model)?;
         Ok(())
     }
 }
@@ -285,6 +300,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            model: String::new(),
             is_ready_to_work: false,
             epic_count: None,
             changespec_name: String::new(),
@@ -348,8 +364,21 @@ mod tests {
         assert_eq!(issue.created_at, "");
         assert!(!issue.is_ready_to_work);
         assert_eq!(issue.epic_count, None);
+        assert_eq!(issue.model, "");
         assert_eq!(issue.changespec_name, "");
         assert_eq!(issue.dependencies[0].created_at, "");
+    }
+
+    #[test]
+    fn model_rejects_control_characters() {
+        let mut issue = phase(Some("test-0"));
+        issue.model = "codex/gpt-5.5\n%tag:bad".to_string();
+
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("model cannot contain"));
     }
 
     #[test]

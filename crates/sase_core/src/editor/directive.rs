@@ -18,7 +18,14 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "wait",
         alias: Some("w"),
-        description: "Wait for another agent or for a duration",
+        description: "Wait for another agent or workflow",
+        takes_argument: true,
+        allows_multiple: true,
+    },
+    DirectiveMetadata {
+        name: "time",
+        alias: Some("t"),
+        description: "Wait for a duration or absolute wall-clock time",
         takes_argument: true,
         allows_multiple: true,
     },
@@ -58,9 +65,9 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
-        name: "tag",
-        alias: Some("t"),
-        description: "Assign the agent's user-managed tag",
+        name: "group",
+        alias: Some("g"),
+        description: "Assign the agent's user-managed grouping tag",
         takes_argument: true,
         allows_multiple: false,
     },
@@ -143,11 +150,10 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("true", "Enable xprompt expansion"),
         ],
         "approve" | "edit" | "plan" | "epic" | "hide" => &[],
-        "wait" => &[
-            ("5m", "Wait for five minutes"),
-            ("1h", "Wait for one hour"),
-            ("90s", "Wait for ninety seconds"),
-        ],
+        "time" => {
+            &[("5m", "Wait for five minutes"), ("1h", "Wait for one hour")]
+        }
+        "wait" => &[("agent", "Wait for an agent or workflow")],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
         _ => &[],
     };
@@ -185,11 +191,24 @@ mod tests {
             ("a", "approve"),
             ("e", "edit"),
             ("p", "plan"),
-            ("t", "tag"),
+            ("t", "time"),
+            ("g", "group"),
             ("(", "alt"),
         ] {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
         }
         assert!(directive_metadata("xprompts_enabled").is_some());
+    }
+
+    #[test]
+    fn directive_completion_includes_time_alias() {
+        let completions = build_directive_completion_candidates("%t");
+
+        assert_eq!(completions.candidates.len(), 1);
+        assert_eq!(completions.candidates[0].insertion, "%time");
+        assert_eq!(
+            completions.candidates[0].documentation.as_deref(),
+            Some("Wait for a duration or absolute wall-clock time")
+        );
     }
 }

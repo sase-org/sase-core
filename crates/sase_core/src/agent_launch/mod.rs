@@ -926,7 +926,8 @@ fn canonical_directive_name(name: &str) -> &str {
         "n" => "name",
         "r" => "repeat",
         "p" => "plan",
-        "t" => "tag",
+        "t" => "time",
+        "g" => "group",
         "w" => "wait",
         other => other,
     }
@@ -1945,6 +1946,18 @@ mod tests {
         assert!(plan.slots[0].prompt.contains("---"));
         assert_eq!(plan.slots[1].prompt, "%wait\ntwo");
         assert!(plan.slots[1].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_time_directive_is_not_previous_wait() {
+        let prompt = "%time:5m\ntwo";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+
+        assert_eq!(canonical_directive_name("t"), "time");
+        assert_eq!(plan.slots.len(), 1);
+        assert!(!plan.slots[0].wait_for_previous);
     }
 
     #[test]
