@@ -1171,27 +1171,35 @@ mod tests {
 
     #[test]
     fn priority_and_error_classifiers_are_disjoint() {
-        let mut axe_error = NotificationWire::default();
-        axe_error.sender = "axe".to_string();
-        axe_error.action = Some("ViewErrorReport".to_string());
+        let axe_error = NotificationWire {
+            sender: "axe".to_string(),
+            action: Some("ViewErrorReport".to_string()),
+            ..Default::default()
+        };
         assert!(mobile_notification_error_from_wire(&axe_error));
         assert!(!mobile_notification_priority_from_wire(&axe_error));
 
-        let mut user_agent_error = NotificationWire::default();
-        user_agent_error.sender = "user-agent".to_string();
-        user_agent_error.action = Some("ViewErrorReport".to_string());
+        let user_agent_error = NotificationWire {
+            sender: "user-agent".to_string(),
+            action: Some("ViewErrorReport".to_string()),
+            ..Default::default()
+        };
         assert!(mobile_notification_error_from_wire(&user_agent_error));
         assert!(!mobile_notification_priority_from_wire(&user_agent_error));
 
-        let mut axe_other = NotificationWire::default();
-        axe_other.sender = "axe".to_string();
-        axe_other.action = Some("JumpToChangeSpec".to_string());
+        let axe_other = NotificationWire {
+            sender: "axe".to_string(),
+            action: Some("JumpToChangeSpec".to_string()),
+            ..Default::default()
+        };
         assert!(!mobile_notification_error_from_wire(&axe_other));
         assert!(mobile_notification_priority_from_wire(&axe_other));
 
-        let mut plan_approval = NotificationWire::default();
-        plan_approval.sender = "plan".to_string();
-        plan_approval.action = Some("PlanApproval".to_string());
+        let plan_approval = NotificationWire {
+            sender: "plan".to_string(),
+            action: Some("PlanApproval".to_string()),
+            ..Default::default()
+        };
         assert!(!mobile_notification_error_from_wire(&plan_approval));
         assert!(mobile_notification_priority_from_wire(&plan_approval));
     }
