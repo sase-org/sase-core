@@ -425,6 +425,189 @@ fn notification_dismiss_matching_agents_covers_notification_action_shapes() {
 }
 
 #[test]
+fn notification_dismiss_matching_agents_covers_user_agent_view_error_report() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut error = notification("error");
+    error.sender = "user-agent".to_string();
+    error.action = Some("ViewErrorReport".to_string());
+    error
+        .action_data
+        .insert("cl_name".to_string(), "feature".to_string());
+    error
+        .action_data
+        .insert("raw_suffix".to_string(), "20260501010203".to_string());
+    let mut axe_error = notification("axe-error");
+    axe_error.sender = "axe".to_string();
+    axe_error.action = Some("ViewErrorReport".to_string());
+    axe_error
+        .action_data
+        .insert("error_report_path".to_string(), "/tmp/x".to_string());
+    rewrite_notifications(&path, &[error, axe_error]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "feature".to_string(),
+                raw_suffix: Some("20260501010203".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.changed_count, 1);
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "error")
+            .unwrap()
+            .dismissed
+    );
+    assert!(
+        !outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "axe-error")
+            .unwrap()
+            .dismissed
+    );
+}
+
+#[test]
+fn notification_dismiss_agent_completions_matches_user_agent_jump_and_error() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+
+    let mut jump = notification("jump");
+    jump.sender = "user-agent".to_string();
+    jump.action = Some("JumpToAgent".to_string());
+    jump.action_data
+        .insert("cl_name".to_string(), "feature-a".to_string());
+    jump.action_data
+        .insert("raw_suffix".to_string(), "20260501010203".to_string());
+
+    let mut error = notification("error");
+    error.sender = "user-agent".to_string();
+    error.action = Some("ViewErrorReport".to_string());
+    error
+        .action_data
+        .insert("cl_name".to_string(), "feature-b".to_string());
+    error
+        .action_data
+        .insert("raw_suffix".to_string(), "20260501010204".to_string());
+
+    let mut plan = notification("plan");
+    plan.sender = "user-agent".to_string();
+    plan.action = Some("PlanApproval".to_string());
+    plan.action_data
+        .insert("agent_cl_name".to_string(), "feature-c".to_string());
+
+    let mut question = notification("question");
+    question.sender = "user-agent".to_string();
+    question.action = Some("UserQuestion".to_string());
+    question
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature-d".to_string());
+
+    let mut mentor = notification("mentor");
+    mentor.sender = "user-agent".to_string();
+    mentor.action = Some("JumpToMentorReview".to_string());
+    mentor
+        .action_data
+        .insert("cl_name".to_string(), "feature-e".to_string());
+
+    let mut axe_error = notification("axe-error");
+    axe_error.sender = "axe".to_string();
+    axe_error.action = Some("ViewErrorReport".to_string());
+    axe_error
+        .action_data
+        .insert("error_report_path".to_string(), "/tmp/x".to_string());
+
+    let mut crs = notification("crs");
+    crs.sender = "crs".to_string();
+    crs.action = Some("JumpToAgent".to_string());
+    crs.action_data
+        .insert("cl_name".to_string(), "feature-f".to_string());
+
+    let mut already_dismissed = notification("already-dismissed");
+    already_dismissed.sender = "user-agent".to_string();
+    already_dismissed.action = Some("JumpToAgent".to_string());
+    already_dismissed
+        .action_data
+        .insert("cl_name".to_string(), "feature-g".to_string());
+    already_dismissed.dismissed = true;
+
+    let mut no_cl = notification("no-cl");
+    no_cl.sender = "user-agent".to_string();
+    no_cl.action = Some("JumpToAgent".to_string());
+
+    rewrite_notifications(
+        &path,
+        &[
+            jump,
+            error,
+            plan,
+            question,
+            mentor,
+            axe_error,
+            crs,
+            already_dismissed,
+            no_cl,
+        ],
+    )
+    .unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletions,
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 2);
+
+    let by_id: std::collections::HashMap<_, _> = outcome
+        .notifications
+        .iter()
+        .map(|n| (n.id.clone(), n.dismissed))
+        .collect();
+    assert_eq!(by_id.get("jump"), Some(&true));
+    assert_eq!(by_id.get("error"), Some(&true));
+    assert_eq!(by_id.get("plan"), Some(&false));
+    assert_eq!(by_id.get("question"), Some(&false));
+    assert_eq!(by_id.get("mentor"), Some(&false));
+    assert_eq!(by_id.get("axe-error"), Some(&false));
+    assert_eq!(by_id.get("crs"), Some(&false));
+    assert_eq!(by_id.get("already-dismissed"), Some(&true));
+    assert_eq!(by_id.get("no-cl"), Some(&false));
+}
+
+#[test]
+fn notification_dismiss_agent_completions_no_op_when_already_dismissed() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+
+    let mut already = notification("already");
+    already.sender = "user-agent".to_string();
+    already.action = Some("JumpToAgent".to_string());
+    already
+        .action_data
+        .insert("cl_name".to_string(), "feature".to_string());
+    already.dismissed = true;
+
+    rewrite_notifications(&path, &[already]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletions,
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 0);
+    assert_eq!(outcome.changed_count, 0);
+    assert!(!outcome.rewritten);
+}
+
+#[test]
 fn notification_append_plus_rewrite_concurrency_preserves_valid_rows() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());

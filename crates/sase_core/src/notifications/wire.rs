@@ -104,6 +104,7 @@ pub enum NotificationStateUpdateWire {
     DismissMatchingAgents {
         agents: Vec<NotificationAgentKeyWire>,
     },
+    DismissAgentCompletions,
     RewriteAll {
         notifications: Vec<NotificationWire>,
     },

@@ -315,6 +315,18 @@ fn apply_notification_state_update_with_options(
                     }
                 }
             }
+            NotificationStateUpdateWire::DismissAgentCompletions => {
+                for n in &mut rows {
+                    if n.dismissed {
+                        continue;
+                    }
+                    if matches_agent_completion_notification(n) {
+                        matched_count += 1;
+                        n.dismissed = true;
+                        changed_count += 1;
+                    }
+                }
+            }
             NotificationStateUpdateWire::RewriteAll { .. } => unreachable!(),
         }
 
@@ -563,6 +575,23 @@ fn matches_agent_notification(
                 }),
             }
         }
+        Some("ViewErrorReport") if notification.sender == "user-agent" => {
+            let cl_name = notification.action_data.get("cl_name");
+            if cl_name.is_none() {
+                return false;
+            }
+            let raw_suffix = notification.action_data.get("raw_suffix");
+            match raw_suffix {
+                None => {
+                    agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
+                }
+                Some(raw_suffix) => agents.iter().any(|agent| {
+                    Some(&agent.cl_name) == cl_name
+                        && agent.raw_suffix.as_deref()
+                            == Some(raw_suffix.as_str())
+                }),
+            }
+        }
         Some("PlanApproval" | "UserQuestion") => {
             let cl_name = notification.action_data.get("agent_cl_name");
             let timestamp = notification
@@ -580,6 +609,22 @@ fn matches_agent_notification(
                 }),
             }
         }
+        _ => false,
+    }
+}
+
+fn matches_agent_completion_notification(
+    notification: &NotificationWire,
+) -> bool {
+    if notification.sender != "user-agent" {
+        return false;
+    }
+    match notification.action.as_deref() {
+        Some("JumpToAgent") | Some("ViewErrorReport") => notification
+            .action_data
+            .get("cl_name")
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
         _ => false,
     }
 }
