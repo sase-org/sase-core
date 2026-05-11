@@ -32,6 +32,7 @@ const DISMISSABLE_STATUSES: &[&str] = &[
     "FAILED",
     "PLAN COMMITTED",
     "PLAN DONE",
+    "TALE DONE",
     "PLAN REJECTED",
     "EPIC CREATED",
 ];
@@ -815,6 +816,17 @@ mod tests {
         assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
         assert_eq!(plan.side_effects.bundle_save_candidates.len(), 2);
         assert_eq!(plan.side_effects.artifact_delete_paths.len(), 2);
+    }
+
+    #[test]
+    fn dismissable_statuses_include_tale_done() {
+        // ``TALE DONE`` is the terminal display for completed tale plan
+        // workflows; it must be treated identically to ``PLAN DONE`` by the
+        // cleanup planner so a tale finishing also surfaces ``x dismiss``.
+        assert!(is_dismissable_status("TALE DONE"));
+        assert!(is_dismissable_status("PLAN DONE"));
+        assert!(!is_dismissable_status("TALE APPROVED"));
+        assert!(!is_dismissable_status("RUNNING"));
     }
 
     #[test]
