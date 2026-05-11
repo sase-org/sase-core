@@ -30,6 +30,7 @@ const TS_WORKFLOW_ROOT: &str = "20260427150000";
 const TS_MENTOR_DONE: &str = "20260427160000";
 const TS_WAITING: &str = "20260427170000";
 const TS_MALFORMED: &str = "20260427180000";
+const TS_PENDING_QUESTION: &str = "20260427190000";
 
 const EXPECTED_TIMESTAMPS: &[&str] = &[
     TS_HOME_RUNNING,
@@ -42,6 +43,7 @@ const EXPECTED_TIMESTAMPS: &[&str] = &[
     TS_MENTOR_DONE,
     TS_WAITING,
     TS_MALFORMED,
+    TS_PENDING_QUESTION,
 ];
 
 const EXPECTED_DECODE_ERRORS: u64 = 2;
@@ -69,6 +71,7 @@ fn build_fixture_tree(root: &Path) -> PathBuf {
     build_mentor_done(root);
     build_waiting(root);
     build_malformed(root);
+    build_pending_question(root);
     root.to_path_buf()
 }
 
@@ -386,6 +389,29 @@ fn build_malformed(root: &Path) {
         .join(TS_MALFORMED);
     write_text(&dir.join("agent_meta.json"), "{not json}");
     // No done.json; the scanner picks up the corrupt agent_meta.json only.
+}
+
+fn build_pending_question(root: &Path) {
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_PENDING_QUESTION);
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "asker",
+            "pid": 33333,
+        }),
+    );
+    write_json(
+        &dir.join("pending_question.json"),
+        &json!({
+            "session_id": "ses-abc",
+            "request_path": "/tmp/user_question/ses-abc/question_request.json",
+            "submitted_at": "2026-04-27T19:00:00+00:00",
+        }),
+    );
 }
 
 fn record_by_timestamp<'a>(
@@ -781,6 +807,38 @@ fn only_workflow_dirs_filters_records() {
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     );
+}
+
+#[test]
+fn pending_question_marker_is_surfaced_when_present() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_PENDING_QUESTION);
+    let marker = rec
+        .pending_question
+        .as_ref()
+        .expect("pending_question marker should be present");
+    assert_eq!(marker.session_id.as_deref(), Some("ses-abc"));
+    assert_eq!(
+        marker.request_path.as_deref(),
+        Some("/tmp/user_question/ses-abc/question_request.json"),
+    );
+    assert_eq!(
+        marker.submitted_at.as_deref(),
+        Some("2026-04-27T19:00:00+00:00"),
+    );
+}
+
+#[test]
+fn pending_question_marker_is_absent_when_file_missing() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    assert!(rec.pending_question.is_none());
 }
 
 #[test]

@@ -24,9 +24,10 @@ use serde_json::{Map, Value};
 use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, PlanPathMarkerWire,
-    PromptStepMarkerWire, RunningMarkerWire, WaitingMarkerWire,
-    WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire,
+    PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
+    RunningMarkerWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
@@ -330,6 +331,18 @@ fn scan_artifact_dir(
         None
     };
 
+    let pending_question_path = artifact_dir.join("pending_question.json");
+    let pending_question = if pending_question_path.exists() {
+        match load_marker_object(&pending_question_path, stats) {
+            Some(m) => Some(pending_question_marker_from_object(&m)),
+            // Marker present but unreadable: surface a default record so
+            // `record.pending_question.is_some()` agrees with existence.
+            None => Some(PendingQuestionMarkerWire::default()),
+        }
+    } else {
+        None
+    };
+
     let workflow_state = if options.include_workflow_state {
         load_marker_object(&artifact_dir.join("workflow_state.json"), stats)
             .map(|m| workflow_state_from_object(&m))
@@ -396,6 +409,7 @@ fn scan_artifact_dir(
         done,
         running,
         waiting,
+        pending_question,
         workflow_state,
         plan_path,
         prompt_steps,
@@ -697,6 +711,16 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         waiting_for: coerce_str_list(data.get("waiting_for")),
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
+    }
+}
+
+fn pending_question_marker_from_object(
+    data: &Map<String, Value>,
+) -> PendingQuestionMarkerWire {
+    PendingQuestionMarkerWire {
+        session_id: coerce_str(data.get("session_id")),
+        request_path: coerce_str(data.get("request_path")),
+        submitted_at: coerce_str(data.get("submitted_at")),
     }
 }
 

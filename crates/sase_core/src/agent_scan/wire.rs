@@ -294,6 +294,23 @@ pub struct WaitingMarkerWire {
     pub wait_until: Option<String>,
 }
 
+/// Compact projection of `pending_question.json`.
+///
+/// The marker is written by `handle_questions_flow()` immediately before the
+/// response-wait poll loop and removed on every loop exit path. Its presence
+/// is the authoritative signal that the agent is currently blocked on user
+/// input, independent of the corresponding `UserQuestion` notification's
+/// dismissed/read state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestionMarkerWire {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub request_path: Option<String>,
+    #[serde(default)]
+    pub submitted_at: Option<String>,
+}
+
 /// One step entry from `workflow_state.json`'s `steps` array.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowStepStateWire {
@@ -439,6 +456,8 @@ pub struct AgentArtifactRecordWire {
     pub running: Option<RunningMarkerWire>,
     #[serde(default)]
     pub waiting: Option<WaitingMarkerWire>,
+    #[serde(default)]
+    pub pending_question: Option<PendingQuestionMarkerWire>,
     #[serde(default)]
     pub workflow_state: Option<WorkflowStateWire>,
     #[serde(default)]
