@@ -95,36 +95,42 @@ pub fn append_notification(
     path: &Path,
     notification: &NotificationWire,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
-    let parent = ensure_parent(path)?;
+    append_notification_with_options(path, notification, true)
+}
+
+pub fn append_notification_counts(
+    path: &Path,
+    notification: &NotificationWire,
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    append_notification_with_options(path, notification, false)
+}
+
+fn append_notification_with_options(
+    path: &Path,
+    notification: &NotificationWire,
+    include_notifications: bool,
+) -> Result<NotificationUpdateOutcomeWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
 
-    let append_result = (|| {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| e.to_string())?;
-        serde_json::to_writer(&mut file, notification)
-            .map_err(|e| format!("failed to serialize notification: {e}"))?;
-        file.write_all(b"\n").map_err(|e| e.to_string())?;
-        file.flush().map_err(|e| e.to_string())?;
-        Ok(())
-    })();
+    let append_result = append_notification_unlocked(path, notification);
 
     let result = match append_result {
         Ok(()) => {
-            let (notifications, stats) = read_rows_unlocked(path, true)?;
-            Ok(outcome_from_rows(
-                notifications,
-                stats,
-                0,
-                0,
-                1,
-                false,
-                Vec::new(),
-            ))
+            if !include_notifications {
+                Ok(outcome_without_rows(0, 0, 1, false, Vec::new()))
+            } else {
+                let (notifications, stats) = read_rows_unlocked(path, true)?;
+                Ok(outcome_from_rows(
+                    notifications,
+                    stats,
+                    0,
+                    0,
+                    1,
+                    false,
+                    Vec::new(),
+                ))
+            }
         }
         Err(e) => Err(e),
     };
@@ -132,14 +138,56 @@ pub fn append_notification(
     result
 }
 
+fn append_notification_unlocked(
+    path: &Path,
+    notification: &NotificationWire,
+) -> Result<(), String> {
+    let parent = ensure_parent(path)?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut file, notification)
+        .map_err(|e| format!("failed to serialize notification: {e}"))?;
+    file.write_all(b"\n").map_err(|e| e.to_string())?;
+    file.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn rewrite_notifications(
     path: &Path,
     notifications: &[NotificationWire],
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    rewrite_notifications_with_options(path, notifications, true)
+}
+
+pub fn rewrite_notifications_counts(
+    path: &Path,
+    notifications: &[NotificationWire],
+) -> Result<NotificationUpdateOutcomeWire, String> {
+    rewrite_notifications_with_options(path, notifications, false)
+}
+
+fn rewrite_notifications_with_options(
+    path: &Path,
+    notifications: &[NotificationWire],
+    include_notifications: bool,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
     let result =
         rewrite_notifications_unlocked(path, notifications).and_then(|()| {
+            if !include_notifications {
+                return Ok(outcome_without_rows(
+                    notifications.len() as u64,
+                    notifications.len() as u64,
+                    0,
+                    true,
+                    Vec::new(),
+                ));
+            }
             let (rows, stats) = read_rows_unlocked(path, true)?;
             Ok(outcome_from_rows(
                 rows,

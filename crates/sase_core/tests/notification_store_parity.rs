@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use sase_core::notifications::{
-    append_notification, apply_notification_state_update,
-    apply_notification_state_update_counts, read_notifications_snapshot,
-    rewrite_notifications, NotificationAgentKeyWire,
+    append_notification, append_notification_counts,
+    apply_notification_state_update, apply_notification_state_update_counts,
+    read_notifications_snapshot, rewrite_notifications,
+    rewrite_notifications_counts, NotificationAgentKeyWire,
     NotificationStateUpdateWire, NotificationWire,
 };
 use serde_json::json;
@@ -741,4 +742,139 @@ fn notification_json_shape_uses_expected_wire_keys() {
             "snooze_until": null
         })
     );
+}
+
+#[test]
+fn notification_append_counts_returns_metadata_without_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let outcome =
+        append_notification_counts(&path, &notification("only")).unwrap();
+    assert_eq!(outcome.appended_count, 1);
+    assert_eq!(outcome.matched_count, 0);
+    assert_eq!(outcome.changed_count, 0);
+    assert!(!outcome.rewritten);
+    assert!(outcome.notifications.is_empty());
+    assert!(outcome.expired_ids.is_empty());
+    assert_eq!(outcome.stats.loaded_rows, 0);
+    assert_eq!(outcome.counts.priority, 0);
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications.len(), 1);
+    assert_eq!(snapshot.notifications[0].id, "only");
+}
+
+#[test]
+fn notification_rewrite_counts_returns_metadata_without_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let outcome = rewrite_notifications_counts(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 3);
+    assert_eq!(outcome.changed_count, 3);
+    assert_eq!(outcome.appended_count, 0);
+    assert!(outcome.rewritten);
+    assert!(outcome.notifications.is_empty());
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications.len(), 3);
+    let ids: Vec<&str> = snapshot
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c"]);
+}
+
+#[test]
+fn notification_append_counts_produces_byte_identical_jsonl() {
+    let temp_baseline = tempdir().unwrap();
+    let temp_counts = tempdir().unwrap();
+    let path_baseline = store_path(temp_baseline.path());
+    let path_counts = store_path(temp_counts.path());
+
+    let mut n1 = notification("one");
+    n1.sender = "axe".to_string();
+    n1.action = Some("PlanApproval".to_string());
+    let mut n2 = notification("two");
+    n2.read = true;
+
+    append_notification(&path_baseline, &n1).unwrap();
+    append_notification(&path_baseline, &n2).unwrap();
+    append_notification_counts(&path_counts, &n1).unwrap();
+    append_notification_counts(&path_counts, &n2).unwrap();
+
+    let baseline = fs::read_to_string(&path_baseline).unwrap();
+    let counts = fs::read_to_string(&path_counts).unwrap();
+    assert_eq!(baseline, counts);
+}
+
+#[test]
+fn notification_rewrite_counts_produces_byte_identical_jsonl() {
+    let temp_baseline = tempdir().unwrap();
+    let temp_counts = tempdir().unwrap();
+    let path_baseline = store_path(temp_baseline.path());
+    let path_counts = store_path(temp_counts.path());
+
+    let mut n1 = notification("alpha");
+    n1.sender = "axe".to_string();
+    let mut n2 = notification("beta");
+    n2.action = Some("PlanApproval".to_string());
+    let mut n3 = notification("gamma");
+    n3.muted = true;
+    n3.snooze_until = Some("2026-05-12T10:00:00+00:00".to_string());
+
+    let payload = [n1, n2, n3];
+    rewrite_notifications(&path_baseline, &payload).unwrap();
+    rewrite_notifications_counts(&path_counts, &payload).unwrap();
+
+    let baseline = fs::read_to_string(&path_baseline).unwrap();
+    let counts = fs::read_to_string(&path_counts).unwrap();
+    assert_eq!(baseline, counts);
+}
+
+#[test]
+fn notification_append_plus_rewrite_counts_concurrency_preserves_valid_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications_counts(&path, &[notification("seed")]).unwrap();
+
+    let append_path = path.clone();
+    let append_thread = thread::spawn(move || {
+        for idx in 0..80 {
+            append_notification_counts(
+                &append_path,
+                &notification(&format!("append-{idx}")),
+            )
+            .unwrap();
+        }
+    });
+
+    let rewrite_path = path.clone();
+    let rewrite_thread = thread::spawn(move || {
+        for idx in 0..30 {
+            let snapshot =
+                read_notifications_snapshot(&rewrite_path, true).unwrap();
+            let mut rows = snapshot.notifications;
+            rows.push(notification(&format!("rewrite-{idx}")));
+            rewrite_notifications_counts(&rewrite_path, &rows).unwrap();
+        }
+    });
+
+    append_thread.join().unwrap();
+    rewrite_thread.join().unwrap();
+
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(!content.is_empty());
+    for line in content.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(value.get("id").is_some());
+    }
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert!(snapshot.notifications.iter().any(|n| n.id == "seed"));
+    assert!(snapshot.notifications.iter().any(|n| n.id == "append-79"));
+    assert!(snapshot.notifications.iter().any(|n| n.id == "rewrite-29"));
 }

@@ -39,7 +39,9 @@
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
 //! - `apply_notification_state_update_counts(path: str, update: dict) -> dict`
 //! - `append_notification(path: str, notification: dict) -> dict`
+//! - `append_notification_counts(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
+//! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
@@ -143,10 +145,12 @@ use sase_core::git_query::{
 };
 use sase_core::notifications::{
     append_notification as core_append_notification,
+    append_notification_counts as core_append_notification_counts,
     apply_notification_state_update as core_apply_notification_state_update,
     apply_notification_state_update_counts as core_apply_notification_state_update_counts,
     read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
     rewrite_notifications as core_rewrite_notifications,
+    rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
@@ -1501,6 +1505,26 @@ fn py_append_notification<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Append one notification dict and return only mutation metadata.
+#[pyfunction]
+#[pyo3(name = "append_notification_counts")]
+fn py_append_notification_counts<'py>(
+    py: Python<'py>,
+    path: &str,
+    notification: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let notification = notification_from_pydict(notification)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| {
+        core_append_notification_counts(&path, &notification)
+    });
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Rewrite the notification JSONL store from notification dicts.
 #[pyfunction]
 #[pyo3(name = "rewrite_notifications")]
@@ -1513,6 +1537,26 @@ fn py_rewrite_notifications<'py>(
     let path = PathBuf::from(path);
     let outcome =
         py.allow_threads(|| core_rewrite_notifications(&path, &notifications));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Rewrite the notification JSONL store and return only mutation metadata.
+#[pyfunction]
+#[pyo3(name = "rewrite_notifications_counts")]
+fn py_rewrite_notifications_counts<'py>(
+    py: Python<'py>,
+    path: &str,
+    notifications: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let notifications = notifications_from_py_list(notifications)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| {
+        core_rewrite_notifications_counts(&path, &notifications)
+    });
     let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
         .map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
@@ -2260,7 +2304,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_notification_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
@@ -2717,6 +2763,113 @@ mod tests {
             .unwrap();
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["notifications"][0]["read"], json!(true));
+
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(
+                path.with_file_name("notifications.jsonl.lock"),
+            );
+            let _ = fs::remove_dir(path.parent().unwrap());
+        });
+    }
+
+    #[test]
+    fn notification_store_append_and_rewrite_counts_bindings_omit_rows() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let path = temp_notification_path("notifications.jsonl");
+            let notification_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": "n1",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "notes": [],
+                    "files": [],
+                    "action": null,
+                    "action_data": {},
+                    "read": false,
+                    "dismissed": false,
+                    "silent": false,
+                    "muted": false,
+                    "snooze_until": null
+                }),
+            )
+            .unwrap();
+            let notification =
+                notification_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let appended = py_append_notification_counts(
+                py,
+                path.to_str().unwrap(),
+                notification,
+            )
+            .unwrap();
+            let appended_value = py_to_json_value(appended.bind(py)).unwrap();
+            assert_eq!(appended_value["appended_count"], json!(1));
+            assert_eq!(appended_value["matched_count"], json!(0));
+            assert_eq!(appended_value["changed_count"], json!(0));
+            assert_eq!(appended_value["rewritten"], json!(false));
+            assert_eq!(appended_value["notifications"], json!([]));
+            assert_eq!(appended_value["counts"]["priority"], json!(0));
+            assert_eq!(appended_value["stats"]["loaded_rows"], json!(0));
+
+            let snapshot = py_read_notifications_snapshot(
+                py,
+                path.to_str().unwrap(),
+                true,
+                false,
+            )
+            .unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["notifications"][0]["id"], json!("n1"));
+
+            let replacement_obj = json_value_to_py(
+                py,
+                &json!([{
+                    "id": "n2",
+                    "timestamp": "2026-04-30T13:00:00+00:00",
+                    "sender": "axe",
+                    "notes": [],
+                    "files": [],
+                    "action": null,
+                    "action_data": {},
+                    "read": false,
+                    "dismissed": false,
+                    "silent": false,
+                    "muted": false,
+                    "snooze_until": null
+                }]),
+            )
+            .unwrap();
+            let replacement =
+                replacement_obj.bind(py).downcast::<PyList>().unwrap();
+
+            let rewritten = py_rewrite_notifications_counts(
+                py,
+                path.to_str().unwrap(),
+                replacement,
+            )
+            .unwrap();
+            let rewritten_value = py_to_json_value(rewritten.bind(py)).unwrap();
+            assert_eq!(rewritten_value["matched_count"], json!(1));
+            assert_eq!(rewritten_value["changed_count"], json!(1));
+            assert_eq!(rewritten_value["appended_count"], json!(0));
+            assert_eq!(rewritten_value["rewritten"], json!(true));
+            assert_eq!(rewritten_value["notifications"], json!([]));
+
+            let after = py_read_notifications_snapshot(
+                py,
+                path.to_str().unwrap(),
+                true,
+                false,
+            )
+            .unwrap();
+            let after_value = py_to_json_value(after.bind(py)).unwrap();
+            assert_eq!(after_value["notifications"][0]["id"], json!("n2"));
+            assert_eq!(
+                after_value["notifications"].as_array().unwrap().len(),
+                1
+            );
 
             let _ = fs::remove_file(&path);
             let _ = fs::remove_file(
