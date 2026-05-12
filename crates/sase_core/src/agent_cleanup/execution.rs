@@ -6,11 +6,14 @@
 //! structured results for the host to report.
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use crate::wire::{CommentWire, HookWire, MentorWire};
 
@@ -98,20 +101,109 @@ pub fn save_dismissed_bundle_json(
     bundles_root: &Path,
     bundle: &JsonValue,
 ) -> Result<AgentCleanupBundleWriteResultWire, String> {
-    let filename = bundle_filename_from_json(bundle)?;
-    let shard = bundle_shard_for_filename(&filename);
+    let raw_suffix = bundle
+        .get("raw_suffix")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "dismissed bundle missing raw_suffix".to_string())?;
+    let revision = bundle
+        .get("archive_revision")
+        .and_then(JsonValue::as_i64)
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
+    let agent_id = agent_id_from_json(bundle)?;
+    let shard = bundle_shard_for_raw_suffix(raw_suffix);
+    let revision_dirname = format!("{agent_id}.{revision}");
+    let filename = format!("{revision_dirname}/bundle.json");
     let shard_dir = bundles_root.join(&shard);
     fs::create_dir_all(&shard_dir).map_err(|e| e.to_string())?;
-    let path = shard_dir.join(&filename);
+    let final_dir = shard_dir.join(&revision_dirname);
+    let path = final_dir.join("bundle.json");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = shard_dir.join(format!(
+        ".{revision_dirname}.tmp.{}.{}",
+        std::process::id(),
+        nonce
+    ));
+    if final_dir.exists() {
+        return Err(format!(
+            "dismissed bundle archive revision already exists: {}",
+            path.display()
+        ));
+    }
+    if tmp_dir.exists() {
+        fs::remove_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir(&tmp_dir).map_err(|e| e.to_string())?;
     let payload = serde_json::to_string_pretty(bundle).map_err(|e| {
         format!("failed to serialize dismissed agent bundle: {e}")
     })?;
-    fs::write(&path, payload).map_err(|e| e.to_string())?;
+    let tmp_path = tmp_dir.join("bundle.json");
+    write_file_synced(&tmp_path, payload.as_bytes()).map_err(|e| {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        e
+    })?;
+    fs::rename(&tmp_dir, &final_dir).map_err(|e| {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        e.to_string()
+    })?;
+    sync_dir(&shard_dir);
     Ok(AgentCleanupBundleWriteResultWire {
         path: path_to_string(&path),
         filename,
         shard,
     })
+}
+
+fn agent_id_from_json(bundle: &JsonValue) -> Result<String, String> {
+    let raw_suffix = bundle
+        .get("raw_suffix")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "dismissed bundle missing raw_suffix".to_string())?;
+    let project_file = bundle
+        .get("project_file")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("");
+    let agent_type = bundle
+        .get("agent_type")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("run");
+    let step_index = bundle
+        .get("step_index")
+        .and_then(JsonValue::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let payload =
+        format!("{project_file}\0{raw_suffix}\0{agent_type}\0{step_index}");
+    let digest = Sha256::digest(payload.as_bytes());
+    Ok(hex::encode(digest))
+}
+
+fn bundle_shard_for_raw_suffix(raw_suffix: &str) -> String {
+    if raw_suffix.len() >= 6
+        && raw_suffix.as_bytes()[0..6].iter().all(u8::is_ascii_digit)
+    {
+        return raw_suffix[0..6].to_string();
+    }
+    "000101".to_string()
+}
+
+fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = File::create(path).map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    file.write_all(b"\n").map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
+fn sync_dir(path: &Path) {
+    if let Ok(dir) = File::open(path) {
+        let _ = dir.sync_all();
+    }
 }
 
 pub fn delete_agent_artifact_markers(
@@ -430,10 +522,30 @@ mod tests {
 
         let result = save_dismissed_bundle_json(dir.path(), &bundle).unwrap();
 
-        assert_eq!(result.filename, "20260430010203.json");
+        assert!(result.filename.ends_with(".1/bundle.json"));
         assert_eq!(result.shard, "202604");
         let written = fs::read_to_string(result.path).unwrap();
         assert!(written.contains("\"cl_name\": \"demo\""));
+    }
+
+    #[test]
+    fn save_dismissed_bundle_json_refuses_existing_revision() {
+        let dir = TempDir::new().unwrap();
+        let bundle = json!({
+            "agent_type": "run",
+            "cl_name": "demo",
+            "project_file": "/tmp/p.sase",
+            "status": "DONE",
+            "start_time": "2026-04-30T01:02:03",
+            "raw_suffix": "20260430010203",
+            "archive_revision": 1
+        });
+
+        save_dismissed_bundle_json(dir.path(), &bundle).unwrap();
+        let err = save_dismissed_bundle_json(dir.path(), &bundle)
+            .expect_err("second write should not replace an existing revision");
+
+        assert!(err.contains("already exists"));
     }
 
     #[test]

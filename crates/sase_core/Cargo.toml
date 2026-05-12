@@ -20,6 +20,8 @@ regex = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 rusqlite = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]

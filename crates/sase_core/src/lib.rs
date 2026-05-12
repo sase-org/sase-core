@@ -8,6 +8,7 @@
 //! corpus. The crate is deliberately free of PyO3 types so later
 //! UniFFI/WASM/server work can reuse the same logic.
 
+pub mod agent_archive;
 pub mod agent_cleanup;
 pub mod agent_launch;
 pub mod agent_scan;
@@ -25,6 +26,17 @@ pub mod suffix;
 pub mod wire;
 pub mod xprompt_catalog;
 
+pub use agent_archive::{
+    agent_archive_facet_counts, mark_agent_archive_bundles_revived,
+    query_agent_archive, verify_agent_archive_index,
+    AgentArchiveFacetCountWire, AgentArchiveFacetCountsWire,
+    AgentArchiveFacetRequestWire, AgentArchiveLifecycleFailureWire,
+    AgentArchivePurgeReportWire, AgentArchiveQueryPageWire,
+    AgentArchiveQueryRequestWire, AgentArchiveReviveMarkReportWire,
+    AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
+    AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
+    AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+};
 pub use agent_cleanup::{
     cleanup_plan_from_json_value, cleanup_request_from_json_value,
     delete_agent_artifact_markers, mark_comment_agents_as_killed,

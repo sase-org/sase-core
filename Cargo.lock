@@ -1425,11 +1425,13 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "fs2",
+ "hex",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
 ]

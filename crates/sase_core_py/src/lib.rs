@@ -17,6 +17,10 @@
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
+//! - `query_agent_archive(root: str, request: dict) -> dict`
+//! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
+//! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
+//! - `verify_agent_archive_index(root: str) -> dict`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -78,6 +82,14 @@ use std::time::{Duration, Instant};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
+use sase_core::agent_archive::{
+    agent_archive_facet_counts as core_agent_archive_facet_counts,
+    mark_agent_archive_bundles_revived as core_mark_agent_archive_bundles_revived,
+    query_agent_archive as core_query_agent_archive,
+    verify_agent_archive_index as core_verify_agent_archive_index,
+    AgentArchiveFacetRequestWire, AgentArchiveQueryRequestWire,
+    AgentArchiveReviveMarkRequestWire,
+};
 use sase_core::agent_cleanup::{
     cleanup_request_from_json_value,
     delete_agent_artifact_markers as core_delete_agent_artifact_markers,
@@ -491,6 +503,98 @@ fn py_query_agent_artifact_index<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Query dismissed-agent archive summary rows from the canonical archive index.
+#[pyfunction]
+#[pyo3(name = "query_agent_archive")]
+fn py_query_agent_archive<'py>(
+    py: Python<'py>,
+    root: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveQueryRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentArchiveQueryRequestWire dict: {e}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| {
+            core_query_agent_archive(&PathBuf::from(root), request)
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return grouped counts for a dismissed-agent archive facet.
+#[pyfunction]
+#[pyo3(name = "agent_archive_facet_counts")]
+fn py_agent_archive_facet_counts<'py>(
+    py: Python<'py>,
+    root: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveFacetRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentArchiveFacetRequestWire dict: {e}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| {
+            core_agent_archive_facet_counts(&PathBuf::from(root), request)
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Mark preserved archive bundles as revived without deleting payloads.
+#[pyfunction]
+#[pyo3(name = "mark_agent_archive_bundles_revived")]
+fn py_mark_agent_archive_bundles_revived<'py>(
+    py: Python<'py>,
+    root: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveReviveMarkRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentArchiveReviveMarkRequestWire dict: {e}"
+            ))
+        })?;
+    let result = py.allow_threads(|| {
+        core_mark_agent_archive_bundles_revived(&PathBuf::from(root), request)
+    });
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Verify the dismissed-agent archive index against bundle payload files.
+#[pyfunction]
+#[pyo3(name = "verify_agent_archive_index")]
+fn py_verify_agent_archive_index<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let result = py.allow_threads(|| {
+        core_verify_agent_archive_index(&PathBuf::from(root))
+    });
+    let value = serde_json::to_value(&result).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -2243,6 +2347,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_mark_agent_archive_bundles_revived,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_verify_agent_archive_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
