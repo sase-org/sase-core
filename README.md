@@ -135,7 +135,7 @@ pub fn parse_project_bytes(
 ```
 
 Phase 1C handles ChangeSpec boundaries (`## ChangeSpec` headers, direct `NAME:` starts, two-blank-line / new-NAME
-terminators), the scalar fields `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`, `STATUS`, and `TEST TARGETS`,
+terminators), the scalar fields `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`, and `STATUS`,
 **and** structured section parsing for `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, and
 `DELTAS`. Suffix-prefix parsing matches `sase.ace.changespec.suffix_utils` (including `~!:`, `~@:`, `~$:`, `?$:`, `!:`,
 `@:`, `$:`, `%:`, `^:`, the legacy `~:` plain form, the standalone `@`/`%`/`^` markers, and the `!: metahook | ...` →

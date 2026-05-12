@@ -7,7 +7,7 @@
 //!   end-on-next-header, end-on-two-blank-lines, end-on-new-NAME.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
 //! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`,
-//!   `STATUS`, `TEST TARGETS`.
+//!   `STATUS`.
 //! - Section bodies: `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
 //!   `TIMESTAMPS`, `DELTAS`. The wire records produced here match Python
 //!   parser output for the golden corpus.
@@ -97,7 +97,6 @@ struct ParserState {
     cl: Option<String>,
     bug: Option<String>,
     status: Option<String>,
-    test_targets: Vec<String>,
 
     commits: Vec<CommitWire>,
     current_commit: Option<CommitWire>,
@@ -110,7 +109,6 @@ struct ParserState {
     deltas: Vec<DeltaWire>,
 
     in_description: bool,
-    in_test_targets: bool,
     in_commits: bool,
     in_hooks: bool,
     in_comments: bool,
@@ -122,7 +120,6 @@ struct ParserState {
 impl ParserState {
     fn reset_section_flags(&mut self) {
         self.in_description = false;
-        self.in_test_targets = false;
         self.in_commits = false;
         self.in_hooks = false;
         self.in_comments = false;
@@ -169,7 +166,6 @@ impl ParserState {
             cl_or_pr: self.cl,
             bug: self.bug,
             description,
-            test_targets: self.test_targets,
             commits: self.commits,
             hooks: self.hooks,
             comments: self.comments,
@@ -281,16 +277,6 @@ fn try_section_header(state: &mut ParserState, line: &str) -> bool {
         state.in_deltas = true;
         return true;
     }
-    if let Some(rest) = line.strip_prefix("TEST TARGETS:") {
-        state.save_pending_entries();
-        state.reset_section_flags();
-        state.in_test_targets = true;
-        let inline = rest.trim();
-        if !inline.is_empty() {
-            state.test_targets.push(inline.to_string());
-        }
-        return true;
-    }
     false
 }
 
@@ -298,7 +284,7 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
     let stripped = line.trim();
 
     // Section-specific parsing takes priority. Inside a section we never
-    // fall through to description/test_targets handling, even if
+    // fall through to description handling, even if
     // the line looks like a continuation.
     if state.in_timestamps {
         parse_timestamps_line(line, stripped, &mut state.timestamps);
@@ -342,12 +328,6 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
 
     if state.in_description && line.starts_with("  ") {
         state.description_lines.push(line[2..].to_string());
-        return;
-    }
-    if state.in_test_targets && line.starts_with("  ") {
-        if !stripped.is_empty() {
-            state.test_targets.push(stripped.to_string());
-        }
         return;
     }
     if stripped.is_empty() {
@@ -529,24 +509,6 @@ STATUS: Submitted
     }
 
     #[test]
-    fn test_targets_inline_and_block_treats_indented_lines_as_targets() {
-        let inline = "NAME: a\nTEST TARGETS: //foo:bar\nSTATUS: WIP\n";
-        assert_eq!(parse(inline)[0].test_targets, vec!["//foo:bar"]);
-
-        let block = "\
-NAME: a
-TEST TARGETS:
-  //foo:bar
-  //foo:baz (FAILED)
-STATUS: WIP
-";
-        assert_eq!(
-            parse(block)[0].test_targets,
-            vec!["//foo:bar", "//foo:baz (FAILED)"]
-        );
-    }
-
-    #[test]
     fn parent_cl_pr_bug_scalars_round_trip() {
         let src = "\
 NAME: a
@@ -664,7 +626,6 @@ PARENT:
 PR: https://example.test/repo/pull/1
 BUG: BUG-100
 STATUS: Submitted
-TEST TARGETS: tests/test_alpha.py
 COMMITS:
   (1) [run] Initial Commit
       | CHAT: ~/.sase/chats/alpha.md (0s)

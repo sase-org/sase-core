@@ -23,7 +23,6 @@
 //!     cl_or_pr='123',
 //!     bug=None,
 //!     description='first line\\nsecond line',
-//!     test_targets=['//foo:bar'],
 //!     commits=[CommitWire(number=1, note='init', suffix='@', suffix_type='running', body=['body line'])],
 //!     hooks=[HookWire(command='just lint', status_lines=[HookStatusLineWire(commit_entry_num='1', timestamp='20260429_010101', status='OK', duration='3s')])],
 //!     comments=[CommentWire(reviewer='alice', file_path='src/foo.rs')],
@@ -47,7 +46,7 @@ use sase_core::{
 use serde_json::Value;
 
 const PYTHON_FIXTURE: &str = r#"{
-    "schema_version": 1,
+    "schema_version": 2,
     "name": "rust_workspace",
     "project_basename": "myproj",
     "file_path": "myproj.sase",
@@ -61,7 +60,6 @@ const PYTHON_FIXTURE: &str = r#"{
     "cl_or_pr": "123",
     "bug": null,
     "description": "first line\nsecond line",
-    "test_targets": ["//foo:bar"],
     "commits": [
         {
             "number": 1,
@@ -148,7 +146,6 @@ fn rust_changespec() -> ChangeSpecWire {
         cl_or_pr: Some("123".to_string()),
         bug: None,
         description: "first line\nsecond line".to_string(),
-        test_targets: vec!["//foo:bar".to_string()],
         commits: vec![CommitWire {
             number: 1,
             note: "init".to_string(),

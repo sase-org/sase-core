@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version mirrored from `wire.py::CHANGESPEC_WIRE_SCHEMA_VERSION`.
-pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 2;
 
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -133,8 +133,6 @@ pub struct ChangeSpecWire {
     pub bug: Option<String>,
     pub description: String,
     #[serde(default)]
-    pub test_targets: Vec<String>,
-    #[serde(default)]
     pub commits: Vec<CommitWire>,
     #[serde(default)]
     pub hooks: Vec<HookWire>,
@@ -208,7 +206,6 @@ mod tests {
             cl_or_pr: None,
             bug: None,
             description: "".to_string(),
-            test_targets: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -218,7 +215,6 @@ mod tests {
         };
         let json = serde_json::to_value(&cs).unwrap();
         for key in [
-            "test_targets",
             "commits",
             "hooks",
             "comments",
@@ -237,7 +233,7 @@ mod tests {
     #[test]
     fn none_fields_serialize_as_json_null() {
         let cs = ChangeSpecWire {
-            schema_version: 1,
+            schema_version: 2,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             file_path: "p.sase".to_string(),
@@ -247,7 +243,6 @@ mod tests {
             cl_or_pr: None,
             bug: None,
             description: "".to_string(),
-            test_targets: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -266,7 +261,7 @@ mod tests {
         // Python uses `dataclasses.asdict`, which preserves declaration order.
         // We replicate that order so byte-for-byte JSON parity is reachable.
         let cs = ChangeSpecWire {
-            schema_version: 1,
+            schema_version: 2,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             file_path: "p.sase".to_string(),
@@ -276,7 +271,6 @@ mod tests {
             cl_or_pr: None,
             bug: None,
             description: "".to_string(),
-            test_targets: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -296,7 +290,6 @@ mod tests {
             "cl_or_pr",
             "bug",
             "description",
-            "test_targets",
             "commits",
             "hooks",
             "comments",
@@ -317,7 +310,7 @@ mod tests {
     #[test]
     fn populated_changespec_round_trips() {
         let cs = ChangeSpecWire {
-            schema_version: 1,
+            schema_version: 2,
             name: "rust_workspace".to_string(),
             project_basename: "myproj".to_string(),
             file_path: "myproj.sase".to_string(),
@@ -331,7 +324,6 @@ mod tests {
             cl_or_pr: Some("123".to_string()),
             bug: None,
             description: "first line\nsecond line".to_string(),
-            test_targets: vec!["//foo:bar".to_string()],
             commits: vec![CommitWire {
                 number: 1,
                 note: "init".to_string(),

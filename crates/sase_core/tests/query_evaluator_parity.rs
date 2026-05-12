@@ -225,7 +225,7 @@ fn ancestor_walk_avoids_cycles() {
         end_line: 1,
     };
     let mk = |name: &str, parent: &str| ChangeSpecWire {
-        schema_version: 1,
+        schema_version: 2,
         name: name.into(),
         project_basename: "p".into(),
         file_path: "core_golden/p.sase".into(),
@@ -235,7 +235,6 @@ fn ancestor_walk_avoids_cycles() {
         cl_or_pr: None,
         bug: None,
         description: String::new(),
-        test_targets: vec![],
         commits: vec![],
         hooks: vec![],
         comments: vec![],
