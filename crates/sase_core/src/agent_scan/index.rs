@@ -509,8 +509,10 @@ impl RecordSummary {
             workflow_status
         } else if record.has_done_marker {
             "done"
-        } else {
+        } else if meta.and_then(|m| m.run_started_at.as_ref()).is_some() {
             "running"
+        } else {
+            "starting"
         }
         .to_string();
 
