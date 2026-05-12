@@ -17,6 +17,7 @@ pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
 pub mod parser;
+pub mod project_spec;
 pub mod query;
 pub mod sections;
 pub mod status;
@@ -197,6 +198,14 @@ pub use notifications::{
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::parse_project_bytes;
+pub use project_spec::{
+    active_project_spec_filename, archive_project_spec_filename,
+    is_archive_project_spec, legacy_active_project_spec_filename,
+    legacy_archive_project_spec_filename, preferred_project_spec_path,
+    project_spec_basename, to_active_project_spec_path,
+    to_archive_project_spec_path, LEGACY_PROJECT_SPEC_EXTENSION,
+    PROJECT_SPEC_ARCHIVE_SUFFIX, PROJECT_SPEC_EXTENSION,
+};
 pub use query::{
     canonicalize_query, compile_query, evaluate_query_many,
     evaluate_query_many_in_corpus, evaluate_query_one, get_base_status,

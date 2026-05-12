@@ -315,6 +315,20 @@ fn apply_notification_state_update_with_options(
                     }
                 }
             }
+            NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
+                agents,
+            } => {
+                for n in &mut rows {
+                    if n.dismissed {
+                        continue;
+                    }
+                    if matches_agent_completion_notification_for_agents(n, agents) {
+                        matched_count += 1;
+                        n.dismissed = true;
+                        changed_count += 1;
+                    }
+                }
+            }
             NotificationStateUpdateWire::DismissAgentCompletions => {
                 for n in &mut rows {
                     if n.dismissed {
@@ -626,6 +640,25 @@ fn matches_agent_completion_notification(
             .map(|value| !value.is_empty())
             .unwrap_or(false),
         _ => false,
+    }
+}
+
+fn matches_agent_completion_notification_for_agents(
+    notification: &NotificationWire,
+    agents: &[NotificationAgentKeyWire],
+) -> bool {
+    if agents.is_empty() || !matches_agent_completion_notification(notification)
+    {
+        return false;
+    }
+    let cl_name = notification.action_data.get("cl_name");
+    let raw_suffix = notification.action_data.get("raw_suffix");
+    match raw_suffix {
+        None => agents.iter().any(|agent| Some(&agent.cl_name) == cl_name),
+        Some(raw_suffix) => agents.iter().any(|agent| {
+            Some(&agent.cl_name) == cl_name
+                && agent.raw_suffix.as_deref() == Some(raw_suffix.as_str())
+        }),
     }
 }
 

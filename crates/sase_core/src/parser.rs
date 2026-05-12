@@ -20,6 +20,7 @@
 //!   the Python facade's placeholder, `end_line` here is the real last
 //!   non-blank line of the spec.
 
+use crate::project_spec::project_spec_basename;
 use crate::sections::{
     parse_comments_line, parse_commits_line, parse_deltas_line,
     parse_hooks_line, parse_mentors_line, parse_timestamps_line,
@@ -86,21 +87,6 @@ fn is_changespec_header(line: &str) -> bool {
         _ => return false,
     }
     after.trim_start().starts_with("ChangeSpec")
-}
-
-/// Match Python's `ChangeSpec.project_basename`:
-/// strip directory, strip the extension, then strip a trailing `-archive`.
-fn project_basename(file_path: &str) -> String {
-    let base = file_path.rsplit('/').next().unwrap_or(file_path);
-    let stem = match base.rfind('.') {
-        Some(i) => &base[..i],
-        None => base,
-    };
-    if let Some(prefix) = stem.strip_suffix("-archive") {
-        prefix.to_string()
-    } else {
-        stem.to_string()
-    }
 }
 
 #[derive(Default)]
@@ -171,7 +157,7 @@ impl ParserState {
         Some(ChangeSpecWire {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name,
-            project_basename: project_basename(file_path),
+            project_basename: project_spec_basename(file_path),
             file_path: file_path.to_string(),
             source_span: SourceSpanWire {
                 file_path: file_path.to_string(),
@@ -448,11 +434,14 @@ mod tests {
 
     #[test]
     fn project_basename_strips_extension_and_archive_suffix() {
-        assert_eq!(project_basename("/tmp/myproj.gp"), "myproj");
-        assert_eq!(project_basename("myproj.gp"), "myproj");
-        assert_eq!(project_basename("/tmp/myproj-archive.gp"), "myproj");
-        assert_eq!(project_basename("/tmp/no_ext"), "no_ext");
-        assert_eq!(project_basename("foo.bar.gp"), "foo.bar");
+        assert_eq!(project_spec_basename("/tmp/myproj.sase"), "myproj");
+        assert_eq!(project_spec_basename("/tmp/myproj.gp"), "myproj");
+        assert_eq!(project_spec_basename("myproj.sase"), "myproj");
+        assert_eq!(project_spec_basename("myproj.gp"), "myproj");
+        assert_eq!(project_spec_basename("/tmp/myproj-archive.sase"), "myproj");
+        assert_eq!(project_spec_basename("/tmp/myproj-archive.gp"), "myproj");
+        assert_eq!(project_spec_basename("/tmp/no_ext"), "no_ext");
+        assert_eq!(project_spec_basename("foo.bar.sase"), "foo.bar");
     }
 
     #[test]

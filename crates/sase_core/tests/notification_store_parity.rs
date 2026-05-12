@@ -475,6 +475,73 @@ fn notification_dismiss_matching_agents_covers_user_agent_view_error_report() {
 }
 
 #[test]
+fn notification_dismiss_agent_completions_matching_agents_is_completion_only() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+
+    let mut jump = notification("jump");
+    jump.sender = "user-agent".to_string();
+    jump.action = Some("JumpToAgent".to_string());
+    jump.action_data
+        .insert("cl_name".to_string(), "feature".to_string());
+    jump.action_data
+        .insert("raw_suffix".to_string(), "20260501010203".to_string());
+
+    let mut error = notification("error");
+    error.sender = "user-agent".to_string();
+    error.action = Some("ViewErrorReport".to_string());
+    error
+        .action_data
+        .insert("cl_name".to_string(), "feature".to_string());
+    error
+        .action_data
+        .insert("raw_suffix".to_string(), "20260501010203".to_string());
+
+    let mut other = notification("other");
+    other.sender = "user-agent".to_string();
+    other.action = Some("JumpToAgent".to_string());
+    other
+        .action_data
+        .insert("cl_name".to_string(), "feature".to_string());
+    other
+        .action_data
+        .insert("raw_suffix".to_string(), "20260501010204".to_string());
+
+    let mut plan = notification("plan");
+    plan.sender = "user-agent".to_string();
+    plan.action = Some("PlanApproval".to_string());
+    plan.action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    plan.action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+
+    rewrite_notifications(&path, &[jump, error, other, plan]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "feature".to_string(),
+                raw_suffix: Some("20260501010203".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 2);
+
+    let by_id: std::collections::HashMap<_, _> = outcome
+        .notifications
+        .iter()
+        .map(|n| (n.id.clone(), n.dismissed))
+        .collect();
+    assert_eq!(by_id.get("jump"), Some(&true));
+    assert_eq!(by_id.get("error"), Some(&true));
+    assert_eq!(by_id.get("other"), Some(&false));
+    assert_eq!(by_id.get("plan"), Some(&false));
+}
+
+#[test]
 fn notification_dismiss_agent_completions_matches_user_agent_jump_and_error() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
