@@ -748,7 +748,6 @@ impl CatalogLoader {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }
         all.extend(self.load_plugin_workflows()?);
-        all.extend(self.load_config_workflows(project)?);
         if let Some(project) = project {
             all.extend(self.load_project_specific_workflows(project)?);
             if let Some(workspace) = self.known_workspaces.get(project) {
@@ -903,45 +902,6 @@ impl CatalogLoader {
                     }
                 }
                 result.insert(xprompt.name.clone(), xprompt);
-            }
-        }
-        Ok(result)
-    }
-
-    fn load_config_workflows(
-        &self,
-        project: Option<&str>,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
-        let mut result = BTreeMap::new();
-        for (source, path) in self.config_paths() {
-            let Some(data) = load_yaml_mapping(&path)? else {
-                continue;
-            };
-            let Some(workflows) = mapping_get(&data, "workflows") else {
-                continue;
-            };
-            let Some(mapping) = workflows.as_mapping() else {
-                continue;
-            };
-            for (name, value) in mapping {
-                let Some(name) = value_as_string(name) else {
-                    continue;
-                };
-                let Some(workflow_data) = value.as_mapping() else {
-                    continue;
-                };
-                let mut workflow =
-                    workflow_from_mapping(&name, workflow_data, &source);
-                if workflow.steps.is_empty() {
-                    continue;
-                }
-                if source == "local_config" {
-                    if let Some(project) = project {
-                        workflow.name = format!("{project}/{}", workflow.name);
-                    }
-                }
-                result.insert(workflow.name.clone(), workflow);
             }
         }
         Ok(result)
@@ -1385,18 +1345,34 @@ fn known_project_workspaces(home: Option<&Path>) -> BTreeMap<String, PathBuf> {
         let Ok(files) = fs::read_dir(project_dir.path()) else {
             continue;
         };
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
         for file in files.flatten() {
             let path = file.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("gp") {
+            let extension = path.extension().and_then(|ext| ext.to_str());
+            if extension != Some("sase") && extension != Some("gp") {
                 continue;
             }
-            let Some(project_name) = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
             else {
                 continue;
             };
+            if stem.ends_with("-archive") {
+                continue;
+            }
+            entries.push((stem.to_string(), path));
+        }
+        entries.sort_by(|a, b| {
+            let prefer_a =
+                a.1.extension().and_then(|ext| ext.to_str()) == Some("sase");
+            let prefer_b =
+                b.1.extension().and_then(|ext| ext.to_str()) == Some("sase");
+            prefer_b.cmp(&prefer_a)
+        });
+        let mut seen = BTreeSet::<String>::new();
+        for (project_name, path) in entries {
+            if !seen.insert(project_name.clone()) {
+                continue;
+            }
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
@@ -2476,7 +2452,10 @@ mod tests {
 
         assert_eq!(by_name["plug"].bucket, "plugin");
         assert_eq!(by_name["gh"].bucket, "plugin");
-        assert_eq!(by_name["plug_flow"].bucket, "plugin");
+        assert!(
+            !by_name.contains_key("plug_flow"),
+            "config-defined workflows must not appear in the catalog"
+        );
         assert_eq!(by_name["plug_cfg"].bucket, "config");
         assert_eq!(
             workflow_prompt_part(&by_name["plug_cfg"].workflow),
@@ -2508,18 +2487,6 @@ mod tests {
             )
         );
         assert_eq!(
-            wire_by_name["plug_flow"].definition_path.as_deref(),
-            Some(
-                plugin_config
-                    .join("default_config.yml")
-                    .canonicalize()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            )
-        );
-        assert_eq!(definition_line(wire_by_name["plug_flow"]), Some(4));
-        assert_eq!(
             wire_by_name["plug_cfg"].definition_path.as_deref(),
             Some(
                 root.join("sase.yml")
@@ -2530,6 +2497,77 @@ mod tests {
             )
         );
         assert_eq!(definition_line(wire_by_name["plug_cfg"]), Some(1));
+    }
+
+    #[test]
+    fn config_workflows_are_ignored_but_file_backed_project_workflows_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        let home = temp.path().join("home");
+        let project_workspace = temp.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(home.join(".config/sase")).unwrap();
+        fs::create_dir_all(project_workspace.join("xprompts")).unwrap();
+
+        fs::write(
+            root.join("sase.yml"),
+            "xprompts:\n  local_xp:\n    content: Local config xprompt body\nworkflows:\n  local_flow:\n    steps:\n      - name: run\n        prompt_part: Local config workflow body\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".config/sase/sase.yml"),
+            "xprompts:\n  user_xp:\n    content: User config xprompt body\nworkflows:\n  user_flow:\n    steps:\n      - name: run\n        prompt_part: User config workflow body\n",
+        )
+        .unwrap();
+        fs::write(
+            project_workspace.join("xprompts/file_flow.yml"),
+            "steps:\n  - name: run\n    prompt_part: File-backed workflow body\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root.clone()),
+            home_dir: Some(home),
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            known_workspaces: BTreeMap::from([(
+                "app".to_string(),
+                project_workspace.clone(),
+            )]),
+        };
+
+        let entries = loader.gather_structured_sources(Some("app")).unwrap();
+        let by_name = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(by_name.contains_key("user_xp"));
+        assert_eq!(by_name["user_xp"].bucket, "config");
+        assert!(
+            by_name.contains_key("app/local_xp"),
+            "local_config xprompts still namespace under the active project"
+        );
+        assert!(
+            !by_name.contains_key("user_flow"),
+            "user config workflows must not appear"
+        );
+        assert!(
+            !by_name.contains_key("local_flow"),
+            "local config workflows must not appear"
+        );
+        assert!(
+            !by_name.contains_key("app/local_flow"),
+            "namespaced local config workflows must not appear"
+        );
+        assert!(
+            by_name.contains_key("app/file_flow"),
+            "file-backed workflows in known project workspaces still load"
+        );
+        assert_eq!(by_name["app/file_flow"].bucket, "project");
     }
 
     #[test]
@@ -2579,6 +2617,58 @@ mod tests {
             )
         );
         assert_eq!(definition_line(entry), Some(1));
+    }
+
+    #[test]
+    fn known_project_workspaces_prefers_sase_spec_with_gp_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let projects_dir = home.join(".sase").join("projects");
+
+        let canonical_workspace = temp.path().join("canonical_ws");
+        let canonical_project_dir = projects_dir.join("canonical");
+        fs::create_dir_all(&canonical_workspace).unwrap();
+        fs::create_dir_all(&canonical_project_dir).unwrap();
+        fs::write(
+            canonical_project_dir.join("canonical.sase"),
+            format!("WORKSPACE_DIR: {}\n", canonical_workspace.display()),
+        )
+        .unwrap();
+        fs::write(
+            canonical_project_dir.join("canonical.gp"),
+            "WORKSPACE_DIR: /tmp/should-be-ignored\n",
+        )
+        .unwrap();
+
+        let legacy_workspace = temp.path().join("legacy_ws");
+        let legacy_project_dir = projects_dir.join("legacy");
+        fs::create_dir_all(&legacy_workspace).unwrap();
+        fs::create_dir_all(&legacy_project_dir).unwrap();
+        fs::write(
+            legacy_project_dir.join("legacy.gp"),
+            format!("WORKSPACE_DIR: {}\n", legacy_workspace.display()),
+        )
+        .unwrap();
+
+        let archived_project_dir = projects_dir.join("archived");
+        fs::create_dir_all(&archived_project_dir).unwrap();
+        fs::write(
+            archived_project_dir.join("archived-archive.sase"),
+            format!("WORKSPACE_DIR: {}\n", temp.path().display()),
+        )
+        .unwrap();
+
+        let workspaces = known_project_workspaces(Some(home.as_path()));
+
+        assert_eq!(
+            workspaces.get("canonical").map(PathBuf::as_path),
+            Some(canonical_workspace.as_path()),
+        );
+        assert_eq!(
+            workspaces.get("legacy").map(PathBuf::as_path),
+            Some(legacy_workspace.as_path()),
+        );
+        assert!(!workspaces.contains_key("archived"));
     }
 
     #[test]
