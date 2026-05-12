@@ -422,7 +422,7 @@ mod tests {
         let bundle = json!({
             "agent_type": "run",
             "cl_name": "demo",
-            "project_file": "/tmp/p.gp",
+            "project_file": "/tmp/p.sase",
             "status": "DONE",
             "start_time": "2026-04-30T01:02:03",
             "raw_suffix": "20260430010203"

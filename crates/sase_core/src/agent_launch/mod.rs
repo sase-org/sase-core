@@ -1626,7 +1626,7 @@ mod tests {
 
     fn request(workspace_num: u32) -> WorkspaceClaimRequestWire {
         WorkspaceClaimRequestWire {
-            project_file: "/tmp/project.gp".to_string(),
+            project_file: "/tmp/project.sase".to_string(),
             workspace_num,
             workflow_name: "run".to_string(),
             pid: 222,
@@ -1644,7 +1644,7 @@ mod tests {
         let request = AgentLaunchRequestWire {
             schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
             cl_name: "feature/test".to_string(),
-            project_file: "/tmp/project.gp".to_string(),
+            project_file: "/tmp/project.sase".to_string(),
             workspace_dir: "/tmp/ws".to_string(),
             workspace_num: 2,
             workflow_name: "ace(run)-260501_120000".to_string(),
@@ -1758,7 +1758,7 @@ mod tests {
         let request = AgentLaunchRequestWire {
             schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
             cl_name: "feature/test".to_string(),
-            project_file: "/tmp/project.gp".to_string(),
+            project_file: "/tmp/project.sase".to_string(),
             workspace_dir: "/tmp/ws".to_string(),
             workspace_num: 4,
             workflow_name: "ace(run)-260501_120000".to_string(),
@@ -1826,7 +1826,7 @@ mod tests {
         let mut request = AgentLaunchRequestWire {
             schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
             cl_name: "home".to_string(),
-            project_file: "/tmp/home.gp".to_string(),
+            project_file: "/tmp/home.sase".to_string(),
             workspace_dir: "/home/me".to_string(),
             workspace_num: 9,
             workflow_name: "ace(run)-260501_120000".to_string(),

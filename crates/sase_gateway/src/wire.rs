@@ -1256,7 +1256,7 @@ mod tests {
             message: Some("loaded helper records".to_string()),
             warnings: vec!["one project could not be read".to_string()],
             skipped: vec![MobileHelperSkippedWire {
-                target: Some("archive.gp".to_string()),
+                target: Some("archive.sase".to_string()),
                 reason: "terminal changespec".to_string(),
             }],
             partial_failure_count: Some(1),
@@ -1279,7 +1279,7 @@ mod tests {
                     status: "WIP".to_string(),
                     workflow: Some("gh".to_string()),
                     source_path_display: Some(
-                        "~/.sase/projects/sase.gp".to_string()
+                        "~/.sase/projects/sase.sase".to_string()
                     ),
                 }],
                 total_count: 1,
@@ -1292,7 +1292,7 @@ mod tests {
                     "message": "loaded helper records",
                     "warnings": ["one project could not be read"],
                     "skipped": [{
-                        "target": "archive.gp",
+                        "target": "archive.sase",
                         "reason": "terminal changespec"
                     }],
                     "partial_failure_count": 1
@@ -1308,7 +1308,7 @@ mod tests {
                     "title": "Feature work",
                     "status": "WIP",
                     "workflow": "gh",
-                    "source_path_display": "~/.sase/projects/sase.gp"
+                    "source_path_display": "~/.sase/projects/sase.sase"
                 }],
                 "total_count": 1
             })
@@ -1367,7 +1367,7 @@ mod tests {
                     "message": "loaded helper records",
                     "warnings": ["one project could not be read"],
                     "skipped": [{
-                        "target": "archive.gp",
+                        "target": "archive.sase",
                         "reason": "terminal changespec"
                     }],
                     "partial_failure_count": 1
@@ -1457,7 +1457,7 @@ mod tests {
                     "message": "loaded helper records",
                     "warnings": ["one project could not be read"],
                     "skipped": [{
-                        "target": "archive.gp",
+                        "target": "archive.sase",
                         "reason": "terminal changespec"
                     }],
                     "partial_failure_count": 1
@@ -1519,7 +1519,7 @@ mod tests {
                     "message": "loaded helper records",
                     "warnings": ["one project could not be read"],
                     "skipped": [{
-                        "target": "archive.gp",
+                        "target": "archive.sase",
                         "reason": "terminal changespec"
                     }],
                     "partial_failure_count": 1

@@ -3,7 +3,7 @@
 //! `tests/test_core_golden.py::test_changespec_wire_json_snapshot`).
 //!
 //! The fixtures under `tests/fixtures/` are byte-for-byte copies of
-//! `sase_100/tests/core_golden/*.gp`. The expected JSON is embedded as
+//! `sase_100/tests/core_golden/*.sase`. The expected JSON is embedded as
 //! literal `serde_json::Value` so this crate stays runnable without the
 //! Python toolchain.
 //!
@@ -23,8 +23,9 @@
 use sase_core::parse_project_bytes;
 use serde_json::{json, Value};
 
-const MYPROJ_GP: &[u8] = include_bytes!("fixtures/myproj.gp");
-const MYPROJ_ARCHIVE_GP: &[u8] = include_bytes!("fixtures/myproj-archive.gp");
+const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
+const MYPROJ_ARCHIVE_SASE: &[u8] =
+    include_bytes!("fixtures/myproj-archive.sase");
 
 fn parse_to_json(path: &str, data: &[u8]) -> Vec<Value> {
     let specs = parse_project_bytes(path, data).expect("parse should succeed");
@@ -45,15 +46,15 @@ fn parse_to_json(path: &str, data: &[u8]) -> Vec<Value> {
 
 #[test]
 fn project_corpus_matches_python_golden_after_end_line_normalization() {
-    let actual = parse_to_json("myproj.gp", MYPROJ_GP);
+    let actual = parse_to_json("myproj.sase", MYPROJ_SASE);
     let expected: Value = json!([
         {
             "schema_version": 1,
             "name": "alpha",
             "project_basename": "myproj",
-            "file_path": "myproj.gp",
+            "file_path": "myproj.sase",
             "source_span": {
-                "file_path": "myproj.gp",
+                "file_path": "myproj.sase",
                 "start_line": 2,
                 "end_line": 2
             },
@@ -134,9 +135,9 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "schema_version": 1,
             "name": "beta",
             "project_basename": "myproj",
-            "file_path": "myproj.gp",
+            "file_path": "myproj.sase",
             "source_span": {
-                "file_path": "myproj.gp",
+                "file_path": "myproj.sase",
                 "start_line": 30,
                 "end_line": 30
             },
@@ -157,9 +158,9 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "schema_version": 1,
             "name": "beta__260102_010101",
             "project_basename": "myproj",
-            "file_path": "myproj.gp",
+            "file_path": "myproj.sase",
             "source_span": {
-                "file_path": "myproj.gp",
+                "file_path": "myproj.sase",
                 "start_line": 37,
                 "end_line": 37
             },
@@ -180,9 +181,9 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "schema_version": 1,
             "name": "gamma",
             "project_basename": "myproj",
-            "file_path": "myproj.gp",
+            "file_path": "myproj.sase",
             "source_span": {
-                "file_path": "myproj.gp",
+                "file_path": "myproj.sase",
                 "start_line": 44,
                 "end_line": 44
             },
@@ -221,15 +222,15 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
 
 #[test]
 fn archive_corpus_matches_python_golden_after_end_line_normalization() {
-    let actual = parse_to_json("myproj-archive.gp", MYPROJ_ARCHIVE_GP);
+    let actual = parse_to_json("myproj-archive.sase", MYPROJ_ARCHIVE_SASE);
     let expected: Value = json!([
         {
             "schema_version": 1,
             "name": "archived_one",
             "project_basename": "myproj",
-            "file_path": "myproj-archive.gp",
+            "file_path": "myproj-archive.sase",
             "source_span": {
-                "file_path": "myproj-archive.gp",
+                "file_path": "myproj-archive.sase",
                 "start_line": 1,
                 "end_line": 1
             },
@@ -262,9 +263,9 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "schema_version": 1,
             "name": "reverted_two",
             "project_basename": "myproj",
-            "file_path": "myproj-archive.gp",
+            "file_path": "myproj-archive.sase",
             "source_span": {
-                "file_path": "myproj-archive.gp",
+                "file_path": "myproj-archive.sase",
                 "start_line": 11,
                 "end_line": 11
             },
@@ -291,7 +292,7 @@ fn rust_real_end_line_is_strictly_greater_than_python_placeholder() {
     // Sanity check on the documented normalization: at least one spec in
     // the corpus should have a real end_line that's > start_line, proving
     // Rust's parser is actually doing better than Python's placeholder.
-    let specs = parse_project_bytes("myproj.gp", MYPROJ_GP).unwrap();
+    let specs = parse_project_bytes("myproj.sase", MYPROJ_SASE).unwrap();
     let alpha = specs.iter().find(|s| s.name == "alpha").unwrap();
     assert_eq!(alpha.source_span.start_line, 2);
     assert!(

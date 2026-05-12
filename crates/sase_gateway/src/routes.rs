@@ -3076,7 +3076,7 @@ mod tests {
                         status: "WIP".to_string(),
                         workflow: Some("gh".to_string()),
                         source_path_display: Some(
-                            "~/.sase/projects/sase.gp".to_string(),
+                            "~/.sase/projects/sase.sase".to_string(),
                         ),
                     }],
                     total_count: 1,

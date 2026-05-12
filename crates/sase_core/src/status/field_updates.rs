@@ -42,7 +42,7 @@ pub fn read_status_from_lines(
 ///
 /// Mirrors `apply_status_update_python` exactly: the target flag is
 /// cleared after the first `STATUS:` rewrite so a second `STATUS:` line in
-/// the same record (which the `.gp` format does not produce) would not be
+/// the same record (which the `.sase` format does not produce) would not be
 /// touched.
 pub fn apply_status_update(
     lines: &[String],

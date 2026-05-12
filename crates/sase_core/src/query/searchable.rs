@@ -20,7 +20,7 @@ pub const RUNNING_PROCESS_MARKER: &str = "- ($: ";
 
 /// `basename(dirname(file_path))` — matches `ChangeSpec.project_name` in
 /// Python, which is the *parent directory* of the project file (e.g.
-/// `core_golden` for `tests/core_golden/myproj.gp`).
+/// `core_golden` for `tests/core_golden/myproj.sase`).
 ///
 /// Note this is intentionally *not* `ChangeSpecWire.project_basename`
 /// (the file basename minus extension); the Python query evaluator uses the
@@ -168,14 +168,14 @@ mod tests {
     #[test]
     fn project_dir_name_basic() {
         assert_eq!(
-            project_dir_name("/home/x/projects/myproj/myproj.gp"),
+            project_dir_name("/home/x/projects/myproj/myproj.sase"),
             "myproj"
         );
         assert_eq!(
-            project_dir_name("tests/core_golden/myproj.gp"),
+            project_dir_name("tests/core_golden/myproj.sase"),
             "core_golden"
         );
-        assert_eq!(project_dir_name("only.gp"), "");
+        assert_eq!(project_dir_name("only.sase"), "");
         assert_eq!(project_dir_name("/just/file"), "just");
     }
 }

@@ -625,7 +625,7 @@ mod tests {
             parent_workflow: None,
             parent_timestamp: None,
             raw_suffix: raw_suffix.map(str::to_string),
-            project_file: Some("/tmp/project.gp".to_string()),
+            project_file: Some("/tmp/project.sase".to_string()),
             artifacts_dir: Some("/tmp/artifacts".to_string()),
             from_changespec: false,
             workspace: None,

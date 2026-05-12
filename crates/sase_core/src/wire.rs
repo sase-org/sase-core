@@ -172,7 +172,7 @@ mod tests {
 
     fn empty_span() -> SourceSpanWire {
         SourceSpanWire {
-            file_path: "p.gp".to_string(),
+            file_path: "p.sase".to_string(),
             start_line: 1,
             end_line: 10,
         }
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(
             json,
             json!({
-                "file_path": "p.gp",
+                "file_path": "p.sase",
                 "start_line": 1,
                 "end_line": 10,
             })
@@ -201,7 +201,7 @@ mod tests {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "my_cl".to_string(),
             project_basename: "myproj".to_string(),
-            file_path: "myproj.gp".to_string(),
+            file_path: "myproj.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
@@ -240,7 +240,7 @@ mod tests {
             schema_version: 1,
             name: "n".to_string(),
             project_basename: "p".to_string(),
-            file_path: "p.gp".to_string(),
+            file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
@@ -269,7 +269,7 @@ mod tests {
             schema_version: 1,
             name: "n".to_string(),
             project_basename: "p".to_string(),
-            file_path: "p.gp".to_string(),
+            file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
@@ -320,9 +320,9 @@ mod tests {
             schema_version: 1,
             name: "rust_workspace".to_string(),
             project_basename: "myproj".to_string(),
-            file_path: "myproj.gp".to_string(),
+            file_path: "myproj.sase".to_string(),
             source_span: SourceSpanWire {
-                file_path: "myproj.gp".to_string(),
+                file_path: "myproj.sase".to_string(),
                 start_line: 5,
                 end_line: 42,
             },
@@ -395,7 +395,7 @@ mod tests {
         let err = ParseErrorWire {
             kind: "syntax".to_string(),
             message: "unexpected EOF".to_string(),
-            file_path: "p.gp".to_string(),
+            file_path: "p.sase".to_string(),
             line: Some(7),
             column: None,
         };
@@ -405,7 +405,7 @@ mod tests {
             json!({
                 "kind": "syntax",
                 "message": "unexpected EOF",
-                "file_path": "p.gp",
+                "file_path": "p.sase",
                 "line": 7,
                 "column": null,
             })

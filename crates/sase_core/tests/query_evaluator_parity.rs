@@ -4,9 +4,9 @@
 //! test_evaluation_matrix_snapshot` — every change here must update both
 //! sides in lockstep.
 //!
-//! The fixture under `tests/fixtures/myproj.gp` is a byte-for-byte copy of
-//! `sase_100/tests/core_golden/myproj.gp`. We pass the corpus's relative
-//! path (`tests/core_golden/myproj.gp`) into `parse_project_bytes` so the
+//! The fixture under `tests/fixtures/myproj.sase` is a byte-for-byte copy of
+//! `sase_100/tests/core_golden/myproj.sase`. We pass the corpus's relative
+//! path (`tests/core_golden/myproj.sase`) into `parse_project_bytes` so the
 //! `project:` matcher's parent-directory logic produces the same answers as
 //! Python (`project_name == "core_golden"`).
 
@@ -15,12 +15,12 @@ use sase_core::{
     parse_project_bytes, QueryCorpus,
 };
 
-const MYPROJ_GP: &[u8] = include_bytes!("fixtures/myproj.gp");
-const MYPROJ_PATH: &str = "tests/core_golden/myproj.gp";
+const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
+const MYPROJ_PATH: &str = "tests/core_golden/myproj.sase";
 
 fn matches(query: &str) -> Vec<String> {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let program = compile_query(query).expect("compile");
     let results = evaluate_query_many(&program, &specs);
     specs
@@ -135,7 +135,7 @@ fn evaluation_matrix_property_shorthands() {
 #[test]
 fn persistent_corpus_matches_golden_matrix_samples() {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let corpus = QueryCorpus::new(specs);
 
     corpus_case(
@@ -163,7 +163,7 @@ fn substring_semantics_not_regex() {
 #[test]
 fn batch_and_oneshot_agree() {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let program = compile_query("ancestor:alpha AND NOT \"beta\"").unwrap();
     let batch = evaluate_query_many(&program, &specs);
     for (i, cs) in specs.iter().enumerate() {
@@ -175,7 +175,7 @@ fn batch_and_oneshot_agree() {
 #[test]
 fn batch_evaluation_is_idempotent() {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let program = compile_query("ancestor:alpha").unwrap();
     let first = evaluate_query_many(&program, &specs);
     let second = evaluate_query_many(&program, &specs);
@@ -185,7 +185,7 @@ fn batch_evaluation_is_idempotent() {
 #[test]
 fn persistent_corpus_reuses_derived_data_across_repeated_evaluations() {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let corpus = QueryCorpus::new(specs);
     let program = compile_query("ancestor:alpha").unwrap();
 
@@ -198,7 +198,7 @@ fn persistent_corpus_reuses_derived_data_across_repeated_evaluations() {
 #[test]
 fn persistent_corpus_keeps_ancestor_memo_query_specific() {
     let specs =
-        parse_project_bytes(MYPROJ_PATH, MYPROJ_GP).expect("parse corpus");
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
     let corpus = QueryCorpus::new(specs);
 
     let missing = compile_query("ancestor:missing").unwrap();
@@ -220,7 +220,7 @@ fn ancestor_walk_avoids_cycles() {
     // evaluator must not recurse forever — the cycle guard breaks the walk.
     use sase_core::{ChangeSpecWire, SourceSpanWire};
     let span = SourceSpanWire {
-        file_path: "p.gp".into(),
+        file_path: "p.sase".into(),
         start_line: 1,
         end_line: 1,
     };
@@ -228,7 +228,7 @@ fn ancestor_walk_avoids_cycles() {
         schema_version: 1,
         name: name.into(),
         project_basename: "p".into(),
-        file_path: "core_golden/p.gp".into(),
+        file_path: "core_golden/p.sase".into(),
         source_span: span.clone(),
         status: "WIP".into(),
         parent: Some(parent.into()),

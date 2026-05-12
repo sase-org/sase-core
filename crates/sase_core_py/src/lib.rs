@@ -2305,9 +2305,9 @@ mod tests {
             "schema_version": 1,
             "name": name,
             "project_basename": "proj",
-            "file_path": "proj.gp",
+            "file_path": "proj.sase",
             "source_span": {
-                "file_path": "proj.gp",
+                "file_path": "proj.sase",
                 "start_line": 1,
                 "end_line": 10
             },
@@ -2509,7 +2509,7 @@ mod tests {
                     "parent_workflow": null,
                     "parent_timestamp": null,
                     "raw_suffix": "1",
-                    "project_file": "/tmp/project.gp",
+                    "project_file": "/tmp/project.sase",
                     "artifacts_dir": "/tmp/artifacts",
                     "workspace": null,
                     "tag": null,

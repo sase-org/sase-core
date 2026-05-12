@@ -11,7 +11,7 @@
 //! Workloads:
 //!
 //! - `golden_myproj`: the committed
-//!   `crates/sase_core/tests/fixtures/myproj.gp` (mirrors the Python
+//!   `crates/sase_core/tests/fixtures/myproj.sase` (mirrors the Python
 //!   golden corpus).
 //! - `synthetic_<N>`: a generated multi-spec file (defaults to N=200)
 //!   that stretches the parser past the noise floor.
@@ -26,7 +26,7 @@
 
 use std::time::Instant;
 
-const GOLDEN_PRIMARY: &str = include_str!("../tests/fixtures/myproj.gp");
+const GOLDEN_PRIMARY: &str = include_str!("../tests/fixtures/myproj.sase");
 
 fn build_synthetic(num_specs: usize) -> String {
     let mut out = String::with_capacity(num_specs * 600);
@@ -76,13 +76,13 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 
 fn time_bytes(label: &str, data: &[u8], runs: usize, warmup: usize) -> Summary {
     for _ in 0..warmup {
-        let _ = sase_core::parse_project_bytes("bench.gp", data)
+        let _ = sase_core::parse_project_bytes("bench.sase", data)
             .expect("parser failure during warmup");
     }
     let mut samples_us: Vec<f64> = Vec::with_capacity(runs);
     for _ in 0..runs {
         let start = Instant::now();
-        let _ = sase_core::parse_project_bytes("bench.gp", data)
+        let _ = sase_core::parse_project_bytes("bench.sase", data)
             .expect("parser failure during measured run");
         samples_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
     }

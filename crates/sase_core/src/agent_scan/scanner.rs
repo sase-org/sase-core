@@ -29,6 +29,7 @@ use super::wire::{
     RunningMarkerWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
+use crate::project_spec::preferred_project_spec_path;
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 
@@ -301,7 +302,8 @@ fn scan_artifact_dir(
     options: &AgentArtifactScanOptionsWire,
     stats: &mut AgentArtifactScanStatsWire,
 ) -> AgentArtifactRecordWire {
-    let project_file = project_dir.join(format!("{project_name}.gp"));
+    let project_file =
+        preferred_project_spec_path(project_dir, project_name, false);
 
     let agent_meta =
         load_marker_object(&artifact_dir.join("agent_meta.json"), stats)

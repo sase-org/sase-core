@@ -429,7 +429,7 @@ mod tests {
     use super::*;
 
     fn parse(data: &str) -> Vec<ChangeSpecWire> {
-        parse_project_bytes("myproj.gp", data.as_bytes()).unwrap()
+        parse_project_bytes("myproj.sase", data.as_bytes()).unwrap()
     }
 
     #[test]
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(s.source_span.start_line, 2);
         assert_eq!(s.source_span.end_line, 4);
         assert_eq!(s.project_basename, "myproj");
-        assert_eq!(s.file_path, "myproj.gp");
+        assert_eq!(s.file_path, "myproj.sase");
     }
 
     #[test]
@@ -735,9 +735,9 @@ STATUS: WIP
     #[test]
     fn invalid_utf8_returns_parse_error_wire() {
         let bad = b"\xff\xfe\x00";
-        let err = parse_project_bytes("p.gp", bad).unwrap_err();
+        let err = parse_project_bytes("p.sase", bad).unwrap_err();
         assert_eq!(err.kind, "encoding");
-        assert_eq!(err.file_path, "p.gp");
+        assert_eq!(err.file_path, "p.sase");
         assert!(err.message.contains("UTF-8"));
     }
 
