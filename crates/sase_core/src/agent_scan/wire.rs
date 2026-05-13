@@ -239,6 +239,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub wait_until: Option<String>,
     #[serde(default)]
+    pub wait_completed_at: Option<String>,
+    #[serde(default)]
     pub plan_submitted_at: Vec<String>,
     #[serde(default)]
     pub epic_started_at: Option<String>,

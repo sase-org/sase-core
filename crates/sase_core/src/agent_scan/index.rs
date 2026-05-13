@@ -509,7 +509,12 @@ impl RecordSummary {
             workflow_status
         } else if record.has_done_marker {
             "done"
-        } else if meta.and_then(|m| m.run_started_at.as_ref()).is_some() {
+        } else if meta
+            .and_then(|m| {
+                m.run_started_at.as_ref().or(m.wait_completed_at.as_ref())
+            })
+            .is_some()
+        {
             "running"
         } else {
             "starting"
@@ -747,5 +752,38 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn wait_completed_records_are_indexed_as_running() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260513120000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "active",
+                "pid": 123,
+                "wait_completed_at": "2026-05-13T16:00:00Z",
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let conn = Connection::open(&index).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
     }
 }

@@ -519,6 +519,34 @@ fn running_record_carries_agent_meta() {
 }
 
 #[test]
+fn running_record_carries_wait_completed_at() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    write_json(
+        &root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(TS_ACE_RUN_RUNNING)
+            .join("agent_meta.json"),
+        &json!({
+            "name": "running_alpha",
+            "wait_completed_at": "2026-05-13T16:00:00Z",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    let meta = rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(
+        meta.wait_completed_at.as_deref(),
+        Some("2026-05-13T16:00:00Z")
+    );
+}
+
+#[test]
 fn running_record_carries_agent_meta_tag() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
