@@ -325,6 +325,9 @@ Epic 1D handoff: complete local daemon wire/versioning scaffolding and committed
 transport, daemon startup, source-store indexing, and production routing. Validation: `cargo test -p sase_gateway` in
 `../sase-core`, plus `just install` and `just check` in the Python checkout.
 
+The SASE checkout's Phase 1E readiness review links this local daemon snapshot to the fixture, perf, and compatibility
+matrix artifacts at `sdd/research/202605/rust_daemon_epic1_readiness.md`.
+
 MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish state-change SSE
 events; oversized or path-unsafe attachments are listed without tokens; agent project context selects only known SASE
 projects or prompt-declared VCS refs; helper routes are read-only except update start; xprompt PDF generation is
