@@ -5,6 +5,7 @@
 pub mod contract;
 pub mod daemon;
 pub mod host_bridge;
+pub mod local_transport;
 pub mod ownership;
 pub mod push;
 pub mod routes;
@@ -31,6 +32,10 @@ pub use host_bridge::{
     StaticAgentHostBridge, StaticHelperHostBridge,
     StaticNotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use local_transport::{
+    handle_connection, response_for_frame, serve_local_transport,
+    LocalTransportError,
 };
 pub use ownership::{
     DaemonOwnershipGuard, DaemonOwnershipMetadata, DaemonOwnershipPaths,

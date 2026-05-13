@@ -951,15 +951,15 @@ pub fn local_daemon_contract_snapshot() -> Value {
         "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         "contract": "sase_local_daemon_framed_json_v1",
         "transport": {
-            "phase": "contract_only",
-            "implemented": false,
-            "future_transport": "unix_domain_socket_framed_json",
+            "phase": "local_transport",
+            "implemented": true,
+            "transport": "unix_domain_socket_framed_json",
             "frame": {
                 "encoding": "utf-8 json",
                 "length_prefix": "u32 big-endian byte length",
                 "max_payload_bytes": LOCAL_DAEMON_MAX_PAYLOAD_BYTES
             },
-            "production_routing": "not implemented by Epic 1D; current source stores remain authoritative"
+            "production_routing": "health, capabilities, batch, and bounded mock/empty list reads are available; current source stores remain authoritative until indexed reads land"
         },
         "versioning": {
             "contract_name": "sase_local_daemon_framed_json_v1",
@@ -1240,7 +1240,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "data": {
                     "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
                     "code": "daemon_unavailable",
-                    "message": "local daemon transport is not implemented in this phase",
+                    "message": "local daemon socket is unavailable",
                     "retryable": false,
                     "target": null,
                     "details": null,
@@ -1353,7 +1353,7 @@ mod tests {
         assert_eq!(mobile["contract"], "sase_mobile_gateway_api_v1");
         assert_eq!(mobile["base_path"], "/api/v1");
         assert_eq!(local["contract"], "sase_local_daemon_framed_json_v1");
-        assert_eq!(local["transport"]["implemented"], false);
+        assert_eq!(local["transport"]["implemented"], true);
         assert!(local.get("base_path").is_none());
     }
 }

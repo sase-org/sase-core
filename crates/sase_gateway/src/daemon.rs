@@ -5,12 +5,14 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::{
+    local_transport::{serve_local_transport, LocalTransportError},
     ownership::{DaemonOwnershipGuard, OwnershipError},
     push::PushConfig,
     routes::GatewayState,
@@ -164,9 +166,13 @@ pub enum DaemonRunError {
     #[error(transparent)]
     Ownership(#[from] OwnershipError),
     #[error(transparent)]
+    LocalTransport(#[from] LocalTransportError),
+    #[error(transparent)]
     MobileGateway(#[from] GatewayRunError),
     #[error("failed to wait for daemon shutdown signal: {0}")]
     ShutdownSignal(std::io::Error),
+    #[error("daemon task failed: {0}")]
+    TaskJoin(String),
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
@@ -183,6 +189,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
         &build,
     )?;
     let runtime = DaemonRuntime::new(config, ownership);
+
+    let mut local_transport_task =
+        tokio::spawn(serve_local_transport(runtime.state().clone()));
+
     if let Some(mobile_gateway) = runtime.state().mobile_gateway.as_ref() {
         let listener =
             TcpListener::bind(mobile_gateway.bind)
@@ -196,13 +206,56 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
         let state = runtime.mobile_gateway_state(local_addr).expect(
             "mobile gateway state is available when mobile HTTP is enabled",
         );
-        return serve_listener_with_state(listener, state)
-            .await
-            .map_err(DaemonRunError::from);
+        let mut mobile_task =
+            tokio::spawn(serve_listener_with_state(listener, state));
+        tokio::select! {
+            result = &mut local_transport_task => {
+                mobile_task.abort();
+                task_result(result)?
+            },
+            result = &mut mobile_task => {
+                runtime.state().shutdown.request();
+                local_transport_task.abort();
+                result
+                    .map_err(|err| DaemonRunError::TaskJoin(err.to_string()))?
+                    .map_err(DaemonRunError::from)?
+            },
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(DaemonRunError::ShutdownSignal)?;
+                runtime.state().shutdown.request();
+                mobile_task.abort();
+                wait_for_local_transport_shutdown(local_transport_task).await?;
+            }
+        }
+        return Ok(());
     }
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(DaemonRunError::ShutdownSignal)
+
+    tokio::select! {
+        result = &mut local_transport_task => task_result(result)?,
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(DaemonRunError::ShutdownSignal)?;
+            runtime.state().shutdown.request();
+            wait_for_local_transport_shutdown(local_transport_task).await?;
+        }
+    }
+    Ok(())
+}
+
+fn task_result(
+    result: Result<Result<(), LocalTransportError>, tokio::task::JoinError>,
+) -> Result<(), DaemonRunError> {
+    result
+        .map_err(|err| DaemonRunError::TaskJoin(err.to_string()))?
+        .map_err(DaemonRunError::from)
+}
+
+async fn wait_for_local_transport_shutdown(
+    task: tokio::task::JoinHandle<Result<(), LocalTransportError>>,
+) -> Result<(), DaemonRunError> {
+    match tokio::time::timeout(Duration::from_secs(1), task).await {
+        Ok(result) => task_result(result),
+        Err(_) => Ok(()),
+    }
 }
 
 pub fn validate_daemon_config(

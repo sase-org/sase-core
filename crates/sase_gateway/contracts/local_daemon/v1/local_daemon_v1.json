@@ -23,7 +23,7 @@
           "message": "use direct source-store readers",
           "reason": "daemon_not_running"
         },
-        "message": "local daemon transport is not implemented in this phase",
+        "message": "local daemon socket is unavailable",
         "retryable": false,
         "schema_version": 1,
         "target": null
@@ -306,10 +306,10 @@
       "length_prefix": "u32 big-endian byte length",
       "max_payload_bytes": 1048576
     },
-    "future_transport": "unix_domain_socket_framed_json",
-    "implemented": false,
-    "phase": "contract_only",
-    "production_routing": "not implemented by Epic 1D; current source stores remain authoritative"
+    "implemented": true,
+    "phase": "local_transport",
+    "production_routing": "health, capabilities, batch, and bounded mock/empty list reads are available; current source stores remain authoritative until indexed reads land",
+    "transport": "unix_domain_socket_framed_json"
   },
   "versioning": {
     "additive_fields": "allowed when clients ignore unknown fields and servers preserve existing required fields",
