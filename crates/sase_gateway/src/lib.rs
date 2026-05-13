@@ -11,7 +11,8 @@ pub mod storage;
 pub mod wire;
 
 pub use contract::{
-    api_v1_contract_snapshot, write_api_v1_contract_snapshot,
+    api_v1_contract_snapshot, local_daemon_contract_snapshot,
+    write_api_v1_contract_snapshot, write_local_daemon_contract_snapshot,
     ContractSnapshotError,
 };
 pub use host_bridge::{
@@ -32,6 +33,19 @@ pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
 pub use wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
     EventRecordWire, GatewayBindWire, GatewayBuildWire, HealthResponseWire,
+    LocalDaemonBatchRequestWire, LocalDaemonBatchResponseWire,
+    LocalDaemonCapabilitiesResponseWire, LocalDaemonClientWire,
+    LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
+    LocalDaemonErrorCodeWire, LocalDaemonErrorWire, LocalDaemonEventBatchWire,
+    LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
+    LocalDaemonEventRequestWire, LocalDaemonEventSourceWire,
+    LocalDaemonFallbackReasonWire, LocalDaemonFallbackWire,
+    LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
+    LocalDaemonHeartbeatWire, LocalDaemonListItemWire,
+    LocalDaemonListRequestWire, LocalDaemonListResponseWire,
+    LocalDaemonPageRequestWire, LocalDaemonPayloadBoundWire,
+    LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
+    LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
     MobileAgentActionAffordancesWire, MobileAgentDisplayLabelsWire,
     MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
     MobileAgentKillResultWire, MobileAgentLaunchResultWire,
@@ -60,5 +74,8 @@ pub use wire::{
     PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
     PushSubscriptionRecordWire, PushSubscriptionRegisterResponseWire,
     PushSubscriptionRequestWire, SessionResponseWire,
-    GATEWAY_WIRE_SCHEMA_VERSION,
+    GATEWAY_WIRE_SCHEMA_VERSION, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+    LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
+    LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+    LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
 };

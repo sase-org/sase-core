@@ -18,6 +18,12 @@ pub use sase_core::host_bridge::{
 };
 
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_DAEMON_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION: u32 = 1;
+pub const LOCAL_DAEMON_MAX_PAYLOAD_BYTES: u32 = 1_048_576;
+pub const LOCAL_DAEMON_DEFAULT_PAGE_LIMIT: u32 = 100;
+pub const LOCAL_DAEMON_MAX_PAGE_LIMIT: u32 = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBuildWire {
@@ -228,6 +234,264 @@ pub struct ApiErrorWire {
     pub message: String,
     pub target: Option<String>,
     pub details: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonClientWire {
+    pub schema_version: u32,
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonRequestEnvelopeWire {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub client: LocalDaemonClientWire,
+    pub payload: LocalDaemonRequestPayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonResponseEnvelopeWire {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub snapshot_id: Option<String>,
+    pub payload: LocalDaemonResponsePayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "data")]
+pub enum LocalDaemonRequestPayloadWire {
+    Health {
+        include_capabilities: bool,
+    },
+    Capabilities,
+    List(LocalDaemonListRequestWire),
+    Events(LocalDaemonEventRequestWire),
+    Batch {
+        requests: Vec<LocalDaemonBatchRequestWire>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "data")]
+pub enum LocalDaemonResponsePayloadWire {
+    Health(LocalDaemonHealthResponseWire),
+    Capabilities(LocalDaemonCapabilitiesResponseWire),
+    List(LocalDaemonListResponseWire),
+    Events(LocalDaemonEventBatchWire),
+    Batch {
+        responses: Vec<LocalDaemonBatchResponseWire>,
+    },
+    Error(LocalDaemonErrorWire),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonBatchRequestWire {
+    pub request_id: String,
+    pub payload: LocalDaemonRequestPayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonBatchResponseWire {
+    pub request_id: String,
+    pub snapshot_id: Option<String>,
+    pub payload: LocalDaemonResponsePayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonHealthResponseWire {
+    pub schema_version: u32,
+    pub status: LocalDaemonHealthStatusWire,
+    pub service: String,
+    pub daemon_started: bool,
+    pub version: String,
+    pub min_client_schema_version: u32,
+    pub max_client_schema_version: u32,
+    pub fallback: LocalDaemonFallbackWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonHealthStatusWire {
+    Ok,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonFallbackWire {
+    pub available: bool,
+    pub reason: Option<LocalDaemonFallbackReasonWire>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonFallbackReasonWire {
+    DaemonNotRunning,
+    UnsupportedClientVersion,
+    RecoveryMode,
+    HostAdapterRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonCapabilitiesResponseWire {
+    pub schema_version: u32,
+    pub contract: String,
+    pub contract_version: u32,
+    pub min_client_schema_version: u32,
+    pub max_client_schema_version: u32,
+    pub capabilities: Vec<String>,
+    pub max_payload_bytes: u32,
+    pub default_page_limit: u32,
+    pub max_page_limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonListRequestWire {
+    pub collection: LocalDaemonCollectionWire,
+    pub page: LocalDaemonPageRequestWire,
+    pub snapshot_id: Option<String>,
+    pub stable_handle: Option<String>,
+    pub max_payload_bytes: Option<u32>,
+    pub filters: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonCollectionWire {
+    Agents,
+    Artifacts,
+    Beads,
+    Changespecs,
+    Notifications,
+    Workflows,
+    Xprompts,
+    Mocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonPageRequestWire {
+    pub limit: u32,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonListResponseWire {
+    pub schema_version: u32,
+    pub collection: LocalDaemonCollectionWire,
+    pub snapshot_id: String,
+    pub items: Vec<LocalDaemonListItemWire>,
+    pub next_cursor: Option<String>,
+    pub stable_handle: Option<String>,
+    pub bounded: LocalDaemonPayloadBoundWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonListItemWire {
+    pub handle: String,
+    pub schema_version: u32,
+    pub summary: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonPayloadBoundWire {
+    pub max_payload_bytes: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonEventRequestWire {
+    pub since_event_id: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub max_events: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonEventBatchWire {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub events: Vec<LocalDaemonEventRecordWire>,
+    pub heartbeat: Option<LocalDaemonHeartbeatWire>,
+    pub next_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonEventRecordWire {
+    pub schema_version: u32,
+    pub event_id: String,
+    pub snapshot_id: String,
+    pub created_at: String,
+    pub source: LocalDaemonEventSourceWire,
+    pub payload: LocalDaemonEventPayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonEventSourceWire {
+    Daemon,
+    Filesystem,
+    HostAdapter,
+    Mock,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "data")]
+pub enum LocalDaemonEventPayloadWire {
+    Heartbeat {
+        sequence: u64,
+    },
+    Delta {
+        collection: LocalDaemonCollectionWire,
+        handle: String,
+        operation: LocalDaemonDeltaOperationWire,
+        fields: JsonValue,
+    },
+    ResyncRequired {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonDeltaOperationWire {
+    Upsert,
+    Delete,
+    Invalidate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonHeartbeatWire {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonErrorWire {
+    pub schema_version: u32,
+    pub code: LocalDaemonErrorCodeWire,
+    pub message: String,
+    pub retryable: bool,
+    pub target: Option<String>,
+    pub details: Option<JsonValue>,
+    pub fallback: LocalDaemonFallbackWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonErrorCodeWire {
+    InvalidRequest,
+    UnsupportedClientVersion,
+    UnsupportedCapability,
+    CursorExpired,
+    SnapshotExpired,
+    PayloadTooLarge,
+    ResourceNotFound,
+    HostAdapterRequired,
+    DaemonUnavailable,
+    Internal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -720,6 +984,101 @@ mod tests {
                     "revoked_at": null
                 },
                 "capabilities": ["session.read", "events.read"]
+            })
+        );
+    }
+
+    #[test]
+    fn local_daemon_wire_json_snapshot() {
+        let request = LocalDaemonRequestEnvelopeWire {
+            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            request_id: "req_001".to_string(),
+            client: LocalDaemonClientWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                name: "sase-cli".to_string(),
+                version: "0.1.1".to_string(),
+            },
+            payload: LocalDaemonRequestPayloadWire::List(
+                LocalDaemonListRequestWire {
+                    collection: LocalDaemonCollectionWire::Mocked,
+                    page: LocalDaemonPageRequestWire {
+                        limit: LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+                        cursor: None,
+                    },
+                    snapshot_id: Some("snap_mock_001".to_string()),
+                    stable_handle: Some("mocked:list:contract".to_string()),
+                    max_payload_bytes: Some(LOCAL_DAEMON_MAX_PAYLOAD_BYTES),
+                    filters: Some(json!({"status": "open"})),
+                },
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "schema_version": 1,
+                "request_id": "req_001",
+                "client": {
+                    "schema_version": 1,
+                    "name": "sase-cli",
+                    "version": "0.1.1"
+                },
+                "payload": {
+                    "type": "list",
+                    "data": {
+                        "collection": "mocked",
+                        "page": {
+                            "limit": 100,
+                            "cursor": null
+                        },
+                        "snapshot_id": "snap_mock_001",
+                        "stable_handle": "mocked:list:contract",
+                        "max_payload_bytes": 1048576,
+                        "filters": {
+                            "status": "open"
+                        }
+                    }
+                }
+            })
+        );
+
+        let error =
+            LocalDaemonResponsePayloadWire::Error(LocalDaemonErrorWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                code: LocalDaemonErrorCodeWire::DaemonUnavailable,
+                message: "local daemon transport is not implemented"
+                    .to_string(),
+                retryable: false,
+                target: None,
+                details: None,
+                fallback: LocalDaemonFallbackWire {
+                    available: true,
+                    reason: Some(
+                        LocalDaemonFallbackReasonWire::DaemonNotRunning,
+                    ),
+                    message: Some(
+                        "use direct source-store readers".to_string(),
+                    ),
+                },
+            });
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "type": "error",
+                "data": {
+                    "schema_version": 1,
+                    "code": "daemon_unavailable",
+                    "message": "local daemon transport is not implemented",
+                    "retryable": false,
+                    "target": null,
+                    "details": null,
+                    "fallback": {
+                        "available": true,
+                        "reason": "daemon_not_running",
+                        "message": "use direct source-store readers"
+                    }
+                }
             })
         );
     }

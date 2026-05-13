@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use sase_gateway::{
-    serve, split_command_words, write_api_v1_contract_snapshot, GatewayConfig,
-    PushProviderMode,
+    serve, split_command_words, write_api_v1_contract_snapshot,
+    write_local_daemon_contract_snapshot, GatewayConfig, PushProviderMode,
 };
 
 #[tokio::main]
@@ -21,6 +21,12 @@ async fn run() -> Result<(), String> {
         })?;
         return Ok(());
     }
+    if let Some(path) = cli.local_daemon_contract_out {
+        write_local_daemon_contract_snapshot(path).map_err(|err| {
+            format!("failed to write local daemon contract: {err}")
+        })?;
+        return Ok(());
+    }
     serve(cli.config)
         .await
         .map_err(|err| format!("sase gateway failed: {err}"))
@@ -30,6 +36,7 @@ async fn run() -> Result<(), String> {
 struct GatewayCli {
     config: GatewayConfig,
     contract_out: Option<PathBuf>,
+    local_daemon_contract_out: Option<PathBuf>,
 }
 
 fn parse_args(
@@ -44,6 +51,7 @@ fn parse_args(
         GatewayConfig::default().helper_bridge_command;
     let mut push_config = GatewayConfig::default().push_config;
     let mut contract_out = None;
+    let mut local_daemon_contract_out = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -69,6 +77,12 @@ fn parse_args(
                     format!("{arg} requires a JSON output path")
                 })?;
                 contract_out = Some(PathBuf::from(value));
+            }
+            "--local-daemon-contract-out" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("{arg} requires a JSON output path")
+                })?;
+                local_daemon_contract_out = Some(PathBuf::from(value));
             }
             "--agent-bridge-command" | "-A" => {
                 let value = args
@@ -149,7 +163,7 @@ fn parse_args(
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND] [--push-provider|-P disabled|test|fcm]"
+                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--local-daemon-contract-out PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND] [--push-provider|-P disabled|test|fcm]"
                 );
                 std::process::exit(0);
             }
@@ -166,6 +180,7 @@ fn parse_args(
             push_config,
         },
         contract_out,
+        local_daemon_contract_out,
     })
 }
 
@@ -234,6 +249,19 @@ mod tests {
         assert_eq!(
             config.contract_out,
             Some(PathBuf::from("/tmp/contract.json"))
+        );
+    }
+
+    #[test]
+    fn parse_local_daemon_contract_out_flag() {
+        let config = parse_args([
+            "--local-daemon-contract-out".to_string(),
+            "/tmp/local-daemon-contract.json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.local_daemon_contract_out,
+            Some(PathBuf::from("/tmp/local-daemon-contract.json"))
         );
     }
 

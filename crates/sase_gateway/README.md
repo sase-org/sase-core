@@ -307,6 +307,24 @@ payloads for future mobile/client phases. Regenerate it after route or wire-shap
 cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
 ```
 
+The committed local daemon contract scaffold lives separately at:
+
+```text
+crates/sase_gateway/contracts/local_daemon/v1/local_daemon_v1.json
+```
+
+It records the future Unix-socket framed-JSON envelope, schema compatibility policy, inert health/capabilities/list/event
+shapes, paging/cursor/snapshot bounds, and explicit no-daemon fallback signaling. Regenerate it after intentional local
+daemon wire-shape changes with:
+
+```bash
+cargo run -p sase_gateway -- --local-daemon-contract-out crates/sase_gateway/contracts/local_daemon/v1/local_daemon_v1.json
+```
+
+Epic 1D handoff: complete local daemon wire/versioning scaffolding and committed snapshot tests; intentionally deferred
+transport, daemon startup, source-store indexing, and production routing. Validation: `cargo test -p sase_gateway` in
+`../sase-core`, plus `just install` and `just check` in the Python checkout.
+
 MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish state-change SSE
 events; oversized or path-unsafe attachments are listed without tokens; agent project context selects only known SASE
 projects or prompt-declared VCS refs; helper routes are read-only except update start; xprompt PDF generation is

@@ -1,0 +1,330 @@
+{
+  "bounds": {
+    "batch_requests": "bounded by max_payload_bytes; future servers may reject large batches with payload_too_large",
+    "default_page_limit": 100,
+    "max_page_limit": 500,
+    "max_payload_bytes": 1048576
+  },
+  "capabilities": [
+    "health.read",
+    "capabilities.read",
+    "mocked.list",
+    "mocked.events",
+    "batch.request"
+  ],
+  "contract": "sase_local_daemon_framed_json_v1",
+  "examples": {
+    "daemon_unavailable_error": {
+      "data": {
+        "code": "daemon_unavailable",
+        "details": null,
+        "fallback": {
+          "available": true,
+          "message": "use direct source-store readers",
+          "reason": "daemon_not_running"
+        },
+        "message": "local daemon transport is not implemented in this phase",
+        "retryable": false,
+        "schema_version": 1,
+        "target": null
+      },
+      "type": "error"
+    },
+    "health_request": {
+      "client": {
+        "name": "sase-cli",
+        "schema_version": 1,
+        "version": "0.1.1"
+      },
+      "payload": {
+        "data": {
+          "include_capabilities": true
+        },
+        "type": "health"
+      },
+      "request_id": "req_001",
+      "schema_version": 1
+    },
+    "mocked_list_response": {
+      "payload": {
+        "data": {
+          "bounded": {
+            "max_payload_bytes": 1048576,
+            "truncated": false
+          },
+          "collection": "mocked",
+          "items": [
+            {
+              "handle": "mocked:item:1",
+              "schema_version": 1,
+              "summary": {
+                "title": "contract fixture"
+              }
+            }
+          ],
+          "next_cursor": null,
+          "schema_version": 1,
+          "snapshot_id": "snap_mock_001",
+          "stable_handle": "mocked:list:contract"
+        },
+        "type": "list"
+      },
+      "request_id": "req_002",
+      "schema_version": 1,
+      "snapshot_id": "snap_mock_001"
+    }
+  },
+  "records": {
+    "LocalDaemonBatchRequestWire": {
+      "payload": "LocalDaemonRequestPayloadWire",
+      "request_id": "string"
+    },
+    "LocalDaemonBatchResponseWire": {
+      "payload": "LocalDaemonResponsePayloadWire",
+      "request_id": "string",
+      "snapshot_id": "string|null"
+    },
+    "LocalDaemonCapabilitiesResponseWire": {
+      "capabilities": "string[]",
+      "contract": "string",
+      "contract_version": "u32",
+      "default_page_limit": "u32",
+      "max_client_schema_version": "u32",
+      "max_page_limit": "u32",
+      "max_payload_bytes": "u32",
+      "min_client_schema_version": "u32",
+      "schema_version": "u32"
+    },
+    "LocalDaemonClientWire": {
+      "name": "string",
+      "schema_version": "u32",
+      "version": "string"
+    },
+    "LocalDaemonErrorWire": {
+      "code": [
+        "invalid_request",
+        "unsupported_client_version",
+        "unsupported_capability",
+        "cursor_expired",
+        "snapshot_expired",
+        "payload_too_large",
+        "resource_not_found",
+        "host_adapter_required",
+        "daemon_unavailable",
+        "internal"
+      ],
+      "details": "json|null",
+      "fallback": "LocalDaemonFallbackWire",
+      "message": "string",
+      "retryable": "bool",
+      "schema_version": "u32",
+      "target": "string|null"
+    },
+    "LocalDaemonEventBatchWire": {
+      "events": "LocalDaemonEventRecordWire[]",
+      "heartbeat": "LocalDaemonHeartbeatWire|null",
+      "next_event_id": "string|null",
+      "schema_version": "u32",
+      "snapshot_id": "string"
+    },
+    "LocalDaemonEventPayloadWire": {
+      "delta": {
+        "collection": "LocalDaemonCollectionWire",
+        "fields": "json",
+        "handle": "string",
+        "operation": "upsert|delete|invalidate"
+      },
+      "heartbeat": {
+        "sequence": "u64"
+      },
+      "resync_required": {
+        "reason": "string"
+      }
+    },
+    "LocalDaemonEventRecordWire": {
+      "created_at": "rfc3339",
+      "event_id": "string",
+      "payload": "LocalDaemonEventPayloadWire",
+      "schema_version": "u32",
+      "snapshot_id": "string",
+      "source": "daemon|filesystem|host_adapter|mock"
+    },
+    "LocalDaemonEventRequestWire": {
+      "max_events": "u32",
+      "since_event_id": "string|null",
+      "snapshot_id": "string|null"
+    },
+    "LocalDaemonFallbackWire": {
+      "available": "bool",
+      "message": "string|null",
+      "reason": "daemon_not_running|unsupported_client_version|recovery_mode|host_adapter_required|null"
+    },
+    "LocalDaemonHealthResponseWire": {
+      "daemon_started": "bool; false is expected in Epic 1D contract tests",
+      "fallback": "LocalDaemonFallbackWire",
+      "max_client_schema_version": "u32",
+      "min_client_schema_version": "u32",
+      "schema_version": "u32",
+      "service": "sase_local_daemon",
+      "status": "ok|degraded|unavailable",
+      "version": "string"
+    },
+    "LocalDaemonHeartbeatWire": {
+      "created_at": "rfc3339",
+      "schema_version": "u32",
+      "sequence": "u64"
+    },
+    "LocalDaemonListItemWire": {
+      "handle": "string",
+      "schema_version": "u32",
+      "summary": "json"
+    },
+    "LocalDaemonListRequestWire": {
+      "collection": "agents|artifacts|beads|changespecs|notifications|workflows|xprompts|mocked",
+      "filters": "json|null",
+      "max_payload_bytes": "u32|null",
+      "page": "LocalDaemonPageRequestWire",
+      "snapshot_id": "string|null",
+      "stable_handle": "string|null"
+    },
+    "LocalDaemonListResponseWire": {
+      "bounded": "LocalDaemonPayloadBoundWire",
+      "collection": "LocalDaemonCollectionWire",
+      "items": "LocalDaemonListItemWire[]",
+      "next_cursor": "string|null",
+      "schema_version": "u32",
+      "snapshot_id": "string",
+      "stable_handle": "string|null"
+    },
+    "LocalDaemonPageRequestWire": {
+      "cursor": "string|null",
+      "limit": "u32; default 100, max 500"
+    },
+    "LocalDaemonPayloadBoundWire": {
+      "max_payload_bytes": "u32",
+      "truncated": "bool"
+    },
+    "LocalDaemonRequestEnvelopeWire": {
+      "client": "LocalDaemonClientWire",
+      "payload": "LocalDaemonRequestPayloadWire",
+      "request_id": "string",
+      "schema_version": "u32"
+    },
+    "LocalDaemonRequestPayloadWire": {
+      "batch": {
+        "requests": "LocalDaemonBatchRequestWire[]"
+      },
+      "capabilities": "no fields",
+      "events": "LocalDaemonEventRequestWire",
+      "health": {
+        "include_capabilities": "bool"
+      },
+      "list": "LocalDaemonListRequestWire"
+    },
+    "LocalDaemonResponseEnvelopeWire": {
+      "payload": "LocalDaemonResponsePayloadWire",
+      "request_id": "string",
+      "schema_version": "u32",
+      "snapshot_id": "string|null"
+    },
+    "LocalDaemonResponsePayloadWire": {
+      "batch": {
+        "responses": "LocalDaemonBatchResponseWire[]"
+      },
+      "capabilities": "LocalDaemonCapabilitiesResponseWire",
+      "error": "LocalDaemonErrorWire",
+      "events": "LocalDaemonEventBatchWire",
+      "health": "LocalDaemonHealthResponseWire",
+      "list": "LocalDaemonListResponseWire"
+    }
+  },
+  "request_envelope": {
+    "client": "LocalDaemonClientWire",
+    "payload": "LocalDaemonRequestPayloadWire",
+    "record": "LocalDaemonRequestEnvelopeWire",
+    "request_id": "string; client-generated correlation id",
+    "schema_version": "u32"
+  },
+  "requests": [
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "request": {
+        "include_capabilities": "bool"
+      },
+      "success": "LocalDaemonHealthResponseWire",
+      "type": "health"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "request": "no fields",
+      "success": "LocalDaemonCapabilitiesResponseWire",
+      "type": "capabilities"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "mocked and future collection reads use pages, cursors, snapshot IDs, stable handles, filters, and payload bounds",
+      "request": "LocalDaemonListRequestWire",
+      "success": "LocalDaemonListResponseWire",
+      "type": "list"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "contract-only delta/heartbeat batch shape for future stream or polling transport",
+      "request": "LocalDaemonEventRequestWire",
+      "success": "LocalDaemonEventBatchWire",
+      "type": "events"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "batching is shape-only in Epic 1D and must remain bounded by max_payload_bytes",
+      "request": "LocalDaemonBatchRequestWire[]",
+      "success": "LocalDaemonBatchResponseWire[]",
+      "type": "batch"
+    }
+  ],
+  "response_envelope": {
+    "payload": "LocalDaemonResponsePayloadWire",
+    "record": "LocalDaemonResponseEnvelopeWire",
+    "request_id": "string; echoes request_id",
+    "schema_version": "u32",
+    "snapshot_id": "string|null; present for stateful reads and event batches"
+  },
+  "schema_version": 1,
+  "transport": {
+    "frame": {
+      "encoding": "utf-8 json",
+      "length_prefix": "u32 big-endian byte length",
+      "max_payload_bytes": 1048576
+    },
+    "future_transport": "unix_domain_socket_framed_json",
+    "implemented": false,
+    "phase": "contract_only",
+    "production_routing": "not implemented by Epic 1D; current source stores remain authoritative"
+  },
+  "versioning": {
+    "additive_fields": "allowed when clients ignore unknown fields and servers preserve existing required fields",
+    "contract_name": "sase_local_daemon_framed_json_v1",
+    "cursor_identifiers": "cursor is an opaque page token scoped to collection, filters, stable_handle, and snapshot_id",
+    "deprecation_policy": "fields are deprecated for at least one compatible schema window before removal",
+    "enum_compatibility": "clients must treat unknown enum variants as unsupported and fall back when possible; removing or renaming variants requires a new schema version",
+    "error_shape": "LocalDaemonErrorWire inside LocalDaemonResponsePayloadWire::error",
+    "max_compatible_client_schema_version": 1,
+    "min_compatible_client_schema_version": 1,
+    "no_daemon_fallback": "LocalDaemonFallbackWire and daemon_unavailable/host_adapter_required errors signal direct source-store fallback",
+    "nullable_fields": "nullable fields are explicit JSON null and may not be repurposed without a new schema version",
+    "removal_policy": "removal, required-field semantic changes, or enum narrowing require a new contract snapshot and schema version bump",
+    "schema_version": 1,
+    "snapshot_identifiers": "snapshot_id is an opaque stable view identifier scoped to one daemon state generation",
+    "stable_handles": "handles are opaque stable resource identifiers for follow-up reads within compatible schemas"
+  }
+}
