@@ -243,10 +243,8 @@ pub fn verify_agent_archive_index(root: &Path) -> AgentArchiveVerifyReportWire {
                 .query_map([], |row| row.get::<_, String>("bundle_path"))
             {
                 Ok(rows) => {
-                    for row in rows {
-                        if let Ok(path) = row {
-                            fts_paths.insert(path);
-                        }
+                    for path in rows.flatten() {
+                        fts_paths.insert(path);
                     }
                 }
                 Err(_) => stale_rows += 1,

@@ -142,9 +142,8 @@ pub fn save_dismissed_bundle_json(
         format!("failed to serialize dismissed agent bundle: {e}")
     })?;
     let tmp_path = tmp_dir.join("bundle.json");
-    write_file_synced(&tmp_path, payload.as_bytes()).map_err(|e| {
+    write_file_synced(&tmp_path, payload.as_bytes()).inspect_err(|_e| {
         let _ = fs::remove_dir_all(&tmp_dir);
-        e
     })?;
     fs::rename(&tmp_dir, &final_dir).map_err(|e| {
         let _ = fs::remove_dir_all(&tmp_dir);
