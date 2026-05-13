@@ -3,6 +3,7 @@
 //! Local host gateway skeleton for SASE mobile clients.
 
 pub mod contract;
+pub mod daemon;
 pub mod host_bridge;
 pub mod push;
 pub mod routes;
@@ -14,6 +15,12 @@ pub use contract::{
     api_v1_contract_snapshot, local_daemon_contract_snapshot,
     write_api_v1_contract_snapshot, write_local_daemon_contract_snapshot,
     ContractSnapshotError,
+};
+pub use daemon::{
+    default_run_root, default_socket_path, host_identity_from_env,
+    mobile_gateway_config, run_daemon, sanitize_host_identity,
+    validate_daemon_config, DaemonConfig, DaemonRunError, DaemonRuntime,
+    DaemonRuntimePaths, DaemonShutdown, DaemonState,
 };
 pub use host_bridge::{
     split_command_words, AgentHostBridge, CommandAgentHostBridge,
@@ -28,7 +35,10 @@ pub use push::{
     PushConfig, PushDeliveryAttempt, PushDispatcher, PushProviderMode,
 };
 pub use routes::{app, app_with_state, default_sase_home, GatewayState};
-pub use server::{serve, validate_bind_policy, GatewayConfig, GatewayRunError};
+pub use server::{
+    serve, serve_listener_with_state, validate_bind_policy, GatewayConfig,
+    GatewayRunError,
+};
 pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
 pub use wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,

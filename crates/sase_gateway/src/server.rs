@@ -108,6 +108,15 @@ pub async fn serve_listener_with_agent_bridge_command(
         .map_err(GatewayRunError::Serve)
 }
 
+pub async fn serve_listener_with_state(
+    listener: TcpListener,
+    state: GatewayState,
+) -> Result<(), GatewayRunError> {
+    axum_serve(listener, app_with_state(state))
+        .await
+        .map_err(GatewayRunError::Serve)
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::{
