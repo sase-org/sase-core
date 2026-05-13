@@ -33,11 +33,8 @@ pub use mutation::{
     BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
-    blocked_issues, blocked_merged_issues, doctor, get_epic_children,
-    get_merged_epic_children, list_issues, list_merged_issues,
-    merge_workspace_issues, merged_stats, read_store_issues, ready_issues,
-    ready_merged_issues, show_issue, show_merged_issue, stats,
-    BEAD_READ_WIRE_SCHEMA_VERSION,
+    blocked_issues, doctor, get_epic_children, list_issues, read_store_issues,
+    ready_issues, show_issue, stats, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, epic_count_migration_sql,

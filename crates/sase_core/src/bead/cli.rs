@@ -14,7 +14,7 @@ use super::mutation::{
     add_dependency, close_issues, open_issue, update_issue,
     BeadMutationOutcomeWire, BeadUpdateFieldsWire,
 };
-use super::read::{merge_workspace_issues, read_store_issues};
+use super::read::read_store_issues;
 use super::wire::{
     BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
     StatusWire,
@@ -642,14 +642,10 @@ fn parse_close_args(args: &[String]) -> Option<(Vec<String>, Option<String>)> {
 }
 
 fn read_issues(
-    read_beads_dirs: &[PathBuf],
+    _read_beads_dirs: &[PathBuf],
     write_beads_dir: &Path,
 ) -> Result<Vec<IssueWire>, BeadError> {
-    if read_beads_dirs.is_empty() {
-        read_store_issues(write_beads_dir)
-    } else {
-        merge_workspace_issues(read_beads_dirs)
-    }
+    read_store_issues(write_beads_dir)
 }
 
 fn find_issue<'a>(

@@ -123,7 +123,6 @@ use sase_core::agent_scan::{
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
     blocked_issues as core_bead_blocked_issues,
-    blocked_merged_issues as core_bead_blocked_merged_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
     build_legend_work_plan as core_bead_build_legend_work_plan,
@@ -133,17 +132,13 @@ use sase_core::bead::{
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     get_epic_children as core_bead_get_epic_children,
-    get_merged_epic_children as core_bead_get_merged_epic_children,
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
-    list_merged_issues as core_bead_list_merged_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
-    merged_stats as core_bead_merged_stats, open_issue as core_bead_open_issue,
+    open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     ready_issues as core_bead_ready_issues,
-    ready_merged_issues as core_bead_ready_merged_issues,
     remove_issue as core_bead_remove_issue, show_issue as core_bead_show_issue,
-    show_merged_issue as core_bead_show_merged_issue, stats as core_bead_stats,
-    sync_is_clean as core_bead_sync_is_clean,
+    stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
@@ -1061,99 +1056,6 @@ fn py_bead_get_epic_children<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| core_bead_get_epic_children(&beads_dir, epic_id)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_show")]
-fn py_bead_merged_show<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-    issue_id: &str,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| core_bead_show_merged_issue(&beads_dirs, issue_id)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_list")]
-#[pyo3(signature = (beads_dirs, statuses=None, issue_types=None, tiers=None))]
-fn py_bead_merged_list<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-    statuses: Option<Vec<String>>,
-    issue_types: Option<Vec<String>>,
-    tiers: Option<Vec<String>>,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| {
-            core_bead_list_merged_issues(
-                &beads_dirs,
-                statuses.as_deref(),
-                issue_types.as_deref(),
-                tiers.as_deref(),
-            )
-        }),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_ready")]
-fn py_bead_merged_ready<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| core_bead_ready_merged_issues(&beads_dirs)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_blocked")]
-fn py_bead_merged_blocked<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| core_bead_blocked_merged_issues(&beads_dirs)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_stats")]
-fn py_bead_merged_stats<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| core_bead_merged_stats(&beads_dirs)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_merged_get_epic_children")]
-fn py_bead_merged_get_epic_children<'py>(
-    py: Python<'py>,
-    beads_dirs: Vec<String>,
-    epic_id: &str,
-) -> PyResult<PyObject> {
-    let beads_dirs = strings_to_paths(beads_dirs);
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| {
-            core_bead_get_merged_epic_children(&beads_dirs, epic_id)
-        }),
     )
 }
 
@@ -2379,12 +2281,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_doctor, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_get_epic_children, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_show, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_list, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_ready, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_blocked, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_stats, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_merged_get_epic_children, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;

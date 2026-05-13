@@ -1,7 +1,7 @@
-//! Read-only bead store queries and workspace merge views.
+//! Read-only bead store queries.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::jsonl::import_issues_from_jsonl;
 use super::wire::{
@@ -103,76 +103,6 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
         messages.push("OK: no issues found".to_string());
     }
     Ok(messages)
-}
-
-pub fn merge_workspace_issues(
-    beads_dirs: &[PathBuf],
-) -> Result<Vec<IssueWire>, BeadError> {
-    let mut merged: BTreeMap<String, IssueWire> = BTreeMap::new();
-    for beads_dir in beads_dirs {
-        let jsonl_path = beads_dir.join("issues.jsonl");
-        if !jsonl_path.exists() {
-            continue;
-        }
-        for issue in import_issues_from_jsonl(&jsonl_path)?.issues {
-            match merged.get(&issue.id) {
-                Some(existing) if existing.updated_at >= issue.updated_at => {}
-                _ => {
-                    merged.insert(issue.id.clone(), issue);
-                }
-            }
-        }
-    }
-
-    let mut issues: Vec<IssueWire> = merged.into_values().collect();
-    sort_for_import(&mut issues);
-    Ok(issues)
-}
-
-pub fn show_merged_issue(
-    beads_dirs: &[PathBuf],
-    issue_id: &str,
-) -> Result<IssueWire, BeadError> {
-    show_issue_in_issues(merge_workspace_issues(beads_dirs)?, issue_id)
-}
-
-pub fn list_merged_issues(
-    beads_dirs: &[PathBuf],
-    statuses: Option<&[String]>,
-    issue_types: Option<&[String]>,
-    tiers: Option<&[String]>,
-) -> Result<Vec<IssueWire>, BeadError> {
-    list_issues_in_issues(
-        merge_workspace_issues(beads_dirs)?,
-        statuses,
-        issue_types,
-        tiers,
-    )
-}
-
-pub fn ready_merged_issues(
-    beads_dirs: &[PathBuf],
-) -> Result<Vec<IssueWire>, BeadError> {
-    ready_issues_in_issues(merge_workspace_issues(beads_dirs)?)
-}
-
-pub fn blocked_merged_issues(
-    beads_dirs: &[PathBuf],
-) -> Result<Vec<IssueWire>, BeadError> {
-    blocked_issues_in_issues(merge_workspace_issues(beads_dirs)?)
-}
-
-pub fn merged_stats(
-    beads_dirs: &[PathBuf],
-) -> Result<BTreeMap<String, usize>, BeadError> {
-    Ok(stats_for_issues(&merge_workspace_issues(beads_dirs)?))
-}
-
-pub fn get_merged_epic_children(
-    beads_dirs: &[PathBuf],
-    epic_id: &str,
-) -> Result<Vec<IssueWire>, BeadError> {
-    get_epic_children_in_issues(merge_workspace_issues(beads_dirs)?, epic_id)
 }
 
 fn show_issue_in_issues(
@@ -344,18 +274,6 @@ fn parse_tier(value: &str) -> Result<BeadTierWire, BeadError> {
 
 fn sort_by_created_at(issues: &mut [IssueWire]) {
     issues.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-}
-
-fn sort_for_import(issues: &mut [IssueWire]) {
-    issues.sort_by(|a, b| issue_import_key(a).cmp(&issue_import_key(b)));
-}
-
-fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
-    let kind_order = match issue.issue_type {
-        IssueTypeWire::Plan => 0,
-        IssueTypeWire::Phase => 1,
-    };
-    (kind_order, issue.id.as_str())
 }
 
 fn status_as_str(status: &StatusWire) -> &'static str {

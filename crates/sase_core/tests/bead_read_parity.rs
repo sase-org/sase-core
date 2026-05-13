@@ -2,8 +2,7 @@ use std::fs;
 
 use sase_core::{
     bead_blocked_issues, bead_doctor, bead_get_epic_children, bead_list_issues,
-    bead_merge_workspace_issues, bead_ready_issues, bead_show_issue,
-    bead_stats,
+    bead_ready_issues, bead_show_issue, bead_stats,
 };
 use tempfile::tempdir;
 
@@ -62,46 +61,6 @@ fn read_queries_match_python_contract_ordering() {
         bead_doctor(&beads_dir).unwrap(),
         vec!["OK: no issues found"]
     );
-}
-
-#[test]
-fn workspace_merge_uses_latest_updated_at() {
-    let temp = tempdir().unwrap();
-    let primary = temp.path().join("project/sdd/beads");
-    let secondary = temp.path().join("project_2/sdd/beads");
-    fs::create_dir_all(&primary).unwrap();
-    fs::create_dir_all(&secondary).unwrap();
-    fs::write(
-        primary.join("issues.jsonl"),
-        issue(
-            "beads-1",
-            "Old",
-            "plan",
-            None,
-            "open",
-            "2026-01-01T00:00:00Z",
-            "",
-        ) + "\n",
-    )
-    .unwrap();
-    fs::write(
-        secondary.join("issues.jsonl"),
-        issue(
-            "beads-1",
-            "New",
-            "plan",
-            None,
-            "open",
-            "2026-01-01T00:01:00Z",
-            "",
-        ) + "\n",
-    )
-    .unwrap();
-
-    let merged = bead_merge_workspace_issues(&[primary, secondary]).unwrap();
-
-    assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].title, "New");
 }
 
 fn ids(issues: Vec<sase_core::IssueWire>) -> Vec<String> {
