@@ -473,28 +473,28 @@ fn visible_where(include_hidden: bool) -> &'static str {
 }
 
 #[derive(Default)]
-pub(crate) struct RecordSummary {
-    pub(crate) status: String,
-    pub(crate) agent_type: String,
-    pub(crate) cl_name: Option<String>,
-    pub(crate) agent_name: Option<String>,
-    pub(crate) model: Option<String>,
-    pub(crate) llm_provider: Option<String>,
-    pub(crate) started_at: Option<String>,
-    pub(crate) finished_at: Option<f64>,
-    pub(crate) workflow_status: Option<String>,
-    pub(crate) hidden: bool,
-    pub(crate) parent_timestamp: Option<String>,
-    pub(crate) step_index: Option<i64>,
-    pub(crate) step_name: Option<String>,
-    pub(crate) retry_of_timestamp: Option<String>,
-    pub(crate) retried_as_timestamp: Option<String>,
-    pub(crate) retry_chain_root_timestamp: Option<String>,
-    pub(crate) retry_attempt: Option<i64>,
+struct RecordSummary {
+    status: String,
+    agent_type: String,
+    cl_name: Option<String>,
+    agent_name: Option<String>,
+    model: Option<String>,
+    llm_provider: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<f64>,
+    workflow_status: Option<String>,
+    hidden: bool,
+    parent_timestamp: Option<String>,
+    step_index: Option<i64>,
+    step_name: Option<String>,
+    retry_of_timestamp: Option<String>,
+    retried_as_timestamp: Option<String>,
+    retry_chain_root_timestamp: Option<String>,
+    retry_attempt: Option<i64>,
 }
 
 impl RecordSummary {
-    pub(crate) fn from_record(record: &AgentArtifactRecordWire) -> Self {
+    fn from_record(record: &AgentArtifactRecordWire) -> Self {
         let meta = record.agent_meta.as_ref();
         let done = record.done.as_ref();
         let running = record.running.as_ref();
