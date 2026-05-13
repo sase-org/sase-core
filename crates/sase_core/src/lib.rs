@@ -19,6 +19,7 @@ pub mod host_bridge;
 pub mod notifications;
 pub mod parser;
 pub mod project_spec;
+pub mod projection;
 pub mod query;
 pub mod sections;
 pub mod status;
