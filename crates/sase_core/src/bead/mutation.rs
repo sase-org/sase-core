@@ -8,7 +8,6 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::jsonl::{export_issues_to_jsonl, import_issues_from_jsonl};
@@ -43,8 +42,6 @@ pub struct BeadCreateRequestWire {
     pub epic_count: Option<i64>,
     #[serde(default)]
     pub now: Option<String>,
-    #[serde(default)]
-    pub workspace_beads_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -141,16 +138,12 @@ pub fn create_issue(
     let now = request.now.unwrap_or_else(now_utc);
     let owner = store.config.owner.clone();
     let issue_id = match request.parent_id.as_deref() {
-        Some(parent_id) => next_child_id(
-            parent_id,
-            &store.issues,
-            workspace_dirs(beads_dir, &request.workspace_beads_dirs),
-        ),
+        Some(parent_id) => next_child_id(parent_id, &store.issues),
         None => {
             let counter = next_top_level_counter(
                 &store.config.issue_prefix,
                 store.config.next_counter,
-                workspace_dirs(beads_dir, &request.workspace_beads_dirs),
+                &store.issues,
             );
             store.config.next_counter = counter + 1;
             format!("{}-{}", store.config.issue_prefix, to_base36(counter))
@@ -679,70 +672,36 @@ fn sorted_children<'a>(
     children
 }
 
-fn workspace_dirs<'a>(
-    beads_dir: &'a Path,
-    requested: &'a [PathBuf],
-) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut dirs = Vec::new();
-    for path in requested {
-        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if seen.insert(key) {
-            dirs.push(path.to_path_buf());
-        }
-    }
-    let key = beads_dir
-        .canonicalize()
-        .unwrap_or_else(|_| beads_dir.to_path_buf());
-    if seen.insert(key) {
-        dirs.push(beads_dir.to_path_buf());
-    }
-    dirs
-}
-
 fn next_top_level_counter(
     issue_prefix: &str,
     config_counter: u64,
-    beads_dirs: Vec<PathBuf>,
+    issues: &[IssueWire],
 ) -> u64 {
     std::cmp::max(
         config_counter,
-        max_top_level_counter(issue_prefix, &beads_dirs) + 1,
+        max_top_level_counter(issue_prefix, issues) + 1,
     )
 }
 
-fn next_child_id(
-    parent_id: &str,
-    issues: &[IssueWire],
-    beads_dirs: Vec<PathBuf>,
-) -> String {
+fn next_child_id(parent_id: &str, issues: &[IssueWire]) -> String {
     let local_max = issues
         .iter()
         .filter_map(|issue| direct_child_counter(parent_id, &issue.id))
         .max()
         .unwrap_or(0);
-    let workspace_max = max_child_counter(parent_id, &beads_dirs);
-    format!(
-        "{parent_id}.{}",
-        std::cmp::max(local_max, workspace_max) + 1
-    )
+    format!("{parent_id}.{}", local_max + 1)
 }
 
-fn max_top_level_counter(issue_prefix: &str, beads_dirs: &[PathBuf]) -> u64 {
+fn max_top_level_counter(issue_prefix: &str, issues: &[IssueWire]) -> u64 {
     let expected_prefix = format!("{issue_prefix}-");
-    iter_jsonl_issue_ids(beads_dirs)
+    issues
+        .iter()
+        .map(|issue| issue.id.as_str())
         .filter_map(|issue_id| {
             issue_id.strip_prefix(&expected_prefix).map(str::to_string)
         })
         .filter(|suffix| !suffix.contains('.'))
         .filter_map(|suffix| from_base36(&suffix))
-        .max()
-        .unwrap_or(0)
-}
-
-fn max_child_counter(parent_id: &str, beads_dirs: &[PathBuf]) -> u64 {
-    iter_jsonl_issue_ids(beads_dirs)
-        .filter_map(|issue_id| direct_child_counter(parent_id, &issue_id))
         .max()
         .unwrap_or(0)
 }
@@ -754,36 +713,6 @@ fn direct_child_counter(parent_id: &str, issue_id: &str) -> Option<u64> {
         return None;
     }
     suffix.parse::<u64>().ok()
-}
-
-fn iter_jsonl_issue_ids(
-    beads_dirs: &[PathBuf],
-) -> impl Iterator<Item = String> {
-    let mut seen = HashSet::new();
-    let mut ids = Vec::new();
-    for beads_dir in beads_dirs {
-        let path = beads_dir.join("issues.jsonl");
-        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if !seen.insert(key) || !path.exists() {
-            continue;
-        }
-        let Ok(contents) = fs::read_to_string(path) else {
-            continue;
-        };
-        for line in contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if let Some(issue_id) = value.get("id").and_then(Value::as_str) {
-                ids.push(issue_id.to_string());
-            }
-        }
-    }
-    ids.into_iter()
 }
 
 fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
@@ -872,14 +801,12 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn create_top_level_uses_workspace_max_and_persists_counter() {
+    fn create_top_level_uses_current_store_max_and_persists_counter() {
         let temp = tempdir().unwrap();
-        let a = temp.path().join("sase/sdd/beads");
-        let b = temp.path().join("sase_101/sdd/beads");
-        fs::create_dir_all(&a).unwrap();
-        fs::create_dir_all(&b).unwrap();
+        let beads_dir = temp.path().join("sase/sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
         save_config(
-            &a,
+            &beads_dir,
             &BeadConfigWire {
                 issue_prefix: "sase".to_string(),
                 next_counter: 1,
@@ -887,28 +814,17 @@ mod tests {
             },
         )
         .unwrap();
-        save_config(
-            &b,
-            &BeadConfigWire {
-                issue_prefix: "sase".to_string(),
-                next_counter: 1,
-                owner: String::new(),
-            },
-        )
-        .unwrap();
-        fs::write(a.join("issues.jsonl"), "").unwrap();
         fs::write(
-            b.join("issues.jsonl"),
+            beads_dir.join("issues.jsonl"),
             r#"{"id":"sase-z","title":"Other","status":"open","issue_type":"plan","parent_id":null,"created_at":"","updated_at":"","dependencies":[]}"#,
         )
         .unwrap();
 
         let result = create_issue(
-            &a,
+            &beads_dir,
             BeadCreateRequestWire {
                 title: "Next".to_string(),
                 issue_type: IssueTypeWire::Plan,
-                workspace_beads_dirs: vec![b],
                 now: Some("2026-01-01T00:00:00Z".to_string()),
                 ..Default::default()
             },
@@ -917,7 +833,7 @@ mod tests {
 
         assert_eq!(result.issue.unwrap().id, "sase-10");
         assert_eq!(
-            load_config(&a, default_config("x", ""))
+            load_config(&beads_dir, default_config("x", ""))
                 .unwrap()
                 .next_counter,
             37
