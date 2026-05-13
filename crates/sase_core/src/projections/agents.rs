@@ -1,0 +1,1588 @@
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
+use crate::agent_archive::AgentArchiveSummaryWire;
+use crate::agent_scan::AgentArtifactRecordWire;
+
+use super::db::{append_event_tx, set_projection_last_seq_tx, ProjectionDb};
+use super::error::ProjectionError;
+use super::event::{
+    EventAppendOutcomeWire, EventAppendRequestWire, EventCausalityWire,
+    EventEnvelopeWire, EventSourceWire,
+};
+use super::replay::ProjectionApplier;
+
+pub const AGENT_PROJECTION_NAME: &str = "agents";
+
+pub const AGENT_EVENT_MARKER_OBSERVED: &str = "agent.lifecycle_marker_observed";
+pub const AGENT_EVENT_ATTEMPT_CREATED: &str = "agent.attempt_created";
+pub const AGENT_EVENT_ATTEMPT_UPDATED: &str = "agent.attempt_updated";
+pub const AGENT_EVENT_EDGE_OBSERVED: &str = "agent.edge_observed";
+pub const AGENT_EVENT_ARTIFACT_ASSOCIATED: &str = "agent.artifact_associated";
+pub const AGENT_EVENT_DISMISSED_IDENTITY_CHANGED: &str =
+    "agent.dismissed_identity_changed";
+pub const AGENT_EVENT_ARCHIVE_BUNDLE_INDEXED: &str =
+    "agent.archive_bundle_indexed";
+pub const AGENT_EVENT_ARCHIVE_BUNDLE_REVIVED: &str =
+    "agent.archive_bundle_revived";
+pub const AGENT_EVENT_ARCHIVE_BUNDLE_PURGED: &str =
+    "agent.archive_bundle_purged";
+
+const AGENT_PROJECTION_WIRE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentProjectionEventContextWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    pub source: EventSourceWire,
+    pub host_id: String,
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub causality: Vec<EventCausalityWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
+pub enum AgentProjectionEventPayloadWire {
+    LifecycleMarkerObserved {
+        schema_version: u32,
+        record: AgentArtifactRecordWire,
+    },
+    AttemptCreated {
+        schema_version: u32,
+        attempt: AgentAttemptProjectionWire,
+    },
+    AttemptUpdated {
+        schema_version: u32,
+        attempt: AgentAttemptProjectionWire,
+    },
+    EdgeObserved {
+        schema_version: u32,
+        edge: AgentEdgeProjectionWire,
+    },
+    ArtifactAssociated {
+        schema_version: u32,
+        artifact: AgentArtifactAssociationWire,
+    },
+    DismissedIdentityChanged {
+        schema_version: u32,
+        identity: AgentDismissedIdentityWire,
+    },
+    ArchiveBundleIndexed {
+        schema_version: u32,
+        archive: AgentArchiveSummaryWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle: Option<JsonValue>,
+    },
+    ArchiveBundleRevived {
+        schema_version: u32,
+        bundle_path: String,
+        revived_at: String,
+    },
+    ArchiveBundlePurged {
+        schema_version: u32,
+        bundle_path: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAttemptProjectionWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub agent_id: String,
+    pub attempt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retried_as_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_chain_root_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<i64>,
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEdgeProjectionWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub parent_agent_id: String,
+    pub child_agent_id: String,
+    pub edge_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactAssociationWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub agent_id: String,
+    pub artifact_path: String,
+    pub artifact_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDismissedIdentityWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub agent_type: String,
+    pub cl_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_name: Option<String>,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentProjectionSummaryWire {
+    pub schema_version: u32,
+    pub agent_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub project_dir: String,
+    pub project_file: String,
+    pub workflow_dir_name: String,
+    pub artifact_dir: String,
+    pub timestamp: String,
+    pub status: String,
+    pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cl_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<f64>,
+    pub hidden: bool,
+    pub has_done_marker: bool,
+    pub has_running_marker: bool,
+    pub has_waiting_marker: bool,
+    pub has_workflow_state: bool,
+    pub last_seq: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentProjectionPageWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub entries: Vec<AgentProjectionSummaryWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentArchiveProjectionPageWire {
+    #[serde(default = "agent_projection_schema_version")]
+    pub schema_version: u32,
+    pub entries: Vec<AgentArchiveSummaryWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u32>,
+}
+
+pub struct AgentProjectionApplier;
+
+impl ProjectionApplier for AgentProjectionApplier {
+    fn projection_name(&self) -> &str {
+        AGENT_PROJECTION_NAME
+    }
+
+    fn apply(
+        &mut self,
+        event: &EventEnvelopeWire,
+        conn: &Connection,
+    ) -> Result<(), ProjectionError> {
+        apply_agent_event_tx(conn, event)
+    }
+}
+
+impl ProjectionDb {
+    pub fn append_agent_event(
+        &mut self,
+        request: EventAppendRequestWire,
+    ) -> Result<EventAppendOutcomeWire, ProjectionError> {
+        self.with_immediate_transaction(|conn| {
+            let outcome = append_event_tx(conn, request)?;
+            if !outcome.duplicate {
+                apply_agent_event_tx(conn, &outcome.event)?;
+                set_projection_last_seq_tx(
+                    conn,
+                    AGENT_PROJECTION_NAME,
+                    outcome.event.seq,
+                )?;
+            }
+            Ok(outcome)
+        })
+    }
+}
+
+pub fn agent_lifecycle_marker_observed_event_request(
+    context: AgentProjectionEventContextWire,
+    record: AgentArtifactRecordWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_MARKER_OBSERVED,
+        AgentProjectionEventPayloadWire::LifecycleMarkerObserved {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            record,
+        },
+    )
+}
+
+pub fn agent_attempt_created_event_request(
+    context: AgentProjectionEventContextWire,
+    attempt: AgentAttemptProjectionWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ATTEMPT_CREATED,
+        AgentProjectionEventPayloadWire::AttemptCreated {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            attempt,
+        },
+    )
+}
+
+pub fn agent_attempt_updated_event_request(
+    context: AgentProjectionEventContextWire,
+    attempt: AgentAttemptProjectionWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ATTEMPT_UPDATED,
+        AgentProjectionEventPayloadWire::AttemptUpdated {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            attempt,
+        },
+    )
+}
+
+pub fn agent_edge_observed_event_request(
+    context: AgentProjectionEventContextWire,
+    edge: AgentEdgeProjectionWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_EDGE_OBSERVED,
+        AgentProjectionEventPayloadWire::EdgeObserved {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            edge,
+        },
+    )
+}
+
+pub fn agent_artifact_associated_event_request(
+    context: AgentProjectionEventContextWire,
+    artifact: AgentArtifactAssociationWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ARTIFACT_ASSOCIATED,
+        AgentProjectionEventPayloadWire::ArtifactAssociated {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            artifact,
+        },
+    )
+}
+
+pub fn agent_dismissed_identity_changed_event_request(
+    context: AgentProjectionEventContextWire,
+    identity: AgentDismissedIdentityWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_DISMISSED_IDENTITY_CHANGED,
+        AgentProjectionEventPayloadWire::DismissedIdentityChanged {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            identity,
+        },
+    )
+}
+
+pub fn agent_archive_bundle_indexed_event_request(
+    context: AgentProjectionEventContextWire,
+    archive: AgentArchiveSummaryWire,
+    bundle: Option<JsonValue>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ARCHIVE_BUNDLE_INDEXED,
+        AgentProjectionEventPayloadWire::ArchiveBundleIndexed {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            archive,
+            bundle,
+        },
+    )
+}
+
+pub fn agent_archive_bundle_revived_event_request(
+    context: AgentProjectionEventContextWire,
+    bundle_path: String,
+    revived_at: String,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ARCHIVE_BUNDLE_REVIVED,
+        AgentProjectionEventPayloadWire::ArchiveBundleRevived {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            bundle_path,
+            revived_at,
+        },
+    )
+}
+
+pub fn agent_archive_bundle_purged_event_request(
+    context: AgentProjectionEventContextWire,
+    bundle_path: String,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_ARCHIVE_BUNDLE_PURGED,
+        AgentProjectionEventPayloadWire::ArchiveBundlePurged {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            bundle_path,
+        },
+    )
+}
+
+pub fn agent_projection_active_page(
+    conn: &Connection,
+    project_id: &str,
+    limit: u32,
+    offset: u32,
+    include_hidden: bool,
+) -> Result<AgentProjectionPageWire, ProjectionError> {
+    agent_projection_page(
+        conn,
+        "project_id = ?1 AND (?2 OR hidden = 0) AND (
+            has_done_marker = 0
+            OR (has_workflow_state = 1 AND status NOT IN ('completed', 'failed', 'cancelled', 'noop'))
+        )",
+        project_id,
+        limit,
+        offset,
+        include_hidden,
+        "timestamp DESC, agent_id ASC",
+    )
+}
+
+pub fn agent_projection_recent_page(
+    conn: &Connection,
+    project_id: &str,
+    limit: u32,
+    offset: u32,
+    include_hidden: bool,
+) -> Result<AgentProjectionPageWire, ProjectionError> {
+    agent_projection_page(
+        conn,
+        "project_id = ?1 AND (?2 OR hidden = 0) AND has_done_marker = 1",
+        project_id,
+        limit,
+        offset,
+        include_hidden,
+        "COALESCE(finished_at, 0) DESC, timestamp DESC, agent_id ASC",
+    )
+}
+
+pub fn agent_projection_children(
+    conn: &Connection,
+    project_id: &str,
+    parent_agent_id: &str,
+) -> Result<Vec<AgentProjectionSummaryWire>, ProjectionError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT a.agent_id, a.project_id, a.project_name, a.project_dir,
+               a.project_file, a.workflow_dir_name, a.artifact_dir,
+               a.timestamp, a.status, a.agent_type, a.cl_name, a.agent_name,
+               a.model, a.llm_provider, a.started_at, a.finished_at,
+               a.hidden, a.has_done_marker, a.has_running_marker,
+               a.has_waiting_marker, a.has_workflow_state, a.last_seq
+        FROM agent_edges e
+        JOIN agents a
+          ON a.project_id = e.project_id
+         AND a.agent_id = e.child_agent_id
+        WHERE e.project_id = ?1 AND e.parent_agent_id = ?2
+        ORDER BY a.timestamp ASC, a.agent_id ASC
+        "#,
+    )?;
+    let rows =
+        stmt.query_map(params![project_id, parent_agent_id], agent_row)?;
+    collect_rows(rows)
+}
+
+pub fn agent_projection_artifacts(
+    conn: &Connection,
+    project_id: &str,
+    agent_id: &str,
+) -> Result<Vec<AgentArtifactAssociationWire>, ProjectionError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT agent_id, artifact_path, artifact_kind, display_name, role
+        FROM agent_artifacts
+        WHERE project_id = ?1 AND agent_id = ?2
+        ORDER BY artifact_kind ASC, artifact_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![project_id, agent_id], |row| {
+        Ok(AgentArtifactAssociationWire {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            agent_id: row.get(0)?,
+            artifact_path: row.get(1)?,
+            artifact_kind: row.get(2)?,
+            display_name: row.get(3)?,
+            role: row.get(4)?,
+        })
+    })?;
+    let mut artifacts = Vec::new();
+    for row in rows {
+        artifacts.push(row?);
+    }
+    Ok(artifacts)
+}
+
+pub fn agent_projection_archive_page(
+    conn: &Connection,
+    project_id: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<AgentArchiveProjectionPageWire, ProjectionError> {
+    let fetch_limit = limit.saturating_add(1);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT archive_json
+        FROM agent_archive
+        WHERE project_id = ?1 AND purged = 0
+        ORDER BY COALESCE(dismissed_at, start_time, raw_suffix) DESC,
+                 bundle_path ASC
+        LIMIT ?2 OFFSET ?3
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![project_id, fetch_limit as i64, offset as i64],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(serde_json::from_str(&row?)?);
+    }
+    let next_offset = truncate_for_next_offset(&mut entries, limit, offset);
+    Ok(AgentArchiveProjectionPageWire {
+        schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+        entries,
+        next_offset,
+    })
+}
+
+pub fn agent_projection_dismissed_identities(
+    conn: &Connection,
+    project_id: &str,
+    active_only: bool,
+) -> Result<Vec<AgentDismissedIdentityWire>, ProjectionError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT agent_type, cl_name, raw_suffix, agent_id, dismissed_name,
+               active, changed_at
+        FROM agent_dismissed_identities
+        WHERE project_id = ?1 AND (?2 = 0 OR active = 1)
+        ORDER BY cl_name ASC, raw_suffix ASC, agent_type ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![project_id, active_only], |row| {
+        Ok(AgentDismissedIdentityWire {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            agent_type: row.get(0)?,
+            cl_name: row.get(1)?,
+            raw_suffix: nonempty(row.get(2)?),
+            agent_id: row.get(3)?,
+            dismissed_name: row.get(4)?,
+            active: row.get::<_, i64>(5)? != 0,
+            changed_at: row.get(6)?,
+        })
+    })?;
+    let mut identities = Vec::new();
+    for row in rows {
+        identities.push(row?);
+    }
+    Ok(identities)
+}
+
+fn apply_agent_event_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+) -> Result<(), ProjectionError> {
+    if !is_agent_event(&event.event_type) {
+        return Ok(());
+    }
+
+    let payload: AgentProjectionEventPayloadWire =
+        serde_json::from_value(event.payload.clone())?;
+    match payload {
+        AgentProjectionEventPayloadWire::LifecycleMarkerObserved {
+            record,
+            ..
+        } => {
+            upsert_record_tx(conn, event, &record)?;
+        }
+        AgentProjectionEventPayloadWire::AttemptCreated { attempt, .. }
+        | AgentProjectionEventPayloadWire::AttemptUpdated { attempt, .. } => {
+            upsert_attempt_tx(conn, event, &attempt)?
+        }
+        AgentProjectionEventPayloadWire::EdgeObserved { edge, .. } => {
+            upsert_edge_tx(conn, event, &edge)?
+        }
+        AgentProjectionEventPayloadWire::ArtifactAssociated {
+            artifact,
+            ..
+        } => upsert_artifact_tx(conn, event, &artifact)?,
+        AgentProjectionEventPayloadWire::DismissedIdentityChanged {
+            identity,
+            ..
+        } => upsert_dismissed_identity_tx(conn, event, &identity)?,
+        AgentProjectionEventPayloadWire::ArchiveBundleIndexed {
+            archive,
+            bundle,
+            ..
+        } => upsert_archive_tx(conn, event, &archive, bundle.as_ref())?,
+        AgentProjectionEventPayloadWire::ArchiveBundleRevived {
+            bundle_path,
+            revived_at,
+            ..
+        } => revive_archive_tx(conn, event, &bundle_path, &revived_at)?,
+        AgentProjectionEventPayloadWire::ArchiveBundlePurged {
+            bundle_path,
+            ..
+        } => purge_archive_tx(conn, event, &bundle_path)?,
+    }
+    Ok(())
+}
+
+fn upsert_record_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    record: &AgentArtifactRecordWire,
+) -> Result<(), ProjectionError> {
+    let summary = RecordSummary::from_record(record);
+    let agent_id = agent_id_for_record(record);
+    let record_json = serde_json::to_string(record)?;
+    conn.execute(
+        r#"
+        INSERT INTO agents (
+            project_id, agent_id, project_name, project_dir, project_file,
+            workflow_dir_name, artifact_dir, timestamp, status, agent_type,
+            cl_name, agent_name, model, llm_provider, started_at, finished_at,
+            hidden, has_done_marker, has_running_marker, has_waiting_marker,
+            has_workflow_state, record_json, last_seq
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23
+        )
+        ON CONFLICT(project_id, agent_id) DO UPDATE SET
+            project_name = excluded.project_name,
+            project_dir = excluded.project_dir,
+            project_file = excluded.project_file,
+            workflow_dir_name = excluded.workflow_dir_name,
+            artifact_dir = excluded.artifact_dir,
+            timestamp = excluded.timestamp,
+            status = excluded.status,
+            agent_type = excluded.agent_type,
+            cl_name = excluded.cl_name,
+            agent_name = excluded.agent_name,
+            model = excluded.model,
+            llm_provider = excluded.llm_provider,
+            started_at = excluded.started_at,
+            finished_at = excluded.finished_at,
+            hidden = excluded.hidden,
+            has_done_marker = excluded.has_done_marker,
+            has_running_marker = excluded.has_running_marker,
+            has_waiting_marker = excluded.has_waiting_marker,
+            has_workflow_state = excluded.has_workflow_state,
+            record_json = excluded.record_json,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            agent_id,
+            record.project_name,
+            record.project_dir,
+            record.project_file,
+            record.workflow_dir_name,
+            record.artifact_dir,
+            record.timestamp,
+            summary.status,
+            summary.agent_type,
+            summary.cl_name,
+            summary.agent_name,
+            summary.model,
+            summary.llm_provider,
+            summary.started_at,
+            summary.finished_at,
+            summary.hidden,
+            record.has_done_marker,
+            record.running.is_some(),
+            record.waiting.is_some(),
+            record.workflow_state.is_some(),
+            record_json,
+            event.seq,
+        ],
+    )?;
+    conn.execute(
+        "DELETE FROM agent_search_fts WHERE agent_id = ?1 AND project_id = ?2",
+        params![agent_id, event.project_id],
+    )?;
+    conn.execute(
+        "INSERT INTO agent_search_fts(agent_id, project_id, content) VALUES (?1, ?2, ?3)",
+        params![agent_id, event.project_id, search_text(record, &summary)],
+    )?;
+
+    let attempt = attempt_from_record(&agent_id, record);
+    upsert_attempt_tx(conn, event, &attempt)?;
+
+    for edge in edges_from_record(record, &agent_id) {
+        upsert_edge_tx(conn, event, &edge)?;
+    }
+    for artifact in artifacts_from_record(record, &agent_id) {
+        upsert_artifact_tx(conn, event, &artifact)?;
+    }
+    Ok(())
+}
+
+fn upsert_attempt_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    attempt: &AgentAttemptProjectionWire,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        INSERT INTO agent_attempts (
+            project_id, agent_id, attempt_id, retry_of_timestamp,
+            retried_as_timestamp, retry_chain_root_timestamp, retry_attempt,
+            terminal, last_seq
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(project_id, agent_id, attempt_id) DO UPDATE SET
+            retry_of_timestamp = excluded.retry_of_timestamp,
+            retried_as_timestamp = excluded.retried_as_timestamp,
+            retry_chain_root_timestamp = excluded.retry_chain_root_timestamp,
+            retry_attempt = excluded.retry_attempt,
+            terminal = excluded.terminal,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            attempt.agent_id,
+            attempt.attempt_id,
+            attempt.retry_of_timestamp,
+            attempt.retried_as_timestamp,
+            attempt.retry_chain_root_timestamp,
+            attempt.retry_attempt,
+            attempt.terminal,
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_edge_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    edge: &AgentEdgeProjectionWire,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        INSERT INTO agent_edges (
+            project_id, parent_agent_id, child_agent_id, edge_type,
+            parent_timestamp, child_timestamp, workflow_name, last_seq
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(project_id, parent_agent_id, child_agent_id, edge_type)
+        DO UPDATE SET
+            parent_timestamp = excluded.parent_timestamp,
+            child_timestamp = excluded.child_timestamp,
+            workflow_name = excluded.workflow_name,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            edge.parent_agent_id,
+            edge.child_agent_id,
+            edge.edge_type,
+            edge.parent_timestamp,
+            edge.child_timestamp,
+            edge.workflow_name,
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_artifact_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    artifact: &AgentArtifactAssociationWire,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        INSERT INTO agent_artifacts (
+            project_id, agent_id, artifact_path, artifact_kind, display_name,
+            role, last_seq
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(project_id, agent_id, artifact_path, artifact_kind)
+        DO UPDATE SET
+            display_name = excluded.display_name,
+            role = excluded.role,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            artifact.agent_id,
+            artifact.artifact_path,
+            artifact.artifact_kind,
+            artifact.display_name,
+            artifact.role,
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_dismissed_identity_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    identity: &AgentDismissedIdentityWire,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        INSERT INTO agent_dismissed_identities (
+            project_id, agent_type, cl_name, raw_suffix, agent_id,
+            dismissed_name, active, changed_at, last_seq
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(project_id, agent_type, cl_name, raw_suffix)
+        DO UPDATE SET
+            agent_id = excluded.agent_id,
+            dismissed_name = excluded.dismissed_name,
+            active = excluded.active,
+            changed_at = excluded.changed_at,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            identity.agent_type,
+            identity.cl_name,
+            identity.raw_suffix.as_deref().unwrap_or(""),
+            identity.agent_id,
+            identity.dismissed_name,
+            identity.active,
+            identity.changed_at.as_ref().unwrap_or(&event.created_at),
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_archive_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    archive: &AgentArchiveSummaryWire,
+    bundle: Option<&JsonValue>,
+) -> Result<(), ProjectionError> {
+    let archive_json = serde_json::to_string(archive)?;
+    let bundle_json =
+        serde_json::to_string(&bundle.unwrap_or(&JsonValue::Null))?;
+    conn.execute(
+        r#"
+        INSERT INTO agent_archive (
+            project_id, bundle_path, agent_id, raw_suffix, cl_name,
+            agent_name, status, start_time, dismissed_at, revived_at,
+            project_name, model, runtime, llm_provider, step_index,
+            step_name, step_type, retry_attempt, is_workflow_child,
+            archive_json, bundle_json, purged, last_seq
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, 0, ?22
+        )
+        ON CONFLICT(project_id, bundle_path) DO UPDATE SET
+            agent_id = excluded.agent_id,
+            raw_suffix = excluded.raw_suffix,
+            cl_name = excluded.cl_name,
+            agent_name = excluded.agent_name,
+            status = excluded.status,
+            start_time = excluded.start_time,
+            dismissed_at = excluded.dismissed_at,
+            revived_at = excluded.revived_at,
+            project_name = excluded.project_name,
+            model = excluded.model,
+            runtime = excluded.runtime,
+            llm_provider = excluded.llm_provider,
+            step_index = excluded.step_index,
+            step_name = excluded.step_name,
+            step_type = excluded.step_type,
+            retry_attempt = excluded.retry_attempt,
+            is_workflow_child = excluded.is_workflow_child,
+            archive_json = excluded.archive_json,
+            bundle_json = excluded.bundle_json,
+            purged = 0,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            archive.bundle_path,
+            archive.agent_id,
+            archive.raw_suffix,
+            archive.cl_name,
+            archive.agent_name,
+            archive.status,
+            archive.start_time,
+            archive.dismissed_at,
+            archive.revived_at,
+            archive.project_name,
+            archive.model,
+            archive.runtime,
+            archive.llm_provider,
+            archive.step_index,
+            archive.step_name,
+            archive.step_type,
+            archive.retry_attempt,
+            archive.is_workflow_child,
+            archive_json,
+            bundle_json,
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn revive_archive_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    bundle_path: &str,
+    revived_at: &str,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        UPDATE agent_archive
+        SET revived_at = ?3,
+            archive_json = json_set(archive_json, '$.revived_at', ?3),
+            last_seq = ?4
+        WHERE project_id = ?1 AND bundle_path = ?2
+        "#,
+        params![event.project_id, bundle_path, revived_at, event.seq],
+    )?;
+    Ok(())
+}
+
+fn purge_archive_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    bundle_path: &str,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        UPDATE agent_archive
+        SET purged = 1, last_seq = ?3
+        WHERE project_id = ?1 AND bundle_path = ?2
+        "#,
+        params![event.project_id, bundle_path, event.seq],
+    )?;
+    Ok(())
+}
+
+fn agent_projection_page(
+    conn: &Connection,
+    where_sql: &str,
+    project_id: &str,
+    limit: u32,
+    offset: u32,
+    include_hidden: bool,
+    order_sql: &str,
+) -> Result<AgentProjectionPageWire, ProjectionError> {
+    let fetch_limit = limit.saturating_add(1);
+    let sql = format!(
+        "SELECT agent_id, project_id, project_name, project_dir, project_file,
+                workflow_dir_name, artifact_dir, timestamp, status, agent_type,
+                cl_name, agent_name, model, llm_provider, started_at,
+                finished_at, hidden, has_done_marker, has_running_marker,
+                has_waiting_marker, has_workflow_state, last_seq
+         FROM agents
+         WHERE {where_sql}
+         ORDER BY {order_sql}
+         LIMIT ?3 OFFSET ?4"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![
+            project_id,
+            include_hidden,
+            fetch_limit as i64,
+            offset as i64
+        ],
+        agent_row,
+    )?;
+    let mut entries = collect_rows(rows)?;
+    let next_offset = truncate_for_next_offset(&mut entries, limit, offset);
+    Ok(AgentProjectionPageWire {
+        schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+        entries,
+        next_offset,
+    })
+}
+
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    >,
+) -> Result<Vec<T>, ProjectionError> {
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(row?);
+    }
+    Ok(values)
+}
+
+fn agent_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AgentProjectionSummaryWire> {
+    Ok(AgentProjectionSummaryWire {
+        schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+        agent_id: row.get(0)?,
+        project_id: row.get(1)?,
+        project_name: row.get(2)?,
+        project_dir: row.get(3)?,
+        project_file: row.get(4)?,
+        workflow_dir_name: row.get(5)?,
+        artifact_dir: row.get(6)?,
+        timestamp: row.get(7)?,
+        status: row.get(8)?,
+        agent_type: row.get(9)?,
+        cl_name: row.get(10)?,
+        agent_name: row.get(11)?,
+        model: row.get(12)?,
+        llm_provider: row.get(13)?,
+        started_at: row.get(14)?,
+        finished_at: row.get(15)?,
+        hidden: row.get::<_, i64>(16)? != 0,
+        has_done_marker: row.get::<_, i64>(17)? != 0,
+        has_running_marker: row.get::<_, i64>(18)? != 0,
+        has_waiting_marker: row.get::<_, i64>(19)? != 0,
+        has_workflow_state: row.get::<_, i64>(20)? != 0,
+        last_seq: row.get(21)?,
+    })
+}
+
+fn agent_event_request(
+    context: AgentProjectionEventContextWire,
+    event_type: &str,
+    payload: AgentProjectionEventPayloadWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    Ok(EventAppendRequestWire {
+        created_at: context.created_at,
+        source: context.source,
+        host_id: context.host_id,
+        project_id: context.project_id,
+        event_type: event_type.to_string(),
+        payload: serde_json::to_value(payload)?,
+        idempotency_key: context.idempotency_key,
+        causality: context.causality,
+        source_path: context.source_path,
+        source_revision: context.source_revision,
+    })
+}
+
+fn agent_id_for_record(record: &AgentArtifactRecordWire) -> String {
+    agent_id_from_timestamp(&record.project_name, &record.timestamp)
+}
+
+fn agent_id_from_timestamp(project_name: &str, timestamp: &str) -> String {
+    format!("agent:{project_name}:{timestamp}")
+}
+
+fn attempt_from_record(
+    agent_id: &str,
+    record: &AgentArtifactRecordWire,
+) -> AgentAttemptProjectionWire {
+    let meta = record.agent_meta.as_ref();
+    let done = record.done.as_ref();
+    AgentAttemptProjectionWire {
+        schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+        agent_id: agent_id.to_string(),
+        attempt_id: record.timestamp.clone(),
+        retry_of_timestamp: meta.and_then(|m| m.retry_of_timestamp.clone()),
+        retried_as_timestamp: meta
+            .and_then(|m| m.retried_as_timestamp.clone())
+            .or_else(|| done.and_then(|d| d.retried_as_timestamp.clone())),
+        retry_chain_root_timestamp: meta
+            .and_then(|m| m.retry_chain_root_timestamp.clone())
+            .or_else(|| {
+                done.and_then(|d| d.retry_chain_root_timestamp.clone())
+            }),
+        retry_attempt: meta.and_then(|m| m.retry_attempt),
+        terminal: record.has_done_marker
+            || meta.map(|m| m.retry_terminal).unwrap_or(false),
+    }
+}
+
+fn edges_from_record(
+    record: &AgentArtifactRecordWire,
+    agent_id: &str,
+) -> Vec<AgentEdgeProjectionWire> {
+    let mut edges = Vec::new();
+    if let Some(meta) = record.agent_meta.as_ref() {
+        if let Some(parent_timestamp) = meta.parent_timestamp.as_ref() {
+            edges.push(AgentEdgeProjectionWire {
+                schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+                parent_agent_id: agent_id_from_timestamp(
+                    &record.project_name,
+                    parent_timestamp,
+                ),
+                child_agent_id: agent_id.to_string(),
+                edge_type: "parent_child".to_string(),
+                parent_timestamp: Some(parent_timestamp.clone()),
+                child_timestamp: Some(record.timestamp.clone()),
+                workflow_name: meta.workflow_name.clone(),
+            });
+        }
+        if let Some(parent_timestamp) = meta.parent_agent_timestamp.as_ref() {
+            edges.push(AgentEdgeProjectionWire {
+                schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+                parent_agent_id: agent_id_from_timestamp(
+                    &record.project_name,
+                    parent_timestamp,
+                ),
+                child_agent_id: agent_id.to_string(),
+                edge_type: "workflow_parent_child".to_string(),
+                parent_timestamp: Some(parent_timestamp.clone()),
+                child_timestamp: Some(record.timestamp.clone()),
+                workflow_name: meta.workflow_name.clone(),
+            });
+        }
+    }
+    edges
+}
+
+fn artifacts_from_record(
+    record: &AgentArtifactRecordWire,
+    agent_id: &str,
+) -> Vec<AgentArtifactAssociationWire> {
+    let mut artifacts = Vec::new();
+    if let Some(done) = record.done.as_ref() {
+        push_optional_artifact(
+            &mut artifacts,
+            agent_id,
+            &done.plan_path,
+            "plan",
+            "done_marker",
+        );
+        push_optional_artifact(
+            &mut artifacts,
+            agent_id,
+            &done.diff_path,
+            "diff",
+            "done_marker",
+        );
+        push_optional_artifact(
+            &mut artifacts,
+            agent_id,
+            &done.response_path,
+            "response",
+            "done_marker",
+        );
+        push_optional_artifact(
+            &mut artifacts,
+            agent_id,
+            &done.output_path,
+            "output",
+            "done_marker",
+        );
+        for path in &done.markdown_pdf_paths {
+            artifacts.push(AgentArtifactAssociationWire {
+                schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+                agent_id: agent_id.to_string(),
+                artifact_path: path.clone(),
+                artifact_kind: "markdown_pdf".to_string(),
+                display_name: path.rsplit('/').next().map(str::to_string),
+                role: Some("done_marker".to_string()),
+            });
+        }
+        for path in &done.image_paths {
+            artifacts.push(AgentArtifactAssociationWire {
+                schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+                agent_id: agent_id.to_string(),
+                artifact_path: path.clone(),
+                artifact_kind: "image".to_string(),
+                display_name: path.rsplit('/').next().map(str::to_string),
+                role: Some("done_marker".to_string()),
+            });
+        }
+    }
+    if let Some(plan_path) = record.plan_path.as_ref() {
+        push_optional_artifact(
+            &mut artifacts,
+            agent_id,
+            &plan_path.plan_path,
+            "plan",
+            "plan_path_marker",
+        );
+    }
+    artifacts
+}
+
+fn push_optional_artifact(
+    artifacts: &mut Vec<AgentArtifactAssociationWire>,
+    agent_id: &str,
+    path: &Option<String>,
+    kind: &str,
+    role: &str,
+) {
+    if let Some(path) = path.as_ref() {
+        artifacts.push(AgentArtifactAssociationWire {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            agent_id: agent_id.to_string(),
+            artifact_path: path.clone(),
+            artifact_kind: kind.to_string(),
+            display_name: path.rsplit('/').next().map(str::to_string),
+            role: Some(role.to_string()),
+        });
+    }
+}
+
+#[derive(Default)]
+struct RecordSummary {
+    status: String,
+    agent_type: String,
+    cl_name: Option<String>,
+    agent_name: Option<String>,
+    model: Option<String>,
+    llm_provider: Option<String>,
+    started_at: Option<String>,
+    finished_at: Option<f64>,
+    hidden: bool,
+}
+
+impl RecordSummary {
+    fn from_record(record: &AgentArtifactRecordWire) -> Self {
+        let meta = record.agent_meta.as_ref();
+        let done = record.done.as_ref();
+        let running = record.running.as_ref();
+        let waiting = record.waiting.as_ref();
+        let workflow_state = record.workflow_state.as_ref();
+        let first_step = record.prompt_steps.first();
+
+        let workflow_status = workflow_state.map(|w| w.status.as_str());
+        let status = if waiting.is_some() {
+            "waiting"
+        } else if let Some(workflow_status) = workflow_status {
+            workflow_status
+        } else if record.has_done_marker {
+            "done"
+        } else if meta
+            .and_then(|m| {
+                m.run_started_at.as_ref().or(m.wait_completed_at.as_ref())
+            })
+            .is_some()
+            || running.is_some()
+        {
+            "running"
+        } else {
+            "starting"
+        };
+
+        Self {
+            status: status.to_string(),
+            agent_type: if workflow_state.is_some() {
+                "workflow".to_string()
+            } else {
+                "agent".to_string()
+            },
+            cl_name: done
+                .and_then(|d| d.cl_name.clone())
+                .or_else(|| running.and_then(|r| r.cl_name.clone()))
+                .or_else(|| workflow_state.and_then(|w| w.cl_name.clone())),
+            agent_name: meta
+                .and_then(|m| m.name.clone())
+                .or_else(|| done.and_then(|d| d.name.clone()))
+                .or_else(|| workflow_state.map(|w| w.workflow_name.clone())),
+            model: meta
+                .and_then(|m| m.model.clone())
+                .or_else(|| done.and_then(|d| d.model.clone()))
+                .or_else(|| running.and_then(|r| r.model.clone()))
+                .or_else(|| first_step.and_then(|s| s.model.clone())),
+            llm_provider: meta
+                .and_then(|m| m.llm_provider.clone())
+                .or_else(|| done.and_then(|d| d.llm_provider.clone()))
+                .or_else(|| running.and_then(|r| r.llm_provider.clone()))
+                .or_else(|| first_step.and_then(|s| s.llm_provider.clone())),
+            started_at: meta
+                .and_then(|m| m.run_started_at.clone())
+                .or_else(|| workflow_state.and_then(|w| w.start_time.clone())),
+            finished_at: done.and_then(|d| d.finished_at),
+            hidden: meta.map(|m| m.hidden).unwrap_or(false)
+                || done.map(|d| d.hidden).unwrap_or(false)
+                || workflow_state.map(|w| w.is_anonymous).unwrap_or(false),
+        }
+    }
+}
+
+fn search_text(
+    record: &AgentArtifactRecordWire,
+    summary: &RecordSummary,
+) -> String {
+    let mut parts = vec![
+        record.project_name.clone(),
+        record.workflow_dir_name.clone(),
+        record.timestamp.clone(),
+        summary.status.clone(),
+        summary.agent_type.clone(),
+    ];
+    parts.extend(summary.cl_name.clone());
+    parts.extend(summary.agent_name.clone());
+    parts.extend(summary.model.clone());
+    parts.extend(summary.llm_provider.clone());
+    parts.extend(record.raw_prompt_snippet.clone());
+    parts.join("\n")
+}
+
+fn truncate_for_next_offset<T>(
+    entries: &mut Vec<T>,
+    limit: u32,
+    offset: u32,
+) -> Option<u32> {
+    if limit == 0 {
+        entries.clear();
+        return Some(offset);
+    }
+    if entries.len() > limit as usize {
+        entries.truncate(limit as usize);
+        Some(offset + limit)
+    } else {
+        None
+    }
+}
+
+fn nonempty(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn is_agent_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        AGENT_EVENT_MARKER_OBSERVED
+            | AGENT_EVENT_ATTEMPT_CREATED
+            | AGENT_EVENT_ATTEMPT_UPDATED
+            | AGENT_EVENT_EDGE_OBSERVED
+            | AGENT_EVENT_ARTIFACT_ASSOCIATED
+            | AGENT_EVENT_DISMISSED_IDENTITY_CHANGED
+            | AGENT_EVENT_ARCHIVE_BUNDLE_INDEXED
+            | AGENT_EVENT_ARCHIVE_BUNDLE_REVIVED
+            | AGENT_EVENT_ARCHIVE_BUNDLE_PURGED
+    )
+}
+
+fn agent_projection_schema_version() -> u32 {
+    AGENT_PROJECTION_WIRE_SCHEMA_VERSION
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::agent_scan::{
+        scan_agent_artifacts, AgentArtifactScanOptionsWire,
+    };
+
+    use super::*;
+
+    const PROJECT_ID: &str = "project-a";
+
+    fn context() -> AgentProjectionEventContextWire {
+        AgentProjectionEventContextWire {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            created_at: Some("2026-05-13T21:00:00.000Z".to_string()),
+            source: EventSourceWire {
+                source_type: "test".to_string(),
+                name: "agent-projection-test".to_string(),
+                ..EventSourceWire::default()
+            },
+            host_id: "host-a".to_string(),
+            project_id: PROJECT_ID.to_string(),
+            idempotency_key: None,
+            causality: vec![],
+            source_path: Some("artifacts".to_string()),
+            source_revision: None,
+        }
+    }
+
+    fn write_json(path: &std::path::Path, value: &JsonValue) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(value).unwrap())
+            .unwrap();
+    }
+
+    fn fixture_root(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let root = tmp.path().join("projects");
+        let parent = root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260513120000");
+        write_json(
+            &parent.join("agent_meta.json"),
+            &json!({
+                "name": "parent",
+                "run_started_at": "2026-05-13T16:00:00Z"
+            }),
+        );
+        write_json(
+            &parent.join("done.json"),
+            &json!({
+                "outcome": "completed",
+                "finished_at": 1800000000.0,
+                "cl_name": "feature_alpha",
+                "name": "parent",
+                "plan_path": "/tmp/plan.md",
+                "diff_path": "/tmp/diff.patch",
+                "response_path": "/tmp/response.md"
+            }),
+        );
+
+        let child = root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260513121000");
+        write_json(
+            &child.join("agent_meta.json"),
+            &json!({
+                "name": "child",
+                "parent_timestamp": "20260513120000",
+                "workflow_name": "wf_alpha",
+                "run_started_at": "2026-05-13T16:10:00Z"
+            }),
+        );
+
+        root
+    }
+
+    #[test]
+    fn marker_observed_projects_agent_rows_and_artifacts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture_root(&tmp);
+        let snapshot = scan_agent_artifacts(
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+
+        for record in snapshot.records.clone() {
+            db.append_agent_event(
+                agent_lifecycle_marker_observed_event_request(
+                    context(),
+                    record,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let recent = agent_projection_recent_page(
+            db.connection(),
+            PROJECT_ID,
+            10,
+            0,
+            false,
+        )
+        .unwrap();
+        assert_eq!(recent.entries.len(), 1);
+        assert_eq!(recent.entries[0].agent_name.as_deref(), Some("parent"));
+        assert_eq!(recent.entries[0].cl_name.as_deref(), Some("feature_alpha"));
+        assert!(recent.entries[0].has_done_marker);
+
+        let artifacts = agent_projection_artifacts(
+            db.connection(),
+            PROJECT_ID,
+            &recent.entries[0].agent_id,
+        )
+        .unwrap();
+        let kinds: Vec<_> = artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_kind.as_str())
+            .collect();
+        assert!(kinds.contains(&"plan"));
+        assert!(kinds.contains(&"diff"));
+        assert!(kinds.contains(&"response"));
+    }
+
+    #[test]
+    fn parent_child_edges_are_stable_across_replay() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture_root(&tmp);
+        let snapshot = scan_agent_artifacts(
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let mut live = ProjectionDb::open_in_memory().unwrap();
+
+        for record in snapshot.records {
+            live.append_agent_event(
+                agent_lifecycle_marker_observed_event_request(
+                    context(),
+                    record,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let parent_id = agent_id_from_timestamp("myproj", "20260513120000");
+        let live_children = agent_projection_children(
+            live.connection(),
+            PROJECT_ID,
+            &parent_id,
+        )
+        .unwrap();
+        assert_eq!(live_children.len(), 1);
+        assert_eq!(live_children[0].agent_name.as_deref(), Some("child"));
+
+        let mut replayed = ProjectionDb::open_in_memory().unwrap();
+        for event in live.events_after(0, None).unwrap() {
+            replayed
+                .append_event(EventAppendRequestWire {
+                    created_at: Some(event.created_at),
+                    source: event.source,
+                    host_id: event.host_id,
+                    project_id: event.project_id,
+                    event_type: event.event_type,
+                    payload: event.payload,
+                    idempotency_key: None,
+                    causality: event.causality,
+                    source_path: event.source_path,
+                    source_revision: event.source_revision,
+                })
+                .unwrap();
+        }
+        let mut applier = AgentProjectionApplier;
+        replayed.replay_events(0, &mut [&mut applier]).unwrap();
+
+        assert_eq!(
+            live_children,
+            agent_projection_children(
+                replayed.connection(),
+                PROJECT_ID,
+                &parent_id
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn dismissed_and_archived_identities_remain_queryable() {
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        let identity = AgentDismissedIdentityWire {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            agent_type: "run".to_string(),
+            cl_name: "feature_alpha".to_string(),
+            raw_suffix: Some("20260513120000".to_string()),
+            agent_id: Some(agent_id_from_timestamp("myproj", "20260513120000")),
+            dismissed_name: Some("260513.parent".to_string()),
+            active: true,
+            changed_at: Some("2026-05-13T21:00:00Z".to_string()),
+        };
+        db.append_agent_event(
+            agent_dismissed_identity_changed_event_request(
+                context(),
+                identity.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let archive = AgentArchiveSummaryWire {
+            agent_id: "agent-a".to_string(),
+            raw_suffix: "20260513120000".to_string(),
+            bundle_path: "/tmp/archive/bundle.json".to_string(),
+            cl_name: "feature_alpha".to_string(),
+            agent_name: Some("parent".to_string()),
+            status: "DONE".to_string(),
+            start_time: Some("2026-05-13T16:00:00Z".to_string()),
+            dismissed_at: Some("2026-05-13T21:00:00Z".to_string()),
+            revived_at: None,
+            project_name: Some("myproj".to_string()),
+            model: Some("codex".to_string()),
+            runtime: Some("codex".to_string()),
+            llm_provider: Some("openai".to_string()),
+            step_index: None,
+            step_name: None,
+            step_type: None,
+            retry_attempt: 0,
+            is_workflow_child: false,
+        };
+        db.append_agent_event(
+            agent_archive_bundle_indexed_event_request(
+                context(),
+                archive.clone(),
+                Some(json!({"raw_suffix": archive.raw_suffix})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.append_agent_event(
+            agent_archive_bundle_revived_event_request(
+                context(),
+                archive.bundle_path.clone(),
+                "2026-05-13T21:05:00Z".to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let identities = agent_projection_dismissed_identities(
+            db.connection(),
+            PROJECT_ID,
+            true,
+        )
+        .unwrap();
+        assert_eq!(identities, vec![identity]);
+
+        let archive_page =
+            agent_projection_archive_page(db.connection(), PROJECT_ID, 10, 0)
+                .unwrap();
+        assert_eq!(archive_page.entries.len(), 1);
+        assert_eq!(
+            archive_page.entries[0].revived_at.as_deref(),
+            Some("2026-05-13T21:05:00Z")
+        );
+    }
+}
