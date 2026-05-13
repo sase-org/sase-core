@@ -1,9 +1,22 @@
+pub mod agent;
 pub mod changespec;
 pub mod event;
 pub mod notification;
 pub mod schema;
 pub mod store;
 
+pub use agent::{
+    agent_artifact_records, agent_projection_snapshot, apply_agent_event,
+    AgentArchiveBundleUpsertedPayload, AgentArchiveProjectionRow,
+    AgentArtifactProjectionRow, AgentArtifactUpsertedPayload,
+    AgentAttemptProjectionRow, AgentAttemptRecordedPayload,
+    AgentDismissedIdentityProjectionRow, AgentDismissedIdentityUpsertedPayload,
+    AgentEdgeProjectionRow, AgentEdgeUpsertedPayload,
+    AgentLifecycleTransitionPayload, AgentProjectionRow,
+    AgentProjectionSnapshot, AgentPurgedPayload, AgentRevivedPayload,
+    AgentSearchRow, AgentTombstonePayload,
+    AgentWorkflowChildEdgeUpsertedPayload,
+};
 pub use changespec::{
     apply_changespec_event, changespec_projection_snapshot, changespec_wires,
     ChangeSpecArchiveMovedPayload, ChangeSpecEdgeRow,

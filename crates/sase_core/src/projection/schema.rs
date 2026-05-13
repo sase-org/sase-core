@@ -191,4 +191,155 @@ CREATE INDEX IF NOT EXISTS idx_pending_actions_state
 
 CREATE VIRTUAL TABLE IF NOT EXISTS notification_search_fts
     USING fts5(id UNINDEXED, summary);
+
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id TEXT PRIMARY KEY,
+    family TEXT NOT NULL,
+    current_attempt_id TEXT,
+    agent_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    cl_name TEXT,
+    agent_name TEXT,
+    project_name TEXT,
+    workflow_dir_name TEXT,
+    model TEXT,
+    llm_provider TEXT,
+    started_at TEXT,
+    finished_at REAL,
+    has_waiting_marker INTEGER NOT NULL DEFAULT 0,
+    has_pending_question INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    purged INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT,
+    updated_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_status
+    ON agents(status, hidden, archived);
+CREATE INDEX IF NOT EXISTS idx_agents_family
+    ON agents(family, current_attempt_id);
+
+CREATE TABLE IF NOT EXISTS agent_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT,
+    finished_at REAL,
+    retry_of_attempt_id TEXT,
+    retry_of_timestamp TEXT,
+    retried_as_timestamp TEXT,
+    retry_chain_root_timestamp TEXT,
+    record_json TEXT,
+    updated_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_attempts_agent
+    ON agent_attempts(agent_id, attempt_number);
+
+CREATE TABLE IF NOT EXISTS agent_edges (
+    parent_agent_id TEXT NOT NULL,
+    child_agent_id TEXT NOT NULL,
+    edge_kind TEXT NOT NULL,
+    step_index INTEGER,
+    step_name TEXT,
+    metadata_json TEXT,
+    updated_seq INTEGER NOT NULL,
+    PRIMARY KEY(parent_agent_id, child_agent_id, edge_kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_edges_child
+    ON agent_edges(child_agent_id, edge_kind);
+
+CREATE TABLE IF NOT EXISTS agent_artifacts (
+    artifact_dir TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    project_dir TEXT NOT NULL,
+    project_file TEXT NOT NULL,
+    workflow_dir_name TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    status TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    cl_name TEXT,
+    agent_name TEXT,
+    model TEXT,
+    llm_provider TEXT,
+    started_at TEXT,
+    finished_at REAL,
+    has_done_marker INTEGER NOT NULL,
+    has_running_marker INTEGER NOT NULL,
+    has_waiting_marker INTEGER NOT NULL,
+    has_pending_question INTEGER NOT NULL,
+    has_workflow_state INTEGER NOT NULL,
+    workflow_status TEXT,
+    hidden INTEGER NOT NULL,
+    parent_timestamp TEXT,
+    step_index INTEGER,
+    step_name TEXT,
+    retry_of_timestamp TEXT,
+    retried_as_timestamp TEXT,
+    retry_chain_root_timestamp TEXT,
+    retry_attempt INTEGER,
+    record_json TEXT NOT NULL,
+    updated_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent
+    ON agent_artifacts(agent_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_agent_artifacts_recent
+    ON agent_artifacts(hidden, has_done_marker, finished_at, timestamp);
+
+CREATE TABLE IF NOT EXISTS agent_archive (
+    bundle_path TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    raw_suffix TEXT NOT NULL,
+    cl_name TEXT NOT NULL,
+    agent_name TEXT,
+    status TEXT NOT NULL,
+    start_time TEXT,
+    dismissed_at TEXT,
+    revived_at TEXT,
+    project_name TEXT,
+    model TEXT,
+    runtime TEXT,
+    llm_provider TEXT,
+    step_index INTEGER,
+    step_name TEXT,
+    step_type TEXT,
+    retry_attempt INTEGER NOT NULL,
+    is_workflow_child INTEGER NOT NULL,
+    purged INTEGER NOT NULL DEFAULT 0,
+    summary_json TEXT NOT NULL,
+    updated_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_archive_query
+    ON agent_archive(purged, dismissed_at, start_time, raw_suffix);
+
+CREATE TABLE IF NOT EXISTS dismissed_identities (
+    identity_key TEXT PRIMARY KEY,
+    agent_type TEXT NOT NULL,
+    cl_name TEXT NOT NULL,
+    raw_suffix TEXT,
+    agent_id TEXT,
+    dismissed_at TEXT,
+    metadata_json TEXT,
+    updated_seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dismissed_identities_agent
+    ON dismissed_identities(agent_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS agent_search_fts
+    USING fts5(agent_id UNINDEXED, summary);
 "#;
