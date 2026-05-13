@@ -5,6 +5,7 @@
 pub mod contract;
 pub mod daemon;
 pub mod host_bridge;
+pub mod ownership;
 pub mod push;
 pub mod routes;
 pub mod server;
@@ -30,6 +31,11 @@ pub use host_bridge::{
     StaticAgentHostBridge, StaticHelperHostBridge,
     StaticNotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use ownership::{
+    DaemonOwnershipGuard, DaemonOwnershipMetadata, DaemonOwnershipPaths,
+    OwnershipError, OwnershipRecovery, StaleOwnership,
+    DAEMON_LOCK_SCHEMA_VERSION,
 };
 pub use push::{
     PushConfig, PushDeliveryAttempt, PushDispatcher, PushProviderMode,

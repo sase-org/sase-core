@@ -11,6 +11,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::{
+    ownership::{DaemonOwnershipGuard, OwnershipError},
     push::PushConfig,
     routes::GatewayState,
     server::{
@@ -90,10 +91,12 @@ impl Default for DaemonConfig {
 #[derive(Clone, Debug)]
 pub struct DaemonRuntime {
     state: DaemonState,
+    ownership: Arc<DaemonOwnershipGuard>,
 }
 
 impl DaemonRuntime {
-    pub fn new(config: DaemonConfig) -> Self {
+    pub fn new(config: DaemonConfig, ownership: DaemonOwnershipGuard) -> Self {
+        let ownership = Arc::new(ownership);
         let state = DaemonState {
             build: GatewayBuildWire {
                 package_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -106,11 +109,15 @@ impl DaemonRuntime {
                 .mobile_http_enabled
                 .then_some(config.mobile_gateway.clone()),
         };
-        Self { state }
+        Self { state, ownership }
     }
 
     pub fn state(&self) -> &DaemonState {
         &self.state
+    }
+
+    pub fn ownership(&self) -> &DaemonOwnershipGuard {
+        &self.ownership
     }
 
     fn mobile_gateway_state(
@@ -155,6 +162,8 @@ impl DaemonShutdown {
 #[derive(Debug, Error)]
 pub enum DaemonRunError {
     #[error(transparent)]
+    Ownership(#[from] OwnershipError),
+    #[error(transparent)]
     MobileGateway(#[from] GatewayRunError),
     #[error("failed to wait for daemon shutdown signal: {0}")]
     ShutdownSignal(std::io::Error),
@@ -162,7 +171,18 @@ pub enum DaemonRunError {
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
     validate_daemon_config(&config)?;
-    let runtime = DaemonRuntime::new(config);
+    let build = GatewayBuildWire {
+        package_version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: None,
+    };
+    let ownership = DaemonOwnershipGuard::acquire(
+        config.paths.run_root.clone(),
+        config.paths.socket_path.clone(),
+        config.host_identity.clone(),
+        config.paths.sase_home.clone(),
+        &build,
+    )?;
+    let runtime = DaemonRuntime::new(config, ownership);
     if let Some(mobile_gateway) = runtime.state().mobile_gateway.as_ref() {
         let listener =
             TcpListener::bind(mobile_gateway.bind)
