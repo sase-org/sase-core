@@ -288,16 +288,15 @@ impl ProviderHostManager {
             }
             HostErrorCodeWire::OperationUnsupported
             | HostErrorCodeWire::NetworkDenied
-            | HostErrorCodeWire::ManifestInvalid => {
+            | HostErrorCodeWire::ManifestInvalid
                 if error
                     .target
                     .as_deref()
-                    .is_some_and(|target| target.starts_with("manifest."))
-                {
-                    self.inner
-                        .total_manifest_denials
-                        .fetch_add(1, Ordering::Relaxed);
-                }
+                    .is_some_and(|target| target.starts_with("manifest.")) =>
+            {
+                self.inner
+                    .total_manifest_denials
+                    .fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
