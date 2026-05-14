@@ -13,7 +13,8 @@ use sase_core::projections::{
     NotificationProjectionApplier, ProjectionApplier, ProjectionDb,
     ProjectionError, ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
     ProjectionRecoveryIssueWire, ProjectionStartupRepairReportWire,
-    SourceExportPlanWire, SourceExportStatusWire, WorkflowProjectionApplier,
+    SchedulerProjectionApplier, SourceExportPlanWire, SourceExportStatusWire,
+    WorkflowProjectionApplier,
 };
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
@@ -448,13 +449,15 @@ fn run_startup_repair_checks(
     let mut agents = AgentProjectionApplier;
     let mut workflows = WorkflowProjectionApplier;
     let mut catalogs = CatalogProjectionApplier;
-    let mut appliers: [&mut dyn ProjectionApplier; 6] = [
+    let mut scheduler = SchedulerProjectionApplier;
+    let mut appliers: [&mut dyn ProjectionApplier; 7] = [
         &mut changespec,
         &mut notifications,
         &mut beads,
         &mut agents,
         &mut workflows,
         &mut catalogs,
+        &mut scheduler,
     ];
     let mut report = db.repair_projection_gaps(&mut appliers)?;
     report

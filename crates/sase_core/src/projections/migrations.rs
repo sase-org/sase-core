@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ProjectionError;
 
-pub const PROJECTION_SCHEMA_VERSION: u32 = 8;
+pub const PROJECTION_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationWire {
@@ -701,6 +701,71 @@ const MIGRATIONS: &[Migration] = &[
             ON agents(project_id, workflow_id, timestamp DESC);
     "#,
     },
+    Migration {
+        version: 9,
+        name: "scheduler_queue_projection",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS scheduler_batches (
+            project_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            queue_id TEXT NOT NULL,
+            slot_count INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            batch_json TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, batch_id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_batches_idempotency
+            ON scheduler_batches(project_id, idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_batches_queue_created
+            ON scheduler_batches(project_id, queue_id, created_at, batch_id);
+
+        CREATE TABLE IF NOT EXISTS scheduler_slots (
+            project_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            slot_id TEXT NOT NULL,
+            queue_id TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            queued_position INTEGER,
+            terminal INTEGER NOT NULL DEFAULT 0,
+            launch_spec_json TEXT NOT NULL,
+            slot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, slot_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_batch
+            ON scheduler_slots(project_id, batch_id, slot_index, slot_id);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_queue_position
+            ON scheduler_slots(project_id, queue_id, terminal, queued_position, slot_index);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_status
+            ON scheduler_slots(project_id, status, terminal, updated_at);
+
+        CREATE TABLE IF NOT EXISTS scheduler_events (
+            seq INTEGER PRIMARY KEY REFERENCES event_log(seq) ON DELETE CASCADE,
+            project_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            batch_id TEXT,
+            slot_id TEXT,
+            status TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_batch_seq
+            ON scheduler_events(project_id, batch_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_slot_seq
+            ON scheduler_events(project_id, slot_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_type_seq
+            ON scheduler_events(project_id, event_type, seq);
+    "#,
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<(), ProjectionError> {
@@ -802,6 +867,9 @@ pub(crate) fn recreate_projection_tables(
         DROP TABLE IF EXISTS workflow_steps;
         DROP TABLE IF EXISTS workflows;
         DROP TABLE IF EXISTS workflow_agent_edges;
+        DROP TABLE IF EXISTS scheduler_events;
+        DROP TABLE IF EXISTS scheduler_slots;
+        DROP TABLE IF EXISTS scheduler_batches;
         DROP TABLE IF EXISTS agent_lifecycle_events;
         DROP TABLE IF EXISTS agent_search_fts;
         DROP TABLE IF EXISTS agent_dismissed_identities;

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -33,7 +34,7 @@ use sase_core::projections::{
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
-    source_fingerprint_from_path,
+    scheduler_batch_status, source_fingerprint_from_path,
     workflow_action_response_recorded_event_request,
     workflow_run_created_event_request, workflow_run_updated_event_request,
     AgentArtifactAssociationWire, AgentDismissedIdentityWire,
@@ -43,7 +44,8 @@ use sase_core::projections::{
     LocalDaemonMutationOutcomeWire, NotificationPendingActionsReadResponseWire,
     NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
     ProjectionPageInfoWire, ProjectionPayloadBoundWire,
-    ProjectionSnapshotReadWire, SourceExportKindWire, SourceExportPlanWire,
+    ProjectionSnapshotReadWire, SchedulerEventContextWire,
+    SchedulerQueueSettingsWire, SourceExportKindWire, SourceExportPlanWire,
     SourceExportReportWire, SourceExportStatusWire, SourceFingerprintWire,
     WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
@@ -64,20 +66,22 @@ use crate::{
     projection_service::ProjectionServiceState,
     wire::{
         LocalDaemonBatchResponseWire, LocalDaemonCapabilitiesResponseWire,
-        LocalDaemonCollectionWire, LocalDaemonErrorCodeWire,
-        LocalDaemonErrorWire, LocalDaemonEventBatchWire,
-        LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
-        LocalDaemonEventRequestWire, LocalDaemonFallbackWire,
-        LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
-        LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
+        LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
+        LocalDaemonErrorCodeWire, LocalDaemonErrorWire,
+        LocalDaemonEventBatchWire, LocalDaemonEventPayloadWire,
+        LocalDaemonEventRecordWire, LocalDaemonEventRequestWire,
+        LocalDaemonFallbackWire, LocalDaemonHealthResponseWire,
+        LocalDaemonHealthStatusWire, LocalDaemonHeartbeatWire,
+        LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
         LocalDaemonPayloadBoundWire, LocalDaemonReadRequestWire,
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LocalDaemonWriteRequestWire, LocalDaemonWriteResponseWire,
-        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonSchedulerStatusRequestWire, LocalDaemonWriteRequestWire,
+        LocalDaemonWriteResponseWire, ProjectionPageRequestWire,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -309,6 +313,15 @@ fn handle_payload(
                 Some("payload".to_string()),
                 None,
             ))
+        }
+        LocalDaemonRequestPayloadWire::SchedulerSubmit(request) => {
+            handle_scheduler_submit_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerStatus(request) => {
+            handle_scheduler_status_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerCancel(request) => {
+            handle_scheduler_cancel_payload(request, state)
         }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
             let responses = requests
@@ -623,6 +636,142 @@ fn handle_read_payload(
         other => LocalDaemonResponsePayloadWire::Error(unsupported_read_error(
             read_surface_name(&other),
         )),
+    }
+}
+
+fn handle_scheduler_submit_payload(
+    request: crate::wire::SchedulerBatchSubmitRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let batch_id_hint = request.batch_id.clone();
+    let result = state.projection_service.write_blocking(move |db| {
+        db.submit_scheduler_batch(
+            context,
+            request,
+            SchedulerQueueSettingsWire::default(),
+        )
+    });
+    match result {
+        Ok(response) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: response.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": response.handle.project_id,
+                        "queue_id": response.handle.queue_id,
+                        "status": response.handle.status,
+                        "slot_count": response.handle.slot_count,
+                        "duplicate": response.duplicate,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler submit failed: {error}"),
+            false,
+            batch_id_hint.or_else(|| Some("scheduler_submit".to_string())),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn handle_scheduler_status_payload(
+    request: LocalDaemonSchedulerStatusRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let result = state.projection_service.read_blocking(move |db| {
+        scheduler_batch_status(
+            db.connection(),
+            &request.project_id,
+            &request.batch_id,
+        )
+    });
+    match result {
+        Ok(Some(status)) => {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status)
+        }
+        Ok(None) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::ResourceNotFound,
+            "scheduler batch not found",
+            false,
+            Some("batch_id".to_string()),
+            None,
+        )),
+        Err(error) => {
+            LocalDaemonResponsePayloadWire::Error(projection_error(error))
+        }
+    }
+}
+
+fn handle_scheduler_cancel_payload(
+    request: crate::wire::SchedulerCancelRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let result = state
+        .projection_service
+        .write_blocking(move |db| db.cancel_scheduler_slots(context, request));
+    match result {
+        Ok(status) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: status.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": status.handle.project_id,
+                        "queue_id": status.handle.queue_id,
+                        "status": status.handle.status,
+                        "slot_count": status.handle.slot_count,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerCancel(status)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler cancel failed: {error}"),
+            false,
+            Some("scheduler_cancel".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn scheduler_event_context(
+    state: &DaemonState,
+    project_id: String,
+    idempotency_key: Option<String>,
+) -> SchedulerEventContextWire {
+    SchedulerEventContextWire {
+        schema_version: sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+        created_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        source: EventSourceWire {
+            source_type: "daemon_rpc".to_string(),
+            name: "sase_gateway".to_string(),
+            version: Some(state.build.package_version.clone()),
+            runtime: Some("rust".to_string()),
+            metadata: BTreeMap::new(),
+        },
+        host_id: state.host_identity.clone(),
+        project_id,
+        idempotency_key,
+        causality: Vec::new(),
+        source_path: None,
+        source_revision: None,
     }
 }
 
@@ -2344,6 +2493,7 @@ fn collection_capability(
         LocalDaemonCollectionWire::Changespecs => "changespecs.read",
         LocalDaemonCollectionWire::Notifications => "notifications.read",
         LocalDaemonCollectionWire::Workflows => "catalogs.read",
+        LocalDaemonCollectionWire::Scheduler => "scheduler.read",
         LocalDaemonCollectionWire::Xprompts => "catalogs.read",
         LocalDaemonCollectionWire::Indexing => "indexing.status",
         LocalDaemonCollectionWire::Mocked => "mocked.list",
@@ -2427,6 +2577,9 @@ fn local_daemon_capabilities() -> Vec<String> {
         "notifications.read".to_string(),
         "notifications.write".to_string(),
         "workflows.write".to_string(),
+        "scheduler.submit".to_string(),
+        "scheduler.read".to_string(),
+        "scheduler.cancel".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -2717,6 +2870,7 @@ mod tests {
         notification_append_event_request, AgentLifecycleProjectionWire,
         AgentLifecycleStatusWire, AgentProjectionEventContextWire,
         EventSourceWire, NotificationProjectionEventContextWire,
+        SchedulerBatchSubmitRequestWire, SchedulerLaunchSpecWire,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -2932,6 +3086,112 @@ mod tests {
             other => {
                 panic!("expected unsupported write error, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn scheduler_submit_status_and_events_use_projection() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service);
+        let submit = SchedulerBatchSubmitRequestWire {
+            schema_version:
+                sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+            project_id: "project-a".to_string(),
+            idempotency_key: "batch-key-1".to_string(),
+            batch_id: Some("batch-a".to_string()),
+            queue_id: Some("agents".to_string()),
+            launch_specs: vec![
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "first".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "second".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            metadata: BTreeMap::new(),
+        };
+        let submit_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerSubmit(submit),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&submit_payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response) => {
+                assert_eq!(response.handle.batch_id, "batch-a");
+                assert_eq!(response.status.slots.len(), 2);
+                assert_eq!(response.status.slots[0].queued_position, Some(1));
+            }
+            other => {
+                panic!("expected scheduler submit response, got {other:?}")
+            }
+        }
+
+        let status_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerStatus(
+                LocalDaemonSchedulerStatusRequestWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    batch_id: "batch-a".to_string(),
+                },
+            ),
+        ))
+        .unwrap();
+        let status_response = response_for_frame(&status_payload, &state);
+        match status_response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status) => {
+                assert_eq!(status.handle.status, "queued");
+                assert_eq!(status.slots.len(), 2);
+            }
+            other => {
+                panic!("expected scheduler status response, got {other:?}")
+            }
+        }
+
+        let events_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Events(
+                LocalDaemonEventRequestWire {
+                    since_event_id: Some("0000000000000000".to_string()),
+                    collections: vec![LocalDaemonCollectionWire::Scheduler],
+                    snapshot_id: None,
+                    max_events: 4,
+                },
+            ),
+        ))
+        .unwrap();
+        let events_response = response_for_frame(&events_payload, &state);
+        match events_response.payload {
+            LocalDaemonResponsePayloadWire::Events(events) => {
+                assert!(events.events.iter().any(|event| matches!(
+                    event.payload,
+                    LocalDaemonEventPayloadWire::Delta {
+                        collection: LocalDaemonCollectionWire::Scheduler,
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected events response, got {other:?}"),
         }
     }
 
