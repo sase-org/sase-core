@@ -390,6 +390,16 @@ pub fn apply_source_export(
     plan: &SourceExportPlanWire,
 ) -> Result<Option<SourceFingerprintWire>, SourceExportApplyError> {
     let target = Path::new(&plan.target_path);
+    if source_export_create_new(plan) && target.exists() {
+        let existing = fs::read(target).map_err(SourceExportApplyError::Io)?;
+        if sha256_hex(&existing) == plan.content_sha256 {
+            return Ok(source_fingerprint_from_path(target, true));
+        }
+        return Err(SourceExportApplyError::Conflict {
+            message: "source export target already exists".to_string(),
+            actual_fingerprint: source_fingerprint_from_path(target, true),
+        });
+    }
     if let Some(expected) = plan.expected_fingerprint.as_ref() {
         let actual = source_fingerprint_from_path(target, true);
         if !source_fingerprint_matches(actual.as_ref(), expected) {
@@ -421,6 +431,14 @@ pub fn apply_source_export(
     }
     lock.unlock().map_err(SourceExportApplyError::Io)?;
     Ok(source_fingerprint_from_path(target, true))
+}
+
+fn source_export_create_new(plan: &SourceExportPlanWire) -> bool {
+    plan.repair_context
+        .as_ref()
+        .and_then(|context| context.get("create_new"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
 }
 
 fn source_fingerprint_matches(

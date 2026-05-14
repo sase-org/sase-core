@@ -200,6 +200,7 @@ pub use replay::{
     ReplayProjectionApplier,
 };
 pub use workflows::{
+    workflow_action_response_recorded_event_request,
     workflow_hitl_paused_event_request, workflow_hitl_resumed_event_request,
     workflow_projection_detail, workflow_projection_list,
     workflow_retry_requested_event_request, workflow_run_created_event_request,
@@ -209,8 +210,9 @@ pub use workflows::{
     WorkflowEventProjectionWire, WorkflowProjectionApplier,
     WorkflowProjectionEventContextWire, WorkflowProjectionPageWire,
     WorkflowRunProjectionWire, WorkflowStepProjectionWire, WorkflowSummaryWire,
-    WORKFLOW_EVENT_HITL_PAUSED, WORKFLOW_EVENT_HITL_RESUMED,
-    WORKFLOW_EVENT_RETRY_REQUESTED, WORKFLOW_EVENT_RUN_CREATED,
-    WORKFLOW_EVENT_RUN_UPDATED, WORKFLOW_EVENT_STEP_TRANSITIONED,
-    WORKFLOW_EVENT_TERMINAL_STATE_REACHED, WORKFLOW_PROJECTION_NAME,
+    WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED, WORKFLOW_EVENT_HITL_PAUSED,
+    WORKFLOW_EVENT_HITL_RESUMED, WORKFLOW_EVENT_RETRY_REQUESTED,
+    WORKFLOW_EVENT_RUN_CREATED, WORKFLOW_EVENT_RUN_UPDATED,
+    WORKFLOW_EVENT_STEP_TRANSITIONED, WORKFLOW_EVENT_TERMINAL_STATE_REACHED,
+    WORKFLOW_PROJECTION_NAME,
 };

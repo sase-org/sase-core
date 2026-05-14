@@ -16,6 +16,7 @@
     "mocked.events",
     "notifications.read",
     "notifications.write",
+    "workflows.write",
     "projection.rebuild",
     "indexing.status",
     "indexing.rebuild",

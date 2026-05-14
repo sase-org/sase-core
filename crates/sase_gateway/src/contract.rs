@@ -988,6 +988,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "mocked.events",
             "notifications.read",
             "notifications.write",
+            "workflows.write",
             "projection.rebuild",
             "indexing.status",
             "indexing.rebuild",

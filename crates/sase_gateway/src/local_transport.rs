@@ -7,6 +7,7 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use sase_core::agent_archive::AgentArchiveSummaryWire;
+use sase_core::agent_scan::WorkflowStateWire;
 use sase_core::notifications::{
     cleanup_stale_pending_actions_in_store, notification_append_jsonl,
     pending_action_store_json, pending_action_store_path,
@@ -28,20 +29,23 @@ use sase_core::projections::{
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
-    source_fingerprint_from_path, AgentArtifactAssociationWire,
-    AgentDismissedIdentityWire, AgentProjectionEventContextWire,
-    BeadMutationWriteRequestWire, BeadProjectionEventContextWire,
-    EventAppendRequestWire, EventSourceWire, LocalDaemonMutationOutcomeWire,
-    NotificationPendingActionsReadResponseWire,
+    source_fingerprint_from_path,
+    workflow_action_response_recorded_event_request,
+    workflow_run_created_event_request, workflow_run_updated_event_request,
+    AgentArtifactAssociationWire, AgentDismissedIdentityWire,
+    AgentProjectionEventContextWire, BeadMutationWriteRequestWire,
+    BeadProjectionEventContextWire, EventAppendRequestWire, EventSourceWire,
+    LocalDaemonMutationOutcomeWire, NotificationPendingActionsReadResponseWire,
     NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
     ProjectionPayloadBoundWire, ProjectionSnapshotReadWire,
     SourceExportKindWire, SourceExportPlanWire, SourceExportReportWire,
     SourceExportStatusWire, SourceFingerprintWire,
+    WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
     CHANGESPEC_STATUS_TRANSITIONED, PROJECTION_READ_WIRE_SCHEMA_VERSION,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 use tokio::{
@@ -601,6 +605,11 @@ fn handle_write_payload(
             .map(LocalDaemonResponsePayloadWire::Write)
             .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
     }
+    if request.surface.starts_with("workflow.") {
+        return workflow_write_payload(request, state)
+            .map(LocalDaemonResponsePayloadWire::Write)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
     if request.surface.starts_with("agents.") {
         return agent_write_payload(request, state)
             .map(LocalDaemonResponsePayloadWire::Write)
@@ -949,6 +958,277 @@ fn notification_projection_plan_error(
     local_error(
         LocalDaemonErrorCodeWire::InvalidRequest,
         format!("invalid notification write event: {error}"),
+        false,
+        Some("payload".to_string()),
+        Some(json!({"fallbackable": true})),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowStateWritePayload {
+    state: WorkflowStateWire,
+    #[serde(default)]
+    workflow_id: Option<String>,
+    #[serde(default)]
+    event: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowActionResponseWritePayload {
+    action_kind: String,
+    response_path: String,
+    response_json: JsonValue,
+    #[serde(default)]
+    workflow_id: Option<String>,
+    #[serde(default)]
+    notification_id: Option<String>,
+    #[serde(default = "default_action_response_state")]
+    state: String,
+}
+
+fn default_action_response_state() -> String {
+    "already_handled".to_string()
+}
+
+fn workflow_write_payload(
+    request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonWriteResponseWire, LocalDaemonErrorWire> {
+    let (event_request, resource_handle, source_exports, projection_snapshot) =
+        workflow_write_plan(&request)?;
+    let outcome = state
+        .projection_service
+        .write_blocking(move |db| {
+            db.append_mutation_event_with_outbox(
+                event_request,
+                resource_handle,
+                source_exports,
+                projection_snapshot,
+            )
+        })
+        .map_err(projection_write_error)?;
+    let outcome =
+        apply_source_exports(state, outcome).map_err(projection_write_error)?;
+    if let Some(report) = outcome
+        .source_exports
+        .iter()
+        .find(|report| report.status != SourceExportStatusWire::Applied)
+    {
+        return Err(source_export_repair_error(report, &outcome));
+    }
+    Ok(LocalDaemonWriteResponseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        surface: request.surface,
+        outcome,
+        fallback: fallback_unavailable(),
+    })
+}
+
+fn workflow_write_plan(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<
+    (
+        EventAppendRequestWire,
+        Option<String>,
+        Vec<SourceExportPlanWire>,
+        Option<JsonValue>,
+    ),
+    LocalDaemonErrorWire,
+> {
+    match request.surface.as_str() {
+        "workflow.state" => {
+            preflight_source_exports(request)?;
+            let payload: WorkflowStateWritePayload =
+                decode_surface_payload(request)?;
+            let workflow_id = payload.workflow_id.unwrap_or_else(|| {
+                request
+                    .payload
+                    .get("artifacts_dir")
+                    .and_then(JsonValue::as_str)
+                    .or_else(|| {
+                        request.source_exports.first().and_then(|export| {
+                            Path::new(&export.target_path)
+                                .parent()
+                                .and_then(Path::to_str)
+                        })
+                    })
+                    .and_then(|path| {
+                        path.trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or(&payload.state.workflow_name)
+                    .to_string()
+            });
+            let workflow = WorkflowRunProjectionWire::from_state(
+                &workflow_id,
+                payload.state,
+            );
+            let context = workflow_event_context(
+                request,
+                request
+                    .source_exports
+                    .first()
+                    .map(|export| export.target_path.clone()),
+            );
+            let event_request = if payload.event.as_deref()
+                == Some("run_created")
+            {
+                workflow_run_created_event_request(context, workflow.clone())
+            } else {
+                workflow_run_updated_event_request(context, workflow.clone())
+            }
+            .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!("workflow:{workflow_id}")),
+                request.source_exports.clone(),
+                Some(json!({"workflow": workflow})),
+            ))
+        }
+        "workflow.action_response" => {
+            let payload: WorkflowActionResponseWritePayload =
+                decode_surface_payload(request)?;
+            let source_exports = if request.source_exports.is_empty() {
+                vec![workflow_response_source_export(
+                    &payload.response_path,
+                    &payload.response_json,
+                    &payload.action_kind,
+                )?]
+            } else {
+                request.source_exports.clone()
+            };
+            preflight_create_new_exports(&source_exports)?;
+            let event_request =
+                workflow_action_response_recorded_event_request(
+                    workflow_event_context(
+                        request,
+                        Some(payload.response_path.clone()),
+                    ),
+                    payload.workflow_id.clone(),
+                    payload.action_kind.clone(),
+                    payload.response_path.clone(),
+                    payload.notification_id.clone(),
+                    payload.state.clone(),
+                )
+                .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!(
+                    "workflow_action:{}",
+                    payload
+                        .notification_id
+                        .as_deref()
+                        .unwrap_or(&payload.response_path)
+                )),
+                source_exports,
+                Some(json!({"action_response": payload})),
+            ))
+        }
+        _ => Err(unsupported_write_error(request)),
+    }
+}
+
+fn workflow_event_context(
+    request: &LocalDaemonWriteRequestWire,
+    source_path: Option<String>,
+) -> WorkflowProjectionEventContextWire {
+    WorkflowProjectionEventContextWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        created_at: Some(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        source: EventSourceWire {
+            source_type: request.actor.actor_type.clone(),
+            name: request.actor.name.clone(),
+            version: request.actor.version.clone(),
+            runtime: request.actor.runtime.clone(),
+            ..EventSourceWire::default()
+        },
+        host_id: "local-daemon".to_string(),
+        project_id: request.project_id.clone(),
+        idempotency_key: Some(request.idempotency_key.clone()),
+        causality: Vec::new(),
+        source_path,
+        source_revision: None,
+    }
+}
+
+fn workflow_response_source_export(
+    response_path: &str,
+    response_json: &JsonValue,
+    action_kind: &str,
+) -> Result<SourceExportPlanWire, LocalDaemonErrorWire> {
+    let content = serde_json::to_string_pretty(response_json)
+        .map(|value| format!("{value}\n"))
+        .map_err(|error| {
+            local_error(
+                LocalDaemonErrorCodeWire::InvalidRequest,
+                format!("failed to serialize workflow response JSON: {error}"),
+                false,
+                Some("payload.response_json".to_string()),
+                None,
+            )
+        })?;
+    let mut plan = SourceExportPlanWire::new(
+        response_path,
+        SourceExportKindWire::AtomicJson,
+        content,
+    );
+    plan.repair_context = Some(json!({
+        "domain": "workflow",
+        "action_kind": action_kind,
+        "create_new": true,
+    }));
+    Ok(plan)
+}
+
+fn preflight_create_new_exports(
+    source_exports: &[SourceExportPlanWire],
+) -> Result<(), LocalDaemonErrorWire> {
+    for export in source_exports {
+        let create_new = export
+            .repair_context
+            .as_ref()
+            .and_then(|context| context.get("create_new"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        if !create_new || !Path::new(&export.target_path).exists() {
+            continue;
+        }
+        let existing = fs::read(&export.target_path).map_err(|error| {
+            local_error(
+                LocalDaemonErrorCodeWire::Internal,
+                format!("failed to read existing response file: {error}"),
+                false,
+                Some(export.target_path.clone()),
+                None,
+            )
+        })?;
+        let existing_sha = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(existing))
+        };
+        if existing_sha != export.content_sha256 {
+            return Err(local_error(
+                LocalDaemonErrorCodeWire::ConflictStaleSource,
+                "workflow response file already exists",
+                false,
+                Some(export.target_path.clone()),
+                Some(json!({"fallbackable": false})),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn workflow_projection_plan_error(
+    error: sase_core::projections::ProjectionError,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::InvalidRequest,
+        format!("invalid workflow write event: {error}"),
         false,
         Some("payload".to_string()),
         Some(json!({"fallbackable": true})),
@@ -1915,6 +2195,7 @@ fn local_daemon_capabilities() -> Vec<String> {
         "mocked.events".to_string(),
         "notifications.read".to_string(),
         "notifications.write".to_string(),
+        "workflows.write".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -2419,6 +2700,179 @@ mod tests {
                 panic!("expected unsupported write error, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn workflow_state_write_updates_projection_and_source_export() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service);
+        let artifacts_dir = dir.path().join("artifacts").join("wf-001");
+        std::fs::create_dir_all(&artifacts_dir).unwrap();
+        let state_path = artifacts_dir.join("workflow_state.json");
+        let workflow_state = json!({
+            "workflow_name": "review",
+            "status": "running",
+            "current_step_index": 0,
+            "steps": [{"name": "plan", "status": "pending"}],
+            "pid": 123,
+            "appears_as_agent": true
+        });
+        let content = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&workflow_state).unwrap()
+        );
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "workflow.state".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "workflow-state-wf-001".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "workflow_id": "wf-001",
+                    "event": "run_created",
+                    "artifacts_dir": artifacts_dir.display().to_string(),
+                    "state": workflow_state,
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![SourceExportPlanWire::new(
+                    state_path.display().to_string(),
+                    SourceExportKindWire::AtomicJson,
+                    content,
+                )],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.surface, "workflow.state");
+                assert_eq!(write.outcome.event_type, "workflow.run_created");
+                assert_eq!(
+                    write.outcome.resource_handle.as_deref(),
+                    Some("workflow:wf-001")
+                );
+                assert_eq!(
+                    write.outcome.source_exports[0].status,
+                    SourceExportStatusWire::Applied
+                );
+                assert!(state_path.exists());
+            }
+            other => panic!("expected workflow write response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_action_response_is_create_once_and_idempotent() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service);
+        let response_path = dir.path().join("plan_response.json");
+
+        let response_json = json!({"action": "approve"});
+        let write_request =
+            |idempotency_key: &str, response_json: JsonValue| {
+                LocalDaemonRequestPayloadWire::Write(
+                    LocalDaemonWriteRequestWire {
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        surface: "workflow.action_response".to_string(),
+                        project_id: "project-a".to_string(),
+                        idempotency_key: idempotency_key.to_string(),
+                        actor: MutationActorWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            actor_type: "test".to_string(),
+                            name: "local-transport-test".to_string(),
+                            version: None,
+                            runtime: None,
+                        },
+                        payload: json!({
+                            "workflow_id": "wf-001",
+                            "action_kind": "plan_approval",
+                            "response_path": response_path.display().to_string(),
+                            "response_json": response_json,
+                            "notification_id": "notif-1",
+                        }),
+                        expected_source_fingerprints: vec![],
+                        source_exports: vec![],
+                    },
+                )
+            };
+
+        let first = response_for_frame(
+            &serde_json::to_vec(&request(write_request(
+                "action-response-1",
+                response_json.clone(),
+            )))
+            .unwrap(),
+            &state,
+        );
+        match first.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(
+                    write.outcome.event_type,
+                    "workflow.action_response_recorded"
+                );
+                assert!(!write.outcome.duplicate);
+                assert_eq!(
+                    write.outcome.source_exports[0].status,
+                    SourceExportStatusWire::Applied
+                );
+            }
+            other => panic!("expected workflow action response, got {other:?}"),
+        }
+
+        let duplicate = response_for_frame(
+            &serde_json::to_vec(&request(write_request(
+                "action-response-1",
+                response_json,
+            )))
+            .unwrap(),
+            &state,
+        );
+        match duplicate.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert!(write.outcome.duplicate);
+            }
+            other => {
+                panic!("expected duplicate workflow response, got {other:?}")
+            }
+        }
+
+        let conflict = response_for_frame(
+            &serde_json::to_vec(&request(write_request(
+                "action-response-2",
+                json!({"action": "reject"}),
+            )))
+            .unwrap(),
+            &state,
+        );
+        match conflict.payload {
+            LocalDaemonResponsePayloadWire::Error(error) => {
+                assert_eq!(
+                    error.code,
+                    LocalDaemonErrorCodeWire::ConflictStaleSource
+                );
+            }
+            other => panic!("expected response-file conflict, got {other:?}"),
+        }
+        assert!(std::fs::read_to_string(response_path)
+            .unwrap()
+            .contains("\"approve\""));
     }
 
     #[test]

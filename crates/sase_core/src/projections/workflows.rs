@@ -25,6 +25,8 @@ pub const WORKFLOW_EVENT_HITL_RESUMED: &str = "workflow.hitl_resumed";
 pub const WORKFLOW_EVENT_RETRY_REQUESTED: &str = "workflow.retry_requested";
 pub const WORKFLOW_EVENT_TERMINAL_STATE_REACHED: &str =
     "workflow.terminal_state_reached";
+pub const WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED: &str =
+    "workflow.action_response_recorded";
 
 const WORKFLOW_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -294,6 +296,14 @@ enum WorkflowProjectionEventPayloadWire {
         error: Option<String>,
         traceback: Option<String>,
     },
+    ActionResponseRecorded {
+        schema_version: u32,
+        workflow_id: Option<String>,
+        action_kind: String,
+        response_path: String,
+        notification_id: Option<String>,
+        state: String,
+    },
 }
 
 pub struct WorkflowProjectionApplier;
@@ -440,6 +450,28 @@ pub fn workflow_terminal_state_reached_event_request(
             finished_at,
             error,
             traceback,
+        },
+    )
+}
+
+pub fn workflow_action_response_recorded_event_request(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: Option<String>,
+    action_kind: String,
+    response_path: String,
+    notification_id: Option<String>,
+    state: String,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_event_request(
+        context,
+        WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED,
+        WorkflowProjectionEventPayloadWire::ActionResponseRecorded {
+            schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
+            workflow_id,
+            action_kind,
+            response_path,
+            notification_id,
+            state,
         },
     )
 }
@@ -666,6 +698,10 @@ fn apply_workflow_event_tx(
             )?;
             (Some(workflow_id.as_str()), None)
         }
+        WorkflowProjectionEventPayloadWire::ActionResponseRecorded {
+            workflow_id,
+            ..
+        } => (workflow_id.as_deref(), None),
     };
     insert_workflow_event_tx(conn, event, workflow_id, step_index)?;
     Ok(())
@@ -681,6 +717,7 @@ fn is_workflow_event(event_type: &str) -> bool {
             | WORKFLOW_EVENT_HITL_RESUMED
             | WORKFLOW_EVENT_RETRY_REQUESTED
             | WORKFLOW_EVENT_TERMINAL_STATE_REACHED
+            | WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED
     )
 }
 
