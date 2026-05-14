@@ -1036,17 +1036,16 @@ fn workflow_write_payload(
     })
 }
 
+type WorkflowWritePlan = (
+    EventAppendRequestWire,
+    Option<String>,
+    Vec<SourceExportPlanWire>,
+    Option<JsonValue>,
+);
+
 fn workflow_write_plan(
     request: &LocalDaemonWriteRequestWire,
-) -> Result<
-    (
-        EventAppendRequestWire,
-        Option<String>,
-        Vec<SourceExportPlanWire>,
-        Option<JsonValue>,
-    ),
-    LocalDaemonErrorWire,
-> {
+) -> Result<WorkflowWritePlan, LocalDaemonErrorWire> {
     match request.surface.as_str() {
         "workflow.state" => {
             preflight_source_exports(request)?;
