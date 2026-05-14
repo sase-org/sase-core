@@ -9,9 +9,13 @@
     "health.read",
     "capabilities.read",
     "writes.contract",
+    "agents.write",
+    "beads.write",
+    "changespecs.write",
     "mocked.list",
     "mocked.events",
     "notifications.read",
+    "notifications.write",
     "projection.rebuild",
     "indexing.status",
     "indexing.rebuild",
@@ -695,7 +699,7 @@
     },
     "implemented": true,
     "phase": "local_transport",
-    "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for writes and unsupported read surfaces",
+    "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads/writes, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for unsupported write and read surfaces",
     "transport": "unix_domain_socket_framed_json"
   },
   "versioning": {

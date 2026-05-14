@@ -8,9 +8,10 @@ use std::{
 use sase_core::projections::{
     AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
     ChangeSpecProjectionApplier, EventAppendOutcomeWire,
-    EventAppendRequestWire, NotificationProjectionApplier, ProjectionApplier,
-    ProjectionDb, ProjectionError, ProjectionRebuildOptionsWire,
-    ProjectionRebuildReportWire, ProjectionStartupRepairReportWire,
+    EventAppendRequestWire, LocalDaemonMutationOutcomeWire,
+    NotificationProjectionApplier, ProjectionApplier, ProjectionDb,
+    ProjectionError, ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
+    ProjectionStartupRepairReportWire, SourceExportPlanWire,
     WorkflowProjectionApplier,
 };
 use serde_json::{json, Value as JsonValue};
@@ -215,6 +216,25 @@ impl ProjectionService {
         result
     }
 
+    pub fn write_blocking<T, F>(
+        &self,
+        f: F,
+    ) -> Result<T, ProjectionServiceError>
+    where
+        F: FnOnce(&mut ProjectionDb) -> Result<T, ProjectionError>,
+    {
+        let db = self.db()?;
+        let started = Instant::now();
+        let mut guard = db
+            .lock()
+            .map_err(|_| ProjectionServiceError::LockPoisoned)?;
+        let result = f(&mut guard).map_err(ProjectionServiceError::from);
+        self.inner
+            .metrics
+            .record_projection_query(started.elapsed());
+        result
+    }
+
     pub async fn write<T, F>(&self, f: F) -> Result<T, ProjectionServiceError>
     where
         T: Send + 'static,
@@ -257,6 +277,49 @@ impl ProjectionService {
         let result = self
             .write(move |db| db.append_projected_event(request))
             .await;
+        self.inner
+            .metrics
+            .record_projection_event_append(started.elapsed());
+        result
+    }
+
+    pub fn append_mutation_event_with_outbox_blocking(
+        &self,
+        request: EventAppendRequestWire,
+        resource_handle: Option<String>,
+        source_exports: Vec<SourceExportPlanWire>,
+        projection_snapshot: Option<JsonValue>,
+    ) -> Result<LocalDaemonMutationOutcomeWire, ProjectionServiceError> {
+        let started = Instant::now();
+        let result = self.write_blocking(move |db| {
+            let mut outcome = db.append_mutation_event_with_outbox(
+                request,
+                resource_handle,
+                source_exports,
+                projection_snapshot,
+            )?;
+            let export_ids: Vec<i64> = outcome
+                .source_exports
+                .iter()
+                .filter(|report| {
+                    matches!(
+                        report.status,
+                        sase_core::projections::SourceExportStatusWire::Pending
+                            | sase_core::projections::SourceExportStatusWire::Failed
+                            | sase_core::projections::SourceExportStatusWire::Conflict
+                    )
+                })
+                .map(|report| report.export_id)
+                .collect();
+            if !export_ids.is_empty() {
+                let mut reports = Vec::with_capacity(export_ids.len());
+                for export_id in export_ids {
+                    reports.push(db.retry_source_export_once(export_id)?);
+                }
+                outcome.source_exports = reports;
+            }
+            Ok(outcome)
+        });
         self.inner
             .metrics
             .record_projection_event_append(started.elapsed());

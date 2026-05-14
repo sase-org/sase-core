@@ -6,14 +6,42 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-use sase_core::notifications::PendingActionStoreWire;
-use sase_core::projections::{
-    notification_projection_counts, notification_projection_detail,
-    notification_projection_page, projected_pending_action_store,
-    NotificationPendingActionsReadResponseWire,
-    NotificationReadDetailResponseWire, ProjectionPayloadBoundWire,
-    ProjectionSnapshotReadWire, PROJECTION_READ_WIRE_SCHEMA_VERSION,
+use sase_core::agent_archive::AgentArchiveSummaryWire;
+use sase_core::notifications::{
+    cleanup_stale_pending_actions_in_store, notification_append_jsonl,
+    pending_action_store_json, pending_action_store_path,
+    plan_notification_state_update_export, read_pending_action_store,
+    register_pending_action_in_store, update_pending_action_in_store,
+    NotificationStateUpdateWire, NotificationUpdateOutcomeWire,
+    NotificationWire, PendingActionStoreWire, PendingActionWire,
 };
+use sase_core::projections::{
+    agent_archive_bundle_indexed_event_request,
+    agent_archive_bundle_purged_event_request,
+    agent_archive_bundle_revived_event_request,
+    agent_artifact_associated_event_request,
+    agent_cleanup_result_recorded_event_request,
+    agent_dismissed_identity_changed_event_request, changespec_handle,
+    notification_append_event_request, notification_projection_counts,
+    notification_projection_detail, notification_projection_page,
+    notification_source_paths, notification_state_update_event_request,
+    pending_action_cleanup_event_request,
+    pending_action_register_event_request, pending_action_update_event_request,
+    plan_bead_source_export_mutation, projected_pending_action_store,
+    source_fingerprint_from_path, AgentArtifactAssociationWire,
+    AgentDismissedIdentityWire, AgentProjectionEventContextWire,
+    BeadMutationWriteRequestWire, BeadProjectionEventContextWire,
+    EventAppendRequestWire, EventSourceWire, LocalDaemonMutationOutcomeWire,
+    NotificationPendingActionsReadResponseWire,
+    NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
+    ProjectionPayloadBoundWire, ProjectionSnapshotReadWire,
+    SourceExportKindWire, SourceExportPlanWire, SourceExportReportWire,
+    SourceExportStatusWire, SourceFingerprintWire,
+    CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
+    CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
+    CHANGESPEC_STATUS_TRANSITIONED, PROJECTION_READ_WIRE_SCHEMA_VERSION,
+};
+use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 use tokio::{
@@ -39,8 +67,8 @@ use crate::{
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LocalDaemonWriteRequestWire, ProjectionPageRequestWire,
-        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonWriteRequestWire, LocalDaemonWriteResponseWire,
+        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -232,7 +260,7 @@ fn handle_payload(
             handle_read_payload(request, state)
         }
         LocalDaemonRequestPayloadWire::Write(request) => {
-            handle_write_payload(request)
+            handle_write_payload(request, state)
         }
         LocalDaemonRequestPayloadWire::Events(request) => {
             LocalDaemonResponsePayloadWire::Events(event_batch_response(
@@ -559,8 +587,920 @@ fn handle_read_payload(
 
 fn handle_write_payload(
     request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
+    if request.surface.starts_with("changespec.") {
+        return changespec_write_payload(request, state)
+            .map(LocalDaemonResponsePayloadWire::Write)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
+    if request.surface.starts_with("notifications.")
+        || request.surface.starts_with("pending_actions.")
+    {
+        return notification_write_payload(request, state)
+            .map(LocalDaemonResponsePayloadWire::Write)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
+    if request.surface.starts_with("agents.") {
+        return agent_write_payload(request, state)
+            .map(LocalDaemonResponsePayloadWire::Write)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
+    if request.surface == "beads" {
+        return bead_write_payload(request, state)
+            .map(LocalDaemonResponsePayloadWire::Write)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
     LocalDaemonResponsePayloadWire::Error(unsupported_write_error(&request))
+}
+
+#[derive(Debug, Deserialize)]
+struct NotificationAppendWritePayload {
+    notification: NotificationWire,
+}
+
+#[derive(Debug, Deserialize)]
+struct NotificationStateUpdateWritePayload {
+    update: NotificationStateUpdateWire,
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingActionWritePayload {
+    action: PendingActionWire,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PendingActionCleanupWritePayload {
+    #[serde(default)]
+    prefixes: Vec<String>,
+    #[serde(default)]
+    now_unix: Option<f64>,
+}
+
+struct PlannedNotificationWrite {
+    event_request: EventAppendRequestWire,
+    resource_handle: Option<String>,
+    source_exports: Vec<SourceExportPlanWire>,
+    projection_snapshot: Option<JsonValue>,
+    changed: Option<bool>,
+}
+
+fn notification_write_payload(
+    request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonWriteResponseWire, LocalDaemonErrorWire> {
+    let planned = plan_notification_write(&request, state)?;
+    let mut outcome = state
+        .projection_service
+        .write_blocking({
+            let source_exports = planned.source_exports;
+            let projection_snapshot = planned.projection_snapshot;
+            let resource_handle = planned.resource_handle;
+            move |db| {
+                db.append_mutation_event_with_outbox(
+                    planned.event_request,
+                    resource_handle,
+                    source_exports,
+                    projection_snapshot,
+                )
+            }
+        })
+        .map_err(projection_write_error)?;
+    outcome =
+        apply_source_exports(state, outcome).map_err(projection_write_error)?;
+    if let Some(changed) = planned.changed {
+        outcome.changed = changed && !outcome.duplicate;
+    }
+    Ok(LocalDaemonWriteResponseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        surface: request.surface,
+        outcome,
+        fallback: LocalDaemonFallbackWire {
+            available: false,
+            reason: None,
+            message: None,
+        },
+    })
+}
+
+fn plan_notification_write(
+    request: &LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<PlannedNotificationWrite, LocalDaemonErrorWire> {
+    let paths = notification_source_paths(&state.paths.sase_home);
+    match request.surface.as_str() {
+        "notifications.append" => {
+            let payload: NotificationAppendWritePayload =
+                decode_surface_payload(request)?;
+            let content = notification_append_jsonl(&payload.notification)
+                .map_err(notification_plan_error)?;
+            let path = paths.notifications_path.clone();
+            let event_request = notification_append_event_request(
+                notification_event_context(request, Some(path.clone())),
+                payload.notification.clone(),
+            )
+            .map_err(notification_projection_plan_error)?;
+            Ok(PlannedNotificationWrite {
+                event_request,
+                resource_handle: Some(payload.notification.id.clone()),
+                source_exports: vec![source_export_plan(
+                    &path,
+                    SourceExportKindWire::JsonlAppend,
+                    content,
+                )],
+                projection_snapshot: Some(json!({
+                    "appended_count": 1,
+                    "notification_id": payload.notification.id,
+                })),
+                changed: Some(true),
+            })
+        }
+        "notifications.state_update" => {
+            let payload: NotificationStateUpdateWritePayload =
+                decode_surface_payload(request)?;
+            let path = paths.notifications_path.clone();
+            let (outcome, content) = plan_notification_state_update_export(
+                Path::new(&path),
+                &payload.update,
+                true,
+            )
+            .map_err(notification_plan_error)?;
+            let event_request = notification_state_update_event_request(
+                notification_event_context(request, Some(path.clone())),
+                payload.update,
+                outcome.notifications.clone(),
+            )
+            .map_err(notification_projection_plan_error)?;
+            let changed = outcome.changed_count > 0 || outcome.rewritten;
+            Ok(PlannedNotificationWrite {
+                event_request,
+                resource_handle: notification_update_resource_handle(&outcome),
+                source_exports: if changed {
+                    vec![source_export_plan(
+                        &path,
+                        SourceExportKindWire::AtomicJson,
+                        content,
+                    )]
+                } else {
+                    Vec::new()
+                },
+                projection_snapshot: Some(json!({"outcome": outcome})),
+                changed: Some(changed),
+            })
+        }
+        "pending_actions.register" => pending_action_write_plan(
+            request,
+            state,
+            PendingActionWriteMode::Register,
+        ),
+        "pending_actions.update" => pending_action_write_plan(
+            request,
+            state,
+            PendingActionWriteMode::Update,
+        ),
+        "pending_actions.cleanup" => {
+            pending_action_cleanup_write_plan(request, state)
+        }
+        _ => Err(unsupported_write_error(request)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PendingActionWriteMode {
+    Register,
+    Update,
+}
+
+fn pending_action_write_plan(
+    request: &LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+    mode: PendingActionWriteMode,
+) -> Result<PlannedNotificationWrite, LocalDaemonErrorWire> {
+    let payload: PendingActionWritePayload = decode_surface_payload(request)?;
+    let path = pending_action_store_path(&state.paths.sase_home);
+    let store = read_pending_action_store(&path, None)
+        .map_err(notification_plan_error)?;
+    let next = match mode {
+        PendingActionWriteMode::Register => {
+            register_pending_action_in_store(store, &payload.action)
+        }
+        PendingActionWriteMode::Update => {
+            update_pending_action_in_store(store, &payload.action)
+        }
+    };
+    let content =
+        pending_action_store_json(&next).map_err(notification_plan_error)?;
+    let source_path = path.to_string_lossy().to_string();
+    let context =
+        notification_event_context(request, Some(source_path.clone()));
+    let event_request = match mode {
+        PendingActionWriteMode::Register => {
+            pending_action_register_event_request(
+                context,
+                payload.action.clone(),
+            )
+        }
+        PendingActionWriteMode::Update => {
+            pending_action_update_event_request(context, payload.action.clone())
+        }
+    }
+    .map_err(notification_projection_plan_error)?;
+    Ok(PlannedNotificationWrite {
+        event_request,
+        resource_handle: Some(payload.action.notification_id.clone()),
+        source_exports: vec![source_export_plan(
+            &source_path,
+            SourceExportKindWire::AtomicJson,
+            content,
+        )],
+        projection_snapshot: Some(json!({"store": next})),
+        changed: Some(true),
+    })
+}
+
+fn pending_action_cleanup_write_plan(
+    request: &LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<PlannedNotificationWrite, LocalDaemonErrorWire> {
+    let payload: PendingActionCleanupWritePayload =
+        decode_surface_payload(request)?;
+    let path = pending_action_store_path(&state.paths.sase_home);
+    let mut store = read_pending_action_store(&path, None)
+        .map_err(notification_plan_error)?;
+    let mut prefixes = payload.prefixes;
+    if let Some(now_unix) = payload.now_unix {
+        prefixes.extend(cleanup_stale_pending_actions_in_store(
+            &mut store, now_unix,
+        ));
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    for prefix in &prefixes {
+        store.actions.remove(prefix);
+    }
+    let content =
+        pending_action_store_json(&store).map_err(notification_plan_error)?;
+    let source_path = path.to_string_lossy().to_string();
+    let event_request = pending_action_cleanup_event_request(
+        notification_event_context(request, Some(source_path.clone())),
+        prefixes.clone(),
+    )
+    .map_err(notification_projection_plan_error)?;
+    let changed = !prefixes.is_empty();
+    Ok(PlannedNotificationWrite {
+        event_request,
+        resource_handle: Some("pending_actions".to_string()),
+        source_exports: if changed {
+            vec![source_export_plan(
+                &source_path,
+                SourceExportKindWire::AtomicJson,
+                content,
+            )]
+        } else {
+            Vec::new()
+        },
+        projection_snapshot: Some(
+            json!({"store": store, "prefixes": prefixes}),
+        ),
+        changed: Some(changed),
+    })
+}
+
+fn decode_surface_payload<T>(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<T, LocalDaemonErrorWire>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(request.payload.clone()).map_err(|error| {
+        local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            format!(
+                "local daemon write surface '{}' has invalid payload: {error}",
+                request.surface
+            ),
+            false,
+            Some("payload".to_string()),
+            None,
+        )
+    })
+}
+
+fn notification_event_context(
+    request: &LocalDaemonWriteRequestWire,
+    source_path: Option<String>,
+) -> NotificationProjectionEventContextWire {
+    NotificationProjectionEventContextWire {
+        created_at: Some(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        source: EventSourceWire {
+            source_type: request.actor.actor_type.clone(),
+            name: request.actor.name.clone(),
+            version: request.actor.version.clone(),
+            runtime: request.actor.runtime.clone(),
+            ..EventSourceWire::default()
+        },
+        host_id: "local-daemon".to_string(),
+        project_id: request.project_id.clone(),
+        idempotency_key: Some(request.idempotency_key.clone()),
+        source_path,
+        source_revision: None,
+    }
+}
+
+fn source_export_plan(
+    target_path: &str,
+    kind: SourceExportKindWire,
+    content: String,
+) -> SourceExportPlanWire {
+    let mut plan = SourceExportPlanWire::new(target_path, kind, content);
+    plan.expected_fingerprint =
+        source_fingerprint_from_path(Path::new(target_path), true);
+    plan
+}
+
+fn notification_update_resource_handle(
+    outcome: &NotificationUpdateOutcomeWire,
+) -> Option<String> {
+    if outcome.matched_count == 1 {
+        outcome
+            .notifications
+            .first()
+            .map(|notification| notification.id.clone())
+    } else {
+        Some("notifications".to_string())
+    }
+}
+
+fn notification_plan_error(error: String) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::InvalidRequest,
+        error,
+        false,
+        Some("payload".to_string()),
+        Some(json!({"fallbackable": true})),
+    )
+}
+
+fn notification_projection_plan_error(
+    error: sase_core::projections::ProjectionError,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::InvalidRequest,
+        format!("invalid notification write event: {error}"),
+        false,
+        Some("payload".to_string()),
+        Some(json!({"fallbackable": true})),
+    )
+}
+
+fn bead_write_payload(
+    request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonWriteResponseWire, LocalDaemonErrorWire> {
+    let plan_request: BeadMutationWriteRequestWire =
+        serde_json::from_value(request.payload.clone()).map_err(|error| {
+            local_error(
+                LocalDaemonErrorCodeWire::InvalidRequest,
+                format!("invalid bead mutation payload: {error}"),
+                false,
+                Some("payload".to_string()),
+                None,
+            )
+        })?;
+    let write_plan =
+        plan_bead_source_export_mutation(plan_request).map_err(|error| {
+            local_error(
+                LocalDaemonErrorCodeWire::InvalidRequest,
+                format!("failed to plan bead mutation: {error}"),
+                false,
+                Some("payload".to_string()),
+                None,
+            )
+        })?;
+    let source_path = write_plan
+        .source_exports
+        .iter()
+        .find(|export| export.target_path.ends_with("issues.jsonl"))
+        .map(|export| export.target_path.clone());
+    let context = BeadProjectionEventContextWire {
+        created_at: Some(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        source: EventSourceWire {
+            source_type: request.actor.actor_type.clone(),
+            name: request.actor.name.clone(),
+            version: request.actor.version.clone(),
+            runtime: request.actor.runtime.clone(),
+            ..EventSourceWire::default()
+        },
+        host_id: "local-daemon".to_string(),
+        project_id: request.project_id.clone(),
+        idempotency_key: Some(request.idempotency_key.clone()),
+        causality: Vec::new(),
+        source_path,
+        source_revision: None,
+    };
+    let outcome = state
+        .projection_service
+        .write_blocking(move |db| {
+            db.append_bead_mutation_event_with_exports(
+                context,
+                write_plan.outcome,
+                write_plan.source_exports,
+            )
+        })
+        .map_err(projection_write_error)?;
+    let outcome =
+        apply_source_exports(state, outcome).map_err(projection_write_error)?;
+    if let Some(report) = outcome
+        .source_exports
+        .iter()
+        .find(|report| report.status != SourceExportStatusWire::Applied)
+    {
+        return Err(source_export_repair_error(report, &outcome));
+    }
+    Ok(LocalDaemonWriteResponseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        surface: request.surface,
+        outcome,
+        fallback: fallback_unavailable(),
+    })
+}
+
+fn changespec_write_payload(
+    request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonWriteResponseWire, LocalDaemonErrorWire> {
+    preflight_source_exports(&request)?;
+    let event_request = changespec_event_request_from_write(&request)?;
+    let resource_handle = changespec_resource_handle(&request);
+    let outcome = state
+        .projection_service
+        .write_blocking({
+            let source_exports = request.source_exports.clone();
+            let projection_snapshot = Some(json!({
+                "surface": request.surface,
+                "payload": request.payload,
+            }));
+            move |db| {
+                db.append_mutation_event_with_outbox(
+                    event_request,
+                    resource_handle,
+                    source_exports,
+                    projection_snapshot,
+                )
+            }
+        })
+        .map_err(projection_write_error)?;
+    let outcome =
+        apply_source_exports(state, outcome).map_err(projection_write_error)?;
+    if let Some(report) = outcome
+        .source_exports
+        .iter()
+        .find(|report| report.status != SourceExportStatusWire::Applied)
+    {
+        return Err(source_export_repair_error(report, &outcome));
+    }
+    Ok(LocalDaemonWriteResponseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        surface: request.surface,
+        outcome,
+        fallback: fallback_unavailable(),
+    })
+}
+
+fn changespec_event_request_from_write(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<EventAppendRequestWire, LocalDaemonErrorWire> {
+    let spec = required_payload_object(request, "spec")?;
+    let name = spec
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| invalid_write_payload(request, "spec.name"))?;
+    let source_path = spec
+        .get("file_path")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+    let event_type = changespec_event_type(request)?;
+    let payload = changespec_event_payload(request, spec)?;
+    let event = EventAppendRequestWire {
+        created_at: Some(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        source: EventSourceWire {
+            source_type: request.actor.actor_type.clone(),
+            name: request.actor.name.clone(),
+            version: request.actor.version.clone(),
+            runtime: request.actor.runtime.clone(),
+            ..EventSourceWire::default()
+        },
+        host_id: "local-daemon".to_string(),
+        project_id: request.project_id.clone(),
+        event_type: event_type.to_string(),
+        payload,
+        idempotency_key: Some(request.idempotency_key.clone()),
+        causality: vec![],
+        source_path,
+        source_revision: None,
+    };
+    debug!(
+        surface = %request.surface,
+        changespec = %name,
+        event_type = %event.event_type,
+        "prepared changespec write event"
+    );
+    Ok(event)
+}
+
+fn changespec_event_type(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<&'static str, LocalDaemonErrorWire> {
+    match request.surface.as_str() {
+        "changespec.status" => Ok(CHANGESPEC_STATUS_TRANSITIONED),
+        "changespec.field" => Ok(CHANGESPEC_SPEC_UPDATED),
+        "changespec.comments" => Ok(CHANGESPEC_SECTIONS_UPDATED),
+        "changespec.created" => Ok(CHANGESPEC_SPEC_CREATED),
+        "changespec.active_archive_moved" => {
+            Ok(CHANGESPEC_ACTIVE_ARCHIVE_MOVED)
+        }
+        _ => Err(unsupported_write_error(request)),
+    }
+}
+
+fn changespec_event_payload(
+    request: &LocalDaemonWriteRequestWire,
+    spec: &JsonValue,
+) -> Result<JsonValue, LocalDaemonErrorWire> {
+    let is_archive = request
+        .payload
+        .get("is_archive")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    match request.surface.as_str() {
+        "changespec.status" => Ok(json!({
+            "schema_version": 1,
+            "spec": spec,
+            "from_status": required_payload_string(request, "from_status")?,
+            "to_status": required_payload_string(request, "to_status")?,
+            "is_archive": is_archive,
+        })),
+        "changespec.field" | "changespec.created" => Ok(json!({
+            "schema_version": 1,
+            "spec": spec,
+            "is_archive": is_archive,
+        })),
+        "changespec.comments" => Ok(json!({
+            "schema_version": 1,
+            "spec": spec,
+            "section_names": request
+                .payload
+                .get("section_names")
+                .cloned()
+                .unwrap_or_else(|| json!(["comments"])),
+            "is_archive": is_archive,
+        })),
+        "changespec.active_archive_moved" => Ok(json!({
+            "schema_version": 1,
+            "spec": spec,
+            "from_path": required_payload_string(request, "from_path")?,
+            "to_path": required_payload_string(request, "to_path")?,
+            "is_archive": is_archive,
+        })),
+        _ => Err(unsupported_write_error(request)),
+    }
+}
+
+fn changespec_resource_handle(
+    request: &LocalDaemonWriteRequestWire,
+) -> Option<String> {
+    request
+        .payload
+        .get("spec")
+        .and_then(|spec| spec.get("name"))
+        .and_then(JsonValue::as_str)
+        .map(|name| changespec_handle(&request.project_id, name))
+}
+
+fn required_payload_object<'a>(
+    request: &'a LocalDaemonWriteRequestWire,
+    field: &str,
+) -> Result<&'a JsonValue, LocalDaemonErrorWire> {
+    request
+        .payload
+        .get(field)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| invalid_write_payload(request, field))
+}
+
+fn invalid_write_payload(
+    request: &LocalDaemonWriteRequestWire,
+    field: &str,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::InvalidRequest,
+        format!(
+            "local daemon write surface '{}' has invalid payload field '{}'",
+            request.surface, field
+        ),
+        false,
+        Some(format!("payload.{field}")),
+        None,
+    )
+}
+
+fn preflight_source_exports(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<(), LocalDaemonErrorWire> {
+    for export in &request.source_exports {
+        let Some(expected) = export.expected_fingerprint.as_ref() else {
+            continue;
+        };
+        let actual =
+            source_fingerprint_from_path(Path::new(&export.target_path), true);
+        if !source_fingerprint_matches(actual.as_ref(), expected) {
+            return Err(local_error(
+                LocalDaemonErrorCodeWire::ConflictStaleSource,
+                "source fingerprint changed before mutation",
+                false,
+                Some(export.target_path.clone()),
+                Some(json!({
+                    "expected_fingerprint": expected,
+                    "actual_fingerprint": actual,
+                    "fallbackable": false,
+                })),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn source_fingerprint_matches(
+    actual: Option<&SourceFingerprintWire>,
+    expected: &SourceFingerprintWire,
+) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    expected
+        .file_size
+        .map_or(true, |value| actual.file_size == Some(value))
+        && expected
+            .modified_at_unix_millis
+            .map_or(true, |value| actual.modified_at_unix_millis == Some(value))
+        && expected
+            .inode
+            .map_or(true, |value| actual.inode == Some(value))
+        && expected
+            .content_sha256
+            .as_ref()
+            .map_or(true, |value| actual.content_sha256.as_ref() == Some(value))
+}
+
+fn apply_source_exports(
+    state: &DaemonState,
+    mut outcome: LocalDaemonMutationOutcomeWire,
+) -> Result<
+    LocalDaemonMutationOutcomeWire,
+    crate::projection_service::ProjectionServiceError,
+> {
+    let export_ids: Vec<i64> = outcome
+        .source_exports
+        .iter()
+        .filter(|export| export.status != SourceExportStatusWire::Applied)
+        .map(|export| export.export_id)
+        .collect();
+    if export_ids.is_empty() {
+        return Ok(outcome);
+    }
+    let mut reports = Vec::with_capacity(export_ids.len());
+    for export_id in export_ids {
+        reports.push(state.projection_service.write_blocking(move |db| {
+            db.retry_source_export_once(export_id)
+        })?);
+    }
+    outcome.source_exports = reports;
+    Ok(outcome)
+}
+
+fn source_export_repair_error(
+    report: &SourceExportReportWire,
+    outcome: &LocalDaemonMutationOutcomeWire,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::ExportPendingRepair,
+        format!(
+            "source export for '{}' is {:?}",
+            report.target_path, report.status
+        ),
+        true,
+        Some(report.target_path.clone()),
+        Some(json!({
+            "fallbackable": false,
+            "event_seq": outcome.event_seq,
+            "export_id": report.export_id,
+            "status": report.status,
+            "message": report.message,
+        })),
+    )
+}
+
+fn agent_write_payload(
+    request: LocalDaemonWriteRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonWriteResponseWire, LocalDaemonErrorWire> {
+    let event_request = agent_event_request_from_write(&request)?;
+    let resource_handle = agent_resource_handle(&request);
+    let outcome = state
+        .projection_service
+        .write_blocking({
+            let source_exports = request.source_exports.clone();
+            let projection_snapshot = Some(json!({
+                "surface": request.surface,
+                "payload": request.payload,
+            }));
+            move |db| {
+                db.append_mutation_event_with_outbox(
+                    event_request,
+                    resource_handle,
+                    source_exports,
+                    projection_snapshot,
+                )
+            }
+        })
+        .map_err(projection_write_error)?;
+    let outcome =
+        apply_source_exports(state, outcome).map_err(projection_write_error)?;
+    Ok(LocalDaemonWriteResponseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        surface: request.surface,
+        outcome,
+        fallback: LocalDaemonFallbackWire {
+            available: false,
+            reason: None,
+            message: None,
+        },
+    })
+}
+
+fn agent_event_request_from_write(
+    request: &LocalDaemonWriteRequestWire,
+) -> Result<EventAppendRequestWire, LocalDaemonErrorWire> {
+    let context = agent_event_context(request);
+    match request.surface.as_str() {
+        "agents.dismissed_identity" => {
+            let identity: AgentDismissedIdentityWire =
+                decode_write_payload(request, "identity")?;
+            agent_dismissed_identity_changed_event_request(context, identity)
+        }
+        "agents.archive_bundle" => {
+            let archive: AgentArchiveSummaryWire =
+                decode_write_payload(request, "archive")?;
+            let bundle = request.payload.get("bundle").cloned();
+            agent_archive_bundle_indexed_event_request(context, archive, bundle)
+        }
+        "agents.archive_revived" => {
+            let bundle_path = required_payload_string(request, "bundle_path")?;
+            let revived_at = required_payload_string(request, "revived_at")?;
+            agent_archive_bundle_revived_event_request(
+                context,
+                bundle_path,
+                revived_at,
+            )
+        }
+        "agents.archive_purged" => {
+            let bundle_path = required_payload_string(request, "bundle_path")?;
+            agent_archive_bundle_purged_event_request(context, bundle_path)
+        }
+        "agents.artifact_associated" => {
+            let artifact: AgentArtifactAssociationWire =
+                decode_write_payload(request, "artifact")?;
+            agent_artifact_associated_event_request(context, artifact)
+        }
+        "agents.cleanup_result" => agent_cleanup_result_recorded_event_request(
+            context,
+            request.payload.clone(),
+        ),
+        _ => {
+            return Err(unsupported_write_error(request));
+        }
+    }
+    .map_err(|error| {
+        local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            format!("invalid agent write payload: {error}"),
+            false,
+            Some("payload".to_string()),
+            None,
+        )
+    })
+}
+
+fn agent_event_context(
+    request: &LocalDaemonWriteRequestWire,
+) -> AgentProjectionEventContextWire {
+    AgentProjectionEventContextWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        created_at: Some(
+            Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        source: EventSourceWire {
+            source_type: request.actor.actor_type.clone(),
+            name: request.actor.name.clone(),
+            version: request.actor.version.clone(),
+            runtime: request.actor.runtime.clone(),
+            ..EventSourceWire::default()
+        },
+        host_id: "local-daemon".to_string(),
+        project_id: request.project_id.clone(),
+        idempotency_key: Some(request.idempotency_key.clone()),
+        causality: Vec::new(),
+        source_path: request
+            .source_exports
+            .first()
+            .map(|export| export.target_path.clone()),
+        source_revision: None,
+    }
+}
+
+fn decode_write_payload<T>(
+    request: &LocalDaemonWriteRequestWire,
+    field: &str,
+) -> Result<T, LocalDaemonErrorWire>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = request.payload.get(field).cloned().ok_or_else(|| {
+        local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            format!("agent write payload missing '{field}'"),
+            false,
+            Some(format!("payload.{field}")),
+            None,
+        )
+    })?;
+    serde_json::from_value(value).map_err(|error| {
+        local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            format!("agent write payload field '{field}' is invalid: {error}"),
+            false,
+            Some(format!("payload.{field}")),
+            None,
+        )
+    })
+}
+
+fn required_payload_string(
+    request: &LocalDaemonWriteRequestWire,
+    field: &str,
+) -> Result<String, LocalDaemonErrorWire> {
+    request
+        .payload
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            local_error(
+                LocalDaemonErrorCodeWire::InvalidRequest,
+                format!("agent write payload missing string '{field}'"),
+                false,
+                Some(format!("payload.{field}")),
+                None,
+            )
+        })
+}
+
+fn agent_resource_handle(
+    request: &LocalDaemonWriteRequestWire,
+) -> Option<String> {
+    match request.surface.as_str() {
+        "agents.dismissed_identity" => request
+            .payload
+            .get("identity")
+            .and_then(|value| value.get("raw_suffix"))
+            .and_then(JsonValue::as_str)
+            .map(|suffix| format!("dismissed:{suffix}")),
+        "agents.archive_bundle" => request
+            .payload
+            .get("archive")
+            .and_then(|value| value.get("bundle_path"))
+            .and_then(JsonValue::as_str)
+            .map(|path| format!("archive:{path}")),
+        "agents.archive_revived" | "agents.archive_purged" => request
+            .payload
+            .get("bundle_path")
+            .and_then(JsonValue::as_str)
+            .map(|path| format!("archive:{path}")),
+        "agents.artifact_associated" => request
+            .payload
+            .get("artifact")
+            .and_then(|value| value.get("artifact_path"))
+            .and_then(JsonValue::as_str)
+            .map(|path| format!("artifact:{path}")),
+        "agents.cleanup_result" => Some("cleanup_result".to_string()),
+        _ => None,
+    }
 }
 
 fn notification_list_payload(
@@ -815,6 +1755,18 @@ fn projection_error(
     )
 }
 
+fn projection_write_error(
+    error: crate::projection_service::ProjectionServiceError,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::ExportPendingRepair,
+        format!("projection write failed: {error}"),
+        true,
+        Some("projection_db".to_string()),
+        Some(json!({"fallbackable": true})),
+    )
+}
+
 fn read_surface_name(request: &LocalDaemonReadRequestWire) -> &'static str {
     match request {
         LocalDaemonReadRequestWire::ChangespecList(_) => "changespecs.list",
@@ -931,9 +1883,13 @@ fn local_daemon_capabilities() -> Vec<String> {
         "health.read".to_string(),
         "capabilities.read".to_string(),
         "writes.contract".to_string(),
+        "agents.write".to_string(),
+        "beads.write".to_string(),
+        "changespecs.write".to_string(),
         "mocked.list".to_string(),
         "mocked.events".to_string(),
         "notifications.read".to_string(),
+        "notifications.write".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -1215,7 +2171,10 @@ mod tests {
             ProjectionPageRequestWire, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         },
     };
-    use sase_core::notifications::NotificationWire;
+    use sase_core::notifications::{
+        read_notifications_snapshot, NotificationStateUpdateWire,
+        NotificationWire,
+    };
     use sase_core::projections::{
         notification_append_event_request, EventSourceWire,
         NotificationProjectionEventContextWire,
@@ -1435,6 +2394,379 @@ mod tests {
                 panic!("expected unsupported write error, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn changespec_status_write_updates_projection_and_source_export() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project_file = project_dir.join("project.sase");
+        let original =
+            "NAME: alpha\nDESCRIPTION: demo\nSTATUS: WIP\n".to_string();
+        let updated =
+            "NAME: alpha\nDESCRIPTION: demo\nSTATUS: Draft\n".to_string();
+        std::fs::write(&project_file, &original).unwrap();
+
+        let spec = sase_core::parser::parse_project_bytes(
+            &project_file.display().to_string(),
+            updated.as_bytes(),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let mut export = SourceExportPlanWire::new(
+            project_file.display().to_string(),
+            SourceExportKindWire::ProjectFile,
+            updated.clone(),
+        );
+        export.expected_fingerprint =
+            source_fingerprint_from_path(&project_file, true);
+
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "changespec.status".to_string(),
+                project_id: "project".to_string(),
+                idempotency_key: "changespec-status-alpha".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "spec": spec,
+                    "from_status": "WIP",
+                    "to_status": "Draft",
+                    "is_archive": false,
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![export],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.surface, "changespec.status");
+                assert_eq!(
+                    write.outcome.event_type,
+                    CHANGESPEC_STATUS_TRANSITIONED
+                );
+                assert_eq!(
+                    write.outcome.resource_handle.as_deref(),
+                    Some("changespec:project:alpha")
+                );
+                assert_eq!(
+                    write.outcome.source_exports[0].status,
+                    SourceExportStatusWire::Applied
+                );
+            }
+            other => {
+                panic!("expected changespec write response, got {other:?}")
+            }
+        }
+
+        assert_eq!(std::fs::read_to_string(&project_file).unwrap(), updated);
+        let projected = projection_service
+            .read_blocking(|db| {
+                db.fetch_changespec_detail(&changespec_handle(
+                    "project", "alpha",
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.summary.status, "Draft");
+        assert_eq!(projected.spec.name, "alpha");
+    }
+
+    #[test]
+    fn changespec_write_stale_source_returns_conflict_before_append() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project_file = project_dir.join("project.sase");
+        let original =
+            "NAME: alpha\nDESCRIPTION: demo\nSTATUS: WIP\n".to_string();
+        let legacy =
+            "NAME: alpha\nDESCRIPTION: changed\nSTATUS: WIP\n".to_string();
+        let updated =
+            "NAME: alpha\nDESCRIPTION: demo\nSTATUS: Draft\n".to_string();
+        std::fs::write(&project_file, &original).unwrap();
+        let expected = source_fingerprint_from_path(&project_file, true);
+        std::fs::write(&project_file, &legacy).unwrap();
+
+        let spec = sase_core::parser::parse_project_bytes(
+            &project_file.display().to_string(),
+            updated.as_bytes(),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let mut export = SourceExportPlanWire::new(
+            project_file.display().to_string(),
+            SourceExportKindWire::ProjectFile,
+            updated,
+        );
+        export.expected_fingerprint = expected;
+
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "changespec.status".to_string(),
+                project_id: "project".to_string(),
+                idempotency_key: "changespec-status-alpha-stale".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "spec": spec,
+                    "from_status": "WIP",
+                    "to_status": "Draft",
+                    "is_archive": false,
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![export],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Error(error) => {
+                assert_eq!(
+                    error.code,
+                    LocalDaemonErrorCodeWire::ConflictStaleSource
+                );
+            }
+            other => {
+                panic!("expected changespec conflict response, got {other:?}")
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&project_file).unwrap(), legacy);
+        assert_eq!(
+            projection_service
+                .read_blocking(|db| db.event_count())
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn notification_write_updates_projection_and_source_exports() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let mut state = test_state_with_projection(projection_service.clone());
+        state.paths.sase_home = dir.path().join("home");
+        let notification = notification("write-notification-1");
+
+        let append_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "notifications.append".to_string(),
+                project_id: "home".to_string(),
+                idempotency_key: "append-write-notification-1".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({"notification": notification}),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let append_response = response_for_frame(&append_payload, &state);
+
+        match append_response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.surface, "notifications.append");
+                assert!(write.outcome.changed);
+                assert_eq!(write.outcome.source_exports.len(), 1);
+                assert_eq!(
+                    write.outcome.source_exports[0].status,
+                    SourceExportStatusWire::Applied
+                );
+            }
+            other => {
+                panic!("expected notification write response, got {other:?}")
+            }
+        }
+
+        let notification_path = state
+            .paths
+            .sase_home
+            .join("notifications")
+            .join("notifications.jsonl");
+        let snapshot =
+            read_notifications_snapshot(&notification_path, true).unwrap();
+        assert_eq!(snapshot.notifications.len(), 1);
+        assert!(!snapshot.notifications[0].read);
+
+        let mark_read_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "notifications.state_update".to_string(),
+                project_id: "home".to_string(),
+                idempotency_key: "mark-read-write-notification-1".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "update": NotificationStateUpdateWire::MarkRead {
+                        id: "write-notification-1".to_string(),
+                    }
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let mark_read_response = response_for_frame(&mark_read_payload, &state);
+
+        match mark_read_response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.surface, "notifications.state_update");
+                assert!(write.outcome.changed);
+                assert_eq!(
+                    write.outcome.source_exports[0].status,
+                    SourceExportStatusWire::Applied
+                );
+            }
+            other => {
+                panic!("expected notification write response, got {other:?}")
+            }
+        }
+
+        let snapshot =
+            read_notifications_snapshot(&notification_path, true).unwrap();
+        assert!(snapshot.notifications[0].read);
+        let projected = projection_service
+            .read_blocking(|db| {
+                sase_core::projections::notification_projection_detail(
+                    db.connection(),
+                    "write-notification-1",
+                )
+            })
+            .unwrap();
+        assert!(projected.unwrap().read);
+    }
+
+    #[test]
+    fn bead_write_updates_projection_and_source_exports() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let beads_dir = dir.path().join("project").join("sdd").join("beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        std::fs::write(
+            beads_dir.join("config.json"),
+            r#"{"issue_prefix":"sase","next_counter":1,"owner":"owner@example.com"}"#,
+        )
+        .unwrap();
+        std::fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "beads".to_string(),
+                project_id: "project".to_string(),
+                idempotency_key: "bead-create-1".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "schema_version": 1,
+                    "operation": "create",
+                    "beads_dir": beads_dir,
+                    "create": {
+                        "title": "Daemon bead",
+                        "issue_type": "plan",
+                        "tier": "epic",
+                        "now": "2026-05-14T00:00:00Z"
+                    }
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.surface, "beads");
+                assert_eq!(write.outcome.event_type, "bead.created");
+                assert_eq!(
+                    write.outcome.resource_handle.as_deref(),
+                    Some("sase-1")
+                );
+                assert!(write.outcome.source_exports.iter().all(|export| {
+                    export.status == SourceExportStatusWire::Applied
+                }));
+                assert_eq!(
+                    write.outcome.projection_snapshot.as_ref().unwrap()
+                        ["operation"],
+                    json!("create")
+                );
+            }
+            other => panic!("expected bead write response, got {other:?}"),
+        }
+
+        let source =
+            std::fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+        assert!(source.contains("Daemon bead"));
+        let projected = projection_service
+            .read_blocking(|db| {
+                sase_core::projections::bead_projection_show(
+                    db.connection(),
+                    "project",
+                    "sase-1",
+                )
+            })
+            .unwrap();
+        assert_eq!(projected.title, "Daemon bead");
     }
 
     #[test]

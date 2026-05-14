@@ -42,6 +42,8 @@ pub const AGENT_EVENT_ARCHIVE_BUNDLE_REVIVED: &str =
     "agent.archive_bundle_revived";
 pub const AGENT_EVENT_ARCHIVE_BUNDLE_PURGED: &str =
     "agent.archive_bundle_purged";
+pub const AGENT_EVENT_CLEANUP_RESULT_RECORDED: &str =
+    "agent.cleanup_result_recorded";
 
 const AGENT_PROJECTION_WIRE_SCHEMA_VERSION: u32 = 1;
 const AGENT_INDEXING_DOMAIN: &str = "agents";
@@ -118,6 +120,10 @@ pub enum AgentProjectionEventPayloadWire {
     ArchiveBundlePurged {
         schema_version: u32,
         bundle_path: String,
+    },
+    CleanupResultRecorded {
+        schema_version: u32,
+        result: JsonValue,
     },
 }
 
@@ -397,6 +403,20 @@ pub fn agent_archive_bundle_purged_event_request(
         AgentProjectionEventPayloadWire::ArchiveBundlePurged {
             schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
             bundle_path,
+        },
+    )
+}
+
+pub fn agent_cleanup_result_recorded_event_request(
+    context: AgentProjectionEventContextWire,
+    result: JsonValue,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    agent_event_request(
+        context,
+        AGENT_EVENT_CLEANUP_RESULT_RECORDED,
+        AgentProjectionEventPayloadWire::CleanupResultRecorded {
+            schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
+            result,
         },
     )
 }
@@ -828,6 +848,7 @@ fn apply_agent_event_tx(
             bundle_path,
             ..
         } => purge_archive_tx(conn, event, &bundle_path)?,
+        AgentProjectionEventPayloadWire::CleanupResultRecorded { .. } => {}
     }
     Ok(())
 }

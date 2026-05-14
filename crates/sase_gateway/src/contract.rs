@@ -959,7 +959,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "length_prefix": "u32 big-endian byte length",
                 "max_payload_bytes": LOCAL_DAEMON_MAX_PAYLOAD_BYTES
             },
-            "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for writes and unsupported read surfaces"
+            "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads/writes, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for unsupported write and read surfaces"
         },
         "versioning": {
             "contract_name": "sase_local_daemon_framed_json_v1",
@@ -981,9 +981,13 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "health.read",
             "capabilities.read",
             "writes.contract",
+            "agents.write",
+            "beads.write",
+            "changespecs.write",
             "mocked.list",
             "mocked.events",
             "notifications.read",
+            "notifications.write",
             "projection.rebuild",
             "indexing.status",
             "indexing.rebuild",

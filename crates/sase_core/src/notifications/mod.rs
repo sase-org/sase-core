@@ -22,11 +22,13 @@ pub use mobile::{
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 pub use pending_actions::{
-    cleanup_stale_pending_actions, current_unix_time,
-    legacy_telegram_pending_actions_path, pending_action_from_notification,
-    pending_action_state_for_notification, pending_action_state_from_store,
+    cleanup_stale_pending_actions, cleanup_stale_pending_actions_in_store,
+    current_unix_time, legacy_telegram_pending_actions_path,
+    pending_action_from_notification, pending_action_state_for_notification,
+    pending_action_state_from_store, pending_action_store_json,
     pending_action_store_path, read_pending_action_store,
-    register_pending_action, resolve_pending_action_prefix,
+    register_pending_action, register_pending_action_in_store,
+    resolve_pending_action_prefix, update_pending_action_in_store,
     PendingActionStoreWire, PendingActionTransportWire, PendingActionWire,
     DEFAULT_PENDING_ACTION_PREFIX_LEN, DEFAULT_PENDING_ACTION_STALE_SECONDS,
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
@@ -34,6 +36,7 @@ pub use pending_actions::{
 pub use store::{
     append_notification, append_notification_counts,
     apply_notification_state_update, apply_notification_state_update_counts,
+    notification_append_jsonl, plan_notification_state_update_export,
     read_notifications_snapshot, read_notifications_snapshot_with_options,
     rewrite_notifications, rewrite_notifications_counts,
 };

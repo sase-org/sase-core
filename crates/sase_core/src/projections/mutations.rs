@@ -392,7 +392,7 @@ pub fn apply_source_export(
     let target = Path::new(&plan.target_path);
     if let Some(expected) = plan.expected_fingerprint.as_ref() {
         let actual = source_fingerprint_from_path(target, true);
-        if actual.as_ref() != Some(expected) {
+        if !source_fingerprint_matches(actual.as_ref(), expected) {
             return Err(SourceExportApplyError::Conflict {
                 message: "source fingerprint changed before export".to_string(),
                 actual_fingerprint: actual,
@@ -421,6 +421,28 @@ pub fn apply_source_export(
     }
     lock.unlock().map_err(SourceExportApplyError::Io)?;
     Ok(source_fingerprint_from_path(target, true))
+}
+
+fn source_fingerprint_matches(
+    actual: Option<&SourceFingerprintWire>,
+    expected: &SourceFingerprintWire,
+) -> bool {
+    let Some(actual) = actual else {
+        return false;
+    };
+    expected
+        .file_size
+        .map_or(true, |value| actual.file_size == Some(value))
+        && expected
+            .modified_at_unix_millis
+            .map_or(true, |value| actual.modified_at_unix_millis == Some(value))
+        && expected
+            .inode
+            .map_or(true, |value| actual.inode == Some(value))
+        && expected
+            .content_sha256
+            .as_ref()
+            .map_or(true, |value| actual.content_sha256.as_ref() == Some(value))
 }
 
 #[derive(Debug)]

@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -15,6 +16,11 @@ use crate::bead::wire::BeadTierWire;
 use crate::bead::work::{
     build_epic_work_plan_from_issues, build_legend_work_plan_from_issues,
     EpicWorkPlanWire, LegendWorkPlanWire,
+};
+use crate::bead::{
+    add_dependency, close_issues, create_issue, mark_ready_to_work,
+    preclaim_epic_work_plan, remove_issue, unmark_ready_to_work, update_issue,
+    BeadCreateRequestWire, BeadPreclaimAssignmentWire, BeadUpdateFieldsWire,
 };
 use crate::bead::{
     import_issues_from_jsonl, BeadMutationOutcomeWire,
@@ -33,6 +39,11 @@ use super::indexing::{
     ShadowDiffCategoryWire, ShadowDiffCountsWire, ShadowDiffRecordWire,
     ShadowDiffReportWire, SourceChangeOperationWire, SourceIdentityWire,
     INDEXING_WIRE_SCHEMA_VERSION,
+};
+use super::mutations::{
+    enqueue_source_exports_tx, source_exports_for_event_tx,
+    LocalDaemonMutationOutcomeWire, SourceExportKindWire, SourceExportPlanWire,
+    MUTATION_WIRE_SCHEMA_VERSION,
 };
 use super::replay::ProjectionApplier;
 
@@ -129,6 +140,36 @@ pub struct BeadStoreSourceWire {
     pub source_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BeadMutationWriteRequestWire {
+    pub schema_version: u32,
+    pub operation: String,
+    pub beads_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create: Option<BeadCreateRequestWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<BeadUpdateFieldsWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    #[serde(default)]
+    pub issue_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on_id: Option<String>,
+    #[serde(default)]
+    pub assignments: Vec<BeadPreclaimAssignmentWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BeadMutationWritePlanWire {
+    pub schema_version: u32,
+    pub outcome: BeadMutationOutcomeWire,
+    pub source_exports: Vec<SourceExportPlanWire>,
+}
+
 pub struct BeadProjectionApplier;
 
 impl ProjectionApplier for BeadProjectionApplier {
@@ -163,6 +204,200 @@ impl ProjectionDb {
             Ok(outcome)
         })
     }
+
+    pub fn append_bead_mutation_event_with_exports(
+        &mut self,
+        context: BeadProjectionEventContextWire,
+        mutation_outcome: BeadMutationOutcomeWire,
+        source_exports: Vec<SourceExportPlanWire>,
+    ) -> Result<LocalDaemonMutationOutcomeWire, ProjectionError> {
+        self.with_immediate_transaction(|conn| {
+            let Some(request) =
+                bead_mutation_event_request(context, mutation_outcome.clone())?
+            else {
+                return Err(ProjectionError::Invariant(format!(
+                    "unsupported bead mutation operation {:?}",
+                    mutation_outcome.operation
+                )));
+            };
+            let event_outcome = append_event_tx(conn, request)?;
+            if !event_outcome.duplicate {
+                apply_bead_event_tx(conn, &event_outcome.event)?;
+                set_projection_last_seq_tx(
+                    conn,
+                    BEAD_PROJECTION_NAME,
+                    event_outcome.event.seq,
+                )?;
+                enqueue_source_exports_tx(
+                    conn,
+                    &event_outcome.event,
+                    &source_exports,
+                )?;
+            }
+            let reports =
+                source_exports_for_event_tx(conn, event_outcome.event.seq)?;
+            Ok(LocalDaemonMutationOutcomeWire {
+                schema_version: MUTATION_WIRE_SCHEMA_VERSION,
+                event_seq: event_outcome.event.seq,
+                event_type: event_outcome.event.event_type.clone(),
+                duplicate: event_outcome.duplicate,
+                changed: mutation_outcome.changed,
+                resource_handle: bead_resource_handle(&event_outcome.event)
+                    .or_else(|| mutation_outcome.issue_ids.first().cloned()),
+                source_exports: reports,
+                projection_snapshot: Some(serde_json::to_value(
+                    mutation_outcome,
+                )?),
+            })
+        })
+    }
+}
+
+pub fn plan_bead_source_export_mutation(
+    request: BeadMutationWriteRequestWire,
+) -> Result<BeadMutationWritePlanWire, ProjectionError> {
+    if request.schema_version != MUTATION_WIRE_SCHEMA_VERSION {
+        return Err(ProjectionError::Invariant(format!(
+            "unsupported bead mutation schema {}",
+            request.schema_version
+        )));
+    }
+    let beads_dir = PathBuf::from(&request.beads_dir);
+    let staging = tempfile::Builder::new()
+        .prefix("sase_bead_mutation_")
+        .tempdir()?;
+    let staging_beads_dir = staging.path().join("beads");
+    fs::create_dir_all(&staging_beads_dir)?;
+    copy_if_exists(
+        &beads_dir.join("config.json"),
+        &staging_beads_dir.join("config.json"),
+    )?;
+    copy_if_exists(
+        &beads_dir.join("issues.jsonl"),
+        &staging_beads_dir.join("issues.jsonl"),
+    )?;
+
+    let outcome = match request.operation.as_str() {
+        "create" => create_issue(
+            &staging_beads_dir,
+            request.create.ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead create mutation is missing create payload"
+                        .to_string(),
+                )
+            })?,
+        )
+        .map_err(bead_error)?,
+        "update" | "open" => update_issue(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead update mutation is missing issue_id".to_string(),
+                )
+            })?,
+            request.update.ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead update mutation is missing update payload"
+                        .to_string(),
+                )
+            })?,
+        )
+        .map_err(bead_error)
+        .map(|mut outcome| {
+            if request.operation == "open" {
+                outcome.operation = "open".to_string();
+            }
+            outcome
+        })?,
+        "close" => close_issues(
+            &staging_beads_dir,
+            &request.issue_ids,
+            request.reason,
+            request.now,
+        )
+        .map_err(bead_error)?,
+        "rm" => remove_issue(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead rm mutation is missing issue_id".to_string(),
+                )
+            })?,
+        )
+        .map_err(bead_error)?,
+        "dep_add" => add_dependency(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead dependency mutation is missing issue_id".to_string(),
+                )
+            })?,
+            request.depends_on_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead dependency mutation is missing depends_on_id"
+                        .to_string(),
+                )
+            })?,
+            request.now,
+        )
+        .map_err(bead_error)?,
+        "preclaim_epic_work" => preclaim_epic_work_plan(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead preclaim mutation is missing epic issue_id"
+                        .to_string(),
+                )
+            })?,
+            &request.assignments,
+            request.now,
+        )
+        .map_err(bead_error)?,
+        "mark_ready_to_work" => mark_ready_to_work(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead ready mutation is missing issue_id".to_string(),
+                )
+            })?,
+            request.now,
+        )
+        .map_err(bead_error)?,
+        "unmark_ready_to_work" => unmark_ready_to_work(
+            &staging_beads_dir,
+            request.issue_id.as_deref().ok_or_else(|| {
+                ProjectionError::Invariant(
+                    "bead ready mutation is missing issue_id".to_string(),
+                )
+            })?,
+            request.now,
+        )
+        .map_err(bead_error)?,
+        other => {
+            return Err(ProjectionError::Invariant(format!(
+                "unsupported bead mutation operation {other:?}"
+            )))
+        }
+    };
+
+    let source_exports = vec![
+        source_export_plan(
+            beads_dir.join("config.json"),
+            SourceExportKindWire::AtomicJson,
+            fs::read_to_string(staging_beads_dir.join("config.json"))?,
+        ),
+        source_export_plan(
+            beads_dir.join("issues.jsonl"),
+            SourceExportKindWire::ProjectFile,
+            fs::read_to_string(staging_beads_dir.join("issues.jsonl"))?,
+        ),
+    ];
+
+    Ok(BeadMutationWritePlanWire {
+        schema_version: MUTATION_WIRE_SCHEMA_VERSION,
+        outcome,
+        source_exports,
+    })
 }
 
 pub fn discover_bead_stores(
@@ -1135,6 +1370,25 @@ fn is_bead_event(event_type: &str) -> bool {
 
 fn bead_error(error: crate::bead::BeadError) -> ProjectionError {
     ProjectionError::Invariant(format!("bead projection error: {error}"))
+}
+
+fn source_export_plan(
+    path: PathBuf,
+    kind: SourceExportKindWire,
+    content: String,
+) -> SourceExportPlanWire {
+    SourceExportPlanWire::new(display_path(&path), kind, content)
+}
+
+fn copy_if_exists(source: &Path, target: &Path) -> Result<(), ProjectionError> {
+    if source.exists() {
+        fs::copy(source, target)?;
+    }
+    Ok(())
+}
+
+fn bead_resource_handle(event: &EventEnvelopeWire) -> Option<String> {
+    bead_id_for_event(event).ok().flatten()
 }
 
 fn status_value(status: &StatusWire) -> &'static str {
