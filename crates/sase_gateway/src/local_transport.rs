@@ -3508,7 +3508,6 @@ fn error_response(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn error_response_with_fallback(
     request_id: String,
     code: LocalDaemonErrorCodeWire,
