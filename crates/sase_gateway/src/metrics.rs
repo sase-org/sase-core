@@ -34,9 +34,16 @@ struct DaemonMetricsInner {
     indexing_shadow_diff_stale_total: AtomicU64,
     indexing_shadow_diff_extra_total: AtomicU64,
     indexing_shadow_diff_corrupt_total: AtomicU64,
+    scheduler_batch_submits_total: AtomicU64,
+    scheduler_status_queries_total: AtomicU64,
+    scheduler_cancels_total: AtomicU64,
+    scheduler_recovery_repairs_total: AtomicU64,
     rpc_latency: LatencyHistogram,
     projection_query_latency: LatencyHistogram,
     projection_event_append_latency: LatencyHistogram,
+    scheduler_batch_submit_latency: LatencyHistogram,
+    scheduler_status_query_latency: LatencyHistogram,
+    scheduler_cancel_latency: LatencyHistogram,
 }
 
 #[derive(Debug)]
@@ -83,9 +90,16 @@ impl Default for DaemonMetrics {
                 indexing_shadow_diff_stale_total: AtomicU64::new(0),
                 indexing_shadow_diff_extra_total: AtomicU64::new(0),
                 indexing_shadow_diff_corrupt_total: AtomicU64::new(0),
+                scheduler_batch_submits_total: AtomicU64::new(0),
+                scheduler_status_queries_total: AtomicU64::new(0),
+                scheduler_cancels_total: AtomicU64::new(0),
+                scheduler_recovery_repairs_total: AtomicU64::new(0),
                 rpc_latency: LatencyHistogram::new(),
                 projection_query_latency: LatencyHistogram::new(),
                 projection_event_append_latency: LatencyHistogram::new(),
+                scheduler_batch_submit_latency: LatencyHistogram::new(),
+                scheduler_status_query_latency: LatencyHistogram::new(),
+                scheduler_cancel_latency: LatencyHistogram::new(),
             }),
         }
     }
@@ -138,6 +152,33 @@ impl DaemonMetrics {
         self.inner
             .dropped_events_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_scheduler_batch_submit(&self, duration: Duration) {
+        self.inner
+            .scheduler_batch_submits_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.scheduler_batch_submit_latency.observe(duration);
+    }
+
+    pub fn record_scheduler_status_query(&self, duration: Duration) {
+        self.inner
+            .scheduler_status_queries_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.scheduler_status_query_latency.observe(duration);
+    }
+
+    pub fn record_scheduler_cancel(&self, duration: Duration) {
+        self.inner
+            .scheduler_cancels_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.scheduler_cancel_latency.observe(duration);
+    }
+
+    pub fn record_scheduler_recovery_repairs(&self, count: u64) {
+        self.inner
+            .scheduler_recovery_repairs_total
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn record_indexing_queued_change(&self) {
@@ -343,6 +384,48 @@ impl DaemonMetrics {
             "degraded",
             self.inner.health_degraded.load(Ordering::Relaxed),
         );
+        metric_type(
+            &mut out,
+            "sase_daemon_scheduler_batch_submits_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_scheduler_batch_submits_total",
+            self.inner
+                .scheduler_batch_submits_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_scheduler_status_queries_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_scheduler_status_queries_total",
+            self.inner
+                .scheduler_status_queries_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(&mut out, "sase_daemon_scheduler_cancels_total", "counter");
+        metric_value(
+            &mut out,
+            "sase_daemon_scheduler_cancels_total",
+            self.inner.scheduler_cancels_total.load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_scheduler_recovery_repairs_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_scheduler_recovery_repairs_total",
+            self.inner
+                .scheduler_recovery_repairs_total
+                .load(Ordering::Relaxed),
+        );
         self.inner
             .rpc_latency
             .render(&mut out, "sase_daemon_rpc_latency_seconds");
@@ -353,6 +436,17 @@ impl DaemonMetrics {
             &mut out,
             "sase_daemon_projection_event_append_latency_seconds",
         );
+        self.inner.scheduler_batch_submit_latency.render(
+            &mut out,
+            "sase_daemon_scheduler_batch_submit_latency_seconds",
+        );
+        self.inner.scheduler_status_query_latency.render(
+            &mut out,
+            "sase_daemon_scheduler_status_query_latency_seconds",
+        );
+        self.inner
+            .scheduler_cancel_latency
+            .render(&mut out, "sase_daemon_scheduler_cancel_latency_seconds");
         out
     }
 }

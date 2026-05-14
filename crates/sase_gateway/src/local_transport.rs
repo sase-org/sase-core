@@ -503,13 +503,18 @@ fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
         .and_then(|source_exports| source_exports.get("state"))
         .and_then(JsonValue::as_str)
         == Some("degraded");
+    let scheduler_degraded = details
+        .get("scheduler")
+        .and_then(|scheduler| scheduler.get("state"))
+        .and_then(JsonValue::as_str)
+        == Some("degraded");
     let status = match projection_status.state {
         ProjectionServiceState::Ok => LocalDaemonHealthStatusWire::Ok,
         ProjectionServiceState::Degraded => {
             LocalDaemonHealthStatusWire::Degraded
         }
     };
-    let status = if source_exports_degraded {
+    let status = if source_exports_degraded || scheduler_degraded {
         LocalDaemonHealthStatusWire::Degraded
     } else {
         status
@@ -648,6 +653,7 @@ fn handle_scheduler_submit_payload(
     request: crate::wire::SchedulerBatchSubmitRequestWire,
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
     let context = scheduler_event_context(
         state,
         request.project_id.clone(),
@@ -661,6 +667,9 @@ fn handle_scheduler_submit_payload(
             SchedulerQueueSettingsWire::default(),
         )
     });
+    state
+        .metrics
+        .record_scheduler_batch_submit(started.elapsed());
     match result {
         Ok(response) => {
             state
@@ -693,6 +702,7 @@ fn handle_scheduler_status_payload(
     request: LocalDaemonSchedulerStatusRequestWire,
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
     let result = state.projection_service.read_blocking(move |db| {
         scheduler_batch_status(
             db.connection(),
@@ -700,6 +710,9 @@ fn handle_scheduler_status_payload(
             &request.batch_id,
         )
     });
+    state
+        .metrics
+        .record_scheduler_status_query(started.elapsed());
     match result {
         Ok(Some(status)) => {
             LocalDaemonResponsePayloadWire::SchedulerStatus(status)
@@ -721,6 +734,7 @@ fn handle_scheduler_cancel_payload(
     request: crate::wire::SchedulerCancelRequestWire,
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
     let context = scheduler_event_context(
         state,
         request.project_id.clone(),
@@ -729,6 +743,7 @@ fn handle_scheduler_cancel_payload(
     let result = state
         .projection_service
         .write_blocking(move |db| db.cancel_scheduler_slots(context, request));
+    state.metrics.record_scheduler_cancel(started.elapsed());
     match result {
         Ok(status) => {
             state

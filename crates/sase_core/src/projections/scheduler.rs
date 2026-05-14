@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use sha2::Digest;
 
 use super::db::{append_event_tx, set_projection_last_seq_tx, ProjectionDb};
@@ -597,6 +597,59 @@ pub fn scheduler_queue_page(
     Ok(slots)
 }
 
+pub fn scheduler_health_summary(
+    conn: &Connection,
+) -> Result<JsonValue, ProjectionError> {
+    let queue_depth =
+        scheduler_slot_count(conn, "status IN ('planned', 'queued')")?;
+    let starting_tasks = scheduler_slot_count(conn, "status = 'starting'")?;
+    let running_tasks = scheduler_slot_count(conn, "status = 'running'")?;
+    let blocked_tasks = scheduler_slot_count(conn, "status = 'blocked'")?;
+    let stale_starts = scheduler_slot_count(conn, "status = 'stale'")?;
+    let active_tasks = scheduler_slot_count(conn, "terminal = 0")?;
+    let last_scheduler_event_seq = conn.query_row(
+        "SELECT COALESCE(MAX(seq), 0) FROM event_log WHERE event_type LIKE 'scheduler.%'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let last_applied_seq = conn
+        .query_row(
+            "SELECT last_seq FROM projection_meta WHERE projection = ?1",
+            [SCHEDULER_PROJECTION_NAME],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let projection_pending_events =
+        last_scheduler_event_seq.saturating_sub(last_applied_seq);
+    let by_queue = scheduler_health_by_queue(conn)?;
+    let state = if projection_pending_events > 0 || stale_starts > 0 {
+        "degraded"
+    } else {
+        "ok"
+    };
+    Ok(json!({
+        "schema_version": SCHEDULER_WIRE_SCHEMA_VERSION,
+        "state": state,
+        "queue_depth": queue_depth,
+        "active_tasks": active_tasks,
+        "running_tasks": running_tasks,
+        "starting_tasks": starting_tasks,
+        "blocked_tasks": blocked_tasks,
+        "stale_starts": stale_starts,
+        "host_bridge": {
+            "available": true,
+            "mode": "python-subprocess",
+        },
+        "projection_lag": {
+            "last_scheduler_event_seq": last_scheduler_event_seq,
+            "last_applied_seq": last_applied_seq,
+            "pending_events": projection_pending_events,
+        },
+        "by_queue": by_queue,
+    }))
+}
+
 pub fn scheduler_mark_slot_status(
     db: &mut ProjectionDb,
     context: SchedulerEventContextWire,
@@ -624,6 +677,52 @@ pub fn scheduler_mark_slot_status(
         append_slot_transition_tx(conn, &context, event_type, &slot, slot_id)?;
         Ok(slot)
     })
+}
+
+fn scheduler_slot_count(
+    conn: &Connection,
+    predicate: &str,
+) -> Result<u64, ProjectionError> {
+    let sql = format!("SELECT COUNT(*) FROM scheduler_slots WHERE {predicate}");
+    let count = conn.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
+    Ok(nonnegative_i64_to_u64(count))
+}
+
+fn scheduler_health_by_queue(
+    conn: &Connection,
+) -> Result<Vec<JsonValue>, ProjectionError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT queue_id,
+               SUM(CASE WHEN status IN ('planned', 'queued') THEN 1 ELSE 0 END) AS queue_depth,
+               SUM(CASE WHEN terminal = 0 THEN 1 ELSE 0 END) AS active_tasks,
+               SUM(CASE WHEN status = 'starting' THEN 1 ELSE 0 END) AS starting_tasks,
+               SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_tasks,
+               SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END) AS stale_starts
+        FROM scheduler_slots
+        GROUP BY queue_id
+        ORDER BY queue_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(json!({
+            "queue_id": row.get::<_, String>(0)?,
+            "queue_depth": nonnegative_i64_to_u64(row.get::<_, i64>(1)?),
+            "active_tasks": nonnegative_i64_to_u64(row.get::<_, i64>(2)?),
+            "starting_tasks": nonnegative_i64_to_u64(row.get::<_, i64>(3)?),
+            "running_tasks": nonnegative_i64_to_u64(row.get::<_, i64>(4)?),
+            "stale_starts": nonnegative_i64_to_u64(row.get::<_, i64>(5)?),
+        }))
+    })?;
+    let mut queues = Vec::new();
+    for row in rows {
+        queues.push(row?);
+    }
+    Ok(queues)
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> u64 {
+    u64::try_from(value.max(0)).unwrap_or(0)
 }
 
 fn apply_scheduler_event_tx(
@@ -1188,5 +1287,34 @@ mod tests {
             status.slots[0].reason.as_deref(),
             Some("daemon_restart_starting_slot_without_host_confirmation")
         );
+    }
+
+    #[test]
+    fn scheduler_health_reports_queue_counts_and_lag() {
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        db.submit_scheduler_batch(
+            context(),
+            submit(2),
+            SchedulerQueueSettingsWire::default(),
+        )
+        .unwrap();
+        scheduler_mark_slot_status(
+            &mut db,
+            context(),
+            "proj",
+            "batch-a:0",
+            SchedulerSlotStatusWire::Running,
+            None,
+        )
+        .unwrap();
+
+        let health = scheduler_health_summary(db.connection()).unwrap();
+
+        assert_eq!(health["state"], "ok");
+        assert_eq!(health["queue_depth"], 1);
+        assert_eq!(health["running_tasks"], 1);
+        assert_eq!(health["active_tasks"], 2);
+        assert_eq!(health["projection_lag"]["pending_events"], 0);
+        assert_eq!(health["by_queue"][0]["queue_id"], "agents");
     }
 }

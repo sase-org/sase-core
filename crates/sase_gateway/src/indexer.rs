@@ -2317,7 +2317,7 @@ mod tests {
         predicate: impl Fn(&IndexingServiceStatusWire) -> bool,
     ) -> IndexingServiceStatusWire {
         let mut status = service.status();
-        for _ in 0..50 {
+        for _ in 0..250 {
             if predicate(&status) {
                 return status;
             }

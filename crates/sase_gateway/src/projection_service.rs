@@ -7,11 +7,12 @@ use std::{
 };
 
 use sase_core::projections::{
-    AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
-    ChangeSpecProjectionApplier, EventAppendOutcomeWire,
-    EventAppendRequestWire, LocalDaemonMutationOutcomeWire,
-    NotificationProjectionApplier, ProjectionApplier, ProjectionDb,
-    ProjectionError, ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
+    scheduler_health_summary, AgentProjectionApplier, BeadProjectionApplier,
+    CatalogProjectionApplier, ChangeSpecProjectionApplier,
+    EventAppendOutcomeWire, EventAppendRequestWire,
+    LocalDaemonMutationOutcomeWire, NotificationProjectionApplier,
+    ProjectionApplier, ProjectionDb, ProjectionError,
+    ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
     ProjectionRecoveryIssueWire, ProjectionStartupRepairReportWire,
     SchedulerProjectionApplier, SourceExportPlanWire, SourceExportStatusWire,
     WorkflowProjectionApplier,
@@ -177,6 +178,30 @@ impl ProjectionService {
                     "examples": [],
                 })
             });
+        let scheduler =
+            self.scheduler_health_summary().unwrap_or_else(|error| {
+                json!({
+                    "schema_version": 1,
+                    "state": "unknown",
+                    "queue_depth": 0,
+                    "active_tasks": 0,
+                    "running_tasks": 0,
+                    "starting_tasks": 0,
+                    "blocked_tasks": 0,
+                    "stale_starts": 0,
+                    "host_bridge": {
+                        "available": false,
+                        "mode": "unknown",
+                    },
+                    "projection_lag": {
+                        "last_scheduler_event_seq": 0,
+                        "last_applied_seq": 0,
+                        "pending_events": 0,
+                    },
+                    "by_queue": [],
+                    "message": error.to_string(),
+                })
+            });
         json!({
             "projection_db": {
                 "state": match status.state {
@@ -192,8 +217,15 @@ impl ProjectionService {
                 "recovery_issue_count": status.recovery_issue_count,
                 "source_exports": source_exports,
                 "message": status.message,
-            }
+            },
+            "scheduler": scheduler,
         })
+    }
+
+    fn scheduler_health_summary(
+        &self,
+    ) -> Result<JsonValue, ProjectionServiceError> {
+        self.read_blocking(|db| scheduler_health_summary(db.connection()))
     }
 
     fn source_export_health_summary(
