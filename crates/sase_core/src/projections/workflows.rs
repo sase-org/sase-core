@@ -14,6 +14,7 @@ use super::event::{
     EventEnvelopeWire, EventSourceWire,
 };
 use super::replay::ProjectionApplier;
+use super::scheduler::SchedulerTaskIdWire;
 
 pub const WORKFLOW_PROJECTION_NAME: &str = "workflows";
 
@@ -29,6 +30,47 @@ pub const WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED: &str =
     "workflow.action_response_recorded";
 
 const WORKFLOW_WIRE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSchedulerCauseWire {
+    #[serde(default = "workflow_schema_version")]
+    pub schema_version: u32,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_task: Option<SchedulerTaskIdWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowTaskProjectionWire {
+    #[serde(default = "workflow_schema_version")]
+    pub schema_version: u32,
+    pub task_id: String,
+    pub workflow_id: String,
+    pub task_kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<WorkflowSchedulerCauseWire>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowEventTaskWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<WorkflowTaskProjectionWire>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowProjectionEventContextWire {
@@ -99,6 +141,10 @@ pub struct WorkflowRunProjectionWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_attempt: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_task: Option<SchedulerTaskIdWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<WorkflowStateWire>,
 }
 
@@ -132,6 +178,8 @@ pub struct WorkflowStepProjectionWire {
     #[serde(default = "workflow_schema_version")]
     pub schema_version: u32,
     pub workflow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
     pub step_index: i64,
     pub name: String,
     pub status: String,
@@ -162,6 +210,10 @@ pub struct WorkflowStepProjectionWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traceback: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_task: Option<SchedulerTaskIdWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<PromptStepMarkerWire>,
 }
 
@@ -174,6 +226,7 @@ impl WorkflowStepProjectionWire {
         Self {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             workflow_id: workflow_id.to_string(),
+            step_id: Some(stable_step_id(workflow_id, step_index, &step.name)),
             step_index,
             name: step.name.clone(),
             status: step.status.clone(),
@@ -189,9 +242,15 @@ impl WorkflowStepProjectionWire {
         workflow_id: impl Into<String>,
         marker: PromptStepMarkerWire,
     ) -> Self {
+        let workflow_id = workflow_id.into();
         Self {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
-            workflow_id: workflow_id.into(),
+            workflow_id: workflow_id.clone(),
+            step_id: Some(stable_step_id(
+                &workflow_id,
+                marker.step_index.unwrap_or(0),
+                &marker.step_name,
+            )),
             step_index: marker.step_index.unwrap_or(0),
             name: marker.step_name.clone(),
             status: marker.status.clone(),
@@ -208,6 +267,8 @@ impl WorkflowStepProjectionWire {
             output_types: marker.output_types.clone(),
             error: marker.error.clone(),
             traceback: marker.traceback.clone(),
+            scheduler_task: None,
+            scheduler_cause: None,
             marker: Some(marker),
         }
     }
@@ -245,7 +306,9 @@ pub struct WorkflowEventProjectionWire {
     pub seq: i64,
     pub event_type: String,
     pub workflow_id: Option<String>,
+    pub step_id: Option<String>,
     pub step_index: Option<i64>,
+    pub task_id: Option<String>,
     pub created_at: String,
 }
 
@@ -255,6 +318,8 @@ pub struct WorkflowDetailWire {
     pub schema_version: u32,
     pub workflow: Option<WorkflowSummaryWire>,
     pub steps: Vec<WorkflowStepProjectionWire>,
+    #[serde(default)]
+    pub tasks: Vec<WorkflowTaskProjectionWire>,
     pub events: Vec<WorkflowEventProjectionWire>,
 }
 
@@ -264,29 +329,53 @@ enum WorkflowProjectionEventPayloadWire {
     RunCreated {
         schema_version: u32,
         workflow: WorkflowRunProjectionWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     RunUpdated {
         schema_version: u32,
         workflow: WorkflowRunProjectionWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     StepTransitioned {
         schema_version: u32,
         step: WorkflowStepProjectionWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     HitlPaused {
         schema_version: u32,
         workflow_id: String,
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     HitlResumed {
         schema_version: u32,
         workflow_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     RetryRequested {
         schema_version: u32,
         workflow_id: String,
         retry_of_workflow_id: Option<String>,
         retry_attempt: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     TerminalStateReached {
         schema_version: u32,
@@ -295,6 +384,10 @@ enum WorkflowProjectionEventPayloadWire {
         finished_at: Option<String>,
         error: Option<String>,
         traceback: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
     ActionResponseRecorded {
         schema_version: u32,
@@ -303,6 +396,10 @@ enum WorkflowProjectionEventPayloadWire {
         response_path: String,
         notification_id: Option<String>,
         state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<WorkflowSchedulerCauseWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<WorkflowTaskProjectionWire>,
     },
 }
 
@@ -346,12 +443,28 @@ pub fn workflow_run_created_event_request(
     context: WorkflowProjectionEventContextWire,
     workflow: WorkflowRunProjectionWire,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_run_created_event_request_with_task(context, workflow, None, None)
+}
+
+pub fn workflow_run_created_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    mut workflow: WorkflowRunProjectionWire,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow.scheduler_cause = cause.clone().or(workflow.scheduler_cause);
+    workflow.scheduler_task = cause
+        .as_ref()
+        .and_then(|cause| cause.scheduler_task.clone())
+        .or(workflow.scheduler_task);
     workflow_event_request(
         context,
         WORKFLOW_EVENT_RUN_CREATED,
         WorkflowProjectionEventPayloadWire::RunCreated {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             workflow,
+            cause,
+            task,
         },
     )
 }
@@ -360,12 +473,28 @@ pub fn workflow_run_updated_event_request(
     context: WorkflowProjectionEventContextWire,
     workflow: WorkflowRunProjectionWire,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_run_updated_event_request_with_task(context, workflow, None, None)
+}
+
+pub fn workflow_run_updated_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    mut workflow: WorkflowRunProjectionWire,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow.scheduler_cause = cause.clone().or(workflow.scheduler_cause);
+    workflow.scheduler_task = cause
+        .as_ref()
+        .and_then(|cause| cause.scheduler_task.clone())
+        .or(workflow.scheduler_task);
     workflow_event_request(
         context,
         WORKFLOW_EVENT_RUN_UPDATED,
         WorkflowProjectionEventPayloadWire::RunUpdated {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             workflow,
+            cause,
+            task,
         },
     )
 }
@@ -374,12 +503,37 @@ pub fn workflow_step_transitioned_event_request(
     context: WorkflowProjectionEventContextWire,
     step: WorkflowStepProjectionWire,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_step_transitioned_event_request_with_task(
+        context, step, None, None,
+    )
+}
+
+pub fn workflow_step_transitioned_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    mut step: WorkflowStepProjectionWire,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    if step.step_id.is_none() {
+        step.step_id = Some(stable_step_id(
+            &step.workflow_id,
+            step.step_index,
+            &step.name,
+        ));
+    }
+    step.scheduler_cause = cause.clone().or(step.scheduler_cause);
+    step.scheduler_task = cause
+        .as_ref()
+        .and_then(|cause| cause.scheduler_task.clone())
+        .or(step.scheduler_task);
     workflow_event_request(
         context,
         WORKFLOW_EVENT_STEP_TRANSITIONED,
         WorkflowProjectionEventPayloadWire::StepTransitioned {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             step,
+            cause,
+            task,
         },
     )
 }
@@ -389,6 +543,22 @@ pub fn workflow_hitl_paused_event_request(
     workflow_id: String,
     reason: Option<String>,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_hitl_paused_event_request_with_task(
+        context,
+        workflow_id,
+        reason,
+        None,
+        None,
+    )
+}
+
+pub fn workflow_hitl_paused_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: String,
+    reason: Option<String>,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
     workflow_event_request(
         context,
         WORKFLOW_EVENT_HITL_PAUSED,
@@ -396,6 +566,8 @@ pub fn workflow_hitl_paused_event_request(
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             workflow_id,
             reason,
+            cause,
+            task,
         },
     )
 }
@@ -404,12 +576,28 @@ pub fn workflow_hitl_resumed_event_request(
     context: WorkflowProjectionEventContextWire,
     workflow_id: String,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_hitl_resumed_event_request_with_task(
+        context,
+        workflow_id,
+        None,
+        None,
+    )
+}
+
+pub fn workflow_hitl_resumed_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: String,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
     workflow_event_request(
         context,
         WORKFLOW_EVENT_HITL_RESUMED,
         WorkflowProjectionEventPayloadWire::HitlResumed {
             schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
             workflow_id,
+            cause,
+            task,
         },
     )
 }
@@ -420,6 +608,24 @@ pub fn workflow_retry_requested_event_request(
     retry_of_workflow_id: Option<String>,
     retry_attempt: Option<i64>,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_retry_requested_event_request_with_task(
+        context,
+        workflow_id,
+        retry_of_workflow_id,
+        retry_attempt,
+        None,
+        None,
+    )
+}
+
+pub fn workflow_retry_requested_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: String,
+    retry_of_workflow_id: Option<String>,
+    retry_attempt: Option<i64>,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    task: Option<WorkflowTaskProjectionWire>,
+) -> Result<EventAppendRequestWire, ProjectionError> {
     workflow_event_request(
         context,
         WORKFLOW_EVENT_RETRY_REQUESTED,
@@ -428,6 +634,8 @@ pub fn workflow_retry_requested_event_request(
             workflow_id,
             retry_of_workflow_id,
             retry_attempt,
+            cause,
+            task,
         },
     )
 }
@@ -440,6 +648,27 @@ pub fn workflow_terminal_state_reached_event_request(
     error: Option<String>,
     traceback: Option<String>,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_terminal_state_reached_event_request_with_task(
+        context,
+        workflow_id,
+        status,
+        finished_at,
+        error,
+        traceback,
+        WorkflowEventTaskWire::default(),
+    )
+}
+
+pub fn workflow_terminal_state_reached_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: String,
+    status: String,
+    finished_at: Option<String>,
+    error: Option<String>,
+    traceback: Option<String>,
+    event_task: WorkflowEventTaskWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    let WorkflowEventTaskWire { cause, task } = event_task;
     workflow_event_request(
         context,
         WORKFLOW_EVENT_TERMINAL_STATE_REACHED,
@@ -450,6 +679,8 @@ pub fn workflow_terminal_state_reached_event_request(
             finished_at,
             error,
             traceback,
+            cause,
+            task,
         },
     )
 }
@@ -462,6 +693,27 @@ pub fn workflow_action_response_recorded_event_request(
     notification_id: Option<String>,
     state: String,
 ) -> Result<EventAppendRequestWire, ProjectionError> {
+    workflow_action_response_recorded_event_request_with_task(
+        context,
+        workflow_id,
+        action_kind,
+        response_path,
+        notification_id,
+        state,
+        WorkflowEventTaskWire::default(),
+    )
+}
+
+pub fn workflow_action_response_recorded_event_request_with_task(
+    context: WorkflowProjectionEventContextWire,
+    workflow_id: Option<String>,
+    action_kind: String,
+    response_path: String,
+    notification_id: Option<String>,
+    state: String,
+    event_task: WorkflowEventTaskWire,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    let WorkflowEventTaskWire { cause, task } = event_task;
     workflow_event_request(
         context,
         WORKFLOW_EVENT_ACTION_RESPONSE_RECORDED,
@@ -472,6 +724,8 @@ pub fn workflow_action_response_recorded_event_request(
             response_path,
             notification_id,
             state,
+            cause,
+            task,
         },
     )
 }
@@ -551,10 +805,11 @@ pub fn workflow_projection_detail(
 
     let mut step_stmt = conn.prepare(
         r#"
-        SELECT workflow_id, step_index, name, status, step_type, step_source,
+        SELECT workflow_id, step_id, step_index, name, status, step_type, step_source,
                parent_step_index, total_steps, parent_total_steps, hidden,
                is_pre_prompt_step, embedded_workflow_name, artifacts_dir,
-               output_json, output_types_json, error, traceback, marker_json
+               output_json, output_types_json, error, traceback, marker_json,
+               scheduler_task_json, scheduler_cause_json
         FROM workflow_steps
         WHERE project_id = ?1 AND workflow_id = ?2
         ORDER BY step_index ASC, name ASC
@@ -567,9 +822,26 @@ pub fn workflow_projection_detail(
         steps.push(row?);
     }
 
+    let mut task_stmt = conn.prepare(
+        r#"
+        SELECT task_id, workflow_id, task_kind, status, step_id, step_index,
+               started_at, completed_at, log_summary, cause_json
+        FROM workflow_tasks
+        WHERE project_id = ?1 AND workflow_id = ?2
+        ORDER BY COALESCE(started_at, ''), task_id
+        "#,
+    )?;
+    let task_rows = task_stmt
+        .query_map(params![project_id, workflow_id], workflow_task_from_row)?;
+    let mut tasks = Vec::new();
+    for row in task_rows {
+        tasks.push(row?);
+    }
+
     let mut event_stmt = conn.prepare(
         r#"
-        SELECT seq, event_type, workflow_id, step_index, created_at
+        SELECT seq, event_type, workflow_id, step_id, step_index, task_id,
+               created_at
         FROM workflow_events
         WHERE project_id = ?1 AND workflow_id = ?2
         ORDER BY seq ASC
@@ -586,6 +858,7 @@ pub fn workflow_projection_detail(
         schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
         workflow,
         steps,
+        tasks,
         events,
     })
 }
@@ -600,9 +873,17 @@ fn apply_workflow_event_tx(
 
     let payload: WorkflowProjectionEventPayloadWire =
         serde_json::from_value(event.payload.clone())?;
-    let (workflow_id, step_index) = match &payload {
-        WorkflowProjectionEventPayloadWire::RunCreated { workflow, .. }
-        | WorkflowProjectionEventPayloadWire::RunUpdated { workflow, .. } => {
+    let (workflow_id, step_id, step_index, task_id) = match &payload {
+        WorkflowProjectionEventPayloadWire::RunCreated {
+            workflow,
+            task,
+            ..
+        }
+        | WorkflowProjectionEventPayloadWire::RunUpdated {
+            workflow,
+            task,
+            ..
+        } => {
             upsert_workflow_tx(conn, event, workflow)?;
             if let Some(state) = workflow.state.as_ref() {
                 for (index, step) in state.steps.iter().enumerate() {
@@ -617,17 +898,36 @@ fn apply_workflow_event_tx(
                     )?;
                 }
             }
-            (Some(workflow.workflow_id.as_str()), None)
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(workflow.workflow_id.as_str()),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::StepTransitioned {
-            step, ..
+            step,
+            task,
+            ..
         } => {
             upsert_step_tx(conn, event, step)?;
-            (Some(step.workflow_id.as_str()), Some(step.step_index))
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(step.workflow_id.as_str()),
+                step.step_id.as_deref(),
+                Some(step.step_index),
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::HitlPaused {
             workflow_id,
             reason,
+            task,
             ..
         } => {
             update_workflow_status_tx(
@@ -639,10 +939,20 @@ fn apply_workflow_event_tx(
                 reason.clone(),
                 None,
             )?;
-            (Some(workflow_id.as_str()), None)
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(workflow_id.as_str()),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::HitlResumed {
-            workflow_id, ..
+            workflow_id,
+            task,
+            ..
         } => {
             update_workflow_status_tx(
                 conn,
@@ -653,12 +963,21 @@ fn apply_workflow_event_tx(
                 None,
                 None,
             )?;
-            (Some(workflow_id.as_str()), None)
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(workflow_id.as_str()),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::RetryRequested {
             workflow_id,
             retry_of_workflow_id,
             retry_attempt,
+            task,
             ..
         } => {
             conn.execute(
@@ -677,7 +996,15 @@ fn apply_workflow_event_tx(
                     event.seq,
                 ],
             )?;
-            (Some(workflow_id.as_str()), None)
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(workflow_id.as_str()),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::TerminalStateReached {
             workflow_id,
@@ -685,6 +1012,7 @@ fn apply_workflow_event_tx(
             finished_at,
             error,
             traceback,
+            task,
             ..
         } => {
             update_workflow_status_tx(
@@ -696,14 +1024,54 @@ fn apply_workflow_event_tx(
                 error.clone(),
                 traceback.clone(),
             )?;
-            (Some(workflow_id.as_str()), None)
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                Some(workflow_id.as_str()),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
         }
         WorkflowProjectionEventPayloadWire::ActionResponseRecorded {
             workflow_id,
+            action_kind,
+            task,
             ..
-        } => (workflow_id.as_deref(), None),
+        } => {
+            if action_kind == "hitl" {
+                if let Some(workflow_id) = workflow_id.as_deref() {
+                    update_workflow_status_tx(
+                        conn,
+                        event,
+                        workflow_id,
+                        "running",
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+            }
+            if let Some(task) = task {
+                upsert_task_tx(conn, event, task)?;
+            }
+            (
+                workflow_id.as_deref(),
+                None,
+                None,
+                task.as_ref().map(|task| task.task_id.as_str()),
+            )
+        }
     };
-    insert_workflow_event_tx(conn, event, workflow_id, step_index)?;
+    insert_workflow_event_tx(
+        conn,
+        event,
+        workflow_id,
+        step_id,
+        step_index,
+        task_id,
+    )?;
     Ok(())
 }
 
@@ -813,16 +1181,18 @@ fn upsert_step_tx(
     conn.execute(
         r#"
         INSERT INTO workflow_steps (
-            project_id, workflow_id, step_index, name, status, step_type,
+            project_id, workflow_id, step_id, step_index, name, status, step_type,
             step_source, parent_step_index, total_steps, parent_total_steps,
             hidden, is_pre_prompt_step, embedded_workflow_name, artifacts_dir,
             output_json, output_types_json, error, traceback, marker_json,
-            last_seq
+            scheduler_task_json, scheduler_cause_json, last_seq
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23
         )
         ON CONFLICT(project_id, workflow_id, step_index) DO UPDATE SET
+            step_id = excluded.step_id,
             name = excluded.name,
             status = excluded.status,
             step_type = excluded.step_type,
@@ -839,11 +1209,18 @@ fn upsert_step_tx(
             error = excluded.error,
             traceback = excluded.traceback,
             marker_json = excluded.marker_json,
+            scheduler_task_json = excluded.scheduler_task_json,
+            scheduler_cause_json = excluded.scheduler_cause_json,
             last_seq = excluded.last_seq
         "#,
         params![
             event.project_id,
             step.workflow_id,
+            step.step_id.clone().unwrap_or_else(|| stable_step_id(
+                &step.workflow_id,
+                step.step_index,
+                &step.name,
+            )),
             step.step_index,
             step.name,
             step.status,
@@ -861,6 +1238,52 @@ fn upsert_step_tx(
             step.error,
             step.traceback,
             marker_json,
+            serde_json::to_string(&step.scheduler_task)?,
+            serde_json::to_string(&step.scheduler_cause)?,
+            event.seq,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_task_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+    task: &WorkflowTaskProjectionWire,
+) -> Result<(), ProjectionError> {
+    conn.execute(
+        r#"
+        INSERT INTO workflow_tasks (
+            project_id, workflow_id, task_id, task_kind, status, step_id,
+            step_index, started_at, completed_at, log_summary, cause_json,
+            task_json, last_seq
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        ON CONFLICT(project_id, task_id) DO UPDATE SET
+            workflow_id = excluded.workflow_id,
+            task_kind = excluded.task_kind,
+            status = excluded.status,
+            step_id = excluded.step_id,
+            step_index = excluded.step_index,
+            started_at = COALESCE(excluded.started_at, workflow_tasks.started_at),
+            completed_at = COALESCE(excluded.completed_at, workflow_tasks.completed_at),
+            log_summary = excluded.log_summary,
+            cause_json = excluded.cause_json,
+            task_json = excluded.task_json,
+            last_seq = excluded.last_seq
+        "#,
+        params![
+            event.project_id,
+            task.workflow_id,
+            task.task_id,
+            task.task_kind,
+            task.status,
+            task.step_id,
+            task.step_index,
+            task.started_at,
+            task.completed_at,
+            task.log_summary,
+            serde_json::to_string(&task.cause)?,
+            serde_json::to_string(task)?,
             event.seq,
         ],
     )?;
@@ -903,20 +1326,24 @@ fn insert_workflow_event_tx(
     conn: &Connection,
     event: &EventEnvelopeWire,
     workflow_id: Option<&str>,
+    step_id: Option<&str>,
     step_index: Option<i64>,
+    task_id: Option<&str>,
 ) -> Result<(), ProjectionError> {
     let payload_json = serde_json::to_string(&event.payload)?;
     conn.execute(
         r#"
         INSERT INTO workflow_events (
-            seq, project_id, event_type, workflow_id, step_index,
+            seq, project_id, event_type, workflow_id, step_id, step_index, task_id,
             payload_json, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(seq) DO UPDATE SET
             project_id = excluded.project_id,
             event_type = excluded.event_type,
             workflow_id = excluded.workflow_id,
+            step_id = excluded.step_id,
             step_index = excluded.step_index,
+            task_id = excluded.task_id,
             payload_json = excluded.payload_json,
             created_at = excluded.created_at
         "#,
@@ -925,7 +1352,9 @@ fn insert_workflow_event_tx(
             event.project_id,
             event.event_type,
             workflow_id,
+            step_id,
             step_index,
+            task_id,
             payload_json,
             event.created_at,
         ],
@@ -976,30 +1405,56 @@ fn workflow_summary_from_row(
 fn workflow_step_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<WorkflowStepProjectionWire> {
-    let output_json: String = row.get(13)?;
-    let output_types_json: String = row.get(14)?;
-    let marker_json: String = row.get(17)?;
+    let output_json: String = row.get(14)?;
+    let output_types_json: String = row.get(15)?;
+    let marker_json: String = row.get(18)?;
+    let scheduler_task_json: String = row.get(19)?;
+    let scheduler_cause_json: String = row.get(20)?;
     Ok(WorkflowStepProjectionWire {
         schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
         workflow_id: row.get(0)?,
-        step_index: row.get(1)?,
-        name: row.get(2)?,
-        status: row.get(3)?,
-        step_type: row.get(4)?,
-        step_source: row.get(5)?,
-        parent_step_index: row.get(6)?,
-        total_steps: row.get(7)?,
-        parent_total_steps: row.get(8)?,
-        hidden: row.get::<_, i64>(9)? != 0,
-        is_pre_prompt_step: row.get::<_, i64>(10)? != 0,
-        embedded_workflow_name: row.get(11)?,
-        artifacts_dir: row.get(12)?,
+        step_id: row.get(1)?,
+        step_index: row.get(2)?,
+        name: row.get(3)?,
+        status: row.get(4)?,
+        step_type: row.get(5)?,
+        step_source: row.get(6)?,
+        parent_step_index: row.get(7)?,
+        total_steps: row.get(8)?,
+        parent_total_steps: row.get(9)?,
+        hidden: row.get::<_, i64>(10)? != 0,
+        is_pre_prompt_step: row.get::<_, i64>(11)? != 0,
+        embedded_workflow_name: row.get(12)?,
+        artifacts_dir: row.get(13)?,
         output: serde_json::from_str(&output_json).map_err(json_error)?,
         output_types: serde_json::from_str(&output_types_json)
             .map_err(json_error)?,
-        error: row.get(15)?,
-        traceback: row.get(16)?,
+        error: row.get(16)?,
+        traceback: row.get(17)?,
+        scheduler_task: serde_json::from_str(&scheduler_task_json)
+            .map_err(json_error)?,
+        scheduler_cause: serde_json::from_str(&scheduler_cause_json)
+            .map_err(json_error)?,
         marker: serde_json::from_str(&marker_json).map_err(json_error)?,
+    })
+}
+
+fn workflow_task_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkflowTaskProjectionWire> {
+    let cause_json: String = row.get(9)?;
+    Ok(WorkflowTaskProjectionWire {
+        schema_version: WORKFLOW_WIRE_SCHEMA_VERSION,
+        task_id: row.get(0)?,
+        workflow_id: row.get(1)?,
+        task_kind: row.get(2)?,
+        status: row.get(3)?,
+        step_id: row.get(4)?,
+        step_index: row.get(5)?,
+        started_at: row.get(6)?,
+        completed_at: row.get(7)?,
+        log_summary: row.get(8)?,
+        cause: serde_json::from_str(&cause_json).map_err(json_error)?,
     })
 }
 
@@ -1010,8 +1465,10 @@ fn workflow_event_from_row(
         seq: row.get(0)?,
         event_type: row.get(1)?,
         workflow_id: row.get(2)?,
-        step_index: row.get(3)?,
-        created_at: row.get(4)?,
+        step_id: row.get(3)?,
+        step_index: row.get(4)?,
+        task_id: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -1051,6 +1508,14 @@ fn json_error(error: serde_json::Error) -> rusqlite::Error {
 
 fn workflow_schema_version() -> u32 {
     WORKFLOW_WIRE_SCHEMA_VERSION
+}
+
+fn stable_step_id(
+    workflow_id: &str,
+    step_index: i64,
+    step_name: &str,
+) -> String {
+    format!("{workflow_id}:step:{step_index}:{step_name}")
 }
 
 #[cfg(test)]

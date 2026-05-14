@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ProjectionError;
 
-pub const PROJECTION_SCHEMA_VERSION: u32 = 9;
+pub const PROJECTION_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationWire {
@@ -766,6 +766,42 @@ const MIGRATIONS: &[Migration] = &[
             ON scheduler_events(project_id, event_type, seq);
     "#,
     },
+    Migration {
+        version: 10,
+        name: "workflow_scheduler_task_projection",
+        sql: r#"
+        ALTER TABLE workflow_steps ADD COLUMN step_id TEXT;
+        ALTER TABLE workflow_steps ADD COLUMN scheduler_task_json TEXT NOT NULL DEFAULT 'null';
+        ALTER TABLE workflow_steps ADD COLUMN scheduler_cause_json TEXT NOT NULL DEFAULT 'null';
+        CREATE INDEX IF NOT EXISTS idx_workflow_steps_step_id
+            ON workflow_steps(project_id, step_id);
+
+        CREATE TABLE IF NOT EXISTS workflow_tasks (
+            project_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            step_id TEXT,
+            step_index INTEGER,
+            started_at TEXT,
+            completed_at TEXT,
+            log_summary TEXT,
+            cause_json TEXT NOT NULL,
+            task_json TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, task_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_tasks_workflow
+            ON workflow_tasks(project_id, workflow_id, task_kind, task_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_tasks_status
+            ON workflow_tasks(project_id, status, task_kind, task_id);
+
+        ALTER TABLE workflow_events ADD COLUMN step_id TEXT;
+        ALTER TABLE workflow_events ADD COLUMN task_id TEXT;
+    "#,
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<(), ProjectionError> {
@@ -866,6 +902,7 @@ pub(crate) fn recreate_projection_tables(
         DROP TABLE IF EXISTS workflow_events;
         DROP TABLE IF EXISTS workflow_steps;
         DROP TABLE IF EXISTS workflows;
+        DROP TABLE IF EXISTS workflow_tasks;
         DROP TABLE IF EXISTS workflow_agent_edges;
         DROP TABLE IF EXISTS scheduler_events;
         DROP TABLE IF EXISTS scheduler_slots;
