@@ -3,10 +3,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, NaiveDateTime};
-use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection,
-};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -34,11 +31,10 @@ use crate::notifications::{
 };
 use crate::notifications::{
     mobile_notification_error_from_wire,
-    mobile_notification_priority_from_wire, NotificationAgentKeyWire,
-    NotificationCountsWire, NotificationStateUpdateWire,
-    NotificationStoreSnapshotWire, NotificationStoreStatsWire,
-    NotificationWire, PendingActionStoreWire, PendingActionWire,
-    NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    mobile_notification_priority_from_wire, NotificationCountsWire,
+    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
+    NotificationStoreStatsWire, NotificationWire, PendingActionStoreWire,
+    PendingActionWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
 
 pub const NOTIFICATION_PROJECTION_NAME: &str = "notifications";
@@ -98,7 +94,6 @@ pub enum NotificationProjectionEventPayloadWire {
     },
     NotificationStateUpdated {
         update: NotificationStateUpdateWire,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notifications: Vec<NotificationWire>,
     },
     PendingActionRegistered {
@@ -531,13 +526,23 @@ pub fn notification_projection_page(
         .transpose()?
         .unwrap_or(0);
     let fetch_limit = limit.saturating_add(1);
-    let page = filtered_notification_page(
-        conn,
-        request,
-        offset,
-        fetch_limit,
-        max_payload_bytes,
-    )?;
+    let mut notifications = filtered_notifications(conn, request)?;
+    let start = offset as usize;
+    if start >= notifications.len() {
+        notifications.clear();
+    } else {
+        notifications = notifications
+            .into_iter()
+            .skip(start)
+            .take(fetch_limit as usize)
+            .collect();
+    }
+    let next_cursor = if notifications.len() > limit as usize {
+        notifications.truncate(limit as usize);
+        Some((offset + limit).to_string())
+    } else {
+        None
+    };
     Ok(NotificationReadListResponseWire {
         schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
         snapshot: ProjectionSnapshotReadWire {
@@ -546,14 +551,14 @@ pub fn notification_projection_page(
         },
         page: ProjectionPageInfoWire {
             schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
-            next_cursor: page.next_cursor,
+            next_cursor,
         },
-        notifications: page.notifications,
+        notifications,
         counts: notification_projection_counts(conn)?,
         bounded: ProjectionPayloadBoundWire {
             schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
             max_payload_bytes,
-            truncated: page.truncated,
+            truncated: false,
         },
     })
 }
@@ -601,107 +606,32 @@ pub fn projected_pending_action_store(
     })
 }
 
-struct NotificationPageRows {
-    notifications: Vec<NotificationWire>,
-    next_cursor: Option<String>,
-    truncated: bool,
-}
-
-fn filtered_notification_page(
+fn filtered_notifications(
     conn: &Connection,
     request: &NotificationReadListRequestWire,
-    offset: u32,
-    fetch_limit: u32,
-    max_payload_bytes: u32,
-) -> Result<NotificationPageRows, ProjectionError> {
-    let mut sql = String::from("SELECT notification_json FROM notifications");
-    let mut values = Vec::new();
-    append_notification_filters(&mut sql, &mut values, request);
-    sql.push_str(" ORDER BY source_order ASC, id ASC LIMIT ? OFFSET ?");
-    values.push(SqlValue::Integer(i64::from(fetch_limit)));
-    values.push(SqlValue::Integer(i64::from(offset)));
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-        row.get::<_, String>(0)
-    })?;
-
-    let mut notifications = Vec::new();
-    let mut payload_bytes = 0_u32;
-    let mut truncated = false;
-    let mut next_cursor = None;
-    let limit = fetch_limit.saturating_sub(1);
-    for (idx, row) in rows.enumerate() {
-        let json = row?;
-        let row_offset = offset + idx as u32;
-        if idx as u32 >= limit {
-            next_cursor = Some(row_offset.to_string());
-            break;
-        }
-        let row_bytes = json.len().min(u32::MAX as usize) as u32;
-        if payload_bytes.saturating_add(row_bytes) > max_payload_bytes {
-            truncated = true;
-            next_cursor = Some(
-                if notifications.is_empty() {
-                    row_offset.saturating_add(1)
-                } else {
-                    row_offset
-                }
-                .to_string(),
-            );
-            break;
-        }
-        payload_bytes = payload_bytes.saturating_add(row_bytes);
-        notifications.push(serde_json::from_str(&json)?);
-    }
-
-    Ok(NotificationPageRows {
-        notifications,
-        next_cursor,
-        truncated,
-    })
-}
-
-fn append_notification_filters(
-    sql: &mut String,
-    values: &mut Vec<SqlValue>,
-    request: &NotificationReadListRequestWire,
-) {
-    let mut clauses = Vec::new();
-    if !request.include_dismissed {
-        clauses.push("dismissed = 0".to_string());
-    }
+) -> Result<Vec<NotificationWire>, ProjectionError> {
+    let mut notifications =
+        notification_projection_snapshot(conn, request.include_dismissed)?
+            .notifications;
     if let Some(sender) =
         request.sender.as_deref().filter(|value| !value.is_empty())
     {
-        clauses.push("sender = ?".to_string());
-        values.push(SqlValue::Text(sender.to_string()));
+        notifications.retain(|notification| notification.sender == sender);
     }
     if let Some(unread) = request.unread {
-        clauses.push("read = ?".to_string());
-        values.push(SqlValue::Integer(if unread { 0 } else { 1 }));
+        notifications.retain(|notification| notification.read != unread);
     }
     if let Some(query) =
         request.query.as_deref().filter(|value| !value.is_empty())
     {
-        clauses.push(
-            "id IN (
-                SELECT notification_id
-                FROM notification_search_fts
-                WHERE notification_search_fts MATCH ?
-            )"
-            .to_string(),
-        );
-        values.push(SqlValue::Text(fts_phrase_query(query)));
+        let query = query.to_lowercase();
+        notifications.retain(|notification| {
+            notification_search_text(notification)
+                .to_lowercase()
+                .contains(&query)
+        });
     }
-    if !clauses.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&clauses.join(" AND "));
-    }
-}
-
-fn fts_phrase_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', "\"\""))
+    Ok(notifications)
 }
 
 fn parse_notification_cursor(cursor: &str) -> Result<u32, ProjectionError> {
@@ -715,69 +645,30 @@ fn parse_notification_cursor(cursor: &str) -> Result<u32, ProjectionError> {
 pub fn notification_projection_counts(
     conn: &Connection,
 ) -> Result<NotificationProjectionFacetCountsWire, ProjectionError> {
-    let mut counts = conn.query_row(
-        r#"
-        SELECT
-            COALESCE(SUM(CASE WHEN dismissed = 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN dismissed = 1 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN read = 1 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN read = 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE
-                WHEN dismissed = 0 AND read = 0 AND silent = 0 AND muted = 1
-                THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE
-                WHEN dismissed = 0 AND read = 0 AND silent = 0 AND muted = 0
-                    AND action = 'ViewErrorReport'
-                    AND sender IN ('axe', 'user-agent')
-                THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE
-                WHEN dismissed = 0 AND read = 0 AND silent = 0 AND muted = 0
-                    AND NOT (
-                        action = 'ViewErrorReport'
-                        AND sender IN ('axe', 'user-agent')
-                    )
-                    AND (
-                        action IN (
-                            'PlanApproval',
-                            'UserQuestion',
-                            'JumpToMentorReview'
-                        )
-                        OR sender IN ('axe', 'crs')
-                    )
-                THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE
-                WHEN dismissed = 0 AND read = 0 AND silent = 0 AND muted = 0
-                    AND NOT (
-                        action = 'ViewErrorReport'
-                        AND sender IN ('axe', 'user-agent')
-                    )
-                    AND NOT (
-                        action IN (
-                            'PlanApproval',
-                            'UserQuestion',
-                            'JumpToMentorReview'
-                        )
-                        OR sender IN ('axe', 'crs')
-                    )
-                THEN 1 ELSE 0 END), 0)
-        FROM notifications
-        "#,
-        [],
-        |row| {
-            Ok(NotificationProjectionFacetCountsWire {
-                active: row.get(0)?,
-                dismissed: row.get(1)?,
-                read: row.get(2)?,
-                unread: row.get(3)?,
-                muted: row.get(4)?,
-                errors: row.get(5)?,
-                priority: row.get(6)?,
-                rest: row.get(7)?,
-                pending_actions: 0,
-                stale_pending_actions: 0,
-            })
-        },
-    )?;
+    let all = notification_projection_snapshot(conn, true)?.notifications;
+    let mut counts = NotificationProjectionFacetCountsWire::default();
+    let visible_counts = counts_for(
+        &all.iter()
+            .filter(|notification| !notification.dismissed)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    counts.priority = visible_counts.priority;
+    counts.errors = visible_counts.errors;
+    counts.rest = visible_counts.rest;
+    counts.muted = visible_counts.muted;
+    for notification in &all {
+        if notification.dismissed {
+            counts.dismissed += 1;
+        } else {
+            counts.active += 1;
+        }
+        if notification.read {
+            counts.read += 1;
+        } else {
+            counts.unread += 1;
+        }
+    }
     counts.pending_actions = conn.query_row(
         "SELECT COUNT(*) FROM notification_pending_actions",
         [],
@@ -828,18 +719,12 @@ fn apply_notification_projection_event_tx(
         }
         NotificationProjectionEventPayloadWire::NotificationsRewritten {
             notifications,
+        }
+        | NotificationProjectionEventPayloadWire::NotificationStateUpdated {
+            notifications,
+            ..
         } => {
             replace_notifications_tx(conn, event, &notifications)?;
-        }
-        NotificationProjectionEventPayloadWire::NotificationStateUpdated {
-            update,
-            notifications,
-        } => {
-            if notifications.is_empty() {
-                apply_notification_state_update_tx(conn, event, &update)?;
-            } else {
-                replace_notifications_tx(conn, event, &notifications)?;
-            }
         }
         NotificationProjectionEventPayloadWire::PendingActionRegistered {
             action,
@@ -895,193 +780,6 @@ fn replace_notifications_tx(
         upsert_notification_tx(conn, event, notification, idx as i64)?;
     }
     Ok(())
-}
-
-fn apply_notification_state_update_tx(
-    conn: &Connection,
-    event: &EventEnvelopeWire,
-    update: &NotificationStateUpdateWire,
-) -> Result<(), ProjectionError> {
-    if let NotificationStateUpdateWire::RewriteAll { notifications } = update {
-        return replace_notifications_tx(conn, event, notifications);
-    }
-
-    let mut rows = notification_update_candidates(conn, update)?;
-    for (notification, source_order) in &mut rows {
-        if mutate_notification_for_update(notification, update) {
-            upsert_notification_tx(conn, event, notification, *source_order)?;
-        }
-    }
-    Ok(())
-}
-
-fn notification_update_candidates(
-    conn: &Connection,
-    update: &NotificationStateUpdateWire,
-) -> Result<Vec<(NotificationWire, i64)>, ProjectionError> {
-    let mut sql = String::from(
-        "SELECT notification_json, source_order FROM notifications",
-    );
-    let mut values = Vec::new();
-    match update {
-        NotificationStateUpdateWire::MarkRead { id }
-        | NotificationStateUpdateWire::MarkDismissed { id }
-        | NotificationStateUpdateWire::MarkMuted { id, .. }
-        | NotificationStateUpdateWire::MarkSnoozed { id, .. } => {
-            sql.push_str(" WHERE id = ?");
-            values.push(SqlValue::Text(id.clone()));
-        }
-        NotificationStateUpdateWire::MarkAllRead => {
-            sql.push_str(" WHERE read = 0");
-        }
-        NotificationStateUpdateWire::MarkManyDismissed { ids } => {
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            let placeholders =
-                std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>();
-            sql.push_str(" WHERE id IN (");
-            sql.push_str(&placeholders.join(", "));
-            sql.push(')');
-            values.extend(ids.iter().cloned().map(SqlValue::Text));
-        }
-        NotificationStateUpdateWire::ExpireSnoozes { .. } => {
-            sql.push_str(" WHERE snooze_until IS NOT NULL");
-        }
-        NotificationStateUpdateWire::DismissMatchingAgents { .. } => {
-            sql.push_str(
-                " WHERE dismissed = 0
-                    AND action IN (
-                        'JumpToAgent',
-                        'ViewErrorReport',
-                        'PlanApproval',
-                        'UserQuestion'
-                    )",
-            );
-        }
-        NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
-            ..
-        }
-        | NotificationStateUpdateWire::DismissAgentCompletions => {
-            sql.push_str(
-                " WHERE dismissed = 0
-                    AND sender = 'user-agent'
-                    AND action IN ('JumpToAgent', 'ViewErrorReport')",
-            );
-        }
-        NotificationStateUpdateWire::RewriteAll { .. } => unreachable!(),
-    }
-    sql.push_str(" ORDER BY source_order ASC, id ASC");
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
-    let mut candidates = Vec::new();
-    for row in rows {
-        let (json, source_order) = row?;
-        candidates.push((serde_json::from_str(&json)?, source_order));
-    }
-    Ok(candidates)
-}
-
-fn mutate_notification_for_update(
-    notification: &mut NotificationWire,
-    update: &NotificationStateUpdateWire,
-) -> bool {
-    match update {
-        NotificationStateUpdateWire::MarkRead { id } => {
-            if notification.id == *id && !notification.read {
-                notification.read = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::MarkAllRead => {
-            if !notification.read {
-                notification.read = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::MarkDismissed { id } => {
-            if notification.id == *id && !notification.dismissed {
-                notification.dismissed = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::MarkManyDismissed { ids } => {
-            if !notification.dismissed && ids.contains(&notification.id) {
-                notification.dismissed = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::MarkMuted { id, muted } => {
-            if notification.id == *id
-                && (notification.muted != *muted
-                    || (!*muted && notification.snooze_until.is_some()))
-            {
-                notification.muted = *muted;
-                if !*muted {
-                    notification.snooze_until = None;
-                }
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::MarkSnoozed { id, until } => {
-            if notification.id == *id
-                && (!notification.muted
-                    || notification.snooze_until.as_deref()
-                        != Some(until.as_str()))
-            {
-                notification.muted = true;
-                notification.snooze_until = Some(until.clone());
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::ExpireSnoozes { now } => {
-            if notification
-                .snooze_until
-                .as_deref()
-                .map(|deadline| iso_timestamp_due(deadline, now))
-                .unwrap_or(false)
-                && (notification.muted || notification.snooze_until.is_some())
-            {
-                notification.muted = false;
-                notification.snooze_until = None;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::DismissMatchingAgents { agents } => {
-            if !notification.dismissed
-                && matches_agent_notification(notification, agents)
-            {
-                notification.dismissed = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
-            agents,
-        } => {
-            if !notification.dismissed
-                && matches_agent_completion_notification_for_agents(
-                    notification,
-                    agents,
-                )
-            {
-                notification.dismissed = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::DismissAgentCompletions => {
-            if !notification.dismissed
-                && matches_agent_completion_notification(notification)
-            {
-                notification.dismissed = true;
-                return true;
-            }
-        }
-        NotificationStateUpdateWire::RewriteAll { .. } => unreachable!(),
-    }
-    false
 }
 
 fn upsert_notification_tx(
@@ -1243,147 +941,6 @@ fn notification_search_text(notification: &NotificationWire) -> String {
         parts.push(value.clone());
     }
     parts.join("\n")
-}
-
-fn matches_agent_notification(
-    notification: &NotificationWire,
-    agents: &[NotificationAgentKeyWire],
-) -> bool {
-    if agents.is_empty() {
-        return false;
-    }
-    match notification.action.as_deref() {
-        Some("JumpToAgent") => {
-            let cl_name = notification.action_data.get("cl_name");
-            let raw_suffix = notification.action_data.get("raw_suffix");
-            match raw_suffix {
-                None => {
-                    agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
-                }
-                Some(raw_suffix) => agents.iter().any(|agent| {
-                    Some(&agent.cl_name) == cl_name
-                        && agent.raw_suffix.as_deref()
-                            == Some(raw_suffix.as_str())
-                }),
-            }
-        }
-        Some("ViewErrorReport") if notification.sender == "user-agent" => {
-            let cl_name = notification.action_data.get("cl_name");
-            if cl_name.is_none() {
-                return false;
-            }
-            let raw_suffix = notification.action_data.get("raw_suffix");
-            match raw_suffix {
-                None => {
-                    agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
-                }
-                Some(raw_suffix) => agents.iter().any(|agent| {
-                    Some(&agent.cl_name) == cl_name
-                        && agent.raw_suffix.as_deref()
-                            == Some(raw_suffix.as_str())
-                }),
-            }
-        }
-        Some("PlanApproval" | "UserQuestion") => {
-            let cl_name = notification.action_data.get("agent_cl_name");
-            let timestamp = notification
-                .action_data
-                .get("agent_timestamp")
-                .and_then(|value| normalize_to_14_digit(value));
-            match timestamp {
-                None => {
-                    agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
-                }
-                Some(timestamp) => agents.iter().any(|agent| {
-                    Some(&agent.cl_name) == cl_name
-                        && agent.raw_suffix.as_deref()
-                            == Some(timestamp.as_str())
-                }),
-            }
-        }
-        _ => false,
-    }
-}
-
-fn matches_agent_completion_notification(
-    notification: &NotificationWire,
-) -> bool {
-    if notification.sender != "user-agent" {
-        return false;
-    }
-    match notification.action.as_deref() {
-        Some("JumpToAgent") | Some("ViewErrorReport") => notification
-            .action_data
-            .get("cl_name")
-            .map(|value| !value.is_empty())
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-fn matches_agent_completion_notification_for_agents(
-    notification: &NotificationWire,
-    agents: &[NotificationAgentKeyWire],
-) -> bool {
-    if agents.is_empty() || !matches_agent_completion_notification(notification)
-    {
-        return false;
-    }
-    let cl_name = notification.action_data.get("cl_name");
-    let raw_suffix = notification.action_data.get("raw_suffix");
-    match raw_suffix {
-        None => agents.iter().any(|agent| Some(&agent.cl_name) == cl_name),
-        Some(raw_suffix) => agents.iter().any(|agent| {
-            Some(&agent.cl_name) == cl_name
-                && agent.raw_suffix.as_deref() == Some(raw_suffix.as_str())
-        }),
-    }
-}
-
-fn normalize_to_14_digit(ts: &str) -> Option<String> {
-    if ts.len() == 14 && ts.bytes().all(|b| b.is_ascii_digit()) {
-        return Some(ts.to_string());
-    }
-    if ts.len() == 13
-        && ts.as_bytes().get(6) == Some(&b'_')
-        && ts[..6].bytes().all(|b| b.is_ascii_digit())
-        && ts[7..].bytes().all(|b| b.is_ascii_digit())
-    {
-        return Some(format!("20{}{}", &ts[..6], &ts[7..]));
-    }
-    None
-}
-
-fn iso_timestamp_due(deadline: &str, now: &str) -> bool {
-    match (parse_iso_moment(deadline), parse_iso_moment(now)) {
-        (Some(IsoMoment::Aware(deadline)), Some(IsoMoment::Aware(now))) => {
-            deadline <= now
-        }
-        (Some(IsoMoment::Naive(deadline)), Some(IsoMoment::Naive(now))) => {
-            deadline <= now
-        }
-        (Some(IsoMoment::Aware(deadline)), Some(IsoMoment::Naive(now))) => {
-            deadline <= now.and_utc().timestamp_micros()
-        }
-        (Some(IsoMoment::Naive(deadline)), Some(IsoMoment::Aware(now))) => {
-            deadline.and_utc().timestamp_micros() <= now
-        }
-        _ => false,
-    }
-}
-
-enum IsoMoment {
-    Aware(i64),
-    Naive(NaiveDateTime),
-}
-
-fn parse_iso_moment(value: &str) -> Option<IsoMoment> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Some(IsoMoment::Aware(dt.timestamp_micros()));
-    }
-    NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
-        .ok()
-        .map(IsoMoment::Naive)
 }
 
 fn expected_notification_snapshot(
@@ -1666,105 +1223,32 @@ mod tests {
 
         let snapshot =
             notification_projection_snapshot(db.connection(), false).unwrap();
-        assert_eq!(
-            snapshot.notifications,
-            vec![priority.clone(), error.clone()]
-        );
+        assert_eq!(snapshot.notifications, vec![priority.clone(), error]);
         assert_eq!(snapshot.counts.priority, 1);
         assert_eq!(snapshot.counts.errors, 1);
 
         priority.read = true;
-        let compact_event_request = notification_state_update_event_request(
-            context(),
-            NotificationStateUpdateWire::MarkRead {
-                id: "priority".to_string(),
-            },
-            Vec::new(),
-        )
-        .unwrap();
-        assert!(compact_event_request.payload.get("notifications").is_none());
-        db.append_notification_projection_event(compact_event_request)
-            .unwrap();
-
-        let snapshot =
-            notification_projection_snapshot(db.connection(), false).unwrap();
-        assert_eq!(snapshot.notifications, vec![priority, error]);
-        assert_eq!(snapshot.counts.priority, 0);
-        assert_eq!(snapshot.counts.errors, 1);
-
-        let counts = notification_projection_counts(db.connection()).unwrap();
-        assert_eq!(counts.active, 2);
-        assert_eq!(counts.read, 1);
-    }
-
-    #[test]
-    fn old_full_snapshot_state_update_events_still_replay() {
-        let mut db = ProjectionDb::open_in_memory().unwrap();
-        let first = notification("first");
-        let mut second = notification("second");
-        second.read = true;
-
-        db.append_notification_projection_event(
-            notification_append_event_request(context(), first).unwrap(),
-        )
-        .unwrap();
         db.append_notification_projection_event(
             notification_state_update_event_request(
                 context(),
                 NotificationStateUpdateWire::MarkRead {
-                    id: "second".to_string(),
+                    id: "priority".to_string(),
                 },
-                vec![second.clone()],
+                vec![priority.clone()],
             )
             .unwrap(),
         )
         .unwrap();
 
         let snapshot =
-            notification_projection_snapshot(db.connection(), true).unwrap();
-        assert_eq!(snapshot.notifications, vec![second]);
-    }
-
-    #[test]
-    fn notification_counts_and_first_page_do_not_deserialize_full_store() {
-        let mut db = ProjectionDb::open_in_memory().unwrap();
-        let first = notification("first");
-        let second = notification("second");
-        db.append_notification_projection_event(
-            notification_append_event_request(context(), first.clone())
-                .unwrap(),
-        )
-        .unwrap();
-        db.append_notification_projection_event(
-            notification_append_event_request(context(), second).unwrap(),
-        )
-        .unwrap();
-        db.connection()
-            .execute(
-                "UPDATE notifications SET notification_json = '{bad-json' WHERE id = 'second'",
-                [],
-            )
-            .unwrap();
+            notification_projection_snapshot(db.connection(), false).unwrap();
+        assert_eq!(snapshot.notifications, vec![priority]);
+        assert_eq!(snapshot.counts.priority, 0);
+        assert_eq!(snapshot.counts.errors, 0);
 
         let counts = notification_projection_counts(db.connection()).unwrap();
-        assert_eq!(counts.active, 2);
-        assert_eq!(counts.unread, 2);
-
-        let page = notification_projection_page(
-            db.connection(),
-            &NotificationReadListRequestWire {
-                page: crate::projections::read::ProjectionPageRequestWire {
-                    limit: 1,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            "snapshot-a",
-            4096,
-        )
-        .unwrap();
-        assert_eq!(page.notifications, vec![first]);
-        assert_eq!(page.page.next_cursor, Some("1".to_string()));
+        assert_eq!(counts.active, 1);
+        assert_eq!(counts.read, 1);
     }
 
     #[test]
