@@ -28,6 +28,7 @@ fs2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 jsonwebtoken = "9"
+notify = "6"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sase_core = { path = "../sase_core" }
 serde = { workspace = true }

@@ -233,6 +233,20 @@ impl ProjectionService {
         result
     }
 
+    pub async fn append_projected_event(
+        &self,
+        request: EventAppendRequestWire,
+    ) -> Result<EventAppendOutcomeWire, ProjectionServiceError> {
+        let started = Instant::now();
+        let result = self
+            .write(move |db| db.append_projected_event(request))
+            .await;
+        self.inner
+            .metrics
+            .record_projection_event_append(started.elapsed());
+        result
+    }
+
     pub async fn rebuild_storage_reset_only(
         &self,
     ) -> Result<ProjectionRebuildReportWire, ProjectionServiceError> {
@@ -347,6 +361,12 @@ fn run_startup_repair_checks(
 
 #[cfg(test)]
 mod tests {
+    use sase_core::bead::wire::BeadTierWire;
+    use sase_core::bead::{IssueTypeWire, IssueWire, StatusWire};
+    use sase_core::projections::{
+        bead_created_event_request, bead_projection_show,
+        BeadProjectionEventContextWire, EventSourceWire,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -404,6 +424,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn projected_append_runs_domain_apply_on_blocking_manager() {
+        let dir = tempdir().unwrap();
+        let service =
+            ProjectionService::initialize(dir.path().join("projection.sqlite"))
+                .await;
+        let issue = issue("sase-1");
+        let request =
+            bead_created_event_request(context(), issue.clone()).unwrap();
+
+        service.append_projected_event(request).await.unwrap();
+        let loaded = service
+            .read(|db| {
+                bead_projection_show(db.connection(), "project-a", "sase-1")
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, issue);
+    }
+
+    #[tokio::test]
     async fn rebuild_resets_and_replays_projection_tables() {
         let dir = tempdir().unwrap();
         let service =
@@ -416,5 +457,49 @@ mod tests {
         assert_eq!(report.reset.event_count_before, 0);
         assert_eq!(report.reset.event_count_after, 0);
         assert_eq!(service.status().state, ProjectionServiceState::Ok);
+    }
+
+    fn context() -> BeadProjectionEventContextWire {
+        BeadProjectionEventContextWire {
+            created_at: Some("2026-05-13T21:00:00.000Z".to_string()),
+            source: EventSourceWire {
+                source_type: "test".to_string(),
+                name: "projection-service-test".to_string(),
+                ..EventSourceWire::default()
+            },
+            host_id: "host-a".to_string(),
+            project_id: "project-a".to_string(),
+            idempotency_key: None,
+            causality: vec![],
+            source_path: Some("sdd/beads/issues.jsonl".to_string()),
+            source_revision: None,
+        }
+    }
+
+    fn issue(id: &str) -> IssueWire {
+        IssueWire {
+            id: id.to_string(),
+            title: "Projected".to_string(),
+            status: StatusWire::Open,
+            issue_type: IssueTypeWire::Plan,
+            tier: Some(BeadTierWire::Epic),
+            parent_id: None,
+            owner: String::new(),
+            assignee: String::new(),
+            created_at: "2026-05-13T21:00:00Z".to_string(),
+            created_by: String::new(),
+            updated_at: "2026-05-13T21:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            description: String::new(),
+            notes: String::new(),
+            design: String::new(),
+            model: String::new(),
+            is_ready_to_work: false,
+            epic_count: None,
+            changespec_name: String::new(),
+            changespec_bug_id: String::new(),
+            dependencies: vec![],
+        }
     }
 }

@@ -11,6 +11,7 @@ pub mod changespec;
 pub mod db;
 pub mod error;
 pub mod event;
+pub mod indexing;
 pub mod maintenance;
 pub mod migrations;
 pub mod notifications;
@@ -96,6 +97,12 @@ pub use error::{ProjectionDuplicateEventWire, ProjectionError};
 pub use event::{
     EventAppendOutcomeWire, EventAppendRequestWire, EventCausalityWire,
     EventEnvelopeWire, EventSourceWire, PROJECTION_EVENT_SCHEMA_VERSION,
+};
+pub use indexing::{
+    source_event_idempotency_key, IndexingDomainReportWire,
+    ShadowDiffCategoryWire, ShadowDiffCountsWire, ShadowDiffRecordWire,
+    ShadowDiffReportWire, SourceChangeOperationWire, SourceChangeWire,
+    SourceFingerprintWire, SourceIdentityWire, INDEXING_WIRE_SCHEMA_VERSION,
 };
 pub use maintenance::{
     projection_checkpoint_decision, ProjectionBackupReportWire,

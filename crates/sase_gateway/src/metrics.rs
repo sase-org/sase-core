@@ -25,6 +25,15 @@ struct DaemonMetricsInner {
     dropped_events_total: AtomicU64,
     health_ok: AtomicU64,
     health_degraded: AtomicU64,
+    indexing_queued_changes_total: AtomicU64,
+    indexing_dropped_changes_total: AtomicU64,
+    indexing_coalesced_changes_total: AtomicU64,
+    indexing_indexed_sources_total: AtomicU64,
+    indexing_failed_parses_total: AtomicU64,
+    indexing_shadow_diff_missing_total: AtomicU64,
+    indexing_shadow_diff_stale_total: AtomicU64,
+    indexing_shadow_diff_extra_total: AtomicU64,
+    indexing_shadow_diff_corrupt_total: AtomicU64,
     rpc_latency: LatencyHistogram,
     projection_query_latency: LatencyHistogram,
     projection_event_append_latency: LatencyHistogram,
@@ -54,6 +63,15 @@ impl Default for DaemonMetrics {
                 dropped_events_total: AtomicU64::new(0),
                 health_ok: AtomicU64::new(1),
                 health_degraded: AtomicU64::new(0),
+                indexing_queued_changes_total: AtomicU64::new(0),
+                indexing_dropped_changes_total: AtomicU64::new(0),
+                indexing_coalesced_changes_total: AtomicU64::new(0),
+                indexing_indexed_sources_total: AtomicU64::new(0),
+                indexing_failed_parses_total: AtomicU64::new(0),
+                indexing_shadow_diff_missing_total: AtomicU64::new(0),
+                indexing_shadow_diff_stale_total: AtomicU64::new(0),
+                indexing_shadow_diff_extra_total: AtomicU64::new(0),
+                indexing_shadow_diff_corrupt_total: AtomicU64::new(0),
                 rpc_latency: LatencyHistogram::new(),
                 projection_query_latency: LatencyHistogram::new(),
                 projection_event_append_latency: LatencyHistogram::new(),
@@ -111,6 +129,51 @@ impl DaemonMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_indexing_queued_change(&self) {
+        self.inner
+            .indexing_queued_changes_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_indexing_dropped_change(&self) {
+        self.inner
+            .indexing_dropped_changes_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_indexing_report(
+        &self,
+        indexed_sources: u64,
+        failed_parses: u64,
+        coalesced_changes: u64,
+        missing: u64,
+        stale: u64,
+        extra: u64,
+        corrupt: u64,
+    ) {
+        self.inner
+            .indexing_indexed_sources_total
+            .fetch_add(indexed_sources, Ordering::Relaxed);
+        self.inner
+            .indexing_failed_parses_total
+            .fetch_add(failed_parses, Ordering::Relaxed);
+        self.inner
+            .indexing_coalesced_changes_total
+            .fetch_add(coalesced_changes, Ordering::Relaxed);
+        self.inner
+            .indexing_shadow_diff_missing_total
+            .fetch_add(missing, Ordering::Relaxed);
+        self.inner
+            .indexing_shadow_diff_stale_total
+            .fetch_add(stale, Ordering::Relaxed);
+        self.inner
+            .indexing_shadow_diff_extra_total
+            .fetch_add(extra, Ordering::Relaxed);
+        self.inner
+            .indexing_shadow_diff_corrupt_total
+            .fetch_add(corrupt, Ordering::Relaxed);
+    }
+
     pub fn set_health_ok(&self, ok: bool) {
         self.inner.health_ok.store(u64::from(ok), Ordering::Relaxed);
         self.inner
@@ -161,6 +224,107 @@ impl DaemonMetrics {
             &mut out,
             "sase_daemon_dropped_events_total",
             self.inner.dropped_events_total.load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_queued_changes_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_indexing_queued_changes_total",
+            self.inner
+                .indexing_queued_changes_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_dropped_changes_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_indexing_dropped_changes_total",
+            self.inner
+                .indexing_dropped_changes_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_coalesced_changes_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_indexing_coalesced_changes_total",
+            self.inner
+                .indexing_coalesced_changes_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_indexed_sources_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_indexing_indexed_sources_total",
+            self.inner
+                .indexing_indexed_sources_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_failed_parses_total",
+            "counter",
+        );
+        metric_value(
+            &mut out,
+            "sase_daemon_indexing_failed_parses_total",
+            self.inner
+                .indexing_failed_parses_total
+                .load(Ordering::Relaxed),
+        );
+        metric_type(
+            &mut out,
+            "sase_daemon_indexing_shadow_diffs_total",
+            "counter",
+        );
+        labeled_metric_value(
+            &mut out,
+            "sase_daemon_indexing_shadow_diffs_total",
+            "category",
+            "missing",
+            self.inner
+                .indexing_shadow_diff_missing_total
+                .load(Ordering::Relaxed),
+        );
+        labeled_metric_value(
+            &mut out,
+            "sase_daemon_indexing_shadow_diffs_total",
+            "category",
+            "stale",
+            self.inner
+                .indexing_shadow_diff_stale_total
+                .load(Ordering::Relaxed),
+        );
+        labeled_metric_value(
+            &mut out,
+            "sase_daemon_indexing_shadow_diffs_total",
+            "category",
+            "extra",
+            self.inner
+                .indexing_shadow_diff_extra_total
+                .load(Ordering::Relaxed),
+        );
+        labeled_metric_value(
+            &mut out,
+            "sase_daemon_indexing_shadow_diffs_total",
+            "category",
+            "corrupt",
+            self.inner
+                .indexing_shadow_diff_corrupt_total
+                .load(Ordering::Relaxed),
         );
         metric_type(&mut out, "sase_daemon_health_status", "gauge");
         labeled_metric_value(

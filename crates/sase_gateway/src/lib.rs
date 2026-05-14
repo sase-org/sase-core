@@ -5,6 +5,7 @@
 pub mod contract;
 pub mod daemon;
 pub mod host_bridge;
+pub mod indexer;
 pub mod local_transport;
 pub mod metrics;
 pub mod ownership;
@@ -34,6 +35,11 @@ pub use host_bridge::{
     StaticAgentHostBridge, StaticHelperHostBridge,
     StaticNotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use indexer::{
+    IndexingConfig, IndexingError, IndexingService, IndexingServiceStateWire,
+    IndexingServiceStatusWire, NotifySourceWatcherFactory, SourceWatcher,
+    SourceWatcherFactory,
 };
 pub use local_transport::{
     handle_connection, response_for_frame, serve_local_transport,

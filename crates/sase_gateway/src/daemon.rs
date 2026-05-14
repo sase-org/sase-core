@@ -16,6 +16,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::{
+    indexer::{IndexingConfig, IndexingService},
     local_transport::{serve_local_transport, LocalTransportError},
     metrics::DaemonMetrics,
     ownership::{DaemonOwnershipGuard, OwnershipError},
@@ -123,6 +124,15 @@ impl DaemonRuntime {
         metrics: DaemonMetrics,
     ) -> Self {
         let ownership = Arc::new(ownership);
+        let shutdown = DaemonShutdown::default();
+        let local_events =
+            LocalEventHub::new(LOCAL_EVENT_BUFFER_CAPACITY, metrics.clone());
+        let indexing_service = IndexingService::start(
+            IndexingConfig::default(),
+            shutdown.clone(),
+            metrics.clone(),
+            local_events.clone(),
+        );
         let state = DaemonState {
             build: GatewayBuildWire {
                 package_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -130,14 +140,12 @@ impl DaemonRuntime {
             },
             host_identity: config.host_identity.clone(),
             paths: config.paths.clone(),
-            shutdown: DaemonShutdown::default(),
+            shutdown,
             metrics: metrics.clone(),
             metrics_endpoint: Arc::new(RwLock::new(None)),
-            local_events: LocalEventHub::new(
-                LOCAL_EVENT_BUFFER_CAPACITY,
-                metrics,
-            ),
+            local_events,
             projection_service,
+            indexing_service,
             mobile_gateway: config
                 .mobile_http_enabled
                 .then_some(config.mobile_gateway.clone()),
@@ -181,6 +189,7 @@ pub struct DaemonState {
     pub metrics_endpoint: Arc<RwLock<Option<String>>>,
     pub local_events: LocalEventHub,
     pub projection_service: ProjectionService,
+    pub indexing_service: IndexingService,
     pub mobile_gateway: Option<GatewayConfig>,
 }
 
@@ -198,6 +207,10 @@ impl DaemonState {
     pub fn diagnostic_details(&self) -> JsonValue {
         let mut details = self.projection_service.health_details();
         if let JsonValue::Object(ref mut object) = details {
+            object.insert(
+                "indexing".to_string(),
+                self.indexing_service.health_details(),
+            );
             object.insert(
                 "metrics".to_string(),
                 json!({
@@ -264,7 +277,7 @@ impl LocalEventHub {
         self.append(|_| LocalDaemonEventPayloadWire::ResyncRequired { reason })
     }
 
-    fn append(
+    pub(crate) fn append(
         &self,
         make_payload: impl FnOnce(u64) -> LocalDaemonEventPayloadWire,
     ) -> LocalDaemonEventRecordWire {

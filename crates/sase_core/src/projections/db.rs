@@ -12,6 +12,11 @@ use super::event::{
     EventEnvelopeWire, EventSourceWire, PROJECTION_EVENT_SCHEMA_VERSION,
 };
 use super::migrations::run_migrations;
+use super::{
+    AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
+    ChangeSpecProjectionApplier, NotificationProjectionApplier,
+    ProjectionApplier, WorkflowProjectionApplier,
+};
 
 const BASE_PROJECTION_NAME: &str = "event_log";
 
@@ -76,6 +81,20 @@ impl ProjectionDb {
         self.with_immediate_transaction(|conn| append_event_tx(conn, request))
     }
 
+    pub fn append_projected_event(
+        &mut self,
+        request: EventAppendRequestWire,
+    ) -> Result<EventAppendOutcomeWire, ProjectionError> {
+        self.with_immediate_transaction(|conn| {
+            let outcome = append_event_tx(conn, request)?;
+            if outcome.duplicate {
+                return Ok(outcome);
+            }
+            apply_projected_event_tx(conn, &outcome.event)?;
+            Ok(outcome)
+        })
+    }
+
     pub fn get_event(
         &self,
         seq: i64,
@@ -109,6 +128,43 @@ impl ProjectionDb {
     pub fn max_event_seq(&self) -> Result<i64, ProjectionError> {
         max_event_seq_tx(&self.conn)
     }
+}
+
+fn apply_projected_event_tx(
+    conn: &Connection,
+    event: &EventEnvelopeWire,
+) -> Result<(), ProjectionError> {
+    let mut changespec = ChangeSpecProjectionApplier;
+    let mut notifications = NotificationProjectionApplier;
+    let mut beads = BeadProjectionApplier;
+    let mut agents = AgentProjectionApplier;
+    let mut workflows = WorkflowProjectionApplier;
+    let mut catalogs = CatalogProjectionApplier;
+
+    let applier: Option<&mut dyn ProjectionApplier> =
+        if event.event_type.starts_with("changespec.") {
+            Some(&mut changespec)
+        } else if event.event_type.starts_with("notification.")
+            || event.event_type.starts_with("pending_action.")
+        {
+            Some(&mut notifications)
+        } else if event.event_type.starts_with("bead.") {
+            Some(&mut beads)
+        } else if event.event_type.starts_with("agent.") {
+            Some(&mut agents)
+        } else if event.event_type.starts_with("workflow.") {
+            Some(&mut workflows)
+        } else if event.event_type.starts_with("catalog.") {
+            Some(&mut catalogs)
+        } else {
+            None
+        };
+
+    if let Some(applier) = applier {
+        applier.apply(event, conn)?;
+        set_projection_last_seq_tx(conn, applier.projection_name(), event.seq)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn append_event_tx(
@@ -338,6 +394,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::bead::wire::BeadTierWire;
+    use crate::bead::{IssueTypeWire, IssueWire, StatusWire};
+    use crate::projections::{
+        bead_created_event_request, bead_projection_show,
+        BeadProjectionEventContextWire, BEAD_PROJECTION_NAME,
+    };
 
     fn request(idempotency_key: Option<&str>) -> EventAppendRequestWire {
         EventAppendRequestWire {
@@ -428,5 +490,105 @@ mod tests {
         assert!(error.to_string().contains("forced failure"));
         assert_eq!(db.event_count().unwrap(), 0);
         assert_eq!(db.projection_last_seq(BASE_PROJECTION_NAME).unwrap(), 0);
+    }
+
+    #[test]
+    fn projected_append_updates_event_and_domain_projection_atomically() {
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        let issue = bead_issue("sase-1", "Indexed");
+        let request =
+            bead_created_event_request(bead_context(None), issue.clone())
+                .unwrap();
+
+        let outcome = db.append_projected_event(request).unwrap();
+
+        assert_eq!(outcome.event.seq, 1);
+        assert_eq!(db.event_count().unwrap(), 1);
+        assert_eq!(db.projection_last_seq(BASE_PROJECTION_NAME).unwrap(), 1);
+        assert_eq!(db.projection_last_seq(BEAD_PROJECTION_NAME).unwrap(), 1);
+        assert_eq!(
+            bead_projection_show(db.connection(), "project-a", "sase-1")
+                .unwrap(),
+            issue
+        );
+    }
+
+    #[test]
+    fn projected_append_rolls_back_event_when_domain_apply_fails() {
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        let mut request = request(None);
+        request.event_type = "bead.created".to_string();
+        request.payload = json!({});
+
+        let error = db.append_projected_event(request).unwrap_err();
+
+        assert!(error.to_string().contains("missing field"));
+        assert_eq!(db.event_count().unwrap(), 0);
+        assert_eq!(db.projection_last_seq(BASE_PROJECTION_NAME).unwrap(), 0);
+        assert_eq!(db.projection_last_seq(BEAD_PROJECTION_NAME).unwrap(), 0);
+    }
+
+    #[test]
+    fn projected_append_deduplicates_without_reapplying_domain_event() {
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        let request = bead_created_event_request(
+            bead_context(Some("same")),
+            bead_issue("sase-1", "Indexed"),
+        )
+        .unwrap();
+
+        let first = db.append_projected_event(request.clone()).unwrap();
+        let duplicate = db.append_projected_event(request).unwrap();
+
+        assert!(!first.duplicate);
+        assert!(duplicate.duplicate);
+        assert_eq!(db.event_count().unwrap(), 1);
+        assert_eq!(db.projection_last_seq(BEAD_PROJECTION_NAME).unwrap(), 1);
+    }
+
+    fn bead_context(
+        idempotency_key: Option<&str>,
+    ) -> BeadProjectionEventContextWire {
+        BeadProjectionEventContextWire {
+            created_at: Some("2026-05-13T21:00:00.000Z".to_string()),
+            source: EventSourceWire {
+                source_type: "test".to_string(),
+                name: "projection-test".to_string(),
+                ..EventSourceWire::default()
+            },
+            host_id: "host-a".to_string(),
+            project_id: "project-a".to_string(),
+            idempotency_key: idempotency_key.map(str::to_string),
+            causality: vec![],
+            source_path: Some("sdd/beads/issues.jsonl".to_string()),
+            source_revision: None,
+        }
+    }
+
+    fn bead_issue(id: &str, title: &str) -> IssueWire {
+        IssueWire {
+            id: id.to_string(),
+            title: title.to_string(),
+            status: StatusWire::Open,
+            issue_type: IssueTypeWire::Plan,
+            tier: Some(BeadTierWire::Epic),
+            parent_id: None,
+            owner: String::new(),
+            assignee: String::new(),
+            created_at: "2026-05-13T21:00:00Z".to_string(),
+            created_by: String::new(),
+            updated_at: "2026-05-13T21:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            description: String::new(),
+            notes: String::new(),
+            design: String::new(),
+            model: String::new(),
+            is_ready_to_work: false,
+            epic_count: None,
+            changespec_name: String::new(),
+            changespec_bug_id: String::new(),
+            dependencies: vec![],
+        }
     }
 }

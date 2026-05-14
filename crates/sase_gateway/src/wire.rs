@@ -386,6 +386,7 @@ pub enum LocalDaemonCollectionWire {
     Notifications,
     Workflows,
     Xprompts,
+    Indexing,
     Mocked,
 }
 

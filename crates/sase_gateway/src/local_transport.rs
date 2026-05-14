@@ -734,6 +734,9 @@ mod tests {
                 PathBuf::from("/tmp/sase-run/projections/projection.sqlite"),
                 "test projection service unavailable",
             ),
+            indexing_service: crate::indexer::IndexingService::disabled(
+                crate::metrics::DaemonMetrics::default(),
+            ),
             mobile_gateway: None,
         }
     }
