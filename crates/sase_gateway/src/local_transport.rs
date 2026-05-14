@@ -6,6 +6,14 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
+use sase_core::notifications::PendingActionStoreWire;
+use sase_core::projections::{
+    notification_projection_counts, notification_projection_detail,
+    notification_projection_page, projected_pending_action_store,
+    NotificationPendingActionsReadResponseWire,
+    NotificationReadDetailResponseWire, ProjectionPayloadBoundWire,
+    ProjectionSnapshotReadWire, PROJECTION_READ_WIRE_SCHEMA_VERSION,
+};
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 use tokio::{
@@ -27,10 +35,11 @@ use crate::{
         LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
-        LocalDaemonPayloadBoundWire, LocalDaemonRebuildRequestWire,
+        LocalDaemonPayloadBoundWire, LocalDaemonReadRequestWire,
+        LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -216,7 +225,10 @@ fn handle_payload(
             LocalDaemonResponsePayloadWire::Capabilities(capabilities_response())
         }
         LocalDaemonRequestPayloadWire::List(request) => {
-            LocalDaemonResponsePayloadWire::List(list_response(request))
+            handle_list_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::Read(request) => {
+            handle_read_payload(request, state)
         }
         LocalDaemonRequestPayloadWire::Events(request) => {
             LocalDaemonResponsePayloadWire::Events(event_batch_response(
@@ -490,6 +502,337 @@ fn list_response(
     }
 }
 
+fn handle_list_payload(
+    request: LocalDaemonListRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    if request.collection == LocalDaemonCollectionWire::Mocked {
+        return LocalDaemonResponsePayloadWire::List(list_response(request));
+    }
+    if request.collection == LocalDaemonCollectionWire::Notifications {
+        return notification_generic_list_payload(request, state)
+            .unwrap_or_else(LocalDaemonResponsePayloadWire::Error);
+    }
+    LocalDaemonResponsePayloadWire::Error(unsupported_collection_error(
+        request.collection,
+    ))
+}
+
+fn handle_read_payload(
+    request: LocalDaemonReadRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    match request {
+        LocalDaemonReadRequestWire::NotificationList(_) => {
+            notification_list_payload(request, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::NotificationDetail(request) => {
+            notification_detail_payload(request.notification_id, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::NotificationCounts => state
+            .projection_service
+            .read_blocking(|db| notification_projection_counts(db.connection()))
+            .map(|counts| {
+                LocalDaemonResponsePayloadWire::Read(
+                    LocalDaemonReadResponseWire::NotificationCounts(counts),
+                )
+            })
+            .unwrap_or_else(|error| {
+                LocalDaemonResponsePayloadWire::Error(projection_error(error))
+            }),
+        LocalDaemonReadRequestWire::NotificationPendingActions => {
+            notification_pending_actions_payload(state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        other => LocalDaemonResponsePayloadWire::Error(unsupported_read_error(
+            read_surface_name(&other),
+        )),
+    }
+}
+
+fn notification_list_payload(
+    request: LocalDaemonReadRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let LocalDaemonReadRequestWire::NotificationList(request) = request else {
+        return Err(local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            "notification list dispatch received the wrong request shape",
+            false,
+            Some("payload".to_string()),
+            None,
+        ));
+    };
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            notification_projection_page(
+                db.connection(),
+                &request,
+                snapshot_id,
+                max_payload_bytes,
+            )
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(
+                LocalDaemonReadResponseWire::NotificationList(response),
+            )
+        })
+        .map_err(projection_error)
+}
+
+fn notification_generic_list_payload(
+    request: LocalDaemonListRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let stable_handle = request.stable_handle.clone();
+    let max_payload_bytes = request
+        .max_payload_bytes
+        .unwrap_or(LOCAL_DAEMON_MAX_PAYLOAD_BYTES);
+    let snapshot_id =
+        request.snapshot_id.clone().unwrap_or_else(next_snapshot_id);
+    let read_request = notification_list_request_from_generic(&request);
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            notification_projection_page(
+                db.connection(),
+                &read_request,
+                snapshot_id,
+                max_payload_bytes,
+            )
+        })
+        .map(|response| {
+            let items = response
+                .notifications
+                .into_iter()
+                .map(|notification| {
+                    let handle = notification.id.clone();
+                    Ok(LocalDaemonListItemWire {
+                        handle,
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        summary: serde_json::to_value(notification)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, serde_json::Error>>()
+                .map_err(|error| {
+                    local_error(
+                        LocalDaemonErrorCodeWire::Internal,
+                        format!(
+                            "failed to serialize notification list item: {error}"
+                        ),
+                        false,
+                        Some("notifications".to_string()),
+                        None,
+                    )
+                })?;
+            Ok(LocalDaemonResponsePayloadWire::List(
+                LocalDaemonListResponseWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    collection: LocalDaemonCollectionWire::Notifications,
+                    snapshot_id: response.snapshot.snapshot_id,
+                    items,
+                    next_cursor: response.page.next_cursor,
+                    stable_handle,
+                    bounded: LocalDaemonPayloadBoundWire {
+                        max_payload_bytes,
+                        truncated: response.bounded.truncated,
+                    },
+                },
+            ))
+        })
+        .map_err(projection_error)?
+}
+
+fn notification_detail_payload(
+    notification_id: String,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let notification = notification_projection_detail(
+                db.connection(),
+                &notification_id,
+            )?;
+            Ok(NotificationReadDetailResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                notification,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(
+                LocalDaemonReadResponseWire::NotificationDetail(response),
+            )
+        })
+        .map_err(projection_error)
+}
+
+fn notification_pending_actions_payload(
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let store = projected_pending_action_store(db.connection())?;
+            let actions = pending_action_store_actions(&store);
+            Ok(NotificationPendingActionsReadResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                store,
+                actions,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(
+                LocalDaemonReadResponseWire::NotificationPendingActions(
+                    response,
+                ),
+            )
+        })
+        .map_err(projection_error)
+}
+
+fn pending_action_store_actions(
+    store: &PendingActionStoreWire,
+) -> Vec<sase_core::notifications::PendingActionWire> {
+    store.actions.values().cloned().collect()
+}
+
+fn notification_list_request_from_generic(
+    request: &LocalDaemonListRequestWire,
+) -> crate::wire::NotificationReadListRequestWire {
+    let filters = request.filters.as_ref();
+    crate::wire::NotificationReadListRequestWire {
+        schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+        page: ProjectionPageRequestWire {
+            schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+            limit: request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT),
+            cursor: request.page.cursor.clone(),
+        },
+        include_dismissed: filters
+            .and_then(|value| value.get("include_dismissed"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        query: filters
+            .and_then(|value| value.get("query"))
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        sender: filters
+            .and_then(|value| value.get("sender"))
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        unread: filters
+            .and_then(|value| value.get("unread"))
+            .and_then(JsonValue::as_bool),
+    }
+}
+
+fn unsupported_collection_error(
+    collection: LocalDaemonCollectionWire,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::UnsupportedCapability,
+        format!("local daemon collection '{collection:?}' is not implemented"),
+        false,
+        Some("collection".to_string()),
+        Some(json!({"capability": collection_capability(collection)})),
+    )
+}
+
+fn unsupported_read_error(surface: &str) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::UnsupportedCapability,
+        format!("local daemon read surface '{surface}' is not implemented"),
+        false,
+        Some("payload".to_string()),
+        Some(json!({"capability": format!("{surface}.read")})),
+    )
+}
+
+fn projection_error(
+    error: crate::projection_service::ProjectionServiceError,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::ProjectionDegraded,
+        format!("projection read failed: {error}"),
+        true,
+        Some("projection_db".to_string()),
+        None,
+    )
+}
+
+fn read_surface_name(request: &LocalDaemonReadRequestWire) -> &'static str {
+    match request {
+        LocalDaemonReadRequestWire::ChangespecList(_) => "changespecs.list",
+        LocalDaemonReadRequestWire::ChangespecSearch(_) => "changespecs.search",
+        LocalDaemonReadRequestWire::ChangespecDetail(_) => "changespecs.detail",
+        LocalDaemonReadRequestWire::AgentActive(_) => "agents.active",
+        LocalDaemonReadRequestWire::AgentRecent(_) => "agents.recent",
+        LocalDaemonReadRequestWire::AgentArchive(_) => "agents.archive",
+        LocalDaemonReadRequestWire::AgentSearch(_) => "agents.search",
+        LocalDaemonReadRequestWire::AgentDetail(_) => "agents.detail",
+        LocalDaemonReadRequestWire::NotificationList(_) => "notifications.list",
+        LocalDaemonReadRequestWire::NotificationDetail(_) => {
+            "notifications.detail"
+        }
+        LocalDaemonReadRequestWire::NotificationCounts => {
+            "notifications.counts"
+        }
+        LocalDaemonReadRequestWire::NotificationPendingActions => {
+            "notifications.pending_actions"
+        }
+        LocalDaemonReadRequestWire::BeadList(_) => "beads.list",
+        LocalDaemonReadRequestWire::BeadReady(_) => "beads.ready",
+        LocalDaemonReadRequestWire::BeadBlocked(_) => "beads.blocked",
+        LocalDaemonReadRequestWire::BeadShow(_) => "beads.show",
+        LocalDaemonReadRequestWire::BeadStats(_) => "beads.stats",
+        LocalDaemonReadRequestWire::XpromptCatalog(_) => "catalogs.xprompts",
+        LocalDaemonReadRequestWire::EditorCatalog(_) => "catalogs.editor",
+        LocalDaemonReadRequestWire::SnippetCatalog(_) => "catalogs.snippets",
+        LocalDaemonReadRequestWire::FileHistory(_) => "catalogs.file_history",
+    }
+}
+
+fn collection_capability(
+    collection: LocalDaemonCollectionWire,
+) -> &'static str {
+    match collection {
+        LocalDaemonCollectionWire::Agents => "agents.read",
+        LocalDaemonCollectionWire::Artifacts => "agents.read",
+        LocalDaemonCollectionWire::Beads => "beads.read",
+        LocalDaemonCollectionWire::Changespecs => "changespecs.read",
+        LocalDaemonCollectionWire::Notifications => "notifications.read",
+        LocalDaemonCollectionWire::Workflows => "catalogs.read",
+        LocalDaemonCollectionWire::Xprompts => "catalogs.read",
+        LocalDaemonCollectionWire::Indexing => "indexing.status",
+        LocalDaemonCollectionWire::Mocked => "mocked.list",
+    }
+}
+
 fn event_batch_response(
     request: LocalDaemonEventRequestWire,
     state: &DaemonState,
@@ -559,6 +902,7 @@ fn local_daemon_capabilities() -> Vec<String> {
         "capabilities.read".to_string(),
         "mocked.list".to_string(),
         "mocked.events".to_string(),
+        "notifications.read".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -723,10 +1067,65 @@ fn snapshot_id_for_payload(
         LocalDaemonResponsePayloadWire::List(response) => {
             Some(response.snapshot_id.clone())
         }
+        LocalDaemonResponsePayloadWire::Read(response) => {
+            read_response_snapshot_id(response)
+        }
         LocalDaemonResponsePayloadWire::Events(response) => {
             Some(response.snapshot_id.clone())
         }
         _ => None,
+    }
+}
+
+fn read_response_snapshot_id(
+    response: &LocalDaemonReadResponseWire,
+) -> Option<String> {
+    match response {
+        LocalDaemonReadResponseWire::ChangespecList(response)
+        | LocalDaemonReadResponseWire::ChangespecSearch(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::ChangespecDetail(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::AgentActive(response)
+        | LocalDaemonReadResponseWire::AgentRecent(response)
+        | LocalDaemonReadResponseWire::AgentSearch(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::AgentArchive(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::AgentDetail(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::NotificationList(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::NotificationDetail(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::NotificationCounts(_) => None,
+        LocalDaemonReadResponseWire::NotificationPendingActions(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::BeadList(response)
+        | LocalDaemonReadResponseWire::BeadReady(response)
+        | LocalDaemonReadResponseWire::BeadBlocked(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::BeadShow(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::BeadStats(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
+        LocalDaemonReadResponseWire::XpromptCatalog(response)
+        | LocalDaemonReadResponseWire::EditorCatalog(response)
+        | LocalDaemonReadResponseWire::SnippetCatalog(response)
+        | LocalDaemonReadResponseWire::FileHistory(response) => {
+            Some(response.snapshot.snapshot_id.clone())
+        }
     }
 }
 
@@ -781,13 +1180,30 @@ mod tests {
         projection_service::ProjectionService,
         wire::{
             GatewayBuildWire, LocalDaemonClientWire,
-            LocalDaemonPageRequestWire, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            LocalDaemonPageRequestWire, ProjectionPageRequestWire,
+            LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         },
     };
+    use sase_core::notifications::NotificationWire;
+    use sase_core::projections::{
+        notification_append_event_request, EventSourceWire,
+        NotificationProjectionEventContextWire,
+    };
+    use std::collections::BTreeMap;
+    use tempfile::tempdir;
 
     use super::*;
 
     fn test_state() -> DaemonState {
+        test_state_with_projection(ProjectionService::unavailable(
+            PathBuf::from("/tmp/sase-run/projections/projection.sqlite"),
+            "test projection service unavailable",
+        ))
+    }
+
+    fn test_state_with_projection(
+        projection_service: ProjectionService,
+    ) -> DaemonState {
         DaemonState {
             build: GatewayBuildWire {
                 package_version: "0.1.1".to_string(),
@@ -806,10 +1222,7 @@ mod tests {
                 256,
                 crate::metrics::DaemonMetrics::default(),
             ),
-            projection_service: ProjectionService::unavailable(
-                PathBuf::from("/tmp/sase-run/projections/projection.sqlite"),
-                "test projection service unavailable",
-            ),
+            projection_service,
             indexing_service: crate::indexer::IndexingService::disabled(
                 crate::metrics::DaemonMetrics::default(),
             ),
@@ -919,6 +1332,160 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_list_collection_returns_fallback_error() {
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::List(LocalDaemonListRequestWire {
+                collection: LocalDaemonCollectionWire::Agents,
+                page: LocalDaemonPageRequestWire {
+                    limit: LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+                    cursor: None,
+                },
+                snapshot_id: None,
+                stable_handle: None,
+                max_payload_bytes: None,
+                filters: None,
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &test_state());
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Error(error) => {
+                assert_eq!(
+                    error.code,
+                    LocalDaemonErrorCodeWire::UnsupportedCapability
+                );
+                assert!(error.fallback.available);
+            }
+            other => {
+                panic!("expected unsupported collection error, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn notification_read_list_uses_projection_rows() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let mut notification = notification("notification-1");
+        notification.notes = vec!["hello projection".to_string()];
+        runtime
+            .block_on(
+                projection_service.append_projected_event(
+                    notification_append_event_request(
+                        notification_context(),
+                        notification.clone(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+        let payload =
+            serde_json::to_vec(&request(LocalDaemonRequestPayloadWire::Read(
+                LocalDaemonReadRequestWire::NotificationList(
+                    crate::wire::NotificationReadListRequestWire {
+                        schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                        page: ProjectionPageRequestWire {
+                            schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                            limit: 10,
+                            cursor: None,
+                        },
+                        include_dismissed: false,
+                        query: Some("projection".to_string()),
+                        sender: None,
+                        unread: Some(true),
+                    },
+                ),
+            )))
+            .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Read(
+                LocalDaemonReadResponseWire::NotificationList(list),
+            ) => {
+                assert_eq!(list.notifications, vec![notification]);
+                assert_eq!(list.counts.active, 1);
+                assert_eq!(
+                    response.snapshot_id,
+                    Some(list.snapshot.snapshot_id)
+                );
+            }
+            other => {
+                panic!("expected notification read response, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn notification_collection_list_returns_generic_list_items() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let mut notification = notification("notification-list-1");
+        notification.notes = vec!["generic list".to_string()];
+        runtime
+            .block_on(
+                projection_service.append_projected_event(
+                    notification_append_event_request(
+                        notification_context(),
+                        notification.clone(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::List(LocalDaemonListRequestWire {
+                collection: LocalDaemonCollectionWire::Notifications,
+                page: LocalDaemonPageRequestWire {
+                    limit: 10,
+                    cursor: None,
+                },
+                snapshot_id: Some("snap_notifications".to_string()),
+                stable_handle: Some("notifications:list:test".to_string()),
+                max_payload_bytes: None,
+                filters: Some(json!({"query": "generic"})),
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::List(list) => {
+                assert_eq!(
+                    list.collection,
+                    LocalDaemonCollectionWire::Notifications
+                );
+                assert_eq!(list.items.len(), 1);
+                assert_eq!(list.items[0].handle, "notification-list-1");
+                assert_eq!(
+                    list.items[0].summary["id"],
+                    json!("notification-list-1")
+                );
+                assert_eq!(list.snapshot_id, "snap_notifications");
+                assert_eq!(
+                    list.stable_handle.as_deref(),
+                    Some("notifications:list:test")
+                );
+            }
+            other => {
+                panic!("expected generic notification list, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
     fn events_request_returns_heartbeat_batch() {
         let payload = serde_json::to_vec(&request(
             LocalDaemonRequestPayloadWire::Events(
@@ -955,6 +1522,39 @@ mod tests {
                 );
             }
             other => panic!("expected events response, got {other:?}"),
+        }
+    }
+
+    fn notification_context() -> NotificationProjectionEventContextWire {
+        NotificationProjectionEventContextWire {
+            created_at: Some("2026-05-13T21:00:00.000Z".to_string()),
+            source: EventSourceWire {
+                source_type: "test".to_string(),
+                name: "local-transport-test".to_string(),
+                ..EventSourceWire::default()
+            },
+            host_id: "host-a".to_string(),
+            project_id: "project-a".to_string(),
+            idempotency_key: None,
+            source_path: Some("notifications.jsonl".to_string()),
+            source_revision: None,
+        }
+    }
+
+    fn notification(id: &str) -> NotificationWire {
+        NotificationWire {
+            id: id.to_string(),
+            timestamp: "2026-05-01T01:02:03+00:00".to_string(),
+            sender: "test-sender".to_string(),
+            notes: Vec::new(),
+            files: Vec::new(),
+            action: None,
+            action_data: BTreeMap::new(),
+            read: false,
+            dismissed: false,
+            silent: false,
+            muted: false,
+            snooze_until: None,
         }
     }
 

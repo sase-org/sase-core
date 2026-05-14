@@ -16,6 +16,7 @@ pub mod indexing;
 pub mod maintenance;
 pub mod migrations;
 pub mod notifications;
+pub mod read;
 pub mod rebuild;
 pub mod replay;
 pub mod workflows;
@@ -138,7 +139,8 @@ pub use migrations::{
 pub use notifications::{
     notification_append_event_request, notification_backfill_event_requests,
     notification_event_requests_for_source_change,
-    notification_projection_counts, notification_projection_snapshot,
+    notification_projection_counts, notification_projection_detail,
+    notification_projection_page, notification_projection_snapshot,
     notification_rewrite_event_request, notification_shadow_diff,
     notification_source_change_from_path, notification_source_kind_from_path,
     notification_source_paths, notification_state_update_event_request,
@@ -154,6 +156,23 @@ pub use notifications::{
     NOTIFICATION_PROJECTION_NAME, PENDING_ACTION_EVENT_CLEANED_UP,
     PENDING_ACTION_EVENT_REGISTERED, PENDING_ACTION_EVENT_STORE_REWRITTEN,
     PENDING_ACTION_EVENT_UPDATED,
+};
+pub use read::{
+    projection_read_schema_version, AgentArchiveReadResponseWire,
+    AgentReadDetailRequestWire, AgentReadDetailResponseWire,
+    AgentReadListRequestWire, AgentReadListResponseWire,
+    BeadReadDetailRequestWire, BeadReadDetailResponseWire,
+    BeadReadListRequestWire, BeadReadListResponseWire,
+    BeadReadStatsResponseWire, CatalogReadListRequestWire,
+    CatalogReadResponseWire, ChangeSpecReadDetailRequestWire,
+    ChangeSpecReadDetailResponseWire, ChangeSpecReadListRequestWire,
+    ChangeSpecReadListResponseWire, NotificationPendingActionsReadResponseWire,
+    NotificationReadDetailRequestWire, NotificationReadDetailResponseWire,
+    NotificationReadListRequestWire, NotificationReadListResponseWire,
+    ProjectionPageInfoWire, ProjectionPageRequestWire,
+    ProjectionPayloadBoundWire, ProjectionReadErrorCodeWire,
+    ProjectionReadErrorWire, ProjectionSnapshotReadWire,
+    PROJECTION_READ_WIRE_SCHEMA_VERSION,
 };
 pub use rebuild::{
     ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,

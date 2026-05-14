@@ -959,7 +959,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "length_prefix": "u32 big-endian byte length",
                 "max_payload_bytes": LOCAL_DAEMON_MAX_PAYLOAD_BYTES
             },
-            "production_routing": "health, capabilities, batch, bounded mock/empty list reads, and shadow-index diagnostics are available; current source stores remain authoritative until indexed reads land"
+            "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, and shadow-index diagnostics are available; current source stores remain authoritative for writes and unsupported read surfaces"
         },
         "versioning": {
             "contract_name": "sase_local_daemon_framed_json_v1",
@@ -982,6 +982,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "capabilities.read",
             "mocked.list",
             "mocked.events",
+            "notifications.read",
             "projection.rebuild",
             "indexing.status",
             "indexing.rebuild",
@@ -1027,7 +1028,14 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "request": "LocalDaemonListRequestWire",
                 "success": "LocalDaemonListResponseWire",
                 "errors": ["LocalDaemonErrorWire"],
-                "notes": "mocked and future collection reads use pages, cursors, snapshot IDs, stable handles, filters, and payload bounds"
+                "notes": "mocked and notification collection reads use pages, cursors, snapshot IDs, stable handles, filters, and payload bounds; unsupported collections return unsupported_capability with fallback metadata"
+            },
+            {
+                "type": "read",
+                "request": "LocalDaemonReadRequestWire",
+                "success": "LocalDaemonReadResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "typed projection read request/response union for ChangeSpecs, agents, notifications, beads, catalogs, snippets, and file history; Phase 5A implements notifications.read and returns typed fallback errors for the remaining surfaces"
             },
             {
                 "type": "events",
@@ -1094,6 +1102,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "health": {"include_capabilities": "bool"},
                 "capabilities": "no fields",
                 "list": "LocalDaemonListRequestWire",
+                "read": "LocalDaemonReadRequestWire",
                 "events": "LocalDaemonEventRequestWire",
                 "rebuild": "LocalDaemonRebuildRequestWire",
                 "indexing_status": "LocalDaemonIndexingStatusRequestWire",
@@ -1105,6 +1114,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "health": "LocalDaemonHealthResponseWire",
                 "capabilities": "LocalDaemonCapabilitiesResponseWire",
                 "list": "LocalDaemonListResponseWire",
+                "read": "LocalDaemonReadResponseWire",
                 "events": "LocalDaemonEventBatchWire",
                 "rebuild": "LocalDaemonRebuildResponseWire",
                 "indexing_status": "LocalDaemonIndexingStatusResponseWire",
@@ -1212,6 +1222,125 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "max_payload_bytes": "u32",
                 "truncated": "bool"
             },
+            "LocalDaemonReadRequestWire": {
+                "changespec_list": "ChangeSpecReadListRequestWire",
+                "changespec_search": "ChangeSpecReadListRequestWire",
+                "changespec_detail": "ChangeSpecReadDetailRequestWire",
+                "agent_active": "AgentReadListRequestWire",
+                "agent_recent": "AgentReadListRequestWire",
+                "agent_archive": "AgentReadListRequestWire",
+                "agent_search": "AgentReadListRequestWire",
+                "agent_detail": "AgentReadDetailRequestWire",
+                "notification_list": "NotificationReadListRequestWire",
+                "notification_detail": "NotificationReadDetailRequestWire",
+                "notification_counts": "no fields",
+                "notification_pending_actions": "no fields",
+                "bead_list": "BeadReadListRequestWire",
+                "bead_ready": "BeadReadListRequestWire",
+                "bead_blocked": "BeadReadListRequestWire",
+                "bead_show": "BeadReadDetailRequestWire",
+                "bead_stats": "BeadReadListRequestWire",
+                "xprompt_catalog": "CatalogReadListRequestWire",
+                "editor_catalog": "CatalogReadListRequestWire",
+                "snippet_catalog": "CatalogReadListRequestWire",
+                "file_history": "CatalogReadListRequestWire"
+            },
+            "LocalDaemonReadResponseWire": {
+                "changespec_list": "ChangeSpecReadListResponseWire",
+                "changespec_search": "ChangeSpecReadListResponseWire",
+                "changespec_detail": "ChangeSpecReadDetailResponseWire",
+                "agent_active": "AgentReadListResponseWire",
+                "agent_recent": "AgentReadListResponseWire",
+                "agent_archive": "AgentArchiveReadResponseWire",
+                "agent_search": "AgentReadListResponseWire",
+                "agent_detail": "AgentReadDetailResponseWire",
+                "notification_list": "NotificationReadListResponseWire",
+                "notification_detail": "NotificationReadDetailResponseWire",
+                "notification_counts": "NotificationProjectionFacetCountsWire",
+                "notification_pending_actions": "NotificationPendingActionsReadResponseWire",
+                "bead_list": "BeadReadListResponseWire",
+                "bead_ready": "BeadReadListResponseWire",
+                "bead_blocked": "BeadReadListResponseWire",
+                "bead_show": "BeadReadDetailResponseWire",
+                "bead_stats": "BeadReadStatsResponseWire",
+                "xprompt_catalog": "CatalogReadResponseWire",
+                "editor_catalog": "CatalogReadResponseWire",
+                "snippet_catalog": "CatalogReadResponseWire",
+                "file_history": "CatalogReadResponseWire"
+            },
+            "ProjectionPageRequestWire": {
+                "schema_version": "u32",
+                "limit": "u32; max 500 at daemon dispatch",
+                "cursor": "opaque string|null"
+            },
+            "ProjectionPageInfoWire": {
+                "schema_version": "u32",
+                "next_cursor": "opaque string|null"
+            },
+            "ProjectionSnapshotReadWire": {
+                "schema_version": "u32",
+                "snapshot_id": "opaque string"
+            },
+            "ProjectionPayloadBoundWire": {
+                "schema_version": "u32",
+                "max_payload_bytes": "u32",
+                "truncated": "bool"
+            },
+            "NotificationReadListRequestWire": {
+                "schema_version": "u32",
+                "page": "ProjectionPageRequestWire",
+                "include_dismissed": "bool",
+                "query": "string|null",
+                "sender": "string|null",
+                "unread": "bool|null"
+            },
+            "NotificationReadListResponseWire": {
+                "schema_version": "u32",
+                "snapshot": "ProjectionSnapshotReadWire",
+                "page": "ProjectionPageInfoWire",
+                "notifications": "NotificationWire[]",
+                "counts": "NotificationProjectionFacetCountsWire",
+                "bounded": "ProjectionPayloadBoundWire"
+            },
+            "NotificationReadDetailRequestWire": {
+                "schema_version": "u32",
+                "notification_id": "string"
+            },
+            "NotificationReadDetailResponseWire": {
+                "schema_version": "u32",
+                "snapshot": "ProjectionSnapshotReadWire",
+                "notification": "NotificationWire|null",
+                "bounded": "ProjectionPayloadBoundWire"
+            },
+            "NotificationPendingActionsReadResponseWire": {
+                "schema_version": "u32",
+                "snapshot": "ProjectionSnapshotReadWire",
+                "store": "PendingActionStoreWire",
+                "actions": "PendingActionWire[]",
+                "bounded": "ProjectionPayloadBoundWire"
+            },
+            "ChangeSpecReadListRequestWire": {
+                "schema_version": "u32",
+                "page": "ProjectionPageRequestWire",
+                "project_id": "string|null",
+                "query": "string|null",
+                "status": "string|null"
+            },
+            "ChangeSpecReadListResponseWire": "snapshot/page/bounded plus ChangeSpecListPageWire entries",
+            "ChangeSpecReadDetailRequestWire": {"schema_version": "u32", "handle": "string"},
+            "ChangeSpecReadDetailResponseWire": "snapshot/bounded plus ChangeSpecDetailWire|null",
+            "AgentReadListRequestWire": "schema_version, page, project_id, include_hidden, query",
+            "AgentReadListResponseWire": "snapshot/page/bounded plus AgentProjectionPageWire",
+            "AgentArchiveReadResponseWire": "snapshot/page/bounded plus AgentArchiveProjectionPageWire",
+            "AgentReadDetailRequestWire": "schema_version, project_id, agent_id",
+            "AgentReadDetailResponseWire": "snapshot/bounded plus summary, children, artifacts",
+            "BeadReadListRequestWire": "schema_version, page, project_id, statuses, issue_types, tiers",
+            "BeadReadListResponseWire": "snapshot/page/bounded plus IssueWire[]",
+            "BeadReadDetailRequestWire": "schema_version, project_id, bead_id",
+            "BeadReadDetailResponseWire": "snapshot/bounded plus IssueWire",
+            "BeadReadStatsResponseWire": "snapshot/bounded plus project_id and status stats",
+            "CatalogReadListRequestWire": "schema_version, page, project_id, query",
+            "CatalogReadResponseWire": "snapshot/page/bounded plus xprompts, config sources, memory sources, and file history",
             "LocalDaemonEventRequestWire": {
                 "since_event_id": "string|null; treated as after_event_id and retained for compatibility",
                 "after_event_id": "accepted input alias for since_event_id",
@@ -1315,6 +1444,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                     "invalid_request",
                     "unsupported_client_version",
                     "unsupported_capability",
+                    "projection_degraded",
                     "cursor_expired",
                     "snapshot_expired",
                     "payload_too_large",
@@ -1368,6 +1498,33 @@ pub fn local_daemon_contract_snapshot() -> Value {
                         "bounded": {
                             "max_payload_bytes": LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
                             "truncated": false
+                        }
+                    }
+                }
+            },
+            "notification_read_request": {
+                "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                "request_id": "req_003",
+                "client": {
+                    "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    "name": "sase-cli",
+                    "version": "0.1.1"
+                },
+                "payload": {
+                    "type": "read",
+                    "data": {
+                        "surface": "notification_list",
+                        "data": {
+                            "schema_version": 1,
+                            "page": {
+                                "schema_version": 1,
+                                "limit": 100,
+                                "cursor": null
+                            },
+                            "include_dismissed": false,
+                            "query": null,
+                            "sender": null,
+                            "unread": null
                         }
                     }
                 }

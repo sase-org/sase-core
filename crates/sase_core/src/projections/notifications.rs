@@ -19,6 +19,11 @@ use super::indexing::{
     ShadowDiffReportWire, SourceChangeOperationWire, SourceChangeWire,
     SourceIdentityWire, INDEXING_WIRE_SCHEMA_VERSION,
 };
+use super::read::{
+    NotificationReadListRequestWire, NotificationReadListResponseWire,
+    ProjectionPageInfoWire, ProjectionPayloadBoundWire,
+    ProjectionSnapshotReadWire, PROJECTION_READ_WIRE_SCHEMA_VERSION,
+};
 use super::replay::ProjectionApplier;
 use crate::notifications::{
     legacy_telegram_pending_actions_path, pending_action_store_path,
@@ -506,6 +511,76 @@ pub fn notification_projection_snapshot(
     })
 }
 
+pub fn notification_projection_page(
+    conn: &Connection,
+    request: &NotificationReadListRequestWire,
+    snapshot_id: impl Into<String>,
+    max_payload_bytes: u32,
+) -> Result<NotificationReadListResponseWire, ProjectionError> {
+    let limit = request.page.limit.clamp(1, 500);
+    let offset = request
+        .page
+        .cursor
+        .as_deref()
+        .map(parse_notification_cursor)
+        .transpose()?
+        .unwrap_or(0);
+    let fetch_limit = limit.saturating_add(1);
+    let mut notifications = filtered_notifications(conn, request)?;
+    let start = offset as usize;
+    if start >= notifications.len() {
+        notifications.clear();
+    } else {
+        notifications = notifications
+            .into_iter()
+            .skip(start)
+            .take(fetch_limit as usize)
+            .collect();
+    }
+    let next_cursor = if notifications.len() > limit as usize {
+        notifications.truncate(limit as usize);
+        Some((offset + limit).to_string())
+    } else {
+        None
+    };
+    Ok(NotificationReadListResponseWire {
+        schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+        snapshot: ProjectionSnapshotReadWire {
+            schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+            snapshot_id: snapshot_id.into(),
+        },
+        page: ProjectionPageInfoWire {
+            schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+            next_cursor,
+        },
+        notifications,
+        counts: notification_projection_counts(conn)?,
+        bounded: ProjectionPayloadBoundWire {
+            schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+            max_payload_bytes,
+            truncated: false,
+        },
+    })
+}
+
+pub fn notification_projection_detail(
+    conn: &Connection,
+    notification_id: &str,
+) -> Result<Option<NotificationWire>, ProjectionError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT notification_json
+        FROM notifications
+        WHERE id = ?1
+        "#,
+    )?;
+    let mut rows = stmt.query([notification_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_str(&row.get::<_, String>(0)?)?))
+}
+
 pub fn projected_pending_action_store(
     conn: &Connection,
 ) -> Result<PendingActionStoreWire, ProjectionError> {
@@ -528,6 +603,42 @@ pub fn projected_pending_action_store(
         schema_version:
             crate::notifications::PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
         actions,
+    })
+}
+
+fn filtered_notifications(
+    conn: &Connection,
+    request: &NotificationReadListRequestWire,
+) -> Result<Vec<NotificationWire>, ProjectionError> {
+    let mut notifications =
+        notification_projection_snapshot(conn, request.include_dismissed)?
+            .notifications;
+    if let Some(sender) =
+        request.sender.as_deref().filter(|value| !value.is_empty())
+    {
+        notifications.retain(|notification| notification.sender == sender);
+    }
+    if let Some(unread) = request.unread {
+        notifications.retain(|notification| notification.read != unread);
+    }
+    if let Some(query) =
+        request.query.as_deref().filter(|value| !value.is_empty())
+    {
+        let query = query.to_lowercase();
+        notifications.retain(|notification| {
+            notification_search_text(notification)
+                .to_lowercase()
+                .contains(&query)
+        });
+    }
+    Ok(notifications)
+}
+
+fn parse_notification_cursor(cursor: &str) -> Result<u32, ProjectionError> {
+    cursor.parse::<u32>().map_err(|error| {
+        ProjectionError::Invariant(format!(
+            "invalid notification projection cursor '{cursor}': {error}"
+        ))
     })
 }
 

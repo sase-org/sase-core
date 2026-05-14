@@ -3,6 +3,22 @@ use serde_json::Value as JsonValue;
 
 use sase_core::projections::{ShadowDiffCountsWire, ShadowDiffRecordWire};
 
+pub use sase_core::projections::{
+    AgentArchiveReadResponseWire, AgentReadDetailRequestWire,
+    AgentReadDetailResponseWire, AgentReadListRequestWire,
+    AgentReadListResponseWire, BeadReadDetailRequestWire,
+    BeadReadDetailResponseWire, BeadReadListRequestWire,
+    BeadReadListResponseWire, BeadReadStatsResponseWire,
+    CatalogReadListRequestWire, CatalogReadResponseWire,
+    ChangeSpecReadDetailRequestWire, ChangeSpecReadDetailResponseWire,
+    ChangeSpecReadListRequestWire, ChangeSpecReadListResponseWire,
+    NotificationPendingActionsReadResponseWire,
+    NotificationProjectionFacetCountsWire, NotificationReadDetailRequestWire,
+    NotificationReadDetailResponseWire, NotificationReadListRequestWire,
+    NotificationReadListResponseWire, ProjectionPageRequestWire,
+    PROJECTION_READ_WIRE_SCHEMA_VERSION,
+};
+
 pub use sase_core::host_bridge::{
     MobileBeadDetailWire, MobileBeadListRequestWire,
     MobileBeadListResponseWire, MobileBeadShowRequestWire,
@@ -269,6 +285,7 @@ pub enum LocalDaemonRequestPayloadWire {
     },
     Capabilities,
     List(LocalDaemonListRequestWire),
+    Read(LocalDaemonReadRequestWire),
     Events(LocalDaemonEventRequestWire),
     Rebuild(LocalDaemonRebuildRequestWire),
     IndexingStatus(LocalDaemonIndexingStatusRequestWire),
@@ -285,6 +302,7 @@ pub enum LocalDaemonResponsePayloadWire {
     Health(LocalDaemonHealthResponseWire),
     Capabilities(LocalDaemonCapabilitiesResponseWire),
     List(LocalDaemonListResponseWire),
+    Read(LocalDaemonReadResponseWire),
     Events(LocalDaemonEventBatchWire),
     Rebuild(LocalDaemonRebuildResponseWire),
     IndexingStatus(LocalDaemonIndexingStatusResponseWire),
@@ -307,6 +325,58 @@ pub struct LocalDaemonBatchResponseWire {
     pub request_id: String,
     pub snapshot_id: Option<String>,
     pub payload: LocalDaemonResponsePayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "surface", content = "data")]
+pub enum LocalDaemonReadRequestWire {
+    ChangespecList(ChangeSpecReadListRequestWire),
+    ChangespecSearch(ChangeSpecReadListRequestWire),
+    ChangespecDetail(ChangeSpecReadDetailRequestWire),
+    AgentActive(AgentReadListRequestWire),
+    AgentRecent(AgentReadListRequestWire),
+    AgentArchive(AgentReadListRequestWire),
+    AgentSearch(AgentReadListRequestWire),
+    AgentDetail(AgentReadDetailRequestWire),
+    NotificationList(NotificationReadListRequestWire),
+    NotificationDetail(NotificationReadDetailRequestWire),
+    NotificationCounts,
+    NotificationPendingActions,
+    BeadList(BeadReadListRequestWire),
+    BeadReady(BeadReadListRequestWire),
+    BeadBlocked(BeadReadListRequestWire),
+    BeadShow(BeadReadDetailRequestWire),
+    BeadStats(BeadReadListRequestWire),
+    XpromptCatalog(CatalogReadListRequestWire),
+    EditorCatalog(CatalogReadListRequestWire),
+    SnippetCatalog(CatalogReadListRequestWire),
+    FileHistory(CatalogReadListRequestWire),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "surface", content = "data")]
+pub enum LocalDaemonReadResponseWire {
+    ChangespecList(ChangeSpecReadListResponseWire),
+    ChangespecSearch(ChangeSpecReadListResponseWire),
+    ChangespecDetail(ChangeSpecReadDetailResponseWire),
+    AgentActive(AgentReadListResponseWire),
+    AgentRecent(AgentReadListResponseWire),
+    AgentArchive(AgentArchiveReadResponseWire),
+    AgentSearch(AgentReadListResponseWire),
+    AgentDetail(AgentReadDetailResponseWire),
+    NotificationList(NotificationReadListResponseWire),
+    NotificationDetail(NotificationReadDetailResponseWire),
+    NotificationCounts(NotificationProjectionFacetCountsWire),
+    NotificationPendingActions(NotificationPendingActionsReadResponseWire),
+    BeadList(BeadReadListResponseWire),
+    BeadReady(BeadReadListResponseWire),
+    BeadBlocked(BeadReadListResponseWire),
+    BeadShow(BeadReadDetailResponseWire),
+    BeadStats(BeadReadStatsResponseWire),
+    XpromptCatalog(CatalogReadResponseWire),
+    EditorCatalog(CatalogReadResponseWire),
+    SnippetCatalog(CatalogReadResponseWire),
+    FileHistory(CatalogReadResponseWire),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,6 +681,7 @@ pub enum LocalDaemonErrorCodeWire {
     InvalidRequest,
     UnsupportedClientVersion,
     UnsupportedCapability,
+    ProjectionDegraded,
     CursorExpired,
     SnapshotExpired,
     PayloadTooLarge,

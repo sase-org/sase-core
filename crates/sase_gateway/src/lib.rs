@@ -83,6 +83,7 @@ pub use wire::{
     LocalDaemonIndexingVerifyResponseWire, LocalDaemonListItemWire,
     LocalDaemonListRequestWire, LocalDaemonListResponseWire,
     LocalDaemonPageRequestWire, LocalDaemonPayloadBoundWire,
+    LocalDaemonReadRequestWire, LocalDaemonReadResponseWire,
     LocalDaemonRebuildRequestWire, LocalDaemonRebuildResponseWire,
     LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
     LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,

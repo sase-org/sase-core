@@ -199,6 +199,22 @@ impl ProjectionService {
         .map_err(|error| ProjectionServiceError::Join(error.to_string()))?
     }
 
+    pub fn read_blocking<T, F>(&self, f: F) -> Result<T, ProjectionServiceError>
+    where
+        F: FnOnce(&ProjectionDb) -> Result<T, ProjectionError>,
+    {
+        let db = self.db()?;
+        let started = Instant::now();
+        let guard = db
+            .lock()
+            .map_err(|_| ProjectionServiceError::LockPoisoned)?;
+        let result = f(&guard).map_err(ProjectionServiceError::from);
+        self.inner
+            .metrics
+            .record_projection_query(started.elapsed());
+        result
+    }
+
     pub async fn write<T, F>(&self, f: F) -> Result<T, ProjectionServiceError>
     where
         T: Send + 'static,

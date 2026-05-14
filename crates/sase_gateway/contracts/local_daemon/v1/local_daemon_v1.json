@@ -10,6 +10,7 @@
     "capabilities.read",
     "mocked.list",
     "mocked.events",
+    "notifications.read",
     "projection.rebuild",
     "indexing.status",
     "indexing.rebuild",
@@ -77,9 +78,61 @@
       "request_id": "req_002",
       "schema_version": 1,
       "snapshot_id": "snap_mock_001"
+    },
+    "notification_read_request": {
+      "client": {
+        "name": "sase-cli",
+        "schema_version": 1,
+        "version": "0.1.1"
+      },
+      "payload": {
+        "data": {
+          "data": {
+            "include_dismissed": false,
+            "page": {
+              "cursor": null,
+              "limit": 100,
+              "schema_version": 1
+            },
+            "query": null,
+            "schema_version": 1,
+            "sender": null,
+            "unread": null
+          },
+          "surface": "notification_list"
+        },
+        "type": "read"
+      },
+      "request_id": "req_003",
+      "schema_version": 1
     }
   },
   "records": {
+    "AgentArchiveReadResponseWire": "snapshot/page/bounded plus AgentArchiveProjectionPageWire",
+    "AgentReadDetailRequestWire": "schema_version, project_id, agent_id",
+    "AgentReadDetailResponseWire": "snapshot/bounded plus summary, children, artifacts",
+    "AgentReadListRequestWire": "schema_version, page, project_id, include_hidden, query",
+    "AgentReadListResponseWire": "snapshot/page/bounded plus AgentProjectionPageWire",
+    "BeadReadDetailRequestWire": "schema_version, project_id, bead_id",
+    "BeadReadDetailResponseWire": "snapshot/bounded plus IssueWire",
+    "BeadReadListRequestWire": "schema_version, page, project_id, statuses, issue_types, tiers",
+    "BeadReadListResponseWire": "snapshot/page/bounded plus IssueWire[]",
+    "BeadReadStatsResponseWire": "snapshot/bounded plus project_id and status stats",
+    "CatalogReadListRequestWire": "schema_version, page, project_id, query",
+    "CatalogReadResponseWire": "snapshot/page/bounded plus xprompts, config sources, memory sources, and file history",
+    "ChangeSpecReadDetailRequestWire": {
+      "handle": "string",
+      "schema_version": "u32"
+    },
+    "ChangeSpecReadDetailResponseWire": "snapshot/bounded plus ChangeSpecDetailWire|null",
+    "ChangeSpecReadListRequestWire": {
+      "page": "ProjectionPageRequestWire",
+      "project_id": "string|null",
+      "query": "string|null",
+      "schema_version": "u32",
+      "status": "string|null"
+    },
+    "ChangeSpecReadListResponseWire": "snapshot/page/bounded plus ChangeSpecListPageWire entries",
     "LocalDaemonBatchRequestWire": {
       "payload": "LocalDaemonRequestPayloadWire",
       "request_id": "string"
@@ -110,6 +163,7 @@
         "invalid_request",
         "unsupported_client_version",
         "unsupported_capability",
+        "projection_degraded",
         "cursor_expired",
         "snapshot_expired",
         "payload_too_large",
@@ -290,6 +344,52 @@
       "max_payload_bytes": "u32",
       "truncated": "bool"
     },
+    "LocalDaemonReadRequestWire": {
+      "agent_active": "AgentReadListRequestWire",
+      "agent_archive": "AgentReadListRequestWire",
+      "agent_detail": "AgentReadDetailRequestWire",
+      "agent_recent": "AgentReadListRequestWire",
+      "agent_search": "AgentReadListRequestWire",
+      "bead_blocked": "BeadReadListRequestWire",
+      "bead_list": "BeadReadListRequestWire",
+      "bead_ready": "BeadReadListRequestWire",
+      "bead_show": "BeadReadDetailRequestWire",
+      "bead_stats": "BeadReadListRequestWire",
+      "changespec_detail": "ChangeSpecReadDetailRequestWire",
+      "changespec_list": "ChangeSpecReadListRequestWire",
+      "changespec_search": "ChangeSpecReadListRequestWire",
+      "editor_catalog": "CatalogReadListRequestWire",
+      "file_history": "CatalogReadListRequestWire",
+      "notification_counts": "no fields",
+      "notification_detail": "NotificationReadDetailRequestWire",
+      "notification_list": "NotificationReadListRequestWire",
+      "notification_pending_actions": "no fields",
+      "snippet_catalog": "CatalogReadListRequestWire",
+      "xprompt_catalog": "CatalogReadListRequestWire"
+    },
+    "LocalDaemonReadResponseWire": {
+      "agent_active": "AgentReadListResponseWire",
+      "agent_archive": "AgentArchiveReadResponseWire",
+      "agent_detail": "AgentReadDetailResponseWire",
+      "agent_recent": "AgentReadListResponseWire",
+      "agent_search": "AgentReadListResponseWire",
+      "bead_blocked": "BeadReadListResponseWire",
+      "bead_list": "BeadReadListResponseWire",
+      "bead_ready": "BeadReadListResponseWire",
+      "bead_show": "BeadReadDetailResponseWire",
+      "bead_stats": "BeadReadStatsResponseWire",
+      "changespec_detail": "ChangeSpecReadDetailResponseWire",
+      "changespec_list": "ChangeSpecReadListResponseWire",
+      "changespec_search": "ChangeSpecReadListResponseWire",
+      "editor_catalog": "CatalogReadResponseWire",
+      "file_history": "CatalogReadResponseWire",
+      "notification_counts": "NotificationProjectionFacetCountsWire",
+      "notification_detail": "NotificationReadDetailResponseWire",
+      "notification_list": "NotificationReadListResponseWire",
+      "notification_pending_actions": "NotificationPendingActionsReadResponseWire",
+      "snippet_catalog": "CatalogReadResponseWire",
+      "xprompt_catalog": "CatalogReadResponseWire"
+    },
     "LocalDaemonRebuildRequestWire": {
       "project_id": "string|null",
       "storage_reset_only": "bool; false requests source-store backfill, true requests projection table reset/replay",
@@ -323,6 +423,7 @@
       },
       "indexing_status": "LocalDaemonIndexingStatusRequestWire",
       "list": "LocalDaemonListRequestWire",
+      "read": "LocalDaemonReadRequestWire",
       "rebuild": "LocalDaemonRebuildRequestWire",
       "verify": "LocalDaemonIndexingVerifyRequestWire"
     },
@@ -343,8 +444,60 @@
       "health": "LocalDaemonHealthResponseWire",
       "indexing_status": "LocalDaemonIndexingStatusResponseWire",
       "list": "LocalDaemonListResponseWire",
+      "read": "LocalDaemonReadResponseWire",
       "rebuild": "LocalDaemonRebuildResponseWire",
       "verify": "LocalDaemonIndexingVerifyResponseWire"
+    },
+    "NotificationPendingActionsReadResponseWire": {
+      "actions": "PendingActionWire[]",
+      "bounded": "ProjectionPayloadBoundWire",
+      "schema_version": "u32",
+      "snapshot": "ProjectionSnapshotReadWire",
+      "store": "PendingActionStoreWire"
+    },
+    "NotificationReadDetailRequestWire": {
+      "notification_id": "string",
+      "schema_version": "u32"
+    },
+    "NotificationReadDetailResponseWire": {
+      "bounded": "ProjectionPayloadBoundWire",
+      "notification": "NotificationWire|null",
+      "schema_version": "u32",
+      "snapshot": "ProjectionSnapshotReadWire"
+    },
+    "NotificationReadListRequestWire": {
+      "include_dismissed": "bool",
+      "page": "ProjectionPageRequestWire",
+      "query": "string|null",
+      "schema_version": "u32",
+      "sender": "string|null",
+      "unread": "bool|null"
+    },
+    "NotificationReadListResponseWire": {
+      "bounded": "ProjectionPayloadBoundWire",
+      "counts": "NotificationProjectionFacetCountsWire",
+      "notifications": "NotificationWire[]",
+      "page": "ProjectionPageInfoWire",
+      "schema_version": "u32",
+      "snapshot": "ProjectionSnapshotReadWire"
+    },
+    "ProjectionPageInfoWire": {
+      "next_cursor": "opaque string|null",
+      "schema_version": "u32"
+    },
+    "ProjectionPageRequestWire": {
+      "cursor": "opaque string|null",
+      "limit": "u32; max 500 at daemon dispatch",
+      "schema_version": "u32"
+    },
+    "ProjectionPayloadBoundWire": {
+      "max_payload_bytes": "u32",
+      "schema_version": "u32",
+      "truncated": "bool"
+    },
+    "ProjectionSnapshotReadWire": {
+      "schema_version": "u32",
+      "snapshot_id": "opaque string"
     }
   },
   "request_envelope": {
@@ -377,10 +530,19 @@
       "errors": [
         "LocalDaemonErrorWire"
       ],
-      "notes": "mocked and future collection reads use pages, cursors, snapshot IDs, stable handles, filters, and payload bounds",
+      "notes": "mocked and notification collection reads use pages, cursors, snapshot IDs, stable handles, filters, and payload bounds; unsupported collections return unsupported_capability with fallback metadata",
       "request": "LocalDaemonListRequestWire",
       "success": "LocalDaemonListResponseWire",
       "type": "list"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "typed projection read request/response union for ChangeSpecs, agents, notifications, beads, catalogs, snippets, and file history; Phase 5A implements notifications.read and returns typed fallback errors for the remaining surfaces",
+      "request": "LocalDaemonReadRequestWire",
+      "success": "LocalDaemonReadResponseWire",
+      "type": "read"
     },
     {
       "errors": [
@@ -453,7 +615,7 @@
     },
     "implemented": true,
     "phase": "local_transport",
-    "production_routing": "health, capabilities, batch, bounded mock/empty list reads, and shadow-index diagnostics are available; current source stores remain authoritative until indexed reads land",
+    "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, and shadow-index diagnostics are available; current source stores remain authoritative for writes and unsupported read surfaces",
     "transport": "unix_domain_socket_framed_json"
   },
   "versioning": {
