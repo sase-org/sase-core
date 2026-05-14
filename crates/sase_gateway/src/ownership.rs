@@ -113,6 +113,7 @@ impl DaemonOwnershipGuard {
             }
         })?;
 
+        let lock_file_existed = paths.lock_path.exists();
         let lock_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -140,8 +141,11 @@ impl DaemonOwnershipGuard {
 
         let hostname = hostname.into();
         let sase_home = sase_home.into();
-        let recovery =
-            diagnose_existing_metadata(&paths.metadata_path, &hostname)?;
+        let recovery = diagnose_existing_metadata(
+            &paths.metadata_path,
+            lock_file_existed,
+            &hostname,
+        )?;
         let metadata = DaemonOwnershipMetadata::current(
             hostname,
             paths.socket_path.clone(),
@@ -217,9 +221,15 @@ pub enum OwnershipError {
 
 fn diagnose_existing_metadata(
     metadata_path: &Path,
+    lock_file_existed: bool,
     current_host: &str,
 ) -> Result<OwnershipRecovery, OwnershipError> {
     if !metadata_path.exists() {
+        if lock_file_existed {
+            return Ok(OwnershipRecovery::RecoveredStale {
+                stale: StaleOwnership::MissingMetadata,
+            });
+        }
         return Ok(OwnershipRecovery::Clean);
     }
 
@@ -442,6 +452,31 @@ mod tests {
                 stale: StaleOwnership::MalformedMetadata { .. }
             }
         ));
+    }
+
+    #[test]
+    fn missing_metadata_with_existing_lock_is_recovered_through_typed_path() {
+        let tmp = tempdir().unwrap();
+        let run_root = tmp.path().join("run");
+        let socket_path = run_root.join("sase-daemon.sock");
+        fs::create_dir_all(&run_root).unwrap();
+        fs::write(run_root.join(DAEMON_LOCK_FILE_NAME), b"").unwrap();
+
+        let guard = DaemonOwnershipGuard::acquire(
+            run_root,
+            socket_path,
+            "host",
+            tmp.path().join("home"),
+            &build(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            guard.recovery,
+            OwnershipRecovery::RecoveredStale {
+                stale: StaleOwnership::MissingMetadata
+            }
+        );
     }
 
     #[test]
