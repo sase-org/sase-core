@@ -1119,8 +1119,15 @@ fn changespec_event_type(
 ) -> Result<&'static str, LocalDaemonErrorWire> {
     match request.surface.as_str() {
         "changespec.status" => Ok(CHANGESPEC_STATUS_TRANSITIONED),
-        "changespec.field" => Ok(CHANGESPEC_SPEC_UPDATED),
-        "changespec.comments" => Ok(CHANGESPEC_SECTIONS_UPDATED),
+        "changespec.field" | "changespec.lifecycle_name" => {
+            Ok(CHANGESPEC_SPEC_UPDATED)
+        }
+        "changespec.comments"
+        | "changespec.hooks"
+        | "changespec.hook_suffix"
+        | "changespec.mentors"
+        | "changespec.mentor_status"
+        | "changespec.timestamps" => Ok(CHANGESPEC_SECTIONS_UPDATED),
         "changespec.created" => Ok(CHANGESPEC_SPEC_CREATED),
         "changespec.active_archive_moved" => {
             Ok(CHANGESPEC_ACTIVE_ARCHIVE_MOVED)
@@ -1146,19 +1153,26 @@ fn changespec_event_payload(
             "to_status": required_payload_string(request, "to_status")?,
             "is_archive": is_archive,
         })),
-        "changespec.field" | "changespec.created" => Ok(json!({
+        "changespec.field"
+        | "changespec.lifecycle_name"
+        | "changespec.created" => Ok(json!({
             "schema_version": 1,
             "spec": spec,
             "is_archive": is_archive,
         })),
-        "changespec.comments" => Ok(json!({
+        "changespec.comments"
+        | "changespec.hooks"
+        | "changespec.hook_suffix"
+        | "changespec.mentors"
+        | "changespec.mentor_status"
+        | "changespec.timestamps" => Ok(json!({
             "schema_version": 1,
             "spec": spec,
             "section_names": request
                 .payload
                 .get("section_names")
                 .cloned()
-                .unwrap_or_else(|| json!(["comments"])),
+                .unwrap_or_else(|| default_changespec_section_names(request)),
             "is_archive": is_archive,
         })),
         "changespec.active_archive_moved" => Ok(json!({
@@ -1169,6 +1183,17 @@ fn changespec_event_payload(
             "is_archive": is_archive,
         })),
         _ => Err(unsupported_write_error(request)),
+    }
+}
+
+fn default_changespec_section_names(
+    request: &LocalDaemonWriteRequestWire,
+) -> JsonValue {
+    match request.surface.as_str() {
+        "changespec.hooks" | "changespec.hook_suffix" => json!(["hooks"]),
+        "changespec.mentors" | "changespec.mentor_status" => json!(["mentors"]),
+        "changespec.timestamps" => json!(["timestamps"]),
+        _ => json!(["comments"]),
     }
 }
 
