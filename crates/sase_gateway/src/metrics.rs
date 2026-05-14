@@ -51,6 +51,17 @@ pub struct GaugeGuard {
     value: Arc<AtomicI64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexingMetricsReport {
+    pub indexed_sources: u64,
+    pub failed_parses: u64,
+    pub coalesced_changes: u64,
+    pub missing: u64,
+    pub stale: u64,
+    pub extra: u64,
+    pub corrupt: u64,
+}
+
 impl Default for DaemonMetrics {
     fn default() -> Self {
         Self {
@@ -141,37 +152,28 @@ impl DaemonMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_indexing_report(
-        &self,
-        indexed_sources: u64,
-        failed_parses: u64,
-        coalesced_changes: u64,
-        missing: u64,
-        stale: u64,
-        extra: u64,
-        corrupt: u64,
-    ) {
+    pub fn record_indexing_report(&self, report: IndexingMetricsReport) {
         self.inner
             .indexing_indexed_sources_total
-            .fetch_add(indexed_sources, Ordering::Relaxed);
+            .fetch_add(report.indexed_sources, Ordering::Relaxed);
         self.inner
             .indexing_failed_parses_total
-            .fetch_add(failed_parses, Ordering::Relaxed);
+            .fetch_add(report.failed_parses, Ordering::Relaxed);
         self.inner
             .indexing_coalesced_changes_total
-            .fetch_add(coalesced_changes, Ordering::Relaxed);
+            .fetch_add(report.coalesced_changes, Ordering::Relaxed);
         self.inner
             .indexing_shadow_diff_missing_total
-            .fetch_add(missing, Ordering::Relaxed);
+            .fetch_add(report.missing, Ordering::Relaxed);
         self.inner
             .indexing_shadow_diff_stale_total
-            .fetch_add(stale, Ordering::Relaxed);
+            .fetch_add(report.stale, Ordering::Relaxed);
         self.inner
             .indexing_shadow_diff_extra_total
-            .fetch_add(extra, Ordering::Relaxed);
+            .fetch_add(report.extra, Ordering::Relaxed);
         self.inner
             .indexing_shadow_diff_corrupt_total
-            .fetch_add(corrupt, Ordering::Relaxed);
+            .fetch_add(report.corrupt, Ordering::Relaxed);
     }
 
     pub fn set_health_ok(&self, ok: bool) {

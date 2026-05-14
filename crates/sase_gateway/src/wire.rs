@@ -302,7 +302,7 @@ pub enum LocalDaemonResponsePayloadWire {
     Health(LocalDaemonHealthResponseWire),
     Capabilities(LocalDaemonCapabilitiesResponseWire),
     List(LocalDaemonListResponseWire),
-    Read(LocalDaemonReadResponseWire),
+    Read(Box<LocalDaemonReadResponseWire>),
     Events(LocalDaemonEventBatchWire),
     Rebuild(LocalDaemonRebuildResponseWire),
     IndexingStatus(LocalDaemonIndexingStatusResponseWire),
@@ -358,7 +358,7 @@ pub enum LocalDaemonReadRequestWire {
 pub enum LocalDaemonReadResponseWire {
     ChangespecList(ChangeSpecReadListResponseWire),
     ChangespecSearch(ChangeSpecReadListResponseWire),
-    ChangespecDetail(ChangeSpecReadDetailResponseWire),
+    ChangespecDetail(Box<ChangeSpecReadDetailResponseWire>),
     AgentActive(AgentReadListResponseWire),
     AgentRecent(AgentReadListResponseWire),
     AgentArchive(AgentArchiveReadResponseWire),
@@ -403,21 +403,18 @@ pub struct LocalDaemonRebuildResponseWire {
     pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalDaemonIndexingSurfaceWire {
+    #[default]
     All,
     Changespecs,
     Notifications,
     Agents,
     Beads,
     Catalogs,
-}
-
-impl Default for LocalDaemonIndexingSurfaceWire {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

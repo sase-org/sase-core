@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::{
     daemon::{DaemonShutdown, LocalEventHub},
-    metrics::DaemonMetrics,
+    metrics::{DaemonMetrics, IndexingMetricsReport},
     projection_service::ProjectionService,
     wire::{
         LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
@@ -294,20 +294,20 @@ impl IndexingService {
 
         let service_projects_root = config.projects_root.clone();
         let service_host_id = config.host_id.clone();
-        tokio::spawn(worker_loop(
+        tokio::spawn(worker_loop(WorkerLoopArgs {
             receiver,
-            status.clone(),
-            known_sources.clone(),
-            metrics.clone(),
+            status: status.clone(),
+            known_sources: known_sources.clone(),
+            metrics: metrics.clone(),
             local_events,
             shutdown,
-            config.debounce,
+            debounce: config.debounce,
             worker_capacity,
             max_batch_size,
-            config.projects_root.clone(),
-            config.host_id.clone(),
+            projects_root: config.projects_root.clone(),
+            host_id: config.host_id.clone(),
             projection_service,
-        ));
+        }));
 
         Self {
             inner: Arc::new(IndexingServiceInner {
@@ -1297,15 +1297,8 @@ fn spawn_changespec_backfill(
                     shadow_diff_counts: diff_counts,
                     source_paths,
                 };
-                metrics.record_indexing_report(
-                    report.indexed_sources,
-                    report.failed_parses,
-                    report.coalesced_changes,
-                    report.shadow_diff_counts.missing,
-                    report.shadow_diff_counts.stale,
-                    report.shadow_diff_counts.extra,
-                    report.shadow_diff_counts.corrupt,
-                );
+                metrics
+                    .record_indexing_report(indexing_metrics_report(&report));
                 apply_report_to_status(&status, report.clone());
                 local_events.append_delta(
                     LocalDaemonCollectionWire::Indexing,
@@ -1550,8 +1543,22 @@ fn enqueue_reconciliation_plan(
     }
 }
 
-async fn worker_loop(
-    mut receiver: mpsc::Receiver<SourceChangeWire>,
+fn indexing_metrics_report(
+    report: &IndexingDomainReportWire,
+) -> IndexingMetricsReport {
+    IndexingMetricsReport {
+        indexed_sources: report.indexed_sources,
+        failed_parses: report.failed_parses,
+        coalesced_changes: report.coalesced_changes,
+        missing: report.shadow_diff_counts.missing,
+        stale: report.shadow_diff_counts.stale,
+        extra: report.shadow_diff_counts.extra,
+        corrupt: report.shadow_diff_counts.corrupt,
+    }
+}
+
+struct WorkerLoopArgs {
+    receiver: mpsc::Receiver<SourceChangeWire>,
     status: Arc<RwLock<IndexingServiceStatusWire>>,
     known_sources: Arc<RwLock<BTreeMap<String, SourceIdentityWire>>>,
     metrics: DaemonMetrics,
@@ -1563,7 +1570,23 @@ async fn worker_loop(
     projects_root: Option<PathBuf>,
     host_id: String,
     projection_service: ProjectionService,
-) {
+}
+
+async fn worker_loop(args: WorkerLoopArgs) {
+    let WorkerLoopArgs {
+        mut receiver,
+        status,
+        known_sources,
+        metrics,
+        local_events,
+        shutdown,
+        debounce,
+        worker_capacity,
+        max_batch_size,
+        projects_root,
+        host_id,
+        projection_service,
+    } = args;
     let semaphore = Arc::new(Semaphore::new(worker_capacity));
     loop {
         if shutdown.is_requested() {
@@ -1634,15 +1657,9 @@ async fn worker_loop(
                     }
                 }
                 for report in output.reports {
-                    metrics.record_indexing_report(
-                        report.indexed_sources,
-                        report.failed_parses,
-                        report.coalesced_changes,
-                        report.shadow_diff_counts.missing,
-                        report.shadow_diff_counts.stale,
-                        report.shadow_diff_counts.extra,
-                        report.shadow_diff_counts.corrupt,
-                    );
+                    metrics.record_indexing_report(indexing_metrics_report(
+                        &report,
+                    ));
                     apply_report_to_status(&status, report.clone());
                     local_events.append_delta(
                         LocalDaemonCollectionWire::Indexing,

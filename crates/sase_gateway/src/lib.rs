@@ -24,8 +24,8 @@ pub use contract::{
 pub use daemon::{
     default_run_root, default_socket_path, host_identity_from_env,
     mobile_gateway_config, run_daemon, sanitize_host_identity,
-    validate_daemon_config, DaemonConfig, DaemonRunError, DaemonRuntime,
-    DaemonRuntimePaths, DaemonShutdown, DaemonState,
+    validate_daemon_config, DaemonConfig, DaemonConfigOptions, DaemonRunError,
+    DaemonRuntime, DaemonRuntimePaths, DaemonShutdown, DaemonState,
 };
 pub use host_bridge::{
     split_command_words, AgentHostBridge, CommandAgentHostBridge,

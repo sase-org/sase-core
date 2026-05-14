@@ -128,7 +128,7 @@ pub async fn handle_connection(
             if matches!(&frame_error, FrameReadError::PayloadTooLarge { .. }) {
                 state.metrics.record_payload_rejection();
             }
-            Err(frame_error_response(frame_error))
+            Err(Box::new(frame_error_response(frame_error)))
         }
     };
     let request = match request {
@@ -203,7 +203,7 @@ pub fn response_for_frame(
 ) -> LocalDaemonResponseEnvelopeWire {
     let request = match request_for_frame(frame) {
         Ok(request) => request,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let payload = handle_payload(request.payload, state);
     envelope(
@@ -359,28 +359,29 @@ async fn handle_diff_payload(
 
 fn request_for_frame(
     frame: &[u8],
-) -> Result<LocalDaemonRequestEnvelopeWire, LocalDaemonResponseEnvelopeWire> {
+) -> Result<LocalDaemonRequestEnvelopeWire, Box<LocalDaemonResponseEnvelopeWire>>
+{
     let request_id = request_id_from_json(frame).unwrap_or_default();
     let request: LocalDaemonRequestEnvelopeWire = serde_json::from_slice(frame)
         .map_err(|error| {
-            error_response(
+            Box::new(error_response(
                 request_id,
                 LocalDaemonErrorCodeWire::InvalidRequest,
                 format!("invalid local daemon request JSON: {error}"),
                 false,
                 None,
                 None,
-            )
+            ))
         })?;
 
     if request.schema_version != LOCAL_DAEMON_WIRE_SCHEMA_VERSION {
-        return Err(unsupported_schema_response(request.request_id));
+        return Err(Box::new(unsupported_schema_response(request.request_id)));
     }
     if request.client.schema_version < LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION
         || request.client.schema_version
             > LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION
     {
-        return Err(unsupported_schema_response(request.request_id));
+        return Err(Box::new(unsupported_schema_response(request.request_id)));
     }
 
     Ok(request)
@@ -535,9 +536,9 @@ fn handle_read_payload(
             .projection_service
             .read_blocking(|db| notification_projection_counts(db.connection()))
             .map(|counts| {
-                LocalDaemonResponsePayloadWire::Read(
+                LocalDaemonResponsePayloadWire::Read(Box::new(
                     LocalDaemonReadResponseWire::NotificationCounts(counts),
-                )
+                ))
             })
             .unwrap_or_else(|error| {
                 LocalDaemonResponsePayloadWire::Error(projection_error(error))
@@ -578,9 +579,9 @@ fn notification_list_payload(
             )
         })
         .map(|response| {
-            LocalDaemonResponsePayloadWire::Read(
+            LocalDaemonResponsePayloadWire::Read(Box::new(
                 LocalDaemonReadResponseWire::NotificationList(response),
-            )
+            ))
         })
         .map_err(projection_error)
 }
@@ -675,9 +676,9 @@ fn notification_detail_payload(
             })
         })
         .map(|response| {
-            LocalDaemonResponsePayloadWire::Read(
+            LocalDaemonResponsePayloadWire::Read(Box::new(
                 LocalDaemonReadResponseWire::NotificationDetail(response),
-            )
+            ))
         })
         .map_err(projection_error)
 }
@@ -707,11 +708,11 @@ fn notification_pending_actions_payload(
             })
         })
         .map(|response| {
-            LocalDaemonResponsePayloadWire::Read(
+            LocalDaemonResponsePayloadWire::Read(Box::new(
                 LocalDaemonReadResponseWire::NotificationPendingActions(
                     response,
                 ),
-            )
+            ))
         })
         .map_err(projection_error)
 }
@@ -1407,9 +1408,14 @@ mod tests {
         let response = response_for_frame(&payload, &state);
 
         match response.payload {
-            LocalDaemonResponsePayloadWire::Read(
-                LocalDaemonReadResponseWire::NotificationList(list),
-            ) => {
+            LocalDaemonResponsePayloadWire::Read(read_response) => {
+                let LocalDaemonReadResponseWire::NotificationList(list) =
+                    *read_response
+                else {
+                    panic!(
+                        "expected notification list response, got {read_response:?}"
+                    );
+                };
                 assert_eq!(list.notifications, vec![notification]);
                 assert_eq!(list.counts.active, 1);
                 assert_eq!(

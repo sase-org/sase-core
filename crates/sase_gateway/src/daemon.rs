@@ -57,36 +57,42 @@ pub struct DaemonConfig {
     pub mobile_gateway: GatewayConfig,
 }
 
+#[derive(Clone, Debug)]
+pub struct DaemonConfigOptions {
+    pub sase_home: PathBuf,
+    pub host_identity: String,
+    pub run_root: Option<PathBuf>,
+    pub socket_path: Option<PathBuf>,
+    pub foreground: bool,
+    pub enable_tokio_console: bool,
+    pub mobile_http_enabled: bool,
+    pub mobile_gateway: GatewayConfig,
+}
+
 impl DaemonConfig {
     pub fn new(sase_home: impl Into<PathBuf>) -> Self {
-        Self::with_options(
-            sase_home,
-            host_identity_from_env(),
-            None,
-            None,
-            false,
-            false,
-            true,
-            GatewayConfig::default(),
-        )
+        Self::with_options(DaemonConfigOptions {
+            sase_home: sase_home.into(),
+            host_identity: host_identity_from_env(),
+            run_root: None,
+            socket_path: None,
+            foreground: false,
+            enable_tokio_console: false,
+            mobile_http_enabled: true,
+            mobile_gateway: GatewayConfig::default(),
+        })
     }
 
-    pub fn with_options(
-        sase_home: impl Into<PathBuf>,
-        host_identity: impl Into<String>,
-        run_root: Option<PathBuf>,
-        socket_path: Option<PathBuf>,
-        foreground: bool,
-        enable_tokio_console: bool,
-        mobile_http_enabled: bool,
-        mut mobile_gateway: GatewayConfig,
-    ) -> Self {
-        let sase_home = sase_home.into();
-        let host_identity = sanitize_host_identity(&host_identity.into());
-        let run_root = run_root
+    pub fn with_options(options: DaemonConfigOptions) -> Self {
+        let sase_home = options.sase_home;
+        let host_identity = sanitize_host_identity(&options.host_identity);
+        let run_root = options
+            .run_root
             .unwrap_or_else(|| default_run_root(&sase_home, &host_identity));
-        let socket_path =
-            socket_path.unwrap_or_else(|| default_socket_path(&run_root));
+        let socket_path = options
+            .socket_path
+            .unwrap_or_else(|| default_socket_path(&run_root));
+        let mut mobile_gateway = options.mobile_gateway;
         mobile_gateway.sase_home = sase_home.clone();
         Self {
             paths: DaemonRuntimePaths {
@@ -95,10 +101,10 @@ impl DaemonConfig {
                 socket_path,
             },
             host_identity,
-            foreground,
-            enable_tokio_console,
+            foreground: options.foreground,
+            enable_tokio_console: options.enable_tokio_console,
             rebuild_once: false,
-            mobile_http_enabled,
+            mobile_http_enabled: options.mobile_http_enabled,
             mobile_gateway,
         }
     }
@@ -642,16 +648,16 @@ mod tests {
 
     #[test]
     fn daemon_default_paths_are_host_local_under_sase_home() {
-        let config = DaemonConfig::with_options(
-            "/tmp/sase-home",
-            "workstation.local",
-            None,
-            None,
-            false,
-            false,
-            true,
-            GatewayConfig::default(),
-        );
+        let config = DaemonConfig::with_options(DaemonConfigOptions {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            host_identity: "workstation.local".to_string(),
+            run_root: None,
+            socket_path: None,
+            foreground: false,
+            enable_tokio_console: false,
+            mobile_http_enabled: true,
+            mobile_gateway: GatewayConfig::default(),
+        });
 
         assert_eq!(config.paths.sase_home, PathBuf::from("/tmp/sase-home"));
         assert_eq!(
@@ -668,16 +674,16 @@ mod tests {
 
     #[test]
     fn daemon_run_root_override_drives_default_socket_path() {
-        let config = DaemonConfig::with_options(
-            "/tmp/sase-home",
-            "workstation",
-            Some(PathBuf::from("/tmp/run-root")),
-            None,
-            true,
-            false,
-            false,
-            GatewayConfig::default(),
-        );
+        let config = DaemonConfig::with_options(DaemonConfigOptions {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            host_identity: "workstation".to_string(),
+            run_root: Some(PathBuf::from("/tmp/run-root")),
+            socket_path: None,
+            foreground: true,
+            enable_tokio_console: false,
+            mobile_http_enabled: false,
+            mobile_gateway: GatewayConfig::default(),
+        });
 
         assert_eq!(config.paths.run_root, PathBuf::from("/tmp/run-root"));
         assert_eq!(
@@ -690,16 +696,16 @@ mod tests {
 
     #[test]
     fn daemon_socket_path_override_is_preserved() {
-        let config = DaemonConfig::with_options(
-            "/tmp/sase-home",
-            "workstation",
-            Some(PathBuf::from("/tmp/run-root")),
-            Some(PathBuf::from("/tmp/custom.sock")),
-            false,
-            false,
-            true,
-            GatewayConfig::default(),
-        );
+        let config = DaemonConfig::with_options(DaemonConfigOptions {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            host_identity: "workstation".to_string(),
+            run_root: Some(PathBuf::from("/tmp/run-root")),
+            socket_path: Some(PathBuf::from("/tmp/custom.sock")),
+            foreground: false,
+            enable_tokio_console: false,
+            mobile_http_enabled: true,
+            mobile_gateway: GatewayConfig::default(),
+        });
 
         assert_eq!(config.paths.socket_path, PathBuf::from("/tmp/custom.sock"));
     }
@@ -715,19 +721,19 @@ mod tests {
 
     #[test]
     fn daemon_mobile_bind_policy_is_skipped_when_mobile_http_disabled() {
-        let config = DaemonConfig::with_options(
-            "/tmp/sase-home",
-            "workstation",
-            None,
-            None,
-            false,
-            false,
-            false,
-            GatewayConfig {
+        let config = DaemonConfig::with_options(DaemonConfigOptions {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            host_identity: "workstation".to_string(),
+            run_root: None,
+            socket_path: None,
+            foreground: false,
+            enable_tokio_console: false,
+            mobile_http_enabled: false,
+            mobile_gateway: GatewayConfig {
                 bind: "0.0.0.0:7629".parse().unwrap(),
                 ..GatewayConfig::default()
             },
-        );
+        });
 
         validate_daemon_config(&config).unwrap();
     }

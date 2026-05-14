@@ -2,8 +2,8 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use sase_gateway::{
     run_daemon, serve, split_command_words, write_api_v1_contract_snapshot,
-    write_local_daemon_contract_snapshot, DaemonConfig, GatewayConfig,
-    PushProviderMode,
+    write_local_daemon_contract_snapshot, DaemonConfig, DaemonConfigOptions,
+    GatewayConfig, PushProviderMode,
 };
 
 #[tokio::main]
@@ -365,16 +365,16 @@ fn parse_daemon_args(
         helper_bridge_command,
         push_config,
     };
-    let mut config = DaemonConfig::with_options(
+    let mut config = DaemonConfig::with_options(DaemonConfigOptions {
         sase_home,
-        sase_gateway::host_identity_from_env(),
+        host_identity: sase_gateway::host_identity_from_env(),
         run_root,
         socket_path,
         foreground,
         enable_tokio_console,
         mobile_http_enabled,
         mobile_gateway,
-    );
+    });
     config.rebuild_once = rebuild_once;
     Ok(DaemonCli { config })
 }
