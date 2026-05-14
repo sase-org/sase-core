@@ -14,7 +14,9 @@ pub const PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const HOST_CAP_IPC_V1: &str = "host.ipc.v1";
 pub const HOST_CAP_MANIFEST_V1: &str = "host.manifest.v1";
 pub const HOST_CAP_LLM_METADATA: &str = "host.llm.metadata";
+pub const HOST_CAP_LLM_INVOKE: &str = "host.llm.invoke";
 pub const HOST_CAP_XPROMPT_CATALOG: &str = "host.xprompt.catalog";
+pub const HOST_CAP_WORKFLOW_STEP: &str = "host.workflow.step";
 pub const HOST_CAP_VCS_QUERY: &str = "host.vcs.query";
 pub const HOST_CAP_WORKSPACE_METADATA: &str = "host.workspace.metadata";
 pub const HOST_CAP_WORKSPACE_RESOLVE_REF: &str = "host.workspace.resolve_ref";
@@ -293,12 +295,14 @@ impl Default for HostValidationPolicy {
         Self {
             max_request_bytes: 1_048_576,
             min_timeout_ms: 1,
-            max_timeout_ms: 300_000,
+            max_timeout_ms: 1_800_000,
             allowed_capabilities: [
                 HOST_CAP_IPC_V1,
                 HOST_CAP_MANIFEST_V1,
                 HOST_CAP_LLM_METADATA,
+                HOST_CAP_LLM_INVOKE,
                 HOST_CAP_XPROMPT_CATALOG,
+                HOST_CAP_WORKFLOW_STEP,
                 HOST_CAP_VCS_QUERY,
                 HOST_CAP_WORKSPACE_METADATA,
                 HOST_CAP_WORKSPACE_RESOLVE_REF,
@@ -925,6 +929,33 @@ mod tests {
         let err = validate_host_response(&request, &response).unwrap_err();
 
         assert_eq!(err.code, HostErrorCodeWire::NetworkDenied);
+    }
+
+    #[test]
+    fn response_validation_accepts_vcs_mutation_intent_shape() {
+        let mut request = request();
+        request.operation = HostOperationSelectorWire {
+            family: "vcs".to_string(),
+            operation: "vcs.mutation".to_string(),
+        };
+        request.manifest = Some(manifest(vec!["vcs.mutation"], "deny"));
+        let response = HostResponseEnvelopeWire {
+            schema_version: PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+            request_id: request.request_id.clone(),
+            status: HostResponseStatusWire::Ok,
+            result: json!({"shadow": true}),
+            error: None,
+            logs: Vec::new(),
+            duration_ms: 1,
+            resource_usage: None,
+            side_effects: vec![HostSideEffectIntentWire::VcsMutation {
+                provider: "bare_git".to_string(),
+                operation: "checkout".to_string(),
+                workspace_dir: "/tmp/workspace".to_string(),
+            }],
+        };
+
+        validate_host_response(&request, &response).unwrap();
     }
 
     #[test]

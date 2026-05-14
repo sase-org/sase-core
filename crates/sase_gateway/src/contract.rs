@@ -7,15 +7,15 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::wire::{
-    GATEWAY_WIRE_SCHEMA_VERSION, HOST_CAP_IPC_V1, HOST_CAP_LLM_METADATA,
-    HOST_CAP_MANIFEST_V1, HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
-    HOST_CAP_VCS_QUERY, HOST_CAP_WORKSPACE_METADATA,
+    GATEWAY_WIRE_SCHEMA_VERSION, HOST_CAP_IPC_V1, HOST_CAP_LLM_INVOKE,
+    HOST_CAP_LLM_METADATA, HOST_CAP_MANIFEST_V1,
+    HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS, HOST_CAP_VCS_QUERY,
+    HOST_CAP_WORKFLOW_STEP, HOST_CAP_WORKSPACE_METADATA,
     HOST_CAP_WORKSPACE_RESOLVE_REF, HOST_CAP_XPROMPT_CATALOG,
-    HOST_ERROR_CODES, HOST_OPERATION_FAMILIES,
-    LOCAL_DAEMON_DEFAULT_PAGE_LIMIT, LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
-    LOCAL_DAEMON_MAX_PAGE_LIMIT, LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
-    LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
-    PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+    HOST_ERROR_CODES, HOST_OPERATION_FAMILIES, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+    LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
+    LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+    LOCAL_DAEMON_WIRE_SCHEMA_VERSION, PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
 };
 
 pub fn api_v1_contract_snapshot() -> Value {
@@ -985,13 +985,15 @@ pub fn local_daemon_contract_snapshot() -> Value {
         "host_ipc": {
             "schema_version": PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
             "contract": "sase_provider_host_ipc_v1",
-            "phase": "vcs_workspace_query_routing",
-            "production_routing": "fake/no-op host operations plus read-only LLM metadata, xprompt catalog, VCS query, and workspace metadata/ref calls may route through the subprocess runtime; mutation-heavy provider and plugin calls still use existing Python fallback or shadow paths",
+            "phase": "llm_workflow_host_routing",
+            "production_routing": "fake/no-op host operations plus read-only metadata/catalog/query calls, daemon-scheduled LLM invocation, and daemon-scheduled bash/python workflow steps may route through the subprocess runtime; mutation-heavy provider and plugin calls still use existing Python fallback or shadow paths",
             "advertised_foundation_capabilities": [
                 HOST_CAP_IPC_V1,
                 HOST_CAP_MANIFEST_V1,
                 HOST_CAP_LLM_METADATA,
+                HOST_CAP_LLM_INVOKE,
                 HOST_CAP_XPROMPT_CATALOG,
+                HOST_CAP_WORKFLOW_STEP,
                 HOST_CAP_VCS_QUERY,
                 HOST_CAP_WORKSPACE_METADATA,
                 HOST_CAP_WORKSPACE_RESOLVE_REF,
@@ -1083,7 +1085,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
             HOST_CAP_IPC_V1,
             HOST_CAP_MANIFEST_V1,
             HOST_CAP_LLM_METADATA,
+            HOST_CAP_LLM_INVOKE,
             HOST_CAP_XPROMPT_CATALOG,
+            HOST_CAP_WORKFLOW_STEP,
             HOST_CAP_VCS_QUERY,
             HOST_CAP_WORKSPACE_METADATA,
             HOST_CAP_WORKSPACE_RESOLVE_REF,

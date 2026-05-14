@@ -11,7 +11,12 @@
     "host.ipc.v1",
     "host.manifest.v1",
     "host.llm.metadata",
+    "host.llm.invoke",
     "host.xprompt.catalog",
+    "host.workflow.step",
+    "host.vcs.query",
+    "host.workspace.metadata",
+    "host.workspace.resolve_ref",
     "host.resource_policy.diagnostics",
     "writes.contract",
     "agents.write",
@@ -123,7 +128,12 @@
       "host.ipc.v1",
       "host.manifest.v1",
       "host.llm.metadata",
+      "host.llm.invoke",
       "host.xprompt.catalog",
+      "host.workflow.step",
+      "host.vcs.query",
+      "host.workspace.metadata",
+      "host.workspace.resolve_ref",
       "host.resource_policy.diagnostics"
     ],
     "contract": "sase_provider_host_ipc_v1",
@@ -149,8 +159,8 @@
       "config",
       "workflow.step"
     ],
-    "phase": "read_only_metadata_catalog_routing",
-    "production_routing": "fake/no-op host operations plus read-only LLM metadata and xprompt catalog calls may route through the subprocess runtime; side-effecting provider and plugin calls still use existing Python fallback paths",
+    "phase": "llm_workflow_host_routing",
+    "production_routing": "fake/no-op host operations plus read-only metadata/catalog/query calls, daemon-scheduled LLM invocation, and daemon-scheduled bash/python workflow steps may route through the subprocess runtime; mutation-heavy provider and plugin calls still use existing Python fallback or shadow paths",
     "records": {
       "HostErrorWire": {
         "code": "host error vocabulary string",
