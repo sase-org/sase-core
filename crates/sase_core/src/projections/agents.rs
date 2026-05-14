@@ -2523,6 +2523,7 @@ impl RecordSummary {
             finished_at: done.and_then(|d| d.finished_at),
             hidden: meta.map(|m| m.hidden).unwrap_or(false)
                 || done.map(|d| d.hidden).unwrap_or(false)
+                || workflow_state.map(|w| w.hidden).unwrap_or(false)
                 || workflow_state.map(|w| w.is_anonymous).unwrap_or(false),
         }
     }
@@ -2777,6 +2778,71 @@ mod tests {
         assert!(kinds.contains(&"plan"));
         assert!(kinds.contains(&"diff"));
         assert!(kinds.contains(&"response"));
+    }
+
+    #[test]
+    fn workflow_state_hidden_hides_agent_projection_row() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture_root(&tmp);
+        let workflow_dir = root
+            .join("myproj")
+            .join("artifacts")
+            .join("workflow-launcher")
+            .join("20260513122000");
+        write_json(
+            &workflow_dir.join("workflow_state.json"),
+            &json!({
+                "workflow_name": "launcher",
+                "status": "running",
+                "hidden": true,
+                "current_step_index": 0,
+                "steps": []
+            }),
+        );
+        let snapshot = scan_agent_artifacts(
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+
+        for record in snapshot.records {
+            db.append_agent_event(
+                agent_lifecycle_marker_observed_event_request(
+                    context(),
+                    record,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let visible = agent_projection_active_page(
+            db.connection(),
+            PROJECT_ID,
+            10,
+            0,
+            false,
+        )
+        .unwrap();
+        assert!(visible
+            .entries
+            .iter()
+            .all(|entry| entry.timestamp != "20260513122000"));
+
+        let all = agent_projection_active_page(
+            db.connection(),
+            PROJECT_ID,
+            10,
+            0,
+            true,
+        )
+        .unwrap();
+        let hidden = all
+            .entries
+            .iter()
+            .find(|entry| entry.timestamp == "20260513122000")
+            .unwrap();
+        assert!(hidden.hidden);
     }
 
     #[test]

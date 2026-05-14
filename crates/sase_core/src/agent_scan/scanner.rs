@@ -763,6 +763,7 @@ fn workflow_state_from_object(data: &Map<String, Value>) -> WorkflowStateWire {
         pid: coerce_int(data.get("pid")),
         appears_as_agent: coerce_bool_truthy(data.get("appears_as_agent")),
         is_anonymous: coerce_bool_truthy(data.get("is_anonymous")),
+        hidden: coerce_bool_truthy(data.get("hidden")),
         current_step_index: coerce_int(data.get("current_step_index"))
             .unwrap_or(0),
         start_time: coerce_str(data.get("start_time")),

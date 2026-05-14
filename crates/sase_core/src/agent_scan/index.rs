@@ -553,6 +553,7 @@ impl RecordSummary {
             workflow_status,
             hidden: meta.map(|m| m.hidden).unwrap_or(false)
                 || done.map(|d| d.hidden).unwrap_or(false)
+                || workflow_state.map(|w| w.hidden).unwrap_or(false)
                 || workflow_state.map(|w| w.is_anonymous).unwrap_or(false),
             parent_timestamp: meta.and_then(|m| m.parent_timestamp.clone()),
             step_index: first_step.and_then(|s| s.step_index),

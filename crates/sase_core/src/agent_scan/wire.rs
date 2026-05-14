@@ -355,6 +355,8 @@ pub struct WorkflowStateWire {
     #[serde(default)]
     pub is_anonymous: bool,
     #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
     pub current_step_index: i64,
     #[serde(default)]
     pub start_time: Option<String>,
@@ -379,6 +381,7 @@ impl Default for WorkflowStateWire {
             pid: None,
             appears_as_agent: false,
             is_anonymous: false,
+            hidden: false,
             current_step_index: 0,
             start_time: None,
             error: None,

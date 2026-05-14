@@ -124,6 +124,8 @@ pub struct WorkflowRunProjectionWire {
     pub appears_as_agent: bool,
     #[serde(default)]
     pub is_anonymous: bool,
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +165,7 @@ impl WorkflowRunProjectionWire {
             pid: state.pid,
             appears_as_agent: state.appears_as_agent,
             is_anonymous: state.is_anonymous,
+            hidden: state.hidden,
             started_at: state.start_time.clone(),
             error: state.error.clone(),
             traceback: state.traceback.clone(),

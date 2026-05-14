@@ -14,7 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sase_core::agent_scan::{
-    scan_agent_artifacts, AgentArtifactScanOptionsWire,
+    query_agent_artifact_index, rebuild_agent_artifact_index,
+    scan_agent_artifacts, AgentArtifactIndexQueryWire,
+    AgentArtifactScanOptionsWire,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -264,6 +266,7 @@ fn build_workflow(root: &Path) {
             "pid": 44444,
             "appears_as_agent": true,
             "is_anonymous": false,
+            "hidden": false,
             "current_step_index": 2,
             "start_time": "2026-04-27T15:00:00",
             "activity": "PDF 2/5 docs/notes.md",
@@ -721,6 +724,7 @@ fn workflow_root_record_has_state_and_steps() {
     assert_eq!(state.status, "completed");
     assert!(state.appears_as_agent);
     assert!(!state.is_anonymous);
+    assert!(!state.hidden);
     assert_eq!(state.activity.as_deref(), Some("PDF 2/5 docs/notes.md"));
     let pdf_status = state.pdf_status.as_ref().unwrap();
     assert_eq!(
@@ -770,6 +774,66 @@ fn workflow_root_record_has_state_and_steps() {
     );
     assert!(code.hidden);
     assert_eq!(code.diff_path.as_deref(), Some("/tmp/diff.diff"));
+}
+
+#[test]
+fn workflow_state_hidden_is_parsed_and_indexed() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let state_path = root
+        .join("myproj")
+        .join("artifacts")
+        .join("workflow-three_phase")
+        .join(TS_WORKFLOW_ROOT)
+        .join("workflow_state.json");
+    let mut state: Value =
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap())
+            .unwrap();
+    state["hidden"] = json!(true);
+    write_json(&state_path, &state);
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_WORKFLOW_ROOT);
+    let state = rec.workflow_state.as_ref().unwrap();
+    assert!(state.hidden);
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let visible = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: true,
+            include_full_history: true,
+            recent_completed_limit: Some(10),
+            include_hidden: false,
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert!(visible
+        .records
+        .iter()
+        .all(|r| r.timestamp != TS_WORKFLOW_ROOT));
+
+    let all = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_hidden: true,
+            ..AgentArtifactIndexQueryWire::default()
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert!(all.records.iter().any(|r| r.timestamp == TS_WORKFLOW_ROOT));
 }
 
 #[test]
