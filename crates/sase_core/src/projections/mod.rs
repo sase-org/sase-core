@@ -20,6 +20,7 @@ pub mod notifications;
 pub mod read;
 pub mod rebuild;
 pub mod replay;
+pub mod scheduler;
 pub mod workflows;
 
 pub use agents::{
@@ -206,6 +207,23 @@ pub use replay::{
     ProjectionApplier, ProjectionGapWire, ProjectionRecoveryIssueWire,
     ProjectionReplayReportWire, ProjectionStartupRepairReportWire,
     ReplayProjectionApplier,
+};
+pub use scheduler::{
+    scheduler_batch_by_idempotency, scheduler_batch_status,
+    scheduler_event_request, scheduler_mark_slot_status, scheduler_queue_page,
+    SchedulerBatchHandleWire, SchedulerBatchProjectionWire,
+    SchedulerBatchStatusWire, SchedulerBatchSubmitRequestWire,
+    SchedulerBatchSubmitResponseWire, SchedulerCancelRequestWire,
+    SchedulerEventContextWire, SchedulerEventPayloadWire,
+    SchedulerLaunchSpecWire, SchedulerProjectionApplier,
+    SchedulerQueueSettingsWire, SchedulerSlotProjectionWire,
+    SchedulerSlotStatusWire, SchedulerTaskIdWire,
+    SCHEDULER_EVENT_BATCH_SUBMITTED, SCHEDULER_EVENT_SLOT_CANCELLED,
+    SCHEDULER_EVENT_SLOT_KILLED, SCHEDULER_EVENT_SLOT_PLANNED,
+    SCHEDULER_EVENT_SLOT_QUEUED, SCHEDULER_EVENT_SLOT_RUNNING,
+    SCHEDULER_EVENT_SLOT_STALE, SCHEDULER_EVENT_SLOT_STARTING,
+    SCHEDULER_EVENT_SLOT_TERMINAL, SCHEDULER_PROJECTION_NAME,
+    SCHEDULER_WIRE_SCHEMA_VERSION,
 };
 pub use workflows::{
     workflow_action_response_recorded_event_request,
