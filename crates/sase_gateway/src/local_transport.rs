@@ -293,8 +293,32 @@ pub async fn handle_connection(
             state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
             result
         }
+        LocalDaemonRequestPayloadWire::Capabilities => {
+            let payload =
+                LocalDaemonResponsePayloadWire::Capabilities(capabilities_response(
+                    state,
+                ));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), result.is_ok());
+            result
+        }
         payload => {
-            let payload = handle_payload(payload, state);
+            let state_for_payload = state.clone();
+            let payload = match tokio::task::spawn_blocking(move || {
+                handle_payload(payload, &state_for_payload)
+            })
+            .await
+            {
+                Ok(payload) => payload,
+                Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+                    LocalDaemonErrorCodeWire::Internal,
+                    format!("local RPC handler task failed: {error}"),
+                    true,
+                    Some("payload".to_string()),
+                    None,
+                )),
+            };
             success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
             let response = envelope(
                 request_id,
@@ -3795,6 +3819,28 @@ mod tests {
         }
     }
 
+    async fn write_request_frame_for_test(
+        stream: &mut UnixStream,
+        request: &LocalDaemonRequestEnvelopeWire,
+    ) {
+        let payload = serde_json::to_vec(request).unwrap();
+        let len = u32::try_from(payload.len()).unwrap();
+        stream.write_all(&len.to_be_bytes()).await.unwrap();
+        stream.write_all(&payload).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn read_response_frame_for_test(
+        stream: &mut UnixStream,
+    ) -> LocalDaemonResponseEnvelopeWire {
+        let mut len_bytes = [0_u8; 4];
+        stream.read_exact(&mut len_bytes).await.unwrap();
+        let len = u32::from_be_bytes(len_bytes);
+        let mut payload = vec![0_u8; len as usize];
+        stream.read_exact(&mut payload).await.unwrap();
+        serde_json::from_slice(&payload).unwrap()
+    }
+
     #[test]
     fn health_response_reports_live_daemon() {
         let payload = serde_json::to_vec(&request(
@@ -3829,6 +3875,103 @@ mod tests {
                 );
             }
             other => panic!("expected health response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capabilities_rpc_is_not_starved_by_blocked_projection_read() {
+        let init_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp_dir = tempdir().unwrap();
+        let projection_service =
+            init_runtime.block_on(ProjectionService::initialize(
+                temp_dir.path().join("projection.sqlite"),
+            ));
+        let db = projection_service.db_for_test().unwrap();
+        let guard = db.lock().unwrap();
+        let state = test_state_with_projection(projection_service);
+        let (tx, rx) = mpsc::channel();
+
+        let mut handle = Some(std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let (mut blocked_client, blocked_server) =
+                    UnixStream::pair().unwrap();
+                let blocked_state = state.clone();
+                tokio::spawn(async move {
+                    let _ =
+                        handle_connection(blocked_server, &blocked_state).await;
+                });
+                write_request_frame_for_test(
+                    &mut blocked_client,
+                    &request(LocalDaemonRequestPayloadWire::Read(
+                        LocalDaemonReadRequestWire::AgentActive(
+                            crate::wire::AgentReadListRequestWire {
+                                schema_version:
+                                    LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                                page: ProjectionPageRequestWire {
+                                    schema_version:
+                                        LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                                    limit: 10,
+                                    cursor: None,
+                                },
+                                project_id: "demo".to_string(),
+                                include_hidden: false,
+                                query: None,
+                            },
+                        ),
+                    )),
+                )
+                .await;
+
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let (mut capabilities_client, capabilities_server) =
+                    UnixStream::pair().unwrap();
+                let capabilities_state = state.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(
+                        capabilities_server,
+                        &capabilities_state,
+                    )
+                    .await;
+                });
+                write_request_frame_for_test(
+                    &mut capabilities_client,
+                    &request(LocalDaemonRequestPayloadWire::Capabilities),
+                )
+                .await;
+                let response =
+                    read_response_frame_for_test(&mut capabilities_client)
+                        .await;
+                tx.send(response.payload).ok();
+            });
+        }));
+
+        let received = rx.recv_timeout(Duration::from_millis(250));
+        drop(guard);
+        if let Some(handle) = handle.take() {
+            handle.join().unwrap();
+        }
+
+        match received {
+            Ok(LocalDaemonResponsePayloadWire::Capabilities(capabilities)) => {
+                assert!(capabilities
+                    .capabilities
+                    .contains(&"capabilities.read".to_string()));
+            }
+            Ok(other) => {
+                panic!("expected capabilities response, got {other:?}")
+            }
+            Err(error) => {
+                panic!(
+                    "capabilities RPC waited behind projection read: {error}"
+                );
+            }
         }
     }
 
