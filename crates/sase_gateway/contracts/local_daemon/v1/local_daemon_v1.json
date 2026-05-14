@@ -280,6 +280,7 @@
     },
     "LocalDaemonCapabilitiesResponseWire": {
       "capabilities": "string[]",
+      "compatibility": "LocalDaemonCompatibilityWire",
       "contract": "string",
       "contract_version": "u32",
       "default_page_limit": "u32",
@@ -290,16 +291,39 @@
       "schema_version": "u32"
     },
     "LocalDaemonClientWire": {
+      "max_supported_schema_version": "u32|null",
+      "metadata_schema_version": "u32|null",
+      "min_supported_schema_version": "u32|null",
       "name": "string",
+      "package_version": "string|null",
+      "sase_core_rs_version": "string|null",
       "schema_version": "u32",
       "version": "string"
+    },
+    "LocalDaemonCompatibilityWire": {
+      "daemon_build": "GatewayBuildWire",
+      "daemon_package_version": "string",
+      "degraded": "bool",
+      "guidance": "string|null",
+      "local_daemon_schema_version": "u32",
+      "projection_read_schema_version": "u32",
+      "projection_schema_version": "u32",
+      "projection_write_schema_version": "u32",
+      "rebuild_required": "bool",
+      "schema_version": "u32",
+      "storage_migration_state": "applied|migration_required",
+      "supported_client_schema_range": "LocalDaemonSchemaRangeWire"
     },
     "LocalDaemonErrorWire": {
       "code": [
         "invalid_request",
         "unsupported_client_version",
+        "unsupported_server_version",
         "unsupported_capability",
+        "projection_schema_mismatch",
         "projection_degraded",
+        "sase_core_rs_version_mismatch",
+        "mobile_contract_mismatch",
         "cursor_expired",
         "snapshot_expired",
         "payload_too_large",
@@ -359,9 +383,11 @@
     "LocalDaemonFallbackWire": {
       "available": "bool",
       "message": "string|null",
-      "reason": "daemon_not_running|unsupported_client_version|recovery_mode|host_adapter_required|null"
+      "reason": "daemon_not_running|unsupported_client_version|unsupported_server_version|projection_schema_mismatch|sase_core_rs_version_mismatch|mobile_contract_mismatch|recovery_mode|host_adapter_required|null"
     },
     "LocalDaemonHealthResponseWire": {
+      "build": "GatewayBuildWire",
+      "compatibility": "LocalDaemonCompatibilityWire",
       "daemon_started": "bool; false is expected in Epic 1D contract tests",
       "details": {
         "indexing": {
@@ -688,6 +714,10 @@
       "batch_id": "string",
       "project_id": "string",
       "schema_version": "u32"
+    },
+    "LocalDaemonSchemaRangeWire": {
+      "max": "u32",
+      "min": "u32"
     },
     "LocalDaemonWriteRequestWire": {
       "actor": "MutationActorWire",
@@ -1113,6 +1143,16 @@
   },
   "versioning": {
     "additive_fields": "allowed when clients ignore unknown fields and servers preserve existing required fields",
+    "client_metadata": {
+      "max_supported_schema_version": "u32|null",
+      "metadata_schema_version": "u32|null",
+      "min_supported_schema_version": "u32|null",
+      "name": "string",
+      "package_version": "string|null",
+      "sase_core_rs_version": "string|null",
+      "schema_version": "u32",
+      "version": "string"
+    },
     "contract_name": "sase_local_daemon_framed_json_v1",
     "cursor_identifiers": "cursor is an opaque page token scoped to collection, filters, stable_handle, and snapshot_id",
     "deprecation_policy": "fields are deprecated for at least one compatible schema window before removal",
@@ -1120,11 +1160,35 @@
     "error_shape": "LocalDaemonErrorWire inside LocalDaemonResponsePayloadWire::error",
     "max_compatible_client_schema_version": 1,
     "min_compatible_client_schema_version": 1,
+    "negotiation": {
+      "daemon_package_version": "advertised on health/capabilities",
+      "projection_read_schema_version": 1,
+      "projection_schema_version": 10,
+      "projection_write_schema_version": 1,
+      "repair_actions": [
+        "upgrade sase",
+        "restart daemon",
+        "run `sase daemon rebuild --live-recovery`",
+        "set SASE_NO_DAEMON=1"
+      ],
+      "storage_migration_state": "applied|migration_required",
+      "supported_client_schema_range": {
+        "max": 1,
+        "min": 1
+      }
+    },
     "no_daemon_fallback": "LocalDaemonFallbackWire and daemon_unavailable/host_adapter_required errors signal direct source-store fallback",
     "nullable_fields": "nullable fields are explicit JSON null and may not be repurposed without a new schema version",
     "removal_policy": "removal, required-field semantic changes, or enum narrowing require a new contract snapshot and schema version bump",
     "schema_version": 1,
     "snapshot_identifiers": "snapshot_id is an opaque stable view identifier scoped to one daemon state generation",
-    "stable_handles": "handles are opaque stable resource identifiers for follow-up reads within compatible schemas"
+    "stable_handles": "handles are opaque stable resource identifiers for follow-up reads within compatible schemas",
+    "typed_compatibility_errors": [
+      "unsupported_client_version",
+      "unsupported_server_version",
+      "projection_schema_mismatch",
+      "sase_core_rs_version_mismatch",
+      "mobile_contract_mismatch"
+    ]
   }
 }

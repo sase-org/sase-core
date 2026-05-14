@@ -22,8 +22,8 @@ pub use sase_core::projections::{
     ProjectionRestoreReportWire, ProjectionWalCheckpointModeWire,
     SchedulerBatchStatusWire, SchedulerBatchSubmitRequestWire,
     SchedulerBatchSubmitResponseWire, SchedulerCancelRequestWire,
-    SourceExportPlanWire, SourceFingerprintWire,
-    PROJECTION_READ_WIRE_SCHEMA_VERSION,
+    SourceExportPlanWire, SourceFingerprintWire, MUTATION_WIRE_SCHEMA_VERSION,
+    PROJECTION_READ_WIRE_SCHEMA_VERSION, PROJECTION_SCHEMA_VERSION,
 };
 
 pub use sase_core::host_bridge::{
@@ -281,6 +281,38 @@ pub struct LocalDaemonClientWire {
     pub schema_version: u32,
     pub name: String,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_supported_schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_supported_schema_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sase_core_rs_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonSchemaRangeWire {
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonCompatibilityWire {
+    pub schema_version: u32,
+    pub daemon_package_version: String,
+    pub daemon_build: GatewayBuildWire,
+    pub local_daemon_schema_version: u32,
+    pub supported_client_schema_range: LocalDaemonSchemaRangeWire,
+    pub projection_schema_version: u32,
+    pub projection_read_schema_version: u32,
+    pub projection_write_schema_version: u32,
+    pub storage_migration_state: String,
+    pub degraded: bool,
+    pub rebuild_required: bool,
+    pub guidance: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -634,8 +666,10 @@ pub struct LocalDaemonHealthResponseWire {
     pub service: String,
     pub daemon_started: bool,
     pub version: String,
+    pub build: GatewayBuildWire,
     pub min_client_schema_version: u32,
     pub max_client_schema_version: u32,
+    pub compatibility: LocalDaemonCompatibilityWire,
     pub fallback: LocalDaemonFallbackWire,
     pub details: JsonValue,
 }
@@ -660,6 +694,10 @@ pub struct LocalDaemonFallbackWire {
 pub enum LocalDaemonFallbackReasonWire {
     DaemonNotRunning,
     UnsupportedClientVersion,
+    UnsupportedServerVersion,
+    ProjectionSchemaMismatch,
+    SaseCoreRsVersionMismatch,
+    MobileContractMismatch,
     RecoveryMode,
     HostAdapterRequired,
 }
@@ -671,6 +709,7 @@ pub struct LocalDaemonCapabilitiesResponseWire {
     pub contract_version: u32,
     pub min_client_schema_version: u32,
     pub max_client_schema_version: u32,
+    pub compatibility: LocalDaemonCompatibilityWire,
     pub capabilities: Vec<String>,
     pub max_payload_bytes: u32,
     pub default_page_limit: u32,
@@ -819,8 +858,12 @@ pub struct LocalDaemonErrorWire {
 pub enum LocalDaemonErrorCodeWire {
     InvalidRequest,
     UnsupportedClientVersion,
+    UnsupportedServerVersion,
     UnsupportedCapability,
+    ProjectionSchemaMismatch,
     ProjectionDegraded,
+    SaseCoreRsVersionMismatch,
+    MobileContractMismatch,
     CursorExpired,
     SnapshotExpired,
     PayloadTooLarge,
@@ -1338,6 +1381,15 @@ mod tests {
                 schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
                 name: "sase-cli".to_string(),
                 version: "0.1.1".to_string(),
+                metadata_schema_version: Some(1),
+                package_version: Some("0.1.0".to_string()),
+                min_supported_schema_version: Some(
+                    LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+                ),
+                max_supported_schema_version: Some(
+                    LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+                ),
+                sase_core_rs_version: None,
             },
             payload: LocalDaemonRequestPayloadWire::List(
                 LocalDaemonListRequestWire {
@@ -1362,7 +1414,11 @@ mod tests {
                 "client": {
                     "schema_version": 1,
                     "name": "sase-cli",
-                    "version": "0.1.1"
+                    "version": "0.1.1",
+                    "metadata_schema_version": 1,
+                    "package_version": "0.1.0",
+                    "min_supported_schema_version": 1,
+                    "max_supported_schema_version": 1
                 },
                 "payload": {
                     "type": "list",

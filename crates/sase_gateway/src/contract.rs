@@ -15,7 +15,9 @@ use crate::wire::{
     HOST_OPERATION_FAMILIES, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
     LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
     LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
-    LOCAL_DAEMON_WIRE_SCHEMA_VERSION, PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+    LOCAL_DAEMON_WIRE_SCHEMA_VERSION, MUTATION_WIRE_SCHEMA_VERSION,
+    PROJECTION_READ_WIRE_SCHEMA_VERSION, PROJECTION_SCHEMA_VERSION,
+    PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
 };
 
 pub fn api_v1_contract_snapshot() -> Value {
@@ -971,6 +973,33 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
             "min_compatible_client_schema_version": LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
             "max_compatible_client_schema_version": LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+            "client_metadata": {
+                "schema_version": "u32",
+                "metadata_schema_version": "u32|null",
+                "name": "string",
+                "version": "string",
+                "package_version": "string|null",
+                "min_supported_schema_version": "u32|null",
+                "max_supported_schema_version": "u32|null",
+                "sase_core_rs_version": "string|null"
+            },
+            "negotiation": {
+                "daemon_package_version": "advertised on health/capabilities",
+                "supported_client_schema_range": {
+                    "min": LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+                    "max": LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION
+                },
+                "projection_schema_version": PROJECTION_SCHEMA_VERSION,
+                "projection_read_schema_version": PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                "projection_write_schema_version": MUTATION_WIRE_SCHEMA_VERSION,
+                "storage_migration_state": "applied|migration_required",
+                "repair_actions": [
+                    "upgrade sase",
+                    "restart daemon",
+                    "run `sase daemon rebuild --live-recovery`",
+                    "set SASE_NO_DAEMON=1"
+                ]
+            },
             "additive_fields": "allowed when clients ignore unknown fields and servers preserve existing required fields",
             "nullable_fields": "nullable fields are explicit JSON null and may not be repurposed without a new schema version",
             "enum_compatibility": "clients must treat unknown enum variants as unsupported and fall back when possible; removing or renaming variants requires a new schema version",
@@ -980,7 +1009,14 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "snapshot_identifiers": "snapshot_id is an opaque stable view identifier scoped to one daemon state generation",
             "cursor_identifiers": "cursor is an opaque page token scoped to collection, filters, stable_handle, and snapshot_id",
             "stable_handles": "handles are opaque stable resource identifiers for follow-up reads within compatible schemas",
-            "no_daemon_fallback": "LocalDaemonFallbackWire and daemon_unavailable/host_adapter_required errors signal direct source-store fallback"
+            "no_daemon_fallback": "LocalDaemonFallbackWire and daemon_unavailable/host_adapter_required errors signal direct source-store fallback",
+            "typed_compatibility_errors": [
+                "unsupported_client_version",
+                "unsupported_server_version",
+                "projection_schema_mismatch",
+                "sase_core_rs_version_mismatch",
+                "mobile_contract_mismatch"
+            ]
         },
         "host_ipc": {
             "schema_version": PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
@@ -1268,7 +1304,30 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "LocalDaemonClientWire": {
                 "schema_version": "u32",
                 "name": "string",
-                "version": "string"
+                "version": "string",
+                "metadata_schema_version": "u32|null",
+                "package_version": "string|null",
+                "min_supported_schema_version": "u32|null",
+                "max_supported_schema_version": "u32|null",
+                "sase_core_rs_version": "string|null"
+            },
+            "LocalDaemonCompatibilityWire": {
+                "schema_version": "u32",
+                "daemon_package_version": "string",
+                "daemon_build": "GatewayBuildWire",
+                "local_daemon_schema_version": "u32",
+                "supported_client_schema_range": "LocalDaemonSchemaRangeWire",
+                "projection_schema_version": "u32",
+                "projection_read_schema_version": "u32",
+                "projection_write_schema_version": "u32",
+                "storage_migration_state": "applied|migration_required",
+                "degraded": "bool",
+                "rebuild_required": "bool",
+                "guidance": "string|null"
+            },
+            "LocalDaemonSchemaRangeWire": {
+                "min": "u32",
+                "max": "u32"
             },
             "LocalDaemonRequestEnvelopeWire": {
                 "schema_version": "u32",
@@ -1403,8 +1462,10 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "service": "sase_local_daemon",
                 "daemon_started": "bool; false is expected in Epic 1D contract tests",
                 "version": "string",
+                "build": "GatewayBuildWire",
                 "min_client_schema_version": "u32",
                 "max_client_schema_version": "u32",
+                "compatibility": "LocalDaemonCompatibilityWire",
                 "fallback": "LocalDaemonFallbackWire",
                 "details": {
                     "projection_db": {
@@ -1470,7 +1531,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
             },
             "LocalDaemonFallbackWire": {
                 "available": "bool",
-                "reason": "daemon_not_running|unsupported_client_version|recovery_mode|host_adapter_required|null",
+                "reason": "daemon_not_running|unsupported_client_version|unsupported_server_version|projection_schema_mismatch|sase_core_rs_version_mismatch|mobile_contract_mismatch|recovery_mode|host_adapter_required|null",
                 "message": "string|null"
             },
             "StoragePathDiagnostic": {
@@ -1489,6 +1550,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "contract_version": "u32",
                 "min_client_schema_version": "u32",
                 "max_client_schema_version": "u32",
+                "compatibility": "LocalDaemonCompatibilityWire",
                 "capabilities": "string[]",
                 "max_payload_bytes": "u32",
                 "default_page_limit": "u32",
@@ -1898,8 +1960,12 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "code": [
                     "invalid_request",
                     "unsupported_client_version",
+                    "unsupported_server_version",
                     "unsupported_capability",
+                    "projection_schema_mismatch",
                     "projection_degraded",
+                    "sase_core_rs_version_mismatch",
+                    "mobile_contract_mismatch",
                     "cursor_expired",
                     "snapshot_expired",
                     "payload_too_large",

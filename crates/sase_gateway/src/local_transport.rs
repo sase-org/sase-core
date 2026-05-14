@@ -55,7 +55,8 @@ use sase_core::projections::{
     WorkflowStepProjectionWire, WorkflowTaskProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
-    CHANGESPEC_STATUS_TRANSITIONED, PROJECTION_READ_WIRE_SCHEMA_VERSION,
+    CHANGESPEC_STATUS_TRANSITIONED, MUTATION_WIRE_SCHEMA_VERSION,
+    PROJECTION_READ_WIRE_SCHEMA_VERSION, PROJECTION_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -71,13 +72,13 @@ use crate::{
     projection_service::ProjectionServiceState,
     wire::{
         LocalDaemonBatchResponseWire, LocalDaemonCapabilitiesResponseWire,
-        LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
-        LocalDaemonErrorCodeWire, LocalDaemonErrorWire,
-        LocalDaemonEventBatchWire, LocalDaemonEventPayloadWire,
-        LocalDaemonEventRecordWire, LocalDaemonEventRequestWire,
-        LocalDaemonFallbackWire, LocalDaemonHealthResponseWire,
-        LocalDaemonHealthStatusWire, LocalDaemonHeartbeatWire,
-        LocalDaemonIndexingDiffRequestWire,
+        LocalDaemonCollectionWire, LocalDaemonCompatibilityWire,
+        LocalDaemonDeltaOperationWire, LocalDaemonErrorCodeWire,
+        LocalDaemonErrorWire, LocalDaemonEventBatchWire,
+        LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
+        LocalDaemonEventRequestWire, LocalDaemonFallbackWire,
+        LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
+        LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
         LocalDaemonPayloadBoundWire, LocalDaemonProjectionBackupRequestWire,
@@ -86,13 +87,14 @@ use crate::{
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LocalDaemonSchedulerStatusRequestWire, LocalDaemonWriteRequestWire,
-        LocalDaemonWriteResponseWire, ProjectionPageRequestWire,
-        HOST_CAP_IPC_V1, HOST_CAP_LLM_INVOKE, HOST_CAP_LLM_METADATA,
-        HOST_CAP_MANIFEST_V1, HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
-        HOST_CAP_VCS_QUERY, HOST_CAP_WORKFLOW_STEP,
-        HOST_CAP_WORKSPACE_METADATA, HOST_CAP_WORKSPACE_RESOLVE_REF,
-        HOST_CAP_XPROMPT_CATALOG, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonSchedulerStatusRequestWire, LocalDaemonSchemaRangeWire,
+        LocalDaemonWriteRequestWire, LocalDaemonWriteResponseWire,
+        ProjectionPageRequestWire, HOST_CAP_IPC_V1, HOST_CAP_LLM_INVOKE,
+        HOST_CAP_LLM_METADATA, HOST_CAP_MANIFEST_V1,
+        HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS, HOST_CAP_VCS_QUERY,
+        HOST_CAP_WORKFLOW_STEP, HOST_CAP_WORKSPACE_METADATA,
+        HOST_CAP_WORKSPACE_RESOLVE_REF, HOST_CAP_XPROMPT_CATALOG,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -322,7 +324,9 @@ fn handle_payload(
             include_capabilities: _,
         } => LocalDaemonResponsePayloadWire::Health(health_response(state)),
         LocalDaemonRequestPayloadWire::Capabilities => {
-            LocalDaemonResponsePayloadWire::Capabilities(capabilities_response())
+            LocalDaemonResponsePayloadWire::Capabilities(capabilities_response(
+                state,
+            ))
         }
         LocalDaemonRequestPayloadWire::List(request) => {
             handle_list_payload(request, state)
@@ -770,13 +774,19 @@ fn request_for_frame(
         })?;
 
     if request.schema_version != LOCAL_DAEMON_WIRE_SCHEMA_VERSION {
-        return Err(Box::new(unsupported_schema_response(request.request_id)));
+        return Err(Box::new(unsupported_schema_response(
+            request.request_id,
+            request.schema_version,
+        )));
     }
     if request.client.schema_version < LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION
         || request.client.schema_version
             > LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION
     {
-        return Err(Box::new(unsupported_schema_response(request.request_id)));
+        return Err(Box::new(unsupported_schema_response(
+            request.request_id,
+            request.client.schema_version,
+        )));
     }
 
     Ok(request)
@@ -864,24 +874,65 @@ fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
         service: LOCAL_DAEMON_SERVICE_NAME.to_string(),
         daemon_started: true,
         version: state.build.package_version.clone(),
+        build: state.build.clone(),
         min_client_schema_version: LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         max_client_schema_version: LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+        compatibility: compatibility_response(&state.build, &projection_status),
         fallback: fallback_unavailable(),
         details,
     }
 }
 
-fn capabilities_response() -> LocalDaemonCapabilitiesResponseWire {
+fn capabilities_response(
+    state: &DaemonState,
+) -> LocalDaemonCapabilitiesResponseWire {
     LocalDaemonCapabilitiesResponseWire {
         schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         contract: LOCAL_DAEMON_CONTRACT_NAME.to_string(),
         contract_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         min_client_schema_version: LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         max_client_schema_version: LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+        compatibility: compatibility_response(
+            &state.build,
+            &state.projection_service.status(),
+        ),
         capabilities: local_daemon_capabilities(),
         max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
         default_page_limit: LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         max_page_limit: LOCAL_DAEMON_MAX_PAGE_LIMIT,
+    }
+}
+
+fn compatibility_response(
+    build: &crate::wire::GatewayBuildWire,
+    projection_status: &crate::projection_service::ProjectionServiceStatus,
+) -> LocalDaemonCompatibilityWire {
+    let degraded = projection_status.state == ProjectionServiceState::Degraded;
+    let rebuild_required = projection_status.repair_needed
+        || !projection_status.migrations_applied;
+    LocalDaemonCompatibilityWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        daemon_package_version: build.package_version.clone(),
+        daemon_build: build.clone(),
+        local_daemon_schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        supported_client_schema_range: LocalDaemonSchemaRangeWire {
+            min: LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+            max: LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+        },
+        projection_schema_version: PROJECTION_SCHEMA_VERSION,
+        projection_read_schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+        projection_write_schema_version: MUTATION_WIRE_SCHEMA_VERSION,
+        storage_migration_state: if projection_status.migrations_applied {
+            "applied".to_string()
+        } else {
+            "migration_required".to_string()
+        },
+        degraded,
+        rebuild_required,
+        guidance: rebuild_required.then(|| {
+            "run `sase daemon rebuild --live-recovery` or set SASE_NO_DAEMON=1"
+                .to_string()
+        }),
     }
 }
 
@@ -3048,25 +3099,53 @@ fn unsupported_write_error(
 fn projection_error(
     error: crate::projection_service::ProjectionServiceError,
 ) -> LocalDaemonErrorWire {
+    let message = format!("projection read failed: {error}");
+    let code = projection_compatibility_code(&message);
     local_error(
-        LocalDaemonErrorCodeWire::ProjectionDegraded,
-        format!("projection read failed: {error}"),
+        code,
+        message,
         true,
         Some("projection_db".to_string()),
-        None,
+        Some(json!({
+            "projection_schema_version": PROJECTION_SCHEMA_VERSION,
+            "projection_read_schema_version": PROJECTION_READ_WIRE_SCHEMA_VERSION,
+            "repair_action": "run `sase daemon rebuild --live-recovery` or set SASE_NO_DAEMON=1",
+        })),
     )
 }
 
 fn projection_write_error(
     error: crate::projection_service::ProjectionServiceError,
 ) -> LocalDaemonErrorWire {
+    let message = format!("projection write failed: {error}");
+    let code = projection_compatibility_code(&message);
     local_error(
-        LocalDaemonErrorCodeWire::ExportPendingRepair,
-        format!("projection write failed: {error}"),
+        if code == LocalDaemonErrorCodeWire::ProjectionSchemaMismatch {
+            code
+        } else {
+            LocalDaemonErrorCodeWire::ExportPendingRepair
+        },
+        message,
         true,
         Some("projection_db".to_string()),
-        Some(json!({"fallbackable": true})),
+        Some(json!({
+            "fallbackable": true,
+            "projection_schema_version": PROJECTION_SCHEMA_VERSION,
+            "projection_write_schema_version": MUTATION_WIRE_SCHEMA_VERSION,
+            "repair_action": "run `sase daemon rebuild --live-recovery` or set SASE_NO_DAEMON=1",
+        })),
     )
+}
+
+fn projection_compatibility_code(message: &str) -> LocalDaemonErrorCodeWire {
+    if message.contains("schema_version_mismatch")
+        || message.contains("run projection migrations")
+        || message.contains("code expects")
+    {
+        LocalDaemonErrorCodeWire::ProjectionSchemaMismatch
+    } else {
+        LocalDaemonErrorCodeWire::ProjectionDegraded
+    }
 }
 
 fn read_surface_name(request: &LocalDaemonReadRequestWire) -> &'static str {
@@ -3290,19 +3369,24 @@ fn frame_error_response(
 
 fn unsupported_schema_response(
     request_id: String,
+    client_schema_version: u32,
 ) -> LocalDaemonResponseEnvelopeWire {
-    error_response(
+    error_response_with_fallback(
         request_id,
         LocalDaemonErrorCodeWire::UnsupportedClientVersion,
         format!(
-            "local daemon supports client schema versions {LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION} through {LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION}"
+            "local daemon supports client schema versions {LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION} through {LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION}; received {client_schema_version}"
         ),
         false,
         Some("schema_version".to_string()),
         Some(json!({
+            "client_schema_version": client_schema_version,
             "min_client_schema_version": LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
             "max_client_schema_version": LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+            "repair_action": "upgrade sase, restart the daemon, or set SASE_NO_DAEMON=1",
         })),
+        Some(crate::wire::LocalDaemonFallbackReasonWire::UnsupportedClientVersion),
+        Some("use direct source-store readers/writers or set SASE_NO_DAEMON=1".to_string()),
     )
 }
 
@@ -3313,6 +3397,28 @@ fn error_response(
     retryable: bool,
     target: Option<String>,
     details: Option<JsonValue>,
+) -> LocalDaemonResponseEnvelopeWire {
+    error_response_with_fallback(
+        request_id,
+        code,
+        message,
+        retryable,
+        target,
+        details,
+        None,
+        Some("use direct source-store readers".to_string()),
+    )
+}
+
+fn error_response_with_fallback(
+    request_id: String,
+    code: LocalDaemonErrorCodeWire,
+    message: String,
+    retryable: bool,
+    target: Option<String>,
+    details: Option<JsonValue>,
+    fallback_reason: Option<crate::wire::LocalDaemonFallbackReasonWire>,
+    fallback_message: Option<String>,
 ) -> LocalDaemonResponseEnvelopeWire {
     envelope(
         request_id,
@@ -3326,8 +3432,8 @@ fn error_response(
             details,
             fallback: LocalDaemonFallbackWire {
                 available: true,
-                reason: None,
-                message: Some("use direct source-store readers".to_string()),
+                reason: fallback_reason,
+                message: fallback_message,
             },
         }),
     )
@@ -3342,16 +3448,57 @@ fn local_error(
 ) -> LocalDaemonErrorWire {
     LocalDaemonErrorWire {
         schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        fallback: LocalDaemonFallbackWire {
+            available: true,
+            reason: fallback_reason_for_error(&code),
+            message: Some(fallback_message_for_error(&code)),
+        },
         code,
         message: message.into(),
         retryable,
         target,
         details,
-        fallback: LocalDaemonFallbackWire {
-            available: true,
-            reason: None,
-            message: Some("use direct source-store readers".to_string()),
-        },
+    }
+}
+
+fn fallback_reason_for_error(
+    code: &LocalDaemonErrorCodeWire,
+) -> Option<crate::wire::LocalDaemonFallbackReasonWire> {
+    match code {
+        LocalDaemonErrorCodeWire::UnsupportedClientVersion => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::UnsupportedClientVersion,
+        ),
+        LocalDaemonErrorCodeWire::UnsupportedServerVersion => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::UnsupportedServerVersion,
+        ),
+        LocalDaemonErrorCodeWire::ProjectionSchemaMismatch => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::ProjectionSchemaMismatch,
+        ),
+        LocalDaemonErrorCodeWire::SaseCoreRsVersionMismatch => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::SaseCoreRsVersionMismatch,
+        ),
+        LocalDaemonErrorCodeWire::MobileContractMismatch => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::MobileContractMismatch,
+        ),
+        LocalDaemonErrorCodeWire::DaemonUnavailable => Some(
+            crate::wire::LocalDaemonFallbackReasonWire::DaemonNotRunning,
+        ),
+        _ => None,
+    }
+}
+
+fn fallback_message_for_error(code: &LocalDaemonErrorCodeWire) -> String {
+    match code {
+        LocalDaemonErrorCodeWire::ProjectionSchemaMismatch => {
+            "run `sase daemon rebuild --live-recovery`, then restart daemon; or set SASE_NO_DAEMON=1".to_string()
+        }
+        LocalDaemonErrorCodeWire::UnsupportedClientVersion
+        | LocalDaemonErrorCodeWire::UnsupportedServerVersion
+        | LocalDaemonErrorCodeWire::SaseCoreRsVersionMismatch
+        | LocalDaemonErrorCodeWire::MobileContractMismatch => {
+            "upgrade sase, restart daemon, or set SASE_NO_DAEMON=1".to_string()
+        }
+        _ => "use direct source-store readers".to_string(),
     }
 }
 
@@ -3560,6 +3707,15 @@ mod tests {
                 schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
                 name: "sase-test".to_string(),
                 version: "0.1.1".to_string(),
+                metadata_schema_version: Some(1),
+                package_version: Some("0.1.0".to_string()),
+                min_supported_schema_version: Some(
+                    LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
+                ),
+                max_supported_schema_version: Some(
+                    LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+                ),
+                sase_core_rs_version: None,
             },
             payload,
         }
@@ -3589,6 +3745,14 @@ mod tests {
                     health.details["projection_db"]["state"],
                     json!("degraded")
                 );
+                assert_eq!(
+                    health.compatibility.supported_client_schema_range.min,
+                    LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION
+                );
+                assert_eq!(
+                    health.compatibility.projection_read_schema_version,
+                    PROJECTION_READ_WIRE_SCHEMA_VERSION
+                );
             }
             other => panic!("expected health response, got {other:?}"),
         }
@@ -3610,6 +3774,12 @@ mod tests {
                     LocalDaemonErrorCodeWire::UnsupportedClientVersion
                 );
                 assert_eq!(error.target.as_deref(), Some("schema_version"));
+                assert_eq!(
+                    error.fallback.reason,
+                    Some(
+                        crate::wire::LocalDaemonFallbackReasonWire::UnsupportedClientVersion
+                    )
+                );
             }
             other => panic!("expected error response, got {other:?}"),
         }
