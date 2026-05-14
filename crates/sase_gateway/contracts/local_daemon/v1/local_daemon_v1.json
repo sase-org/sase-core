@@ -376,7 +376,8 @@
           "watcher_active": "bool"
         },
         "logs": {
-          "path": "string; daemon log file path"
+          "path": "string; daemon log file path",
+          "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown"
         },
         "metrics": {
           "endpoint": "string|null; loopback metrics URL when daemon mobile HTTP is enabled",
@@ -387,7 +388,8 @@
           "max_event_seq": "i64|null",
           "message": "string|null",
           "migrations_applied": "bool",
-          "path_kind": "host_local",
+          "path": "string; projection database path",
+          "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown",
           "recovery_issue_count": "usize",
           "repair_needed": "bool",
           "schema_initialized": "bool",
@@ -406,6 +408,17 @@
           "stale_starts": "u64",
           "starting_tasks": "u64",
           "state": "ok|degraded|unknown"
+        },
+        "storage_layout": {
+          "log_path": "StoragePathDiagnostic",
+          "projection_db_path": "StoragePathDiagnostic",
+          "run_root": "StoragePathDiagnostic",
+          "runtime_files": "string[]; socket, locks, logs, projection SQLite/WAL/SHM, checkpoints, backups, and transient queues to exclude from sync",
+          "sase_home": "StoragePathDiagnostic",
+          "schema_version": "u32",
+          "socket_path": "StoragePathDiagnostic",
+          "source_roots": "StoragePathDiagnostic[]",
+          "warnings": "StorageLayoutWarning[]"
         }
       },
       "fallback": "LocalDaemonFallbackWire",
@@ -796,6 +809,16 @@
       "schema_version": "u32",
       "status": "pending|applied|failed|conflict",
       "target_path": "string"
+    },
+    "StorageLayoutWarning": {
+      "id": "string",
+      "message": "string",
+      "path": "string",
+      "severity": "warning|error"
+    },
+    "StoragePathDiagnostic": {
+      "path": "string",
+      "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown"
     }
   },
   "request_envelope": {

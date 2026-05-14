@@ -1370,7 +1370,8 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "details": {
                     "projection_db": {
                         "state": "ok|degraded",
-                        "path_kind": "host_local",
+                        "path": "string; projection database path",
+                        "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown",
                         "schema_initialized": "bool",
                         "migrations_applied": "bool",
                         "repair_needed": "bool",
@@ -1385,7 +1386,19 @@ pub fn local_daemon_contract_snapshot() -> Value {
                         "loopback_only": "bool"
                     },
                     "logs": {
-                        "path": "string; daemon log file path"
+                        "path": "string; daemon log file path",
+                        "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown"
+                    },
+                    "storage_layout": {
+                        "schema_version": "u32",
+                        "sase_home": "StoragePathDiagnostic",
+                        "run_root": "StoragePathDiagnostic",
+                        "socket_path": "StoragePathDiagnostic",
+                        "projection_db_path": "StoragePathDiagnostic",
+                        "log_path": "StoragePathDiagnostic",
+                        "source_roots": "StoragePathDiagnostic[]",
+                        "runtime_files": "string[]; socket, locks, logs, projection SQLite/WAL/SHM, checkpoints, backups, and transient queues to exclude from sync",
+                        "warnings": "StorageLayoutWarning[]"
                     },
                     "indexing": {
                         "schema_version": "u32",
@@ -1420,6 +1433,16 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "available": "bool",
                 "reason": "daemon_not_running|unsupported_client_version|recovery_mode|host_adapter_required|null",
                 "message": "string|null"
+            },
+            "StoragePathDiagnostic": {
+                "path": "string",
+                "path_kind": "source_root|host_local_default|host_local_override|unsafe_synced_candidate|unknown"
+            },
+            "StorageLayoutWarning": {
+                "id": "string",
+                "severity": "warning|error",
+                "path": "string",
+                "message": "string"
             },
             "LocalDaemonCapabilitiesResponseWire": {
                 "schema_version": "u32",

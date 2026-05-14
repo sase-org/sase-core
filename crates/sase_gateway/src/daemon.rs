@@ -40,6 +40,23 @@ use crate::{
 
 const DAEMON_SOCKET_NAME: &str = "sase-daemon.sock";
 const LOCAL_EVENT_BUFFER_CAPACITY: usize = 256;
+const DAEMON_LOCK_FILE_NAME: &str = "daemon.lock";
+const DAEMON_LOCK_METADATA_FILE_NAME: &str = "daemon.lock.json";
+const DAEMON_LOG_FILE_NAME: &str = "daemon.log";
+const PROJECTION_WAL_SUFFIX: &str = "-wal";
+const PROJECTION_SHM_SUFFIX: &str = "-shm";
+const SOURCE_ROOT_NAMES: &[&str] = &[
+    "projects",
+    "notifications",
+    "pending_actions",
+    "artifacts",
+    "chats",
+    "beads",
+    "repos",
+    "workflow_state",
+    "telegram",
+    "mobile_gateway",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonRuntimePaths {
@@ -224,7 +241,7 @@ pub struct DaemonState {
 
 impl DaemonState {
     pub fn log_path(&self) -> PathBuf {
-        self.paths.run_root.join("daemon.log")
+        self.paths.run_root.join(DAEMON_LOG_FILE_NAME)
     }
 
     pub fn set_metrics_endpoint(&self, endpoint: Option<String>) {
@@ -276,9 +293,261 @@ impl DaemonState {
                     "path": self.log_path(),
                 }),
             );
+            let layout = storage_layout_diagnostics(
+                &self.paths,
+                &self.host_identity,
+                &self.projection_service.status().path,
+                &self.log_path(),
+            );
+            if let Some(projection) = object
+                .get_mut("projection_db")
+                .and_then(JsonValue::as_object_mut)
+            {
+                projection.insert(
+                    "path".to_string(),
+                    json!(self.projection_service.status().path),
+                );
+                projection.insert(
+                    "path_kind".to_string(),
+                    layout
+                        .get("projection_db_path")
+                        .and_then(|entry| entry.get("path_kind"))
+                        .cloned()
+                        .unwrap_or_else(|| json!("unknown")),
+                );
+            }
+            if let Some(logs) =
+                object.get_mut("logs").and_then(JsonValue::as_object_mut)
+            {
+                logs.insert(
+                    "path_kind".to_string(),
+                    layout
+                        .get("log_path")
+                        .and_then(|entry| entry.get("path_kind"))
+                        .cloned()
+                        .unwrap_or_else(|| json!("unknown")),
+                );
+            }
+            object.insert("storage_layout".to_string(), layout);
         }
         details
     }
+}
+
+pub fn storage_layout_diagnostics(
+    paths: &DaemonRuntimePaths,
+    host_identity: &str,
+    projection_db_path: &Path,
+    log_path: &Path,
+) -> JsonValue {
+    let default_run = default_run_root(&paths.sase_home, host_identity);
+    let source_roots: Vec<PathBuf> = SOURCE_ROOT_NAMES
+        .iter()
+        .map(|name| paths.sase_home.join(name))
+        .collect();
+    let runtime_files = runtime_files(
+        &paths.run_root,
+        &paths.socket_path,
+        projection_db_path,
+        log_path,
+    );
+    let path_entries = json!({
+        "sase_home": path_entry(&paths.sase_home, "source_root"),
+        "run_root": path_entry(
+            &paths.run_root,
+            classify_storage_path(
+                &paths.run_root,
+                &paths.sase_home,
+                &paths.run_root,
+                &default_run,
+                &source_roots,
+            ),
+        ),
+        "socket_path": path_entry(
+            &paths.socket_path,
+            classify_storage_path(
+                &paths.socket_path,
+                &paths.sase_home,
+                &paths.run_root,
+                &default_run,
+                &source_roots,
+            ),
+        ),
+        "projection_db_path": path_entry(
+            projection_db_path,
+            classify_storage_path(
+                projection_db_path,
+                &paths.sase_home,
+                &paths.run_root,
+                &default_run,
+                &source_roots,
+            ),
+        ),
+        "log_path": path_entry(
+            log_path,
+            classify_storage_path(
+                log_path,
+                &paths.sase_home,
+                &paths.run_root,
+                &default_run,
+                &source_roots,
+            ),
+        ),
+    });
+    let mut layout = path_entries;
+    if let JsonValue::Object(ref mut object) = layout {
+        object.insert("schema_version".to_string(), json!(1));
+        object.insert(
+            "source_roots".to_string(),
+            JsonValue::Array(
+                source_roots
+                    .iter()
+                    .map(|path| path_entry(path, "source_root"))
+                    .collect(),
+            ),
+        );
+        object.insert("runtime_files".to_string(), json!(runtime_files));
+        object.insert(
+            "warnings".to_string(),
+            JsonValue::Array(layout_warnings(
+                paths,
+                &default_run,
+                &source_roots,
+                object,
+            )),
+        );
+    }
+    layout
+}
+
+fn runtime_files(
+    run_root: &Path,
+    socket_path: &Path,
+    projection_db_path: &Path,
+    log_path: &Path,
+) -> Vec<PathBuf> {
+    vec![
+        socket_path.to_path_buf(),
+        run_root.join(DAEMON_LOCK_FILE_NAME),
+        run_root.join(DAEMON_LOCK_METADATA_FILE_NAME),
+        log_path.to_path_buf(),
+        projection_db_path.to_path_buf(),
+        projection_db_path.with_file_name(format!(
+            "{}{}",
+            projection_db_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("projection.sqlite"),
+            PROJECTION_WAL_SUFFIX
+        )),
+        projection_db_path.with_file_name(format!(
+            "{}{}",
+            projection_db_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("projection.sqlite"),
+            PROJECTION_SHM_SUFFIX
+        )),
+        run_root.join("checkpoints"),
+        run_root.join("backups"),
+        run_root.join("queues"),
+    ]
+}
+
+fn path_entry(path: &Path, path_kind: &str) -> JsonValue {
+    json!({
+        "path": path,
+        "path_kind": path_kind,
+    })
+}
+
+fn classify_storage_path(
+    path: &Path,
+    sase_home: &Path,
+    run_root: &Path,
+    default_run_root: &Path,
+    source_roots: &[PathBuf],
+) -> &'static str {
+    if path == sase_home
+        || source_roots.iter().any(|root| path.starts_with(root))
+    {
+        return "source_root";
+    }
+    if path.starts_with(default_run_root) {
+        return "host_local_default";
+    }
+    if path.starts_with(run_root) {
+        return "host_local_override";
+    }
+    if path.starts_with(sase_home) && !path.starts_with(sase_home.join("run")) {
+        return "unsafe_synced_candidate";
+    }
+    if path.starts_with(sase_home.join("run")) {
+        return "host_local_override";
+    }
+    "unknown"
+}
+
+fn layout_warnings(
+    paths: &DaemonRuntimePaths,
+    default_run_root: &Path,
+    source_roots: &[PathBuf],
+    path_entries: &serde_json::Map<String, JsonValue>,
+) -> Vec<JsonValue> {
+    let mut warnings = Vec::new();
+    if paths.run_root != default_run_root {
+        warnings.push(json!({
+            "id": "run_root_override",
+            "severity": "warning",
+            "path": paths.run_root,
+            "message": "run_root is not the default host-local directory; ensure it is excluded from sync",
+        }));
+    }
+    if source_roots
+        .iter()
+        .any(|root| paths.run_root.starts_with(root))
+    {
+        warnings.push(json!({
+            "id": "run_root_under_source_root",
+            "severity": "error",
+            "path": paths.run_root,
+            "message": "run_root is under a source store; move daemon runtime files out of synced source state",
+        }));
+    }
+    if !paths.socket_path.starts_with(&paths.run_root) {
+        warnings.push(json!({
+            "id": "socket_outside_run_root",
+            "severity": "warning",
+            "path": paths.socket_path,
+            "message": "socket_path is outside run_root; keep sockets and locks host-local",
+        }));
+    }
+    for (name, entry) in path_entries {
+        let path_kind = entry
+            .get("path_kind")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("unknown");
+        if path_kind == "unsafe_synced_candidate" {
+            let path = entry.get("path").cloned().unwrap_or_else(|| json!(""));
+            warnings.push(json!({
+                "id": format!("{name}_unsafe_synced_candidate"),
+                "severity": "error",
+                "path": path,
+                "message": format!("{name} looks like it lives in synced source state; exclude daemon runtime files from sync"),
+            }));
+        }
+    }
+    if paths.run_root.starts_with(&paths.sase_home)
+        && !paths.run_root.starts_with(paths.sase_home.join("run"))
+    {
+        warnings.push(json!({
+            "id": "run_root_under_sase_home_non_run",
+            "severity": "error",
+            "path": paths.run_root,
+            "message": "run_root under sase_home should live below run/<host>",
+        }));
+    }
+    warnings
 }
 
 fn recover_scheduler_starting_slots(state: &DaemonState) {
@@ -779,6 +1048,93 @@ mod tests {
             "work-station-01"
         );
         assert_eq!(sanitize_host_identity("  "), "sase-host");
+    }
+
+    #[test]
+    fn daemon_path_contract_matches_python_cases() {
+        let cases = [
+            (
+                "normal",
+                "workstation.local",
+                "/tmp/sase-home/run/workstation.local",
+                "/tmp/sase-home/run/workstation.local/sase-daemon.sock",
+            ),
+            (
+                "empty",
+                "  ",
+                "/tmp/sase-home/run/sase-host",
+                "/tmp/sase-home/run/sase-host/sase-daemon.sock",
+            ),
+            (
+                "malformed",
+                "work station/01",
+                "/tmp/sase-home/run/work-station-01",
+                "/tmp/sase-home/run/work-station-01/sase-daemon.sock",
+            ),
+        ];
+
+        for (_name, host, run_root, socket_path) in cases {
+            let config = DaemonConfig::with_options(DaemonConfigOptions {
+                sase_home: PathBuf::from("/tmp/sase-home"),
+                host_identity: host.to_string(),
+                run_root: None,
+                socket_path: None,
+                foreground: false,
+                enable_tokio_console: false,
+                mobile_http_enabled: true,
+                mobile_gateway: GatewayConfig::default(),
+            });
+
+            assert_eq!(config.paths.run_root, PathBuf::from(run_root));
+            assert_eq!(config.paths.socket_path, PathBuf::from(socket_path));
+        }
+
+        let override_config = DaemonConfig::with_options(DaemonConfigOptions {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            host_identity: "workstation.local".to_string(),
+            run_root: Some(PathBuf::from("/tmp/sase-run")),
+            socket_path: None,
+            foreground: false,
+            enable_tokio_console: false,
+            mobile_http_enabled: true,
+            mobile_gateway: GatewayConfig::default(),
+        });
+        assert_eq!(
+            override_config.paths.run_root,
+            PathBuf::from("/tmp/sase-run")
+        );
+        assert_eq!(
+            override_config.paths.socket_path,
+            PathBuf::from("/tmp/sase-run/sase-daemon.sock")
+        );
+    }
+
+    #[test]
+    fn storage_layout_diagnostics_warn_for_synced_runtime_paths() {
+        let paths = DaemonRuntimePaths {
+            sase_home: PathBuf::from("/tmp/sase-home"),
+            run_root: PathBuf::from("/tmp/sase-home/projects/demo/run"),
+            socket_path: PathBuf::from(
+                "/tmp/sase-home/projects/demo/run/sase-daemon.sock",
+            ),
+        };
+        let projection = default_projection_db_path(&paths.run_root);
+        let layout = storage_layout_diagnostics(
+            &paths,
+            "workstation.local",
+            &projection,
+            &paths.run_root.join("daemon.log"),
+        );
+
+        assert_eq!(
+            layout["run_root"]["path_kind"],
+            JsonValue::String("source_root".to_string())
+        );
+        let warnings = layout["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|warning| {
+            warning["id"] == "run_root_under_source_root"
+                && warning["severity"] == "error"
+        }));
     }
 
     #[test]
