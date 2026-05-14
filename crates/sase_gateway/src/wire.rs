@@ -39,6 +39,18 @@ pub use sase_core::host_bridge::{
     MobileXpromptInputWire,
 };
 
+pub use sase_core::provider_host::{
+    HostActorWire, HostDeadlineWire, HostEnvironmentPolicyWire,
+    HostEnvironmentRequirementWire, HostErrorCodeWire, HostErrorWire,
+    HostFallbackWire, HostLogLevelWire, HostLogRecordWire, HostManifestWire,
+    HostNetworkPolicyWire, HostOperationSelectorWire, HostProcessPolicyWire,
+    HostRequestEnvelopeWire, HostResourceUsageWire, HostResponseEnvelopeWire,
+    HostResponseStatusWire, HostSideEffectIntentWire, HOST_CAP_IPC_V1,
+    HOST_CAP_LLM_METADATA, HOST_CAP_MANIFEST_V1, HOST_CAP_XPROMPT_CATALOG,
+    HOST_ERROR_CODES, HOST_OPERATION_FAMILIES,
+    PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+};
+
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const LOCAL_DAEMON_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION: u32 = 1;

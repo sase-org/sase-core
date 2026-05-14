@@ -8,6 +8,8 @@
   "capabilities": [
     "health.read",
     "capabilities.read",
+    "host.ipc.v1",
+    "host.manifest.v1",
     "writes.contract",
     "agents.write",
     "beads.write",
@@ -111,6 +113,109 @@
       },
       "request_id": "req_003",
       "schema_version": 1
+    }
+  },
+  "host_ipc": {
+    "advertised_foundation_capabilities": [
+      "host.ipc.v1",
+      "host.manifest.v1"
+    ],
+    "contract": "sase_provider_host_ipc_v1",
+    "error_vocabulary": [
+      "host_unavailable",
+      "host_timeout",
+      "host_cancelled",
+      "plugin_not_found",
+      "operation_unsupported",
+      "capability_denied",
+      "network_denied",
+      "resource_limit_exceeded",
+      "invalid_side_effect_intent",
+      "host_protocol_error",
+      "provider_execution_failed",
+      "manifest_invalid"
+    ],
+    "operation_families": [
+      "llm",
+      "vcs",
+      "workspace",
+      "xprompt",
+      "config",
+      "workflow.step"
+    ],
+    "phase": "foundation_contract_only",
+    "production_routing": "none; provider and plugin calls still use existing Python fallback paths",
+    "records": {
+      "HostErrorWire": {
+        "code": "host error vocabulary string",
+        "details": "json|null",
+        "fallback": "HostFallbackWire",
+        "message": "string",
+        "retryable": "bool",
+        "schema_version": "u32",
+        "target": "string|null"
+      },
+      "HostManifestWire": {
+        "capabilities": "string[]",
+        "environment": "HostEnvironmentRequirementWire",
+        "filesystem_roots": "string[]",
+        "network": "HostNetworkPolicyWire",
+        "operation_families": "string[]",
+        "plugin_id": "string",
+        "process": "HostProcessPolicyWire",
+        "schema_version": "u32",
+        "timeout_hints_ms": "map operation -> u64",
+        "version": "string",
+        "warm_host_eligible": "bool",
+        "wasm_compatible": "bool",
+        "wasm_notes": "string|null"
+      },
+      "HostRequestEnvelopeWire": {
+        "actor": "HostActorWire",
+        "deadline": "HostDeadlineWire",
+        "declared_capabilities": "string[]",
+        "environment": "HostEnvironmentPolicyWire",
+        "manifest": "HostManifestWire|null",
+        "operation": "HostOperationSelectorWire",
+        "payload": "json",
+        "request_id": "string",
+        "schema_version": "u32",
+        "workspace": "HostWorkspaceIdentityWire"
+      },
+      "HostResponseEnvelopeWire": {
+        "duration_ms": "u64",
+        "error": "HostErrorWire|null",
+        "logs": "HostLogRecordWire[]",
+        "request_id": "string",
+        "resource_usage": "HostResourceUsageWire|null",
+        "result": "json",
+        "schema_version": "u32",
+        "side_effects": "HostSideEffectIntentWire[]",
+        "status": "ok|error|cancelled"
+      },
+      "HostSideEffectIntentWire": {
+        "file_delete": "root, path",
+        "file_move": "root, from_path, to_path",
+        "file_write": "root, path, content_sha256",
+        "network_request": "method, url",
+        "notification_mutation": "operation, payload",
+        "process_kill": "pid",
+        "process_spawn": "command[], cwd|null",
+        "vcs_mutation": "provider, operation, workspace_dir",
+        "workflow_state_transition": "workflow_id, from|null, to"
+      }
+    },
+    "reserved_routed_capabilities": [
+      "host.llm.metadata",
+      "host.xprompt.catalog"
+    ],
+    "schema_version": 1,
+    "validation": {
+      "declared_capabilities": "must be advertised by daemon before a routed host call is accepted",
+      "operation_family": "must be one of operation_families",
+      "request_size": "bounded by daemon host policy before dispatch",
+      "side_effect_intents": "shape-only validation before any daemon state mutation",
+      "timeout_bounds": "deadline.timeout_ms must be inside daemon host policy bounds when present"
     }
   },
   "records": {

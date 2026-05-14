@@ -7,10 +7,12 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::wire::{
-    GATEWAY_WIRE_SCHEMA_VERSION, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+    GATEWAY_WIRE_SCHEMA_VERSION, HOST_CAP_IPC_V1, HOST_CAP_LLM_METADATA,
+    HOST_CAP_MANIFEST_V1, HOST_CAP_XPROMPT_CATALOG, HOST_ERROR_CODES,
+    HOST_OPERATION_FAMILIES, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
     LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
     LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
-    LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+    LOCAL_DAEMON_WIRE_SCHEMA_VERSION, PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
 };
 
 pub fn api_v1_contract_snapshot() -> Value {
@@ -977,9 +979,94 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "stable_handles": "handles are opaque stable resource identifiers for follow-up reads within compatible schemas",
             "no_daemon_fallback": "LocalDaemonFallbackWire and daemon_unavailable/host_adapter_required errors signal direct source-store fallback"
         },
+        "host_ipc": {
+            "schema_version": PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+            "contract": "sase_provider_host_ipc_v1",
+            "phase": "foundation_contract_only",
+            "production_routing": "none; provider and plugin calls still use existing Python fallback paths",
+            "advertised_foundation_capabilities": [
+                HOST_CAP_IPC_V1,
+                HOST_CAP_MANIFEST_V1
+            ],
+            "reserved_routed_capabilities": [
+                HOST_CAP_LLM_METADATA,
+                HOST_CAP_XPROMPT_CATALOG
+            ],
+            "operation_families": HOST_OPERATION_FAMILIES,
+            "error_vocabulary": HOST_ERROR_CODES,
+            "validation": {
+                "operation_family": "must be one of operation_families",
+                "request_size": "bounded by daemon host policy before dispatch",
+                "timeout_bounds": "deadline.timeout_ms must be inside daemon host policy bounds when present",
+                "declared_capabilities": "must be advertised by daemon before a routed host call is accepted",
+                "side_effect_intents": "shape-only validation before any daemon state mutation"
+            },
+            "records": {
+                "HostRequestEnvelopeWire": {
+                    "schema_version": "u32",
+                    "request_id": "string",
+                    "deadline": "HostDeadlineWire",
+                    "actor": "HostActorWire",
+                    "operation": "HostOperationSelectorWire",
+                    "declared_capabilities": "string[]",
+                    "workspace": "HostWorkspaceIdentityWire",
+                    "environment": "HostEnvironmentPolicyWire",
+                    "manifest": "HostManifestWire|null",
+                    "payload": "json"
+                },
+                "HostResponseEnvelopeWire": {
+                    "schema_version": "u32",
+                    "request_id": "string",
+                    "status": "ok|error|cancelled",
+                    "result": "json",
+                    "error": "HostErrorWire|null",
+                    "logs": "HostLogRecordWire[]",
+                    "duration_ms": "u64",
+                    "resource_usage": "HostResourceUsageWire|null",
+                    "side_effects": "HostSideEffectIntentWire[]"
+                },
+                "HostManifestWire": {
+                    "schema_version": "u32",
+                    "plugin_id": "string",
+                    "version": "string",
+                    "operation_families": "string[]",
+                    "capabilities": "string[]",
+                    "network": "HostNetworkPolicyWire",
+                    "filesystem_roots": "string[]",
+                    "process": "HostProcessPolicyWire",
+                    "environment": "HostEnvironmentRequirementWire",
+                    "timeout_hints_ms": "map operation -> u64",
+                    "warm_host_eligible": "bool",
+                    "wasm_compatible": "bool",
+                    "wasm_notes": "string|null"
+                },
+                "HostSideEffectIntentWire": {
+                    "file_write": "root, path, content_sha256",
+                    "file_delete": "root, path",
+                    "file_move": "root, from_path, to_path",
+                    "process_spawn": "command[], cwd|null",
+                    "process_kill": "pid",
+                    "vcs_mutation": "provider, operation, workspace_dir",
+                    "network_request": "method, url",
+                    "notification_mutation": "operation, payload",
+                    "workflow_state_transition": "workflow_id, from|null, to"
+                },
+                "HostErrorWire": {
+                    "schema_version": "u32",
+                    "code": "host error vocabulary string",
+                    "message": "string",
+                    "retryable": "bool",
+                    "target": "string|null",
+                    "details": "json|null",
+                    "fallback": "HostFallbackWire"
+                }
+            }
+        },
         "capabilities": [
             "health.read",
             "capabilities.read",
+            HOST_CAP_IPC_V1,
+            HOST_CAP_MANIFEST_V1,
             "writes.contract",
             "agents.write",
             "beads.write",

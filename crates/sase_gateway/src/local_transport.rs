@@ -86,7 +86,7 @@ use crate::{
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
         LocalDaemonSchedulerStatusRequestWire, LocalDaemonWriteRequestWire,
         LocalDaemonWriteResponseWire, ProjectionPageRequestWire,
-        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        HOST_CAP_IPC_V1, HOST_CAP_MANIFEST_V1, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -2849,6 +2849,8 @@ fn local_daemon_capabilities() -> Vec<String> {
     vec![
         "health.read".to_string(),
         "capabilities.read".to_string(),
+        HOST_CAP_IPC_V1.to_string(),
+        HOST_CAP_MANIFEST_V1.to_string(),
         "writes.contract".to_string(),
         "agents.read".to_string(),
         "agents.write".to_string(),
