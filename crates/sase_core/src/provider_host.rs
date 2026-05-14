@@ -15,6 +15,9 @@ pub const HOST_CAP_IPC_V1: &str = "host.ipc.v1";
 pub const HOST_CAP_MANIFEST_V1: &str = "host.manifest.v1";
 pub const HOST_CAP_LLM_METADATA: &str = "host.llm.metadata";
 pub const HOST_CAP_XPROMPT_CATALOG: &str = "host.xprompt.catalog";
+pub const HOST_CAP_VCS_QUERY: &str = "host.vcs.query";
+pub const HOST_CAP_WORKSPACE_METADATA: &str = "host.workspace.metadata";
+pub const HOST_CAP_WORKSPACE_RESOLVE_REF: &str = "host.workspace.resolve_ref";
 pub const HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS: &str =
     "host.resource_policy.diagnostics";
 
@@ -296,6 +299,9 @@ impl Default for HostValidationPolicy {
                 HOST_CAP_MANIFEST_V1,
                 HOST_CAP_LLM_METADATA,
                 HOST_CAP_XPROMPT_CATALOG,
+                HOST_CAP_VCS_QUERY,
+                HOST_CAP_WORKSPACE_METADATA,
+                HOST_CAP_WORKSPACE_RESOLVE_REF,
                 HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
             ]
             .into_iter()
