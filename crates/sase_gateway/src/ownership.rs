@@ -395,6 +395,36 @@ mod tests {
     }
 
     #[test]
+    fn two_hosts_can_share_sase_home_with_separate_run_roots() {
+        let tmp = tempdir().unwrap();
+        let sase_home = tmp.path().join("sase-home");
+        let host_a_run_root = sase_home.join("run").join("host-a");
+        let host_b_run_root = sase_home.join("run").join("host-b");
+
+        let host_a = DaemonOwnershipGuard::acquire(
+            host_a_run_root.clone(),
+            host_a_run_root.join("sase-daemon.sock"),
+            "host-a",
+            sase_home.clone(),
+            &build(),
+        )
+        .unwrap();
+        let host_b = DaemonOwnershipGuard::acquire(
+            host_b_run_root.clone(),
+            host_b_run_root.join("sase-daemon.sock"),
+            "host-b",
+            sase_home.clone(),
+            &build(),
+        )
+        .unwrap();
+
+        assert_eq!(host_a.metadata.sase_home, sase_home);
+        assert_eq!(host_b.metadata.sase_home, sase_home);
+        assert_ne!(host_a.paths.lock_path, host_b.paths.lock_path);
+        assert_ne!(host_a.paths.metadata_path, host_b.paths.metadata_path);
+    }
+
+    #[test]
     fn stale_pid_metadata_is_recovered_through_typed_path() {
         let tmp = tempdir().unwrap();
         let run_root = tmp.path().join("run");

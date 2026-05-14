@@ -3,7 +3,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use notify::{
@@ -22,10 +22,11 @@ use sase_core::projections::{
     BeadProjectionEventContextWire, CatalogBackfillOptionsWire,
     EventAppendRequestWire, EventSourceWire, IndexingDomainReportWire,
     ProjectionReconciliationPlanWire, ShadowDiffCountsWire,
-    ShadowDiffReportWire, SourceChangeOperationWire, SourceChangeWire,
-    SourceIdentityWire, AGENT_PROJECTION_NAME, BEAD_INDEXING_DOMAIN,
-    BEAD_PROJECTION_NAME, CATALOG_PROJECTION_NAME, CHANGESPEC_PROJECTION_NAME,
-    INDEXING_WIRE_SCHEMA_VERSION, NOTIFICATION_PROJECTION_NAME,
+    ShadowDiffRecordWire, ShadowDiffReportWire, SourceChangeOperationWire,
+    SourceChangeWire, SourceIdentityWire, AGENT_PROJECTION_NAME,
+    BEAD_INDEXING_DOMAIN, BEAD_PROJECTION_NAME, CATALOG_PROJECTION_NAME,
+    CHANGESPEC_PROJECTION_NAME, INDEXING_WIRE_SCHEMA_VERSION,
+    NOTIFICATION_PROJECTION_NAME,
 };
 use sase_core::{
     agent_scan::{scan_agent_artifacts, AgentArtifactScanOptionsWire},
@@ -380,12 +381,16 @@ impl IndexingService {
         request: LocalDaemonRebuildRequestWire,
         projection_service: ProjectionService,
     ) -> Result<LocalDaemonRebuildResponseWire, String> {
+        let started = Instant::now();
         if request.storage_reset_only {
             let report = projection_service
                 .rebuild_storage_reset_only()
                 .await
                 .map_err(|error| error.to_string())?;
-            let source_exports = source_export_health(&projection_service);
+            let source_exports = source_export_health_with_retry_report(
+                &projection_service,
+                None,
+            );
             return Ok(LocalDaemonRebuildResponseWire {
                 schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
                 mode: "projection_storage_rebuild".to_string(),
@@ -401,6 +406,10 @@ impl IndexingService {
                 ),
                 source_exports,
                 summaries: Vec::new(),
+                elapsed_ms: elapsed_ms(started),
+                next_command: Some(
+                    "sase daemon verify --surface all --json".to_string(),
+                ),
             });
         }
 
@@ -416,17 +425,33 @@ impl IndexingService {
             })
             .await
             .map_err(|error| error.to_string())?;
+        let retry_report = projection_service
+            .retry_pending_source_exports()
+            .await
+            .map_err(|error| error.to_string())?;
+        let source_exports = source_export_health_with_retry_report(
+            &projection_service,
+            Some(retry_report),
+        );
 
         Ok(LocalDaemonRebuildResponseWire {
             schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
             mode: "source_backfill".to_string(),
             storage_reset_only: false,
             surface: request.surface,
-            project_id: request.project_id,
+            project_id: request.project_id.clone(),
             limitation: None,
             report: json!({"summaries": summaries}),
-            source_exports: source_export_health(&projection_service),
+            source_exports,
             summaries,
+            elapsed_ms: elapsed_ms(started),
+            next_command: Some(command_for_surface(
+                "verify",
+                request.surface,
+                request.project_id.as_deref(),
+                None,
+                None,
+            )),
         })
     }
 
@@ -501,23 +526,44 @@ impl IndexingService {
                 .then(left.message.cmp(&right.message))
         });
         let total = records.len();
-        let records = records
-            .into_iter()
-            .skip(offset)
-            .take(limit as usize)
-            .collect::<Vec<_>>();
+        let records = page_diff_records(records, offset, limit);
         let next_offset = offset + records.len();
+        let next_cursor =
+            (next_offset < total).then(|| next_offset.to_string());
+        let next_command = next_cursor
+            .as_deref()
+            .map(|cursor| {
+                command_for_surface(
+                    "diff",
+                    request.surface,
+                    request.project_id.as_deref(),
+                    Some(limit),
+                    Some(cursor),
+                )
+            })
+            .or_else(|| {
+                has_diff_counts(&counts).then(|| {
+                    command_for_surface(
+                        "rebuild",
+                        request.surface,
+                        request.project_id.as_deref(),
+                        None,
+                        None,
+                    )
+                })
+            });
         Ok(LocalDaemonIndexingDiffResponseWire {
             schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
             surface: request.surface,
             project_id: request.project_id,
             records,
             counts,
-            next_cursor: (next_offset < total).then(|| next_offset.to_string()),
+            next_cursor,
             bounded: LocalDaemonPayloadBoundWire {
                 max_payload_bytes,
                 truncated: next_offset < total,
             },
+            next_command,
         })
     }
 
@@ -544,6 +590,18 @@ impl IndexingService {
                 queued_changes: service.queued_changes,
                 watcher_active: service.watcher_active,
                 diff_counts: service.diff_counts.clone(),
+                scanned_sources: 0,
+                indexed_rows: 0,
+                skipped_rows: 0,
+                parse_failures: service.failed_parses,
+                elapsed_ms: 0,
+                next_command: Some(command_for_surface(
+                    "verify",
+                    surface,
+                    request.project_id.as_deref(),
+                    None,
+                    None,
+                )),
                 message: service.message.clone(),
             })
             .collect();
@@ -556,13 +614,83 @@ impl IndexingService {
     }
 }
 
-fn source_export_health(projection_service: &ProjectionService) -> JsonValue {
-    projection_service
+fn source_export_health_with_retry_report(
+    projection_service: &ProjectionService,
+    retry_report: Option<JsonValue>,
+) -> JsonValue {
+    let mut health = projection_service
         .health_details()
         .get("projection_db")
         .and_then(|projection| projection.get("source_exports"))
         .cloned()
-        .unwrap_or_else(|| json!({"state": "unknown"}))
+        .unwrap_or_else(|| json!({"state": "unknown"}));
+    if let (JsonValue::Object(ref mut map), Some(retry_report)) =
+        (&mut health, retry_report)
+    {
+        map.insert("retry".to_string(), retry_report);
+    }
+    health
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn page_diff_records(
+    records: Vec<ShadowDiffRecordWire>,
+    offset: usize,
+    limit: u32,
+) -> Vec<ShadowDiffRecordWire> {
+    records
+        .into_iter()
+        .skip(offset)
+        .take(limit as usize)
+        .collect()
+}
+
+fn has_diff_counts(counts: &ShadowDiffCountsWire) -> bool {
+    counts.missing > 0
+        || counts.stale > 0
+        || counts.extra > 0
+        || counts.corrupt > 0
+}
+
+fn command_for_surface(
+    subcommand: &str,
+    surface: LocalDaemonIndexingSurfaceWire,
+    project_id: Option<&str>,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> String {
+    let mut command = format!(
+        "sase daemon {subcommand} --surface {}",
+        surface_name(surface)
+    );
+    if let Some(project_id) = project_id {
+        command.push_str(" --project ");
+        command.push_str(project_id);
+    }
+    if let Some(limit) = limit {
+        command.push_str(" --limit ");
+        command.push_str(&limit.to_string());
+    }
+    if let Some(cursor) = cursor {
+        command.push_str(" --cursor ");
+        command.push_str(cursor);
+    }
+    command.push_str(" --json");
+    command
+}
+
+fn surface_name(surface: LocalDaemonIndexingSurfaceWire) -> &'static str {
+    match surface {
+        LocalDaemonIndexingSurfaceWire::All => "all",
+        LocalDaemonIndexingSurfaceWire::Changespecs => "changespecs",
+        LocalDaemonIndexingSurfaceWire::Notifications => "notifications",
+        LocalDaemonIndexingSurfaceWire::Agents => "agents",
+        LocalDaemonIndexingSurfaceWire::Beads => "beads",
+        LocalDaemonIndexingSurfaceWire::Catalogs => "catalogs",
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -594,6 +722,7 @@ fn rebuild_selected_sources(
 ) -> Result<Vec<LocalDaemonIndexingSurfaceSummaryWire>, ProjectionError> {
     let mut summaries = Vec::new();
     for surface in selected_surfaces(selector.surface) {
+        let surface_started = Instant::now();
         match surface {
             LocalDaemonIndexingSurfaceWire::Changespecs => {
                 let Some(root) = projects_root.as_deref() else {
@@ -616,6 +745,9 @@ fn rebuild_selected_sources(
                     host_id.clone(),
                 )?;
                 let diff = db.diff_changespec_projection(root)?;
+                let duplicates =
+                    outcomes.iter().filter(|outcome| outcome.duplicate).count()
+                        as u64;
                 summaries.push(summary_from_report(
                     surface,
                     selector.project_id.clone(),
@@ -623,6 +755,20 @@ fn rebuild_selected_sources(
                     outcomes.len() as u64,
                     true,
                     &diff,
+                    SummaryOperationalStats {
+                        scanned_sources: outcomes.len() as u64,
+                        indexed_rows: outcomes.len() as u64 - duplicates,
+                        skipped_rows: duplicates,
+                        parse_failures: diff.counts.corrupt,
+                        elapsed_ms: elapsed_ms(surface_started),
+                    },
+                    Some(command_for_surface(
+                        "verify",
+                        surface,
+                        selector.project_id.as_deref(),
+                        None,
+                        None,
+                    )),
                     None,
                 ));
             }
@@ -640,6 +786,9 @@ fn rebuild_selected_sources(
                     root,
                     AgentArtifactScanOptionsWire::default(),
                 );
+                let scanned_sources = scan.records.len() as u64;
+                let parse_failures =
+                    scan.stats.json_decode_errors + scan.stats.os_errors;
                 let context = AgentProjectionEventContextWire {
                     schema_version: INDEXING_WIRE_SCHEMA_VERSION,
                     source: EventSourceWire {
@@ -681,6 +830,21 @@ fn rebuild_selected_sources(
                         appended,
                         true,
                         &diff,
+                        SummaryOperationalStats {
+                            scanned_sources,
+                            indexed_rows: appended,
+                            skipped_rows: scanned_sources
+                                .saturating_sub(appended),
+                            parse_failures,
+                            elapsed_ms: elapsed_ms(surface_started),
+                        },
+                        Some(command_for_surface(
+                            "verify",
+                            surface,
+                            selector.project_id.as_deref(),
+                            None,
+                            None,
+                        )),
                         None,
                     ));
                 }
@@ -732,6 +896,20 @@ fn rebuild_selected_sources(
                         u64::from(!outcome.duplicate),
                         true,
                         &diff,
+                        SummaryOperationalStats {
+                            scanned_sources: 1,
+                            indexed_rows: u64::from(!outcome.duplicate),
+                            skipped_rows: u64::from(outcome.duplicate),
+                            parse_failures: diff.counts.corrupt,
+                            elapsed_ms: elapsed_ms(surface_started),
+                        },
+                        Some(command_for_surface(
+                            "verify",
+                            surface,
+                            selector.project_id.as_deref(),
+                            None,
+                            None,
+                        )),
                         None,
                     ));
                 }
@@ -756,6 +934,20 @@ fn rebuild_selected_sources(
                     event_count,
                     true,
                     &diff,
+                    SummaryOperationalStats {
+                        scanned_sources: event_count,
+                        indexed_rows: event_count,
+                        skipped_rows: 0,
+                        parse_failures: diff.counts.corrupt,
+                        elapsed_ms: elapsed_ms(surface_started),
+                    },
+                    Some(command_for_surface(
+                        "verify",
+                        surface,
+                        selector.project_id.as_deref(),
+                        None,
+                        None,
+                    )),
                     None,
                 ));
             }
@@ -794,6 +986,20 @@ fn rebuild_selected_sources(
                     event_count,
                     true,
                     &diff,
+                    SummaryOperationalStats {
+                        scanned_sources: event_count,
+                        indexed_rows: event_count,
+                        skipped_rows: 0,
+                        parse_failures: diff.counts.corrupt,
+                        elapsed_ms: elapsed_ms(surface_started),
+                    },
+                    Some(command_for_surface(
+                        "verify",
+                        surface,
+                        selector.project_id.as_deref(),
+                        None,
+                        None,
+                    )),
                     None,
                 ));
             }
@@ -818,6 +1024,19 @@ fn verify_selected_sources(
             0,
             true,
             &report,
+            SummaryOperationalStats {
+                parse_failures: report.counts.corrupt,
+                ..SummaryOperationalStats::default()
+            },
+            has_diff_counts(&report.counts).then(|| {
+                command_for_surface(
+                    "diff",
+                    surface,
+                    selector.project_id.as_deref(),
+                    None,
+                    None,
+                )
+            }),
             None,
         ));
     }
@@ -983,6 +1202,8 @@ fn summary_from_report(
     queued_changes: u64,
     watcher_active: bool,
     report: &ShadowDiffReportWire,
+    operational: SummaryOperationalStats,
+    next_command: Option<String>,
     message: Option<String>,
 ) -> LocalDaemonIndexingSurfaceSummaryWire {
     let state = if report.counts.corrupt > 0
@@ -997,14 +1218,29 @@ fn summary_from_report(
     LocalDaemonIndexingSurfaceSummaryWire {
         schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         surface,
-        project_id,
+        project_id: project_id.clone(),
         state: state.to_string(),
         last_indexed_event_seq,
         queued_changes,
         watcher_active,
         diff_counts: report.counts.clone(),
+        scanned_sources: operational.scanned_sources,
+        indexed_rows: operational.indexed_rows,
+        skipped_rows: operational.skipped_rows,
+        parse_failures: operational.parse_failures,
+        elapsed_ms: operational.elapsed_ms,
+        next_command,
         message,
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SummaryOperationalStats {
+    scanned_sources: u64,
+    indexed_rows: u64,
+    skipped_rows: u64,
+    parse_failures: u64,
+    elapsed_ms: u64,
 }
 
 fn empty_summary_for_projection(
@@ -1016,12 +1252,24 @@ fn empty_summary_for_projection(
     Ok(LocalDaemonIndexingSurfaceSummaryWire {
         schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         surface,
-        project_id,
+        project_id: project_id.clone(),
         state: "ok".to_string(),
         last_indexed_event_seq: Some(db.projection_last_seq(projection_name)?),
         queued_changes: 0,
         watcher_active: true,
         diff_counts: ShadowDiffCountsWire::default(),
+        scanned_sources: 0,
+        indexed_rows: 0,
+        skipped_rows: 0,
+        parse_failures: 0,
+        elapsed_ms: 0,
+        next_command: Some(command_for_surface(
+            "verify",
+            surface,
+            project_id.as_deref(),
+            None,
+            None,
+        )),
         message: None,
     })
 }
@@ -1035,12 +1283,18 @@ fn empty_summary(
     LocalDaemonIndexingSurfaceSummaryWire {
         schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         surface,
-        project_id,
+        project_id: project_id.clone(),
         state: state.to_string(),
         last_indexed_event_seq: None,
         queued_changes: 0,
         watcher_active: false,
         diff_counts: ShadowDiffCountsWire::default(),
+        scanned_sources: 0,
+        indexed_rows: 0,
+        skipped_rows: 0,
+        parse_failures: 0,
+        elapsed_ms: 0,
+        next_command: Some("sase daemon doctor --json".to_string()),
         message: Some(message.to_string()),
     }
 }
@@ -2041,7 +2295,11 @@ impl LocalEventHub {
 mod tests {
     use std::{collections::BTreeMap, fs, time::Duration};
 
-    use sase_core::projections::SourceFingerprintWire;
+    use sase_core::bead::wire::BeadTierWire;
+    use sase_core::bead::{IssueTypeWire, IssueWire, StatusWire};
+    use sase_core::projections::{
+        bead_projection_show, ShadowDiffCategoryWire, SourceFingerprintWire,
+    };
     use tempfile::tempdir;
 
     use super::*;
@@ -2218,6 +2476,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciliation_repairs_reordered_delete_after_upsert_event() {
+        let dir = tempdir().unwrap();
+        let projects_root = dir.path().join("projects");
+        let project_dir = projects_root.join("project-a");
+        fs::create_dir_all(&project_dir).unwrap();
+        let catalog_path = project_dir.join("xprompts").join("helper.md");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(&catalog_path, "# Helper\n").unwrap();
+        let upsert = source_change_from_path(
+            Some(dir.path()),
+            &catalog_path,
+            SourceChangeOperationWire::Upsert,
+            Some("synthetic upsert".to_string()),
+        )
+        .unwrap();
+        let delete = source_change_from_path(
+            Some(dir.path()),
+            &catalog_path,
+            SourceChangeOperationWire::Delete,
+            Some("synthetic reordered delete".to_string()),
+        )
+        .unwrap();
+
+        let metrics = DaemonMetrics::default();
+        let events = LocalEventHub::new(16, metrics.clone());
+        let projection_service =
+            ProjectionService::initialize(dir.path().join("projection.sqlite"))
+                .await;
+        let service = IndexingService::start_with_factory(
+            IndexingConfig {
+                watch_roots: Vec::new(),
+                projects_root: Some(projects_root),
+                host_id: "local".to_string(),
+                queue_capacity: 8,
+                worker_capacity: 1,
+                debounce: Duration::from_millis(20),
+                reconciliation_interval: Duration::from_millis(5),
+                max_reconciliation_changes: 16,
+                max_batch_size: 16,
+                enabled: true,
+            },
+            DaemonShutdown::default(),
+            metrics,
+            events,
+            projection_service,
+            SyntheticWatcherFactory,
+        );
+
+        assert!(service.enqueue(upsert));
+        assert!(service.enqueue(delete));
+        let status = wait_for_status(&service, |status| {
+            status.queued_changes >= 3
+                && status.indexed_sources >= 1
+                && status.recent_reports.iter().any(|report| {
+                    report.domain == "catalogs"
+                        && report.indexed_sources == 1
+                        && report.source_paths.iter().any(|path| {
+                            path.ends_with("project-a/xprompts/helper.md")
+                        })
+                })
+        })
+        .await;
+
+        assert!(status.coalesced_changes >= 1);
+        assert!(status.indexed_sources >= 1);
+    }
+
+    #[tokio::test]
     async fn watcher_failure_degrades_indexing_without_disabling_daemon() {
         let metrics = DaemonMetrics::default();
         let events = LocalEventHub::new(8, metrics.clone());
@@ -2293,6 +2619,184 @@ mod tests {
             LocalDaemonIndexingSurfaceWire::Notifications
         );
         assert_eq!(summaries[0].diff_counts, ShadowDiffCountsWire::default());
+        assert!(summaries[0].scanned_sources >= 1);
+        assert_eq!(summaries[0].indexed_rows, summaries[0].scanned_sources);
+        assert!(summaries[0]
+            .next_command
+            .as_deref()
+            .unwrap()
+            .contains("sase daemon verify --surface notifications"));
+    }
+
+    #[test]
+    fn bounded_diff_paging_uses_stable_offsets_and_next_commands() {
+        let mut records = (0..12)
+            .map(|idx| ShadowDiffRecordWire {
+                schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                domain: "beads".to_string(),
+                category: ShadowDiffCategoryWire::Missing,
+                source_path: format!("/tmp/source-{idx:02}.jsonl"),
+                handle: Some(format!("sase-{idx:02}")),
+                message: "missing projection row".to_string(),
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.domain
+                .cmp(&right.domain)
+                .then(left.source_path.cmp(&right.source_path))
+                .then(left.handle.cmp(&right.handle))
+                .then(left.message.cmp(&right.message))
+        });
+
+        let page = page_diff_records(records, 5, 4);
+
+        assert_eq!(page.len(), 4);
+        assert_eq!(page[0].handle.as_deref(), Some("sase-05"));
+        assert_eq!(page[3].handle.as_deref(), Some("sase-08"));
+        assert_eq!(
+            command_for_surface(
+                "diff",
+                LocalDaemonIndexingSurfaceWire::Beads,
+                Some("project-a"),
+                Some(4),
+                Some("9"),
+            ),
+            "sase daemon diff --surface beads --project project-a --limit 4 --cursor 9 --json"
+        );
+    }
+
+    #[test]
+    fn rebuild_selected_surfaces_are_idempotent_for_stable_sources() {
+        let dir = tempdir().unwrap();
+        let projects_root = dir.path().join("projects");
+        let project_dir = projects_root.join("project-a");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let notification_path =
+            dir.path().join("notifications").join("notifications.jsonl");
+        fs::create_dir_all(notification_path.parent().unwrap()).unwrap();
+        let notification = sase_core::notifications::NotificationWire {
+            id: "abcdef02-notification".to_string(),
+            timestamp: "2026-05-01T01:02:03+00:00".to_string(),
+            sender: "test".to_string(),
+            notes: vec!["hello".to_string()],
+            files: Vec::new(),
+            action: None,
+            action_data: BTreeMap::new(),
+            read: false,
+            dismissed: false,
+            silent: false,
+            muted: false,
+            snooze_until: None,
+        };
+        sase_core::notifications::append_notification(
+            &notification_path,
+            &notification,
+        )
+        .unwrap();
+
+        let catalog_path = project_dir.join("xprompts").join("helper.md");
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(&catalog_path, "# Helper\n").unwrap();
+
+        let beads_dir = project_dir.join("sdd").join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            format!("{}\n", serde_json::to_string(&issue("sase-1")).unwrap()),
+        )
+        .unwrap();
+
+        for surface in [
+            LocalDaemonIndexingSurfaceWire::Changespecs,
+            LocalDaemonIndexingSurfaceWire::Notifications,
+            LocalDaemonIndexingSurfaceWire::Agents,
+            LocalDaemonIndexingSurfaceWire::Beads,
+            LocalDaemonIndexingSurfaceWire::Catalogs,
+            LocalDaemonIndexingSurfaceWire::All,
+        ] {
+            let mut db = ProjectionDb::open_in_memory().unwrap();
+            let selector = IndexingSelector {
+                surface,
+                project_id: None,
+            };
+            rebuild_selected_sources(
+                &mut db,
+                Some(projects_root.clone()),
+                "host-a".to_string(),
+                selector.clone(),
+            )
+            .unwrap();
+            let event_count_after_first = db.event_count().unwrap();
+            rebuild_selected_sources(
+                &mut db,
+                Some(projects_root.clone()),
+                "host-a".to_string(),
+                selector,
+            )
+            .unwrap();
+
+            assert_eq!(db.event_count().unwrap(), event_count_after_first);
+        }
+    }
+
+    #[test]
+    fn projection_db_deletion_recovers_through_source_rebuild() {
+        let dir = tempdir().unwrap();
+        let projects_root = dir.path().join("projects");
+        let project_dir = projects_root.join("project-a");
+        let beads_dir = project_dir.join("sdd").join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            format!("{}\n", serde_json::to_string(&issue("sase-1")).unwrap()),
+        )
+        .unwrap();
+        let db_path = dir
+            .path()
+            .join("run")
+            .join("projections")
+            .join("projection.sqlite");
+        {
+            let mut db = ProjectionDb::open(&db_path).unwrap();
+            rebuild_selected_sources(
+                &mut db,
+                Some(projects_root.clone()),
+                "host-a".to_string(),
+                IndexingSelector {
+                    surface: LocalDaemonIndexingSurfaceWire::Beads,
+                    project_id: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(db.event_count().unwrap(), 1);
+        }
+        for path in [
+            db_path.clone(),
+            db_path.with_file_name("projection.sqlite-wal"),
+            db_path.with_file_name("projection.sqlite-shm"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+
+        let mut db = ProjectionDb::open(&db_path).unwrap();
+        let summaries = rebuild_selected_sources(
+            &mut db,
+            Some(projects_root),
+            "host-b".to_string(),
+            IndexingSelector {
+                surface: LocalDaemonIndexingSurfaceWire::Beads,
+                project_id: None,
+            },
+        )
+        .unwrap();
+        let loaded =
+            bead_projection_show(db.connection(), "project-a", "sase-1")
+                .unwrap();
+
+        assert_eq!(summaries[0].surface, LocalDaemonIndexingSurfaceWire::Beads);
+        assert_eq!(db.event_count().unwrap(), 1);
+        assert_eq!(loaded.title, "Projected");
     }
 
     fn change(domain: &str, source_path: &str) -> SourceChangeWire {
@@ -2309,6 +2813,33 @@ mod tests {
             },
             operation: SourceChangeOperationWire::Upsert,
             reason: Some("synthetic".to_string()),
+        }
+    }
+
+    fn issue(id: &str) -> IssueWire {
+        IssueWire {
+            id: id.to_string(),
+            title: "Projected".to_string(),
+            status: StatusWire::Open,
+            issue_type: IssueTypeWire::Plan,
+            tier: Some(BeadTierWire::Epic),
+            parent_id: None,
+            owner: String::new(),
+            assignee: String::new(),
+            created_at: "2026-05-13T21:00:00Z".to_string(),
+            created_by: String::new(),
+            updated_at: "2026-05-13T21:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            description: String::new(),
+            notes: String::new(),
+            design: String::new(),
+            model: String::new(),
+            is_ready_to_work: false,
+            epic_count: None,
+            changespec_name: String::new(),
+            changespec_bug_id: String::new(),
+            dependencies: Vec::new(),
         }
     }
 

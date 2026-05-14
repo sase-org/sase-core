@@ -945,6 +945,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_degraded_for_partially_corrupt_projection_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projection.sqlite");
+        std::fs::write(&db_path, b"not a sqlite database").unwrap();
+
+        let corrupt = ProjectionService::initialize(db_path.clone()).await;
+        let corrupt_status = corrupt.status();
+
+        assert_eq!(corrupt_status.state, ProjectionServiceState::Degraded);
+        assert!(corrupt_status.repair_needed);
+        assert!(!corrupt_status.message.unwrap().is_empty());
+
+        std::fs::remove_file(&db_path).unwrap();
+        let rebuilt = ProjectionService::initialize(db_path.clone()).await;
+
+        assert_eq!(rebuilt.status().state, ProjectionServiceState::Ok);
+        assert!(db_path.is_file());
+    }
+
+    #[tokio::test]
     async fn reads_run_through_blocking_manager() {
         let dir = tempdir().unwrap();
         let service =
