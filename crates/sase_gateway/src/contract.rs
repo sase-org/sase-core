@@ -1086,6 +1086,27 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "notes": "returns bounded pages of shadow diff records"
             },
             {
+                "type": "scheduler_submit",
+                "request": "SchedulerBatchSubmitRequestWire",
+                "success": "SchedulerBatchSubmitResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "records queued scheduler slots transactionally and returns a durable batch handle"
+            },
+            {
+                "type": "scheduler_status",
+                "request": "LocalDaemonSchedulerStatusRequestWire",
+                "success": "SchedulerBatchStatusWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "reads current scheduler batch and per-slot state from projections"
+            },
+            {
+                "type": "scheduler_cancel",
+                "request": "SchedulerCancelRequestWire",
+                "success": "SchedulerBatchStatusWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "idempotently cancels a queued/starting/running scheduler batch or slot for operator recovery"
+            },
+            {
                 "type": "batch",
                 "request": "LocalDaemonBatchRequestWire[]",
                 "success": "LocalDaemonBatchResponseWire[]",
@@ -1122,6 +1143,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "indexing_status": "LocalDaemonIndexingStatusRequestWire",
                 "verify": "LocalDaemonIndexingVerifyRequestWire",
                 "diff": "LocalDaemonIndexingDiffRequestWire",
+                "scheduler_submit": "SchedulerBatchSubmitRequestWire",
+                "scheduler_status": "LocalDaemonSchedulerStatusRequestWire",
+                "scheduler_cancel": "SchedulerCancelRequestWire",
                 "batch": {"requests": "LocalDaemonBatchRequestWire[]"}
             },
             "LocalDaemonResponsePayloadWire": {
@@ -1135,6 +1159,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "indexing_status": "LocalDaemonIndexingStatusResponseWire",
                 "verify": "LocalDaemonIndexingVerifyResponseWire",
                 "diff": "LocalDaemonIndexingDiffResponseWire",
+                "scheduler_submit": "SchedulerBatchSubmitResponseWire",
+                "scheduler_status": "SchedulerBatchStatusWire",
+                "scheduler_cancel": "SchedulerBatchStatusWire",
                 "batch": {"responses": "LocalDaemonBatchResponseWire[]"},
                 "error": "LocalDaemonErrorWire"
             },
@@ -1252,6 +1279,19 @@ pub fn local_daemon_contract_snapshot() -> Value {
                         "diff_counts": "ShadowDiffCountsWire",
                         "recent_reports": "IndexingDomainReportWire[]",
                         "message": "string|null"
+                    },
+                    "scheduler": {
+                        "schema_version": "u32",
+                        "state": "ok|degraded|unknown",
+                        "queue_depth": "u64",
+                        "active_tasks": "u64",
+                        "running_tasks": "u64",
+                        "starting_tasks": "u64",
+                        "blocked_tasks": "u64",
+                        "stale_starts": "u64",
+                        "host_bridge": "json availability/mode details",
+                        "projection_lag": "json last scheduler event seq, last applied seq, and pending events",
+                        "by_queue": "per-queue scheduler counters"
                     }
                 }
             },
@@ -1506,6 +1546,78 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "counts": "ShadowDiffCountsWire",
                 "next_cursor": "string|null",
                 "bounded": "LocalDaemonPayloadBoundWire"
+            },
+            "LocalDaemonSchedulerStatusRequestWire": {
+                "schema_version": "u32",
+                "project_id": "string",
+                "batch_id": "string"
+            },
+            "SchedulerBatchSubmitRequestWire": {
+                "schema_version": "u32",
+                "project_id": "string",
+                "idempotency_key": "string",
+                "batch_id": "string|null",
+                "queue_id": "string|null",
+                "launch_specs": "SchedulerLaunchSpecWire[]",
+                "metadata": "json object"
+            },
+            "SchedulerBatchSubmitResponseWire": {
+                "schema_version": "u32",
+                "handle": "SchedulerBatchHandleWire",
+                "duplicate": "bool",
+                "status": "SchedulerBatchStatusWire"
+            },
+            "SchedulerCancelRequestWire": {
+                "schema_version": "u32",
+                "project_id": "string",
+                "batch_id": "string",
+                "slot_id": "string|null",
+                "reason": "string|null",
+                "idempotency_key": "string"
+            },
+            "SchedulerBatchStatusWire": {
+                "schema_version": "u32",
+                "handle": "SchedulerBatchHandleWire",
+                "slots": "SchedulerSlotProjectionWire[]"
+            },
+            "SchedulerBatchHandleWire": {
+                "schema_version": "u32",
+                "batch_id": "string",
+                "idempotency_key": "string",
+                "queue_id": "string",
+                "project_id": "string",
+                "slot_count": "u32",
+                "status": "queued|starting|running|terminal",
+                "created_at": "rfc3339"
+            },
+            "SchedulerSlotProjectionWire": {
+                "schema_version": "u32",
+                "task_id": "SchedulerTaskIdWire",
+                "project_id": "string",
+                "slot_index": "u32",
+                "status": "planned|queued|starting|running|completed|failed|cancelled|killed|stale",
+                "queued_position": "u32|null",
+                "terminal": "bool",
+                "launch_spec": "SchedulerLaunchSpecWire",
+                "created_at": "rfc3339",
+                "updated_at": "rfc3339",
+                "reason": "string|null"
+            },
+            "SchedulerTaskIdWire": {
+                "schema_version": "u32",
+                "batch_id": "string",
+                "slot_id": "string",
+                "queue_id": "string"
+            },
+            "SchedulerLaunchSpecWire": {
+                "schema_version": "u32",
+                "project_id": "string",
+                "prompt": "string",
+                "cwd": "string|null",
+                "model": "string|null",
+                "parent_agent_id": "string|null",
+                "workflow_id": "string|null",
+                "metadata": "json object"
             },
             "LocalDaemonIndexingSurfaceSummaryWire": {
                 "schema_version": "u32",

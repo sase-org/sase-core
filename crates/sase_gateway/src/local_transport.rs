@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -22,25 +23,36 @@ use sase_core::projections::{
     agent_archive_bundle_revived_event_request,
     agent_artifact_associated_event_request,
     agent_cleanup_result_recorded_event_request,
-    agent_dismissed_identity_changed_event_request, changespec_handle,
-    notification_append_event_request, notification_projection_counts,
-    notification_projection_detail, notification_projection_page,
-    notification_source_paths, notification_state_update_event_request,
+    agent_dismissed_identity_changed_event_request, agent_lifecycle_detail,
+    agent_projection_active_page, agent_projection_archive_page,
+    agent_projection_artifacts, agent_projection_children,
+    agent_projection_recent_page, agent_projection_search_page,
+    changespec_handle, notification_append_event_request,
+    notification_projection_counts, notification_projection_detail,
+    notification_projection_page, notification_source_paths,
+    notification_state_update_event_request,
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
-    source_fingerprint_from_path,
-    workflow_action_response_recorded_event_request,
-    workflow_run_created_event_request, workflow_run_updated_event_request,
+    scheduler_batch_status, source_fingerprint_from_path,
+    workflow_action_response_recorded_event_request_with_task,
+    workflow_hitl_paused_event_request_with_task,
+    workflow_run_created_event_request_with_task,
+    workflow_run_updated_event_request_with_task,
+    workflow_step_transitioned_event_request_with_task,
     AgentArtifactAssociationWire, AgentDismissedIdentityWire,
-    AgentProjectionEventContextWire, BeadMutationWriteRequestWire,
+    AgentProjectionEventContextWire, AgentReadDetailResponseWire,
+    AgentReadListResponseWire, BeadMutationWriteRequestWire,
     BeadProjectionEventContextWire, EventAppendRequestWire, EventSourceWire,
     LocalDaemonMutationOutcomeWire, NotificationPendingActionsReadResponseWire,
     NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
-    ProjectionPayloadBoundWire, ProjectionSnapshotReadWire,
-    SourceExportKindWire, SourceExportPlanWire, SourceExportReportWire,
-    SourceExportStatusWire, SourceFingerprintWire,
-    WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
+    ProjectionPageInfoWire, ProjectionPayloadBoundWire,
+    ProjectionSnapshotReadWire, SchedulerEventContextWire,
+    SchedulerQueueSettingsWire, SourceExportKindWire, SourceExportPlanWire,
+    SourceExportReportWire, SourceExportStatusWire, SourceFingerprintWire,
+    WorkflowEventTaskWire, WorkflowProjectionEventContextWire,
+    WorkflowRunProjectionWire, WorkflowSchedulerCauseWire,
+    WorkflowStepProjectionWire, WorkflowTaskProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
     CHANGESPEC_STATUS_TRANSITIONED, PROJECTION_READ_WIRE_SCHEMA_VERSION,
@@ -59,20 +71,22 @@ use crate::{
     projection_service::ProjectionServiceState,
     wire::{
         LocalDaemonBatchResponseWire, LocalDaemonCapabilitiesResponseWire,
-        LocalDaemonCollectionWire, LocalDaemonErrorCodeWire,
-        LocalDaemonErrorWire, LocalDaemonEventBatchWire,
-        LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
-        LocalDaemonEventRequestWire, LocalDaemonFallbackWire,
-        LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
-        LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
+        LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
+        LocalDaemonErrorCodeWire, LocalDaemonErrorWire,
+        LocalDaemonEventBatchWire, LocalDaemonEventPayloadWire,
+        LocalDaemonEventRecordWire, LocalDaemonEventRequestWire,
+        LocalDaemonFallbackWire, LocalDaemonHealthResponseWire,
+        LocalDaemonHealthStatusWire, LocalDaemonHeartbeatWire,
+        LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
         LocalDaemonPayloadBoundWire, LocalDaemonReadRequestWire,
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LocalDaemonWriteRequestWire, LocalDaemonWriteResponseWire,
-        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonSchedulerStatusRequestWire, LocalDaemonWriteRequestWire,
+        LocalDaemonWriteResponseWire, ProjectionPageRequestWire,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -305,6 +319,15 @@ fn handle_payload(
                 None,
             ))
         }
+        LocalDaemonRequestPayloadWire::SchedulerSubmit(request) => {
+            handle_scheduler_submit_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerStatus(request) => {
+            handle_scheduler_status_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerCancel(request) => {
+            handle_scheduler_cancel_payload(request, state)
+        }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
             let responses = requests
                 .into_iter()
@@ -480,13 +503,18 @@ fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
         .and_then(|source_exports| source_exports.get("state"))
         .and_then(JsonValue::as_str)
         == Some("degraded");
+    let scheduler_degraded = details
+        .get("scheduler")
+        .and_then(|scheduler| scheduler.get("state"))
+        .and_then(JsonValue::as_str)
+        == Some("degraded");
     let status = match projection_status.state {
         ProjectionServiceState::Ok => LocalDaemonHealthStatusWire::Ok,
         ProjectionServiceState::Degraded => {
             LocalDaemonHealthStatusWire::Degraded
         }
     };
-    let status = if source_exports_degraded {
+    let status = if source_exports_degraded || scheduler_degraded {
         LocalDaemonHealthStatusWire::Degraded
     } else {
         status
@@ -572,6 +600,26 @@ fn handle_read_payload(
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
     match request {
+        LocalDaemonReadRequestWire::AgentActive(request) => {
+            agent_list_payload(request, state, AgentListKind::Active)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentRecent(request) => {
+            agent_list_payload(request, state, AgentListKind::Recent)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentArchive(request) => {
+            agent_archive_payload(request, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentSearch(request) => {
+            agent_list_payload(request, state, AgentListKind::Search)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentDetail(request) => {
+            agent_detail_payload(request.project_id, request.agent_id, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
         LocalDaemonReadRequestWire::NotificationList(_) => {
             notification_list_payload(request, state)
                 .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
@@ -599,6 +647,346 @@ fn handle_read_payload(
             read_surface_name(&other),
         )),
     }
+}
+
+fn handle_scheduler_submit_payload(
+    request: crate::wire::SchedulerBatchSubmitRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let batch_id_hint = request.batch_id.clone();
+    let result = state.projection_service.write_blocking(move |db| {
+        db.submit_scheduler_batch(
+            context,
+            request,
+            SchedulerQueueSettingsWire::default(),
+        )
+    });
+    state
+        .metrics
+        .record_scheduler_batch_submit(started.elapsed());
+    match result {
+        Ok(response) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: response.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": response.handle.project_id,
+                        "queue_id": response.handle.queue_id,
+                        "status": response.handle.status,
+                        "slot_count": response.handle.slot_count,
+                        "duplicate": response.duplicate,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler submit failed: {error}"),
+            false,
+            batch_id_hint.or_else(|| Some("scheduler_submit".to_string())),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn handle_scheduler_status_payload(
+    request: LocalDaemonSchedulerStatusRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
+    let result = state.projection_service.read_blocking(move |db| {
+        scheduler_batch_status(
+            db.connection(),
+            &request.project_id,
+            &request.batch_id,
+        )
+    });
+    state
+        .metrics
+        .record_scheduler_status_query(started.elapsed());
+    match result {
+        Ok(Some(status)) => {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status)
+        }
+        Ok(None) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::ResourceNotFound,
+            "scheduler batch not found",
+            false,
+            Some("batch_id".to_string()),
+            None,
+        )),
+        Err(error) => {
+            LocalDaemonResponsePayloadWire::Error(projection_error(error))
+        }
+    }
+}
+
+fn handle_scheduler_cancel_payload(
+    request: crate::wire::SchedulerCancelRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let started = Instant::now();
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let result = state
+        .projection_service
+        .write_blocking(move |db| db.cancel_scheduler_slots(context, request));
+    state.metrics.record_scheduler_cancel(started.elapsed());
+    match result {
+        Ok(status) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: status.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": status.handle.project_id,
+                        "queue_id": status.handle.queue_id,
+                        "status": status.handle.status,
+                        "slot_count": status.handle.slot_count,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerCancel(status)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler cancel failed: {error}"),
+            false,
+            Some("scheduler_cancel".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn scheduler_event_context(
+    state: &DaemonState,
+    project_id: String,
+    idempotency_key: Option<String>,
+) -> SchedulerEventContextWire {
+    SchedulerEventContextWire {
+        schema_version: sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+        created_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        source: EventSourceWire {
+            source_type: "daemon_rpc".to_string(),
+            name: "sase_gateway".to_string(),
+            version: Some(state.build.package_version.clone()),
+            runtime: Some("rust".to_string()),
+            metadata: BTreeMap::new(),
+        },
+        host_id: state.host_identity.clone(),
+        project_id,
+        idempotency_key,
+        causality: Vec::new(),
+        source_path: None,
+        source_revision: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AgentListKind {
+    Active,
+    Recent,
+    Search,
+}
+
+fn agent_list_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+    kind: AgentListKind,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let entries = match kind {
+                AgentListKind::Active => agent_projection_active_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Recent => agent_projection_recent_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Search => {
+                    let query = request.query.as_deref().unwrap_or("*");
+                    agent_projection_search_page(
+                        db.connection(),
+                        &request.project_id,
+                        query,
+                        limit,
+                        offset,
+                        request.include_hidden,
+                    )?
+                }
+            };
+            Ok(AgentReadListResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: entries
+                        .next_offset
+                        .map(|value| value.to_string()),
+                },
+                entries,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            let variant = match kind {
+                AgentListKind::Active => {
+                    LocalDaemonReadResponseWire::AgentActive(response)
+                }
+                AgentListKind::Recent => {
+                    LocalDaemonReadResponseWire::AgentRecent(response)
+                }
+                AgentListKind::Search => {
+                    LocalDaemonReadResponseWire::AgentSearch(response)
+                }
+            };
+            LocalDaemonResponsePayloadWire::Read(Box::new(variant))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_archive_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            Ok(crate::wire::AgentArchiveReadResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: None,
+                },
+                entries: agent_projection_archive_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                )?,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentArchive(response),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_detail_payload(
+    project_id: String,
+    agent_id: String,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let detail =
+                agent_lifecycle_detail(db.connection(), &project_id, &agent_id)?;
+            let Some(summary) = detail.summary else {
+                return Err(sase_core::projections::ProjectionError::Invariant(
+                    format!("agent '{agent_id}' not found in project '{project_id}'"),
+                ));
+            };
+            let children = agent_projection_children(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            let artifacts = agent_projection_artifacts(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            Ok(AgentReadDetailResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                summary,
+                children,
+                artifacts,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentDetail(Box::new(response)),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn read_cursor_offset(
+    cursor: Option<&str>,
+) -> Result<u32, LocalDaemonErrorWire> {
+    cursor
+        .map(|value| {
+            value.parse::<u32>().map_err(|error| {
+                local_error(
+                    LocalDaemonErrorCodeWire::InvalidRequest,
+                    format!("invalid projection cursor '{value}': {error}"),
+                    false,
+                    Some("page.cursor".to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(0))
 }
 
 fn handle_write_payload(
@@ -983,6 +1371,10 @@ struct WorkflowStateWritePayload {
     workflow_id: Option<String>,
     #[serde(default)]
     event: Option<String>,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -996,6 +1388,33 @@ struct WorkflowActionResponseWritePayload {
     notification_id: Option<String>,
     #[serde(default = "default_action_response_state")]
     state: String,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowStepTransitionWritePayload {
+    workflow_id: String,
+    step: WorkflowStepProjectionWire,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowHitlRequestWritePayload {
+    workflow_id: String,
+    request_path: String,
+    request_json: JsonValue,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
 }
 
 fn default_action_response_state() -> String {
@@ -1036,17 +1455,16 @@ fn workflow_write_payload(
     })
 }
 
+type WorkflowWritePlan = (
+    EventAppendRequestWire,
+    Option<String>,
+    Vec<SourceExportPlanWire>,
+    Option<JsonValue>,
+);
+
 fn workflow_write_plan(
     request: &LocalDaemonWriteRequestWire,
-) -> Result<
-    (
-        EventAppendRequestWire,
-        Option<String>,
-        Vec<SourceExportPlanWire>,
-        Option<JsonValue>,
-    ),
-    LocalDaemonErrorWire,
-> {
+) -> Result<WorkflowWritePlan, LocalDaemonErrorWire> {
     match request.surface.as_str() {
         "workflow.state" => {
             preflight_source_exports(request)?;
@@ -1084,19 +1502,132 @@ fn workflow_write_plan(
                     .first()
                     .map(|export| export.target_path.clone()),
             );
-            let event_request = if payload.event.as_deref()
-                == Some("run_created")
-            {
-                workflow_run_created_event_request(context, workflow.clone())
-            } else {
-                workflow_run_updated_event_request(context, workflow.clone())
-            }
-            .map_err(workflow_projection_plan_error)?;
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause(
+                    payload.event.as_deref().unwrap_or("run_updated"),
+                    None,
+                    None,
+                ))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &workflow_id,
+                    task_kind: payload
+                        .event
+                        .as_deref()
+                        .unwrap_or("run_updated"),
+                    status: workflow.status.as_str(),
+                    step_id: None,
+                    step_index: None,
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request =
+                if payload.event.as_deref() == Some("run_created") {
+                    workflow_run_created_event_request_with_task(
+                        context,
+                        workflow.clone(),
+                        cause,
+                        task,
+                    )
+                } else {
+                    workflow_run_updated_event_request_with_task(
+                        context,
+                        workflow.clone(),
+                        cause,
+                        task,
+                    )
+                }
+                .map_err(workflow_projection_plan_error)?;
             Ok((
                 event_request,
                 Some(format!("workflow:{workflow_id}")),
                 request.source_exports.clone(),
                 Some(json!({"workflow": workflow})),
+            ))
+        }
+        "workflow.step_transition" => {
+            let payload: WorkflowStepTransitionWritePayload =
+                decode_surface_payload(request)?;
+            let context = workflow_event_context(request, None);
+            let step_id = payload.step.step_id.clone();
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause("step_transition", step_id.clone(), None))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &payload.workflow_id,
+                    task_kind: "step_transition",
+                    status: &payload.step.status,
+                    step_id,
+                    step_index: Some(payload.step.step_index),
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request =
+                workflow_step_transitioned_event_request_with_task(
+                    context,
+                    payload.step.clone(),
+                    cause,
+                    task,
+                )
+                .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!("workflow:{}", payload.workflow_id)),
+                Vec::new(),
+                Some(json!({"step": payload.step})),
+            ))
+        }
+        "workflow.hitl_request" => {
+            let payload: WorkflowHitlRequestWritePayload =
+                decode_surface_payload(request)?;
+            let source_exports = if request.source_exports.is_empty() {
+                vec![workflow_response_source_export(
+                    &payload.request_path,
+                    &payload.request_json,
+                    "hitl_request",
+                )?]
+            } else {
+                request.source_exports.clone()
+            };
+            preflight_source_exports(request)?;
+            let context = workflow_event_context(
+                request,
+                Some(payload.request_path.clone()),
+            );
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause("hitl_pause", None, payload.reason.clone()))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &payload.workflow_id,
+                    task_kind: "hitl_pause",
+                    status: "waiting",
+                    step_id: None,
+                    step_index: None,
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request = workflow_hitl_paused_event_request_with_task(
+                context,
+                payload.workflow_id.clone(),
+                payload.reason.clone(),
+                cause,
+                task,
+            )
+            .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!("workflow:{}", payload.workflow_id)),
+                source_exports,
+                Some(json!({"hitl_request": payload})),
             ))
         }
         "workflow.action_response" => {
@@ -1112,8 +1643,33 @@ fn workflow_write_plan(
                 request.source_exports.clone()
             };
             preflight_create_new_exports(&source_exports)?;
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause(
+                    "hitl_response",
+                    None,
+                    Some(payload.action_kind.clone()),
+                ))
+            });
+            let task = payload.task.clone().or_else(|| {
+                payload.workflow_id.as_ref().map(|workflow_id| {
+                    workflow_task(WorkflowTaskPlan {
+                        workflow_id,
+                        task_kind: if payload.action_kind == "hitl" {
+                            "hitl_response"
+                        } else {
+                            "action_response"
+                        },
+                        status: "completed",
+                        step_id: None,
+                        step_index: None,
+                        cause: cause.clone(),
+                        created_at: None,
+                        log_summary: None,
+                    })
+                })
+            });
             let event_request =
-                workflow_action_response_recorded_event_request(
+                workflow_action_response_recorded_event_request_with_task(
                     workflow_event_context(
                         request,
                         Some(payload.response_path.clone()),
@@ -1123,6 +1679,7 @@ fn workflow_write_plan(
                     payload.response_path.clone(),
                     payload.notification_id.clone(),
                     payload.state.clone(),
+                    WorkflowEventTaskWire { cause, task },
                 )
                 .map_err(workflow_projection_plan_error)?;
             Ok((
@@ -1164,6 +1721,98 @@ fn workflow_event_context(
         causality: Vec::new(),
         source_path,
         source_revision: None,
+    }
+}
+
+fn workflow_cause(
+    kind: &str,
+    step_id: Option<String>,
+    reason: Option<String>,
+) -> WorkflowSchedulerCauseWire {
+    WorkflowSchedulerCauseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        kind: kind.to_string(),
+        scheduler_task: None,
+        reason: reason.or(step_id.map(|step_id| format!("step_id={step_id}"))),
+    }
+}
+
+struct WorkflowTaskPlan<'a> {
+    workflow_id: &'a str,
+    task_kind: &'a str,
+    status: &'a str,
+    step_id: Option<String>,
+    step_index: Option<i64>,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    created_at: Option<String>,
+    log_summary: Option<String>,
+}
+
+fn workflow_task(plan: WorkflowTaskPlan<'_>) -> WorkflowTaskProjectionWire {
+    let status = workflow_task_status(plan.status);
+    let timestamp = plan.created_at.unwrap_or_else(|| {
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    });
+    let terminal = matches!(
+        status.as_str(),
+        "completed" | "failed" | "skipped" | "cancelled"
+    );
+    WorkflowTaskProjectionWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        task_id: workflow_task_id(
+            plan.workflow_id,
+            plan.task_kind,
+            plan.step_id.as_deref(),
+        ),
+        workflow_id: plan.workflow_id.to_string(),
+        task_kind: plan.task_kind.to_string(),
+        status,
+        step_id: plan.step_id,
+        step_index: plan.step_index,
+        started_at: Some(timestamp.clone()),
+        completed_at: terminal.then_some(timestamp),
+        log_summary: plan.log_summary,
+        cause: plan.cause,
+    }
+}
+
+fn workflow_task_status(status: &str) -> String {
+    match status {
+        "completed" => "completed".to_string(),
+        "failed" => "failed".to_string(),
+        "skipped" => "skipped".to_string(),
+        "waiting" | "waiting_hitl" | "paused" => "waiting".to_string(),
+        _ => "running".to_string(),
+    }
+}
+
+fn workflow_task_id(
+    workflow_id: &str,
+    task_kind: &str,
+    step_id: Option<&str>,
+) -> String {
+    let suffix = step_id.unwrap_or("workflow");
+    format!(
+        "workflow-task:{}:{}:{}",
+        sanitize_task_part(workflow_id),
+        sanitize_task_part(task_kind),
+        sanitize_task_part(suffix)
+    )
+}
+
+fn sanitize_task_part(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
     }
 }
 
@@ -2126,6 +2775,7 @@ fn collection_capability(
         LocalDaemonCollectionWire::Changespecs => "changespecs.read",
         LocalDaemonCollectionWire::Notifications => "notifications.read",
         LocalDaemonCollectionWire::Workflows => "catalogs.read",
+        LocalDaemonCollectionWire::Scheduler => "scheduler.read",
         LocalDaemonCollectionWire::Xprompts => "catalogs.read",
         LocalDaemonCollectionWire::Indexing => "indexing.status",
         LocalDaemonCollectionWire::Mocked => "mocked.list",
@@ -2200,6 +2850,7 @@ fn local_daemon_capabilities() -> Vec<String> {
         "health.read".to_string(),
         "capabilities.read".to_string(),
         "writes.contract".to_string(),
+        "agents.read".to_string(),
         "agents.write".to_string(),
         "beads.write".to_string(),
         "changespecs.write".to_string(),
@@ -2208,6 +2859,9 @@ fn local_daemon_capabilities() -> Vec<String> {
         "notifications.read".to_string(),
         "notifications.write".to_string(),
         "workflows.write".to_string(),
+        "scheduler.submit".to_string(),
+        "scheduler.read".to_string(),
+        "scheduler.cancel".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -2494,8 +3148,13 @@ mod tests {
         NotificationWire,
     };
     use sase_core::projections::{
-        notification_append_event_request, EventSourceWire,
+        agent_lifecycle_transitioned_event_request,
+        notification_append_event_request, workflow_projection_detail,
+        AgentLifecycleProjectionWire, AgentLifecycleStatusWire,
+        AgentProjectionEventContextWire, EventSourceWire,
         NotificationProjectionEventContextWire,
+        SchedulerBatchSubmitRequestWire, SchedulerLaunchSpecWire,
+        WorkflowStepProjectionWire,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -2711,6 +3370,112 @@ mod tests {
             other => {
                 panic!("expected unsupported write error, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn scheduler_submit_status_and_events_use_projection() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service);
+        let submit = SchedulerBatchSubmitRequestWire {
+            schema_version:
+                sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+            project_id: "project-a".to_string(),
+            idempotency_key: "batch-key-1".to_string(),
+            batch_id: Some("batch-a".to_string()),
+            queue_id: Some("agents".to_string()),
+            launch_specs: vec![
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "first".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "second".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            metadata: BTreeMap::new(),
+        };
+        let submit_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerSubmit(submit),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&submit_payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response) => {
+                assert_eq!(response.handle.batch_id, "batch-a");
+                assert_eq!(response.status.slots.len(), 2);
+                assert_eq!(response.status.slots[0].queued_position, Some(1));
+            }
+            other => {
+                panic!("expected scheduler submit response, got {other:?}")
+            }
+        }
+
+        let status_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerStatus(
+                LocalDaemonSchedulerStatusRequestWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    batch_id: "batch-a".to_string(),
+                },
+            ),
+        ))
+        .unwrap();
+        let status_response = response_for_frame(&status_payload, &state);
+        match status_response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status) => {
+                assert_eq!(status.handle.status, "queued");
+                assert_eq!(status.slots.len(), 2);
+            }
+            other => {
+                panic!("expected scheduler status response, got {other:?}")
+            }
+        }
+
+        let events_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Events(
+                LocalDaemonEventRequestWire {
+                    since_event_id: Some("0000000000000000".to_string()),
+                    collections: vec![LocalDaemonCollectionWire::Scheduler],
+                    snapshot_id: None,
+                    max_events: 4,
+                },
+            ),
+        ))
+        .unwrap();
+        let events_response = response_for_frame(&events_payload, &state);
+        match events_response.payload {
+            LocalDaemonResponsePayloadWire::Events(events) => {
+                assert!(events.events.iter().any(|event| matches!(
+                    event.payload,
+                    LocalDaemonEventPayloadWire::Delta {
+                        collection: LocalDaemonCollectionWire::Scheduler,
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected events response, got {other:?}"),
         }
     }
 
@@ -3321,6 +4086,228 @@ mod tests {
             other => {
                 panic!("expected notification read response, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn workflow_step_transition_write_records_task_and_event_identity() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let step_id = "wf-001:step:2:verify";
+        let step = WorkflowStepProjectionWire {
+            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            workflow_id: "wf-001".to_string(),
+            step_id: Some(step_id.to_string()),
+            step_index: 2,
+            name: "verify".to_string(),
+            status: "completed".to_string(),
+            step_type: Some("bash".to_string()),
+            step_source: Some("just test".to_string()),
+            ..WorkflowStepProjectionWire::default()
+        };
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "workflow.step_transition".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "workflow-step-wf-001-verify".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "workflow_id": "wf-001",
+                    "step": step,
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(
+                    write.outcome.event_type,
+                    "workflow.step_transitioned"
+                );
+            }
+            other => panic!("expected workflow step response, got {other:?}"),
+        }
+        let detail = projection_service
+            .read_blocking(|db| {
+                workflow_projection_detail(
+                    db.connection(),
+                    "project-a",
+                    "wf-001",
+                )
+            })
+            .unwrap();
+        assert_eq!(detail.steps[0].step_id.as_deref(), Some(step_id));
+        assert_eq!(detail.tasks[0].task_kind, "step_transition");
+        assert_eq!(detail.tasks[0].status, "completed");
+        assert_eq!(detail.events[0].step_id.as_deref(), Some(step_id));
+        assert_eq!(
+            detail.events[0].task_id.as_deref(),
+            Some("workflow-task:wf-001:step_transition:wf-001_step_2_verify")
+        );
+    }
+
+    #[test]
+    fn workflow_hitl_request_materializes_source_and_pause_task() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let request_path = dir.path().join("hitl_request.json");
+        let request_json = json!({
+            "step_name": "review",
+            "step_type": "agent",
+            "output": {"ok": true},
+            "has_output": true
+        });
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "workflow.hitl_request".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "workflow-hitl-wf-001".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "workflow_id": "wf-001",
+                    "request_path": request_path.display().to_string(),
+                    "request_json": request_json,
+                    "reason": "agent:review",
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.outcome.event_type, "workflow.hitl_paused");
+                assert!(request_path.exists());
+            }
+            other => panic!("expected workflow HITL response, got {other:?}"),
+        }
+        let detail = projection_service
+            .read_blocking(|db| {
+                workflow_projection_detail(
+                    db.connection(),
+                    "project-a",
+                    "wf-001",
+                )
+            })
+            .unwrap();
+        assert_eq!(detail.tasks[0].task_kind, "hitl_pause");
+        assert_eq!(detail.tasks[0].status, "waiting");
+        assert_eq!(detail.events[0].event_type, "workflow.hitl_paused");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(
+                &std::fs::read_to_string(request_path).unwrap()
+            )
+            .unwrap()["step_name"],
+            json!("review")
+        );
+    }
+
+    #[test]
+    fn agent_read_surfaces_use_lifecycle_projection_rows() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        projection_service
+            .write_blocking(|db| {
+                db.append_agent_event(
+                    agent_lifecycle_transitioned_event_request(
+                        AgentProjectionEventContextWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            created_at: Some(
+                                "2026-05-14T06:00:00Z".to_string(),
+                            ),
+                            source: EventSourceWire {
+                                source_type: "test".to_string(),
+                                name: "local-transport-test".to_string(),
+                                ..EventSourceWire::default()
+                            },
+                            host_id: "host-a".to_string(),
+                            project_id: "demo".to_string(),
+                            idempotency_key: Some("agent-read-row".to_string()),
+                            causality: Vec::new(),
+                            source_path: None,
+                            source_revision: None,
+                        },
+                        AgentLifecycleProjectionWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            agent_id: "agent:demo:queued-1".to_string(),
+                            lifecycle_status: AgentLifecycleStatusWire::Queued,
+                            project_name: Some("demo".to_string()),
+                            batch_id: Some("batch-1".to_string()),
+                            queue_id: Some("default".to_string()),
+                            ..AgentLifecycleProjectionWire::default()
+                        },
+                    )?,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+
+        let payload =
+            serde_json::to_vec(&request(LocalDaemonRequestPayloadWire::Read(
+                LocalDaemonReadRequestWire::AgentActive(
+                    crate::wire::AgentReadListRequestWire {
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        page: ProjectionPageRequestWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            limit: 10,
+                            cursor: None,
+                        },
+                        project_id: "demo".to_string(),
+                        include_hidden: false,
+                        query: None,
+                    },
+                ),
+            )))
+            .unwrap();
+
+        match response_for_frame(&payload, &state).payload {
+            LocalDaemonResponsePayloadWire::Read(response) => match *response {
+                LocalDaemonReadResponseWire::AgentActive(response) => {
+                    assert_eq!(response.entries.entries.len(), 1);
+                    let row = &response.entries.entries[0];
+                    assert_eq!(row.status, "queued");
+                    assert_eq!(row.batch_id.as_deref(), Some("batch-1"));
+                    assert_eq!(row.queue_id.as_deref(), Some("default"));
+                }
+                other => {
+                    panic!("expected agent active response, got {other:?}")
+                }
+            },
+            other => panic!("expected read response, got {other:?}"),
         }
     }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ProjectionError;
 
-pub const PROJECTION_SCHEMA_VERSION: u32 = 7;
+pub const PROJECTION_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationWire {
@@ -637,6 +637,171 @@ const MIGRATIONS: &[Migration] = &[
             ON source_export_attempts(export_id, attempt_id);
     "#,
     },
+    Migration {
+        version: 8,
+        name: "agent_lifecycle_projection",
+        sql: r#"
+        ALTER TABLE agents ADD COLUMN batch_id TEXT;
+        ALTER TABLE agents ADD COLUMN queue_id TEXT;
+        ALTER TABLE agents ADD COLUMN parent_agent_id TEXT;
+        ALTER TABLE agents ADD COLUMN workflow_id TEXT;
+        ALTER TABLE agents ADD COLUMN retry_of_agent_id TEXT;
+        ALTER TABLE agents ADD COLUMN resume_of_agent_id TEXT;
+        ALTER TABLE agents ADD COLUMN host_id TEXT;
+        ALTER TABLE agents ADD COLUMN pid INTEGER;
+        ALTER TABLE agents ADD COLUMN workspace_claim_id TEXT;
+        ALTER TABLE agents ADD COLUMN last_heartbeat_at TEXT;
+        ALTER TABLE agents ADD COLUMN last_check_at TEXT;
+        ALTER TABLE agents ADD COLUMN lifecycle_changed_at TEXT;
+        ALTER TABLE agents ADD COLUMN stale_reason TEXT;
+
+        ALTER TABLE agent_attempts ADD COLUMN batch_id TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN queue_id TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN host_id TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN pid INTEGER;
+        ALTER TABLE agent_attempts ADD COLUMN artifact_dir TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN workspace_claim_id TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN created_at TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN last_heartbeat_at TEXT;
+        ALTER TABLE agent_attempts ADD COLUMN last_check_at TEXT;
+
+        ALTER TABLE agent_edges ADD COLUMN workflow_id TEXT;
+
+        CREATE TABLE IF NOT EXISTS workflow_agent_edges (
+            project_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            edge_type TEXT NOT NULL,
+            parent_agent_id TEXT,
+            parent_workflow_id TEXT,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, workflow_id, agent_id, edge_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_agent_edges_agent
+            ON workflow_agent_edges(project_id, agent_id, workflow_id);
+
+        CREATE TABLE IF NOT EXISTS agent_lifecycle_events (
+            seq INTEGER PRIMARY KEY REFERENCES event_log(seq) ON DELETE CASCADE,
+            project_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            agent_id TEXT,
+            lifecycle_status TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_lifecycle_events_agent_seq
+            ON agent_lifecycle_events(project_id, agent_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_agents_lifecycle_project_status
+            ON agents(project_id, status, hidden, timestamp DESC, agent_id);
+        CREATE INDEX IF NOT EXISTS idx_agents_lifecycle_batch
+            ON agents(project_id, batch_id, queue_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_agents_lifecycle_workflow
+            ON agents(project_id, workflow_id, timestamp DESC);
+    "#,
+    },
+    Migration {
+        version: 9,
+        name: "scheduler_queue_projection",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS scheduler_batches (
+            project_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            queue_id TEXT NOT NULL,
+            slot_count INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            batch_json TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, batch_id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_batches_idempotency
+            ON scheduler_batches(project_id, idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_batches_queue_created
+            ON scheduler_batches(project_id, queue_id, created_at, batch_id);
+
+        CREATE TABLE IF NOT EXISTS scheduler_slots (
+            project_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            slot_id TEXT NOT NULL,
+            queue_id TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            queued_position INTEGER,
+            terminal INTEGER NOT NULL DEFAULT 0,
+            launch_spec_json TEXT NOT NULL,
+            slot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, slot_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_batch
+            ON scheduler_slots(project_id, batch_id, slot_index, slot_id);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_queue_position
+            ON scheduler_slots(project_id, queue_id, terminal, queued_position, slot_index);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_slots_status
+            ON scheduler_slots(project_id, status, terminal, updated_at);
+
+        CREATE TABLE IF NOT EXISTS scheduler_events (
+            seq INTEGER PRIMARY KEY REFERENCES event_log(seq) ON DELETE CASCADE,
+            project_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            batch_id TEXT,
+            slot_id TEXT,
+            status TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_batch_seq
+            ON scheduler_events(project_id, batch_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_slot_seq
+            ON scheduler_events(project_id, slot_id, seq);
+        CREATE INDEX IF NOT EXISTS idx_scheduler_events_type_seq
+            ON scheduler_events(project_id, event_type, seq);
+    "#,
+    },
+    Migration {
+        version: 10,
+        name: "workflow_scheduler_task_projection",
+        sql: r#"
+        ALTER TABLE workflow_steps ADD COLUMN step_id TEXT;
+        ALTER TABLE workflow_steps ADD COLUMN scheduler_task_json TEXT NOT NULL DEFAULT 'null';
+        ALTER TABLE workflow_steps ADD COLUMN scheduler_cause_json TEXT NOT NULL DEFAULT 'null';
+        CREATE INDEX IF NOT EXISTS idx_workflow_steps_step_id
+            ON workflow_steps(project_id, step_id);
+
+        CREATE TABLE IF NOT EXISTS workflow_tasks (
+            project_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            task_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            step_id TEXT,
+            step_index INTEGER,
+            started_at TEXT,
+            completed_at TEXT,
+            log_summary TEXT,
+            cause_json TEXT NOT NULL,
+            task_json TEXT NOT NULL,
+            last_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            PRIMARY KEY (project_id, task_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workflow_tasks_workflow
+            ON workflow_tasks(project_id, workflow_id, task_kind, task_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_tasks_status
+            ON workflow_tasks(project_id, status, task_kind, task_id);
+
+        ALTER TABLE workflow_events ADD COLUMN step_id TEXT;
+        ALTER TABLE workflow_events ADD COLUMN task_id TEXT;
+    "#,
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<(), ProjectionError> {
@@ -737,6 +902,12 @@ pub(crate) fn recreate_projection_tables(
         DROP TABLE IF EXISTS workflow_events;
         DROP TABLE IF EXISTS workflow_steps;
         DROP TABLE IF EXISTS workflows;
+        DROP TABLE IF EXISTS workflow_tasks;
+        DROP TABLE IF EXISTS workflow_agent_edges;
+        DROP TABLE IF EXISTS scheduler_events;
+        DROP TABLE IF EXISTS scheduler_slots;
+        DROP TABLE IF EXISTS scheduler_batches;
+        DROP TABLE IF EXISTS agent_lifecycle_events;
         DROP TABLE IF EXISTS agent_search_fts;
         DROP TABLE IF EXISTS agent_dismissed_identities;
         DROP TABLE IF EXISTS agent_archive;

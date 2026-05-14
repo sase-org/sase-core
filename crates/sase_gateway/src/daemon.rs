@@ -10,6 +10,7 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
+use sase_core::projections::{EventSourceWire, SchedulerEventContextWire};
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -174,6 +175,7 @@ impl DaemonRuntime {
                 .mobile_http_enabled
                 .then_some(config.mobile_gateway.clone()),
         };
+        recover_scheduler_starting_slots(&state);
         Self { state, ownership }
     }
 
@@ -254,6 +256,37 @@ impl DaemonState {
             );
         }
         details
+    }
+}
+
+fn recover_scheduler_starting_slots(state: &DaemonState) {
+    let context = SchedulerEventContextWire {
+        schema_version: sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+        created_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        source: EventSourceWire {
+            source_type: "daemon_startup".to_string(),
+            name: "sase_gateway".to_string(),
+            version: Some(state.build.package_version.clone()),
+            runtime: Some("rust".to_string()),
+            metadata: Default::default(),
+        },
+        host_id: state.host_identity.clone(),
+        project_id: "global".to_string(),
+        idempotency_key: None,
+        causality: Vec::new(),
+        source_path: None,
+        source_revision: None,
+    };
+    let recovered = state
+        .projection_service
+        .write_blocking(|db| db.recover_scheduler_starting_slots(context));
+    match recovered {
+        Ok(count) => state
+            .metrics
+            .record_scheduler_recovery_repairs(u64::from(count)),
+        Err(error) => {
+            warn!(%error, "failed to recover scheduler starting slots")
+        }
     }
 }
 

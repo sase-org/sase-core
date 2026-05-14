@@ -21,7 +21,7 @@ use super::mutations::{
 use super::{
     AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
     ChangeSpecProjectionApplier, NotificationProjectionApplier,
-    ProjectionApplier, WorkflowProjectionApplier,
+    ProjectionApplier, SchedulerProjectionApplier, WorkflowProjectionApplier,
 };
 
 const BASE_PROJECTION_NAME: &str = "event_log";
@@ -197,6 +197,7 @@ fn apply_projected_event_tx(
     let mut agents = AgentProjectionApplier;
     let mut workflows = WorkflowProjectionApplier;
     let mut catalogs = CatalogProjectionApplier;
+    let mut scheduler = SchedulerProjectionApplier;
 
     let applier: Option<&mut dyn ProjectionApplier> =
         if event.event_type.starts_with("changespec.") {
@@ -213,6 +214,8 @@ fn apply_projected_event_tx(
             Some(&mut workflows)
         } else if event.event_type.starts_with("catalog.") {
             Some(&mut catalogs)
+        } else if event.event_type.starts_with("scheduler.") {
+            Some(&mut scheduler)
         } else {
             None
         };

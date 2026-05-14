@@ -212,6 +212,16 @@ pub use project_spec::{
     to_archive_project_spec_path, LEGACY_PROJECT_SPEC_EXTENSION,
     PROJECT_SPEC_ARCHIVE_SUFFIX, PROJECT_SPEC_EXTENSION,
 };
+pub use projections::{
+    scheduler_batch_by_idempotency, scheduler_batch_status,
+    scheduler_mark_slot_status, scheduler_queue_page, SchedulerBatchHandleWire,
+    SchedulerBatchStatusWire, SchedulerBatchSubmitRequestWire,
+    SchedulerBatchSubmitResponseWire, SchedulerCancelRequestWire,
+    SchedulerEventContextWire, SchedulerLaunchSpecWire,
+    SchedulerQueueSettingsWire, SchedulerSlotProjectionWire,
+    SchedulerSlotStatusWire, SchedulerTaskIdWire,
+    SCHEDULER_WIRE_SCHEMA_VERSION,
+};
 pub use query::{
     canonicalize_query, compile_query, evaluate_query_many,
     evaluate_query_many_in_corpus, evaluate_query_one, get_base_status,

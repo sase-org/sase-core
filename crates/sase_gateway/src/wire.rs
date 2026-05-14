@@ -17,6 +17,8 @@ pub use sase_core::projections::{
     NotificationProjectionFacetCountsWire, NotificationReadDetailRequestWire,
     NotificationReadDetailResponseWire, NotificationReadListRequestWire,
     NotificationReadListResponseWire, ProjectionPageRequestWire,
+    SchedulerBatchStatusWire, SchedulerBatchSubmitRequestWire,
+    SchedulerBatchSubmitResponseWire, SchedulerCancelRequestWire,
     SourceExportPlanWire, SourceFingerprintWire,
     PROJECTION_READ_WIRE_SCHEMA_VERSION,
 };
@@ -294,6 +296,9 @@ pub enum LocalDaemonRequestPayloadWire {
     IndexingStatus(LocalDaemonIndexingStatusRequestWire),
     Verify(LocalDaemonIndexingVerifyRequestWire),
     Diff(LocalDaemonIndexingDiffRequestWire),
+    SchedulerSubmit(SchedulerBatchSubmitRequestWire),
+    SchedulerStatus(LocalDaemonSchedulerStatusRequestWire),
+    SchedulerCancel(SchedulerCancelRequestWire),
     Batch {
         requests: Vec<LocalDaemonBatchRequestWire>,
     },
@@ -312,6 +317,9 @@ pub enum LocalDaemonResponsePayloadWire {
     IndexingStatus(LocalDaemonIndexingStatusResponseWire),
     Verify(LocalDaemonIndexingVerifyResponseWire),
     Diff(LocalDaemonIndexingDiffResponseWire),
+    SchedulerSubmit(SchedulerBatchSubmitResponseWire),
+    SchedulerStatus(SchedulerBatchStatusWire),
+    SchedulerCancel(SchedulerBatchStatusWire),
     Batch {
         responses: Vec<LocalDaemonBatchResponseWire>,
     },
@@ -354,6 +362,13 @@ pub struct LocalDaemonWriteResponseWire {
     pub fallback: LocalDaemonFallbackWire,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonSchedulerStatusRequestWire {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub batch_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "surface", content = "data")]
 pub enum LocalDaemonReadRequestWire {
@@ -390,7 +405,7 @@ pub enum LocalDaemonReadResponseWire {
     AgentRecent(AgentReadListResponseWire),
     AgentArchive(AgentArchiveReadResponseWire),
     AgentSearch(AgentReadListResponseWire),
-    AgentDetail(AgentReadDetailResponseWire),
+    AgentDetail(Box<AgentReadDetailResponseWire>),
     NotificationList(NotificationReadListResponseWire),
     NotificationDetail(NotificationReadDetailResponseWire),
     NotificationCounts(NotificationProjectionFacetCountsWire),
@@ -398,7 +413,7 @@ pub enum LocalDaemonReadResponseWire {
     BeadList(BeadReadListResponseWire),
     BeadReady(BeadReadListResponseWire),
     BeadBlocked(BeadReadListResponseWire),
-    BeadShow(BeadReadDetailResponseWire),
+    BeadShow(Box<BeadReadDetailResponseWire>),
     BeadStats(BeadReadStatsResponseWire),
     XpromptCatalog(CatalogReadResponseWire),
     EditorCatalog(CatalogReadResponseWire),
@@ -584,6 +599,7 @@ pub enum LocalDaemonCollectionWire {
     Changespecs,
     Notifications,
     Workflows,
+    Scheduler,
     Xprompts,
     Indexing,
     Mocked,
