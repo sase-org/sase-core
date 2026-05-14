@@ -1163,7 +1163,7 @@
     "negotiation": {
       "daemon_package_version": "advertised on health/capabilities",
       "projection_read_schema_version": 1,
-      "projection_schema_version": 10,
+      "projection_schema_version": 11,
       "projection_write_schema_version": 1,
       "repair_actions": [
         "upgrade sase",

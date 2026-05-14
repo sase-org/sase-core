@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ProjectionError;
 
-pub const PROJECTION_SCHEMA_VERSION: u32 = 10;
+pub const PROJECTION_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationWire {
@@ -800,6 +800,22 @@ const MIGRATIONS: &[Migration] = &[
 
         ALTER TABLE workflow_events ADD COLUMN step_id TEXT;
         ALTER TABLE workflow_events ADD COLUMN task_id TEXT;
+    "#,
+    },
+    Migration {
+        version: 11,
+        name: "notification_projection_read_indexes",
+        sql: r#"
+        CREATE INDEX IF NOT EXISTS idx_notifications_list_visible_order
+            ON notifications(dismissed, source_order, id);
+        CREATE INDEX IF NOT EXISTS idx_notifications_sender_order
+            ON notifications(sender, dismissed, source_order, id);
+        CREATE INDEX IF NOT EXISTS idx_notifications_unread_order
+            ON notifications(read, dismissed, source_order, id);
+        CREATE INDEX IF NOT EXISTS idx_notifications_counts
+            ON notifications(dismissed, read, silent, muted, action, sender);
+        CREATE INDEX IF NOT EXISTS idx_notifications_source_order
+            ON notifications(source_order, id);
     "#,
     },
 ];

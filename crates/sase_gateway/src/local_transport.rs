@@ -29,8 +29,8 @@ use sase_core::projections::{
     agent_projection_recent_page, agent_projection_search_page,
     changespec_handle, notification_append_event_request,
     notification_projection_counts, notification_projection_detail,
-    notification_projection_page, notification_source_paths,
-    notification_state_update_event_request,
+    notification_projection_page, notification_rewrite_event_request,
+    notification_source_paths, notification_state_update_event_request,
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
@@ -1616,14 +1616,22 @@ fn plan_notification_write(
             let (outcome, content) = plan_notification_state_update_export(
                 Path::new(&path),
                 &payload.update,
-                true,
+                false,
             )
             .map_err(notification_plan_error)?;
-            let event_request = notification_state_update_event_request(
-                notification_event_context(request, Some(path.clone())),
-                payload.update,
-                outcome.notifications.clone(),
-            )
+            let event_request = match &payload.update {
+                NotificationStateUpdateWire::RewriteAll { notifications } => {
+                    notification_rewrite_event_request(
+                        notification_event_context(request, Some(path.clone())),
+                        notifications.clone(),
+                    )
+                }
+                _ => notification_state_update_event_request(
+                    notification_event_context(request, Some(path.clone())),
+                    payload.update,
+                    Vec::new(),
+                ),
+            }
             .map_err(notification_projection_plan_error)?;
             let changed = outcome.changed_count > 0 || outcome.rewritten;
             Ok(PlannedNotificationWrite {
