@@ -49,7 +49,7 @@ pub fn read_notifications_snapshot_with_options(
 
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let lock = open_lock_file(path)?;
-    lock.lock_shared().map_err(|e| e.to_string())?;
+    FileExt::lock_shared(&lock).map_err(|e| e.to_string())?;
     let result = read_rows(path, include_dismissed);
     unlock(lock)?;
     let (notifications, stats) = result?;
@@ -239,7 +239,7 @@ pub fn plan_notification_state_update_export(
     };
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let lock = open_lock_file(path)?;
-    lock.lock_shared().map_err(|e| e.to_string())?;
+    FileExt::lock_shared(&lock).map_err(|e| e.to_string())?;
     let result = (|| {
         let (rows, stats_before) = read_rows_unlocked(path, true)?;
         let (outcome, planned_rows) = notification_state_update_plan_from_rows(

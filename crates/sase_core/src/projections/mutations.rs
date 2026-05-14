@@ -429,7 +429,7 @@ pub fn apply_source_export(
             append_jsonl(target, plan.content_utf8.as_bytes())?;
         }
     }
-    lock.unlock().map_err(SourceExportApplyError::Io)?;
+    FileExt::unlock(&lock).map_err(SourceExportApplyError::Io)?;
     Ok(source_fingerprint_from_path(target, true))
 }
 
@@ -572,6 +572,7 @@ fn acquire_export_lock(target: &Path) -> Result<File, SourceExportApplyError> {
     }
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(lock_path)
         .map_err(SourceExportApplyError::Io)?;
