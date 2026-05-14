@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ProjectionError;
 
-pub const PROJECTION_SCHEMA_VERSION: u32 = 6;
+pub const PROJECTION_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationWire {
@@ -594,6 +594,47 @@ const MIGRATIONS: &[Migration] = &[
 
         CREATE INDEX IF NOT EXISTS idx_catalog_events_type_seq
             ON catalog_events(project_id, event_type, seq);
+    "#,
+    },
+    Migration {
+        version: 7,
+        name: "source_export_outbox",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS source_export_outbox (
+            export_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_seq INTEGER NOT NULL REFERENCES event_log(seq) ON DELETE CASCADE,
+            target_path TEXT NOT NULL,
+            export_kind TEXT NOT NULL,
+            expected_fingerprint_json TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            repair_context_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            applied_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_export_outbox_status
+            ON source_export_outbox(status, event_seq, export_id);
+        CREATE INDEX IF NOT EXISTS idx_source_export_outbox_event
+            ON source_export_outbox(event_seq, export_id);
+        CREATE INDEX IF NOT EXISTS idx_source_export_outbox_target
+            ON source_export_outbox(target_path, status);
+
+        CREATE TABLE IF NOT EXISTS source_export_attempts (
+            attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            export_id INTEGER NOT NULL REFERENCES source_export_outbox(export_id) ON DELETE CASCADE,
+            attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL,
+            message TEXT,
+            actual_fingerprint_json TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_export_attempts_export
+            ON source_export_attempts(export_id, attempt_id);
     "#,
     },
 ];

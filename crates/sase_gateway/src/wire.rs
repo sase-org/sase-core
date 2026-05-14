@@ -12,10 +12,12 @@ pub use sase_core::projections::{
     CatalogReadListRequestWire, CatalogReadResponseWire,
     ChangeSpecReadDetailRequestWire, ChangeSpecReadDetailResponseWire,
     ChangeSpecReadListRequestWire, ChangeSpecReadListResponseWire,
+    LocalDaemonMutationOutcomeWire, MutationActorWire, MutationConflictWire,
     NotificationPendingActionsReadResponseWire,
     NotificationProjectionFacetCountsWire, NotificationReadDetailRequestWire,
     NotificationReadDetailResponseWire, NotificationReadListRequestWire,
     NotificationReadListResponseWire, ProjectionPageRequestWire,
+    SourceExportPlanWire, SourceFingerprintWire,
     PROJECTION_READ_WIRE_SCHEMA_VERSION,
 };
 
@@ -286,6 +288,7 @@ pub enum LocalDaemonRequestPayloadWire {
     Capabilities,
     List(LocalDaemonListRequestWire),
     Read(LocalDaemonReadRequestWire),
+    Write(LocalDaemonWriteRequestWire),
     Events(LocalDaemonEventRequestWire),
     Rebuild(LocalDaemonRebuildRequestWire),
     IndexingStatus(LocalDaemonIndexingStatusRequestWire),
@@ -303,6 +306,7 @@ pub enum LocalDaemonResponsePayloadWire {
     Capabilities(LocalDaemonCapabilitiesResponseWire),
     List(LocalDaemonListResponseWire),
     Read(Box<LocalDaemonReadResponseWire>),
+    Write(LocalDaemonWriteResponseWire),
     Events(LocalDaemonEventBatchWire),
     Rebuild(LocalDaemonRebuildResponseWire),
     IndexingStatus(LocalDaemonIndexingStatusResponseWire),
@@ -325,6 +329,29 @@ pub struct LocalDaemonBatchResponseWire {
     pub request_id: String,
     pub snapshot_id: Option<String>,
     pub payload: LocalDaemonResponsePayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonWriteRequestWire {
+    pub schema_version: u32,
+    pub surface: String,
+    pub project_id: String,
+    pub idempotency_key: String,
+    pub actor: MutationActorWire,
+    #[serde(default)]
+    pub payload: JsonValue,
+    #[serde(default)]
+    pub expected_source_fingerprints: Vec<SourceFingerprintWire>,
+    #[serde(default)]
+    pub source_exports: Vec<SourceExportPlanWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonWriteResponseWire {
+    pub schema_version: u32,
+    pub surface: String,
+    pub outcome: LocalDaemonMutationOutcomeWire,
+    pub fallback: LocalDaemonFallbackWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -684,6 +711,11 @@ pub enum LocalDaemonErrorCodeWire {
     PayloadTooLarge,
     ResourceNotFound,
     HostAdapterRequired,
+    ConflictStaleSource,
+    ExportPendingRepair,
+    IdempotencyConflict,
+    UnsupportedMutation,
+    SourceLockBusy,
     DaemonUnavailable,
     Internal,
 }

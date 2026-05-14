@@ -959,7 +959,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "length_prefix": "u32 big-endian byte length",
                 "max_payload_bytes": LOCAL_DAEMON_MAX_PAYLOAD_BYTES
             },
-            "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, and shadow-index diagnostics are available; current source stores remain authoritative for writes and unsupported read surfaces"
+            "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for writes and unsupported read surfaces"
         },
         "versioning": {
             "contract_name": "sase_local_daemon_framed_json_v1",
@@ -980,6 +980,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
         "capabilities": [
             "health.read",
             "capabilities.read",
+            "writes.contract",
             "mocked.list",
             "mocked.events",
             "notifications.read",
@@ -1036,6 +1037,13 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "success": "LocalDaemonReadResponseWire",
                 "errors": ["LocalDaemonErrorWire"],
                 "notes": "typed projection read request/response union for ChangeSpecs, agents, notifications, beads, catalogs, snippets, and file history; Phase 5A implements notifications.read and returns typed fallback errors for the remaining surfaces"
+            },
+            {
+                "type": "write",
+                "request": "LocalDaemonWriteRequestWire",
+                "success": "LocalDaemonWriteResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "Phase 6A publishes the shared write envelope, idempotency key, actor metadata, stale-source fingerprint fields, and source-export plans; no production write surface is advertised yet, so unsupported surfaces return unsupported_mutation with direct-writer fallback metadata"
             },
             {
                 "type": "events",
@@ -1103,6 +1111,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "capabilities": "no fields",
                 "list": "LocalDaemonListRequestWire",
                 "read": "LocalDaemonReadRequestWire",
+                "write": "LocalDaemonWriteRequestWire",
                 "events": "LocalDaemonEventRequestWire",
                 "rebuild": "LocalDaemonRebuildRequestWire",
                 "indexing_status": "LocalDaemonIndexingStatusRequestWire",
@@ -1115,6 +1124,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "capabilities": "LocalDaemonCapabilitiesResponseWire",
                 "list": "LocalDaemonListResponseWire",
                 "read": "LocalDaemonReadResponseWire",
+                "write": "LocalDaemonWriteResponseWire",
                 "events": "LocalDaemonEventBatchWire",
                 "rebuild": "LocalDaemonRebuildResponseWire",
                 "indexing_status": "LocalDaemonIndexingStatusResponseWire",
@@ -1131,6 +1141,69 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "request_id": "string",
                 "snapshot_id": "string|null",
                 "payload": "LocalDaemonResponsePayloadWire"
+            },
+            "LocalDaemonWriteRequestWire": {
+                "schema_version": "u32",
+                "surface": "string; future stable write surface such as notifications.mark_read",
+                "project_id": "string",
+                "idempotency_key": "string; client-provided stable key required for retries",
+                "actor": "MutationActorWire",
+                "payload": "json",
+                "expected_source_fingerprints": "SourceFingerprintWire[]",
+                "source_exports": "SourceExportPlanWire[]; planned source-store writes recorded in the outbox by vertical write phases"
+            },
+            "LocalDaemonWriteResponseWire": {
+                "schema_version": "u32",
+                "surface": "string",
+                "outcome": "LocalDaemonMutationOutcomeWire",
+                "fallback": "LocalDaemonFallbackWire"
+            },
+            "MutationActorWire": {
+                "schema_version": "u32",
+                "actor_type": "cli|tui|mobile|agent|test|other",
+                "name": "string",
+                "version": "string|null",
+                "runtime": "string|null"
+            },
+            "LocalDaemonMutationOutcomeWire": {
+                "schema_version": "u32",
+                "event_seq": "i64",
+                "event_type": "string",
+                "duplicate": "bool",
+                "changed": "bool",
+                "resource_handle": "string|null",
+                "source_exports": "SourceExportReportWire[]",
+                "projection_snapshot": "json|null"
+            },
+            "SourceExportPlanWire": {
+                "schema_version": "u32",
+                "target_path": "string",
+                "kind": "atomic_json|jsonl_append|project_file",
+                "expected_fingerprint": "SourceFingerprintWire|null",
+                "content_sha256": "hex sha256 of content_utf8",
+                "content_utf8": "string",
+                "repair_context": "json|null"
+            },
+            "SourceExportReportWire": {
+                "schema_version": "u32",
+                "export_id": "i64",
+                "event_seq": "i64",
+                "target_path": "string",
+                "kind": "atomic_json|jsonl_append|project_file",
+                "status": "pending|applied|failed|conflict",
+                "attempts": "i64",
+                "content_sha256": "string",
+                "message": "string|null",
+                "actual_fingerprint": "SourceFingerprintWire|null"
+            },
+            "MutationConflictWire": {
+                "schema_version": "u32",
+                "kind": "conflict_stale_source|idempotency_conflict|source_lock_busy|unsupported_mutation",
+                "message": "string",
+                "target": "string|null",
+                "expected_fingerprint": "SourceFingerprintWire|null",
+                "actual_fingerprint": "SourceFingerprintWire|null",
+                "details": "json|null"
             },
             "LocalDaemonHealthResponseWire": {
                 "schema_version": "u32",
@@ -1450,6 +1523,11 @@ pub fn local_daemon_contract_snapshot() -> Value {
                     "payload_too_large",
                     "resource_not_found",
                     "host_adapter_required",
+                    "conflict_stale_source",
+                    "export_pending_repair",
+                    "idempotency_conflict",
+                    "unsupported_mutation",
+                    "source_lock_busy",
                     "daemon_unavailable",
                     "internal"
                 ],

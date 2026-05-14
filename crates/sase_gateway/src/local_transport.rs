@@ -39,7 +39,8 @@ use crate::{
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonWriteRequestWire, ProjectionPageRequestWire,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -229,6 +230,9 @@ fn handle_payload(
         }
         LocalDaemonRequestPayloadWire::Read(request) => {
             handle_read_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::Write(request) => {
+            handle_write_payload(request)
         }
         LocalDaemonRequestPayloadWire::Events(request) => {
             LocalDaemonResponsePayloadWire::Events(event_batch_response(
@@ -553,6 +557,12 @@ fn handle_read_payload(
     }
 }
 
+fn handle_write_payload(
+    request: LocalDaemonWriteRequestWire,
+) -> LocalDaemonResponsePayloadWire {
+    LocalDaemonResponsePayloadWire::Error(unsupported_write_error(&request))
+}
+
 fn notification_list_payload(
     request: LocalDaemonReadRequestWire,
     state: &DaemonState,
@@ -774,6 +784,25 @@ fn unsupported_read_error(surface: &str) -> LocalDaemonErrorWire {
     )
 }
 
+fn unsupported_write_error(
+    request: &LocalDaemonWriteRequestWire,
+) -> LocalDaemonErrorWire {
+    local_error(
+        LocalDaemonErrorCodeWire::UnsupportedMutation,
+        format!(
+            "local daemon write surface '{}' is not implemented",
+            request.surface
+        ),
+        false,
+        Some("payload.surface".to_string()),
+        Some(json!({
+            "capability": format!("{}.write", request.surface),
+            "idempotency_key": request.idempotency_key,
+            "fallbackable": true,
+        })),
+    )
+}
+
 fn projection_error(
     error: crate::projection_service::ProjectionServiceError,
 ) -> LocalDaemonErrorWire {
@@ -901,6 +930,7 @@ fn local_daemon_capabilities() -> Vec<String> {
     vec![
         "health.read".to_string(),
         "capabilities.read".to_string(),
+        "writes.contract".to_string(),
         "mocked.list".to_string(),
         "mocked.events".to_string(),
         "notifications.read".to_string(),
@@ -1181,8 +1211,8 @@ mod tests {
         projection_service::ProjectionService,
         wire::{
             GatewayBuildWire, LocalDaemonClientWire,
-            LocalDaemonPageRequestWire, ProjectionPageRequestWire,
-            LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            LocalDaemonPageRequestWire, MutationActorWire,
+            ProjectionPageRequestWire, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         },
     };
     use sase_core::notifications::NotificationWire;
@@ -1361,6 +1391,48 @@ mod tests {
             }
             other => {
                 panic!("expected unsupported collection error, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_write_surface_returns_typed_fallback_error() {
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "notifications.mark_read".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "write-key-1".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({"notification_id": "n1"}),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &test_state());
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Error(error) => {
+                assert_eq!(
+                    error.code,
+                    LocalDaemonErrorCodeWire::UnsupportedMutation
+                );
+                assert!(error.fallback.available);
+                assert_eq!(
+                    error.details.unwrap()["idempotency_key"],
+                    json!("write-key-1")
+                );
+            }
+            other => {
+                panic!("expected unsupported write error, got {other:?}")
             }
         }
     }

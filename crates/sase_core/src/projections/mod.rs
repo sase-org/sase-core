@@ -15,6 +15,7 @@ pub mod event;
 pub mod indexing;
 pub mod maintenance;
 pub mod migrations;
+pub mod mutations;
 pub mod notifications;
 pub mod read;
 pub mod rebuild;
@@ -135,6 +136,15 @@ pub use maintenance::{
 pub use migrations::{
     applied_migrations, known_migrations, run_migrations, AppliedMigrationWire,
     MigrationWire, PROJECTION_SCHEMA_VERSION,
+};
+pub use mutations::{
+    apply_source_export, list_pending_source_exports_tx,
+    mark_source_export_applied_tx, mark_source_export_failed_tx,
+    retry_source_export_once_tx, source_export_row_tx,
+    LocalDaemonMutationOutcomeWire, MutationActorWire,
+    MutationConflictKindWire, MutationConflictWire, SourceExportKindWire,
+    SourceExportOutboxRowWire, SourceExportPlanWire, SourceExportReportWire,
+    SourceExportStatusWire, MUTATION_WIRE_SCHEMA_VERSION,
 };
 pub use notifications::{
     notification_append_event_request, notification_backfill_event_requests,

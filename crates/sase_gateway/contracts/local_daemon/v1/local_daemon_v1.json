@@ -8,6 +8,7 @@
   "capabilities": [
     "health.read",
     "capabilities.read",
+    "writes.contract",
     "mocked.list",
     "mocked.events",
     "notifications.read",
@@ -169,6 +170,11 @@
         "payload_too_large",
         "resource_not_found",
         "host_adapter_required",
+        "conflict_stale_source",
+        "export_pending_repair",
+        "idempotency_conflict",
+        "unsupported_mutation",
+        "source_lock_busy",
         "daemon_unavailable",
         "internal"
       ],
@@ -336,6 +342,16 @@
       "snapshot_id": "string",
       "stable_handle": "string|null"
     },
+    "LocalDaemonMutationOutcomeWire": {
+      "changed": "bool",
+      "duplicate": "bool",
+      "event_seq": "i64",
+      "event_type": "string",
+      "projection_snapshot": "json|null",
+      "resource_handle": "string|null",
+      "schema_version": "u32",
+      "source_exports": "SourceExportReportWire[]"
+    },
     "LocalDaemonPageRequestWire": {
       "cursor": "string|null",
       "limit": "u32; default 100, max 500"
@@ -425,7 +441,8 @@
       "list": "LocalDaemonListRequestWire",
       "read": "LocalDaemonReadRequestWire",
       "rebuild": "LocalDaemonRebuildRequestWire",
-      "verify": "LocalDaemonIndexingVerifyRequestWire"
+      "verify": "LocalDaemonIndexingVerifyRequestWire",
+      "write": "LocalDaemonWriteRequestWire"
     },
     "LocalDaemonResponseEnvelopeWire": {
       "payload": "LocalDaemonResponsePayloadWire",
@@ -446,7 +463,40 @@
       "list": "LocalDaemonListResponseWire",
       "read": "LocalDaemonReadResponseWire",
       "rebuild": "LocalDaemonRebuildResponseWire",
-      "verify": "LocalDaemonIndexingVerifyResponseWire"
+      "verify": "LocalDaemonIndexingVerifyResponseWire",
+      "write": "LocalDaemonWriteResponseWire"
+    },
+    "LocalDaemonWriteRequestWire": {
+      "actor": "MutationActorWire",
+      "expected_source_fingerprints": "SourceFingerprintWire[]",
+      "idempotency_key": "string; client-provided stable key required for retries",
+      "payload": "json",
+      "project_id": "string",
+      "schema_version": "u32",
+      "source_exports": "SourceExportPlanWire[]; planned source-store writes recorded in the outbox by vertical write phases",
+      "surface": "string; future stable write surface such as notifications.mark_read"
+    },
+    "LocalDaemonWriteResponseWire": {
+      "fallback": "LocalDaemonFallbackWire",
+      "outcome": "LocalDaemonMutationOutcomeWire",
+      "schema_version": "u32",
+      "surface": "string"
+    },
+    "MutationActorWire": {
+      "actor_type": "cli|tui|mobile|agent|test|other",
+      "name": "string",
+      "runtime": "string|null",
+      "schema_version": "u32",
+      "version": "string|null"
+    },
+    "MutationConflictWire": {
+      "actual_fingerprint": "SourceFingerprintWire|null",
+      "details": "json|null",
+      "expected_fingerprint": "SourceFingerprintWire|null",
+      "kind": "conflict_stale_source|idempotency_conflict|source_lock_busy|unsupported_mutation",
+      "message": "string",
+      "schema_version": "u32",
+      "target": "string|null"
     },
     "NotificationPendingActionsReadResponseWire": {
       "actions": "PendingActionWire[]",
@@ -498,6 +548,27 @@
     "ProjectionSnapshotReadWire": {
       "schema_version": "u32",
       "snapshot_id": "opaque string"
+    },
+    "SourceExportPlanWire": {
+      "content_sha256": "hex sha256 of content_utf8",
+      "content_utf8": "string",
+      "expected_fingerprint": "SourceFingerprintWire|null",
+      "kind": "atomic_json|jsonl_append|project_file",
+      "repair_context": "json|null",
+      "schema_version": "u32",
+      "target_path": "string"
+    },
+    "SourceExportReportWire": {
+      "actual_fingerprint": "SourceFingerprintWire|null",
+      "attempts": "i64",
+      "content_sha256": "string",
+      "event_seq": "i64",
+      "export_id": "i64",
+      "kind": "atomic_json|jsonl_append|project_file",
+      "message": "string|null",
+      "schema_version": "u32",
+      "status": "pending|applied|failed|conflict",
+      "target_path": "string"
     }
   },
   "request_envelope": {
@@ -543,6 +614,15 @@
       "request": "LocalDaemonReadRequestWire",
       "success": "LocalDaemonReadResponseWire",
       "type": "read"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "Phase 6A publishes the shared write envelope, idempotency key, actor metadata, stale-source fingerprint fields, and source-export plans; no production write surface is advertised yet, so unsupported surfaces return unsupported_mutation with direct-writer fallback metadata",
+      "request": "LocalDaemonWriteRequestWire",
+      "success": "LocalDaemonWriteResponseWire",
+      "type": "write"
     },
     {
       "errors": [
@@ -615,7 +695,7 @@
     },
     "implemented": true,
     "phase": "local_transport",
-    "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, and shadow-index diagnostics are available; current source stores remain authoritative for writes and unsupported read surfaces",
+    "production_routing": "health, capabilities, batch, bounded mock reads, notification projection reads, shadow-index diagnostics, and write contract negotiation are available; current source stores remain authoritative for writes and unsupported read surfaces",
     "transport": "unix_domain_socket_framed_json"
   },
   "versioning": {

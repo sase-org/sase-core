@@ -12,6 +12,12 @@ use super::event::{
     EventEnvelopeWire, EventSourceWire, PROJECTION_EVENT_SCHEMA_VERSION,
 };
 use super::migrations::run_migrations;
+use super::mutations::{
+    enqueue_source_exports_tx, list_pending_source_exports_tx,
+    mutation_outcome_for_event, retry_source_export_once_tx,
+    source_exports_for_event_tx, LocalDaemonMutationOutcomeWire,
+    SourceExportOutboxRowWire, SourceExportPlanWire, SourceExportReportWire,
+};
 use super::{
     AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
     ChangeSpecProjectionApplier, NotificationProjectionApplier,
@@ -92,6 +98,57 @@ impl ProjectionDb {
             }
             apply_projected_event_tx(conn, &outcome.event)?;
             Ok(outcome)
+        })
+    }
+
+    pub fn append_mutation_event_with_outbox(
+        &mut self,
+        request: EventAppendRequestWire,
+        resource_handle: Option<String>,
+        source_exports: Vec<SourceExportPlanWire>,
+        projection_snapshot: Option<serde_json::Value>,
+    ) -> Result<LocalDaemonMutationOutcomeWire, ProjectionError> {
+        self.with_immediate_transaction(|conn| {
+            let outcome = append_event_tx(conn, request)?;
+            if outcome.duplicate {
+                let reports =
+                    source_exports_for_event_tx(conn, outcome.event.seq)?;
+                return Ok(mutation_outcome_for_event(
+                    &outcome.event,
+                    true,
+                    resource_handle,
+                    reports,
+                    projection_snapshot,
+                ));
+            }
+            apply_projected_event_tx(conn, &outcome.event)?;
+            let reports = enqueue_source_exports_tx(
+                conn,
+                &outcome.event,
+                &source_exports,
+            )?;
+            Ok(mutation_outcome_for_event(
+                &outcome.event,
+                false,
+                resource_handle,
+                reports,
+                projection_snapshot,
+            ))
+        })
+    }
+
+    pub fn list_pending_source_exports(
+        &self,
+    ) -> Result<Vec<SourceExportOutboxRowWire>, ProjectionError> {
+        list_pending_source_exports_tx(&self.conn)
+    }
+
+    pub fn retry_source_export_once(
+        &mut self,
+        export_id: i64,
+    ) -> Result<SourceExportReportWire, ProjectionError> {
+        self.with_immediate_transaction(|conn| {
+            retry_source_export_once_tx(conn, export_id)
         })
     }
 
