@@ -39,6 +39,10 @@ struct ProviderHostManagerInner {
     total_started: AtomicU64,
     total_completed: AtomicU64,
     total_failed: AtomicU64,
+    total_timeouts: AtomicU64,
+    total_cancellations: AtomicU64,
+    total_backpressure: AtomicU64,
+    total_manifest_denials: AtomicU64,
     cancellations: Mutex<Vec<(String, Arc<AtomicBool>)>>,
 }
 
@@ -50,6 +54,10 @@ pub struct ProviderHostStatus {
     pub total_started: u64,
     pub total_completed: u64,
     pub total_failed: u64,
+    pub total_timeouts: u64,
+    pub total_cancellations: u64,
+    pub total_backpressure: u64,
+    pub total_manifest_denials: u64,
 }
 
 #[derive(Debug)]
@@ -74,6 +82,10 @@ impl ProviderHostManager {
                 total_started: AtomicU64::new(0),
                 total_completed: AtomicU64::new(0),
                 total_failed: AtomicU64::new(0),
+                total_timeouts: AtomicU64::new(0),
+                total_cancellations: AtomicU64::new(0),
+                total_backpressure: AtomicU64::new(0),
+                total_manifest_denials: AtomicU64::new(0),
                 cancellations: Mutex::new(Vec::new()),
             }),
         }
@@ -106,6 +118,9 @@ impl ProviderHostManager {
         }
         let Some(_guard) = self.try_acquire() else {
             self.inner.total_failed.fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .total_backpressure
+                .fetch_add(1, Ordering::Relaxed);
             return error_response(
                 &request.request_id,
                 HostErrorCodeWire::ResourceLimitExceeded,
@@ -143,11 +158,13 @@ impl ProviderHostManager {
                     )
                 {
                     self.inner.total_failed.fetch_add(1, Ordering::Relaxed);
+                    self.record_validation_failure(&error);
                     return response_from_validation_error(
                         &request.request_id,
                         error,
                     );
                 }
+                self.record_response_diagnostics(&response);
                 self.inner.total_completed.fetch_add(1, Ordering::Relaxed);
                 if response.duration_ms == 0 {
                     response.duration_ms = started.elapsed().as_millis() as u64;
@@ -156,6 +173,7 @@ impl ProviderHostManager {
             }
             Err(error) => {
                 self.inner.total_failed.fetch_add(1, Ordering::Relaxed);
+                self.record_call_error(&error);
                 error.into_response(&request.request_id, started.elapsed())
             }
         }
@@ -183,6 +201,19 @@ impl ProviderHostManager {
             total_started: self.inner.total_started.load(Ordering::Relaxed),
             total_completed: self.inner.total_completed.load(Ordering::Relaxed),
             total_failed: self.inner.total_failed.load(Ordering::Relaxed),
+            total_timeouts: self.inner.total_timeouts.load(Ordering::Relaxed),
+            total_cancellations: self
+                .inner
+                .total_cancellations
+                .load(Ordering::Relaxed),
+            total_backpressure: self
+                .inner
+                .total_backpressure
+                .load(Ordering::Relaxed),
+            total_manifest_denials: self
+                .inner
+                .total_manifest_denials
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -225,6 +256,71 @@ impl ProviderHostManager {
                 }
                 Err(next) => current = next,
             }
+        }
+    }
+
+    fn record_call_error(&self, error: &ProviderHostCallError) {
+        match error {
+            ProviderHostCallError::Timeout(_) => {
+                self.inner.total_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+            ProviderHostCallError::Cancelled => {
+                self.inner
+                    .total_cancellations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_response_diagnostics(&self, response: &HostResponseEnvelopeWire) {
+        let Some(error) = response.error.as_ref() else {
+            return;
+        };
+        match error.code {
+            HostErrorCodeWire::HostTimeout => {
+                self.inner.total_timeouts.fetch_add(1, Ordering::Relaxed);
+            }
+            HostErrorCodeWire::HostCancelled => {
+                self.inner
+                    .total_cancellations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            HostErrorCodeWire::OperationUnsupported
+            | HostErrorCodeWire::NetworkDenied
+            | HostErrorCodeWire::ManifestInvalid => {
+                if error
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| target.starts_with("manifest."))
+                {
+                    self.inner
+                        .total_manifest_denials
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_validation_failure(
+        &self,
+        error: &sase_core::provider_host::HostValidationError,
+    ) {
+        let wire = error.to_error_wire();
+        if matches!(
+            wire.code,
+            HostErrorCodeWire::OperationUnsupported
+                | HostErrorCodeWire::NetworkDenied
+                | HostErrorCodeWire::ManifestInvalid
+        ) && wire
+            .target
+            .as_deref()
+            .is_some_and(|target| target.starts_with("manifest."))
+        {
+            self.inner
+                .total_manifest_denials
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -665,6 +761,7 @@ mod tests {
             response.error.unwrap().code,
             HostErrorCodeWire::ResourceLimitExceeded
         );
+        assert_eq!(manager.status().total_backpressure, 1);
     }
 
     #[test]
@@ -676,6 +773,24 @@ mod tests {
         assert!(manager.cancel_request("req"));
         assert!(flag.load(Ordering::SeqCst));
         manager.unregister_cancellation("req");
+    }
+
+    #[test]
+    fn manager_status_counts_timeout_failures() {
+        let manager = ProviderHostManager::new(vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import time; time.sleep(2)".to_string(),
+        ]);
+
+        let response = manager.call_blocking(request("fake.echo", json!({})));
+
+        assert_eq!(response.status, HostResponseStatusWire::Error);
+        assert_eq!(
+            response.error.unwrap().code,
+            HostErrorCodeWire::HostTimeout
+        );
+        assert_eq!(manager.status().total_timeouts, 1);
     }
 
     #[test]

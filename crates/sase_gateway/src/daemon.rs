@@ -261,6 +261,10 @@ impl DaemonState {
                     "total_started": host_status.total_started,
                     "total_completed": host_status.total_completed,
                     "total_failed": host_status.total_failed,
+                    "timeout_count": host_status.total_timeouts,
+                    "cancellation_count": host_status.total_cancellations,
+                    "backpressure_count": host_status.total_backpressure,
+                    "manifest_denial_count": host_status.total_manifest_denials,
                     "resource_policy": self
                         .provider_host_manager
                         .resource_policy_diagnostics(),
