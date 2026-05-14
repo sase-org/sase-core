@@ -22,10 +22,14 @@ use sase_core::projections::{
     agent_archive_bundle_revived_event_request,
     agent_artifact_associated_event_request,
     agent_cleanup_result_recorded_event_request,
-    agent_dismissed_identity_changed_event_request, changespec_handle,
-    notification_append_event_request, notification_projection_counts,
-    notification_projection_detail, notification_projection_page,
-    notification_source_paths, notification_state_update_event_request,
+    agent_dismissed_identity_changed_event_request, agent_lifecycle_detail,
+    agent_projection_active_page, agent_projection_archive_page,
+    agent_projection_artifacts, agent_projection_children,
+    agent_projection_recent_page, agent_projection_search_page,
+    changespec_handle, notification_append_event_request,
+    notification_projection_counts, notification_projection_detail,
+    notification_projection_page, notification_source_paths,
+    notification_state_update_event_request,
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
@@ -33,13 +37,14 @@ use sase_core::projections::{
     workflow_action_response_recorded_event_request,
     workflow_run_created_event_request, workflow_run_updated_event_request,
     AgentArtifactAssociationWire, AgentDismissedIdentityWire,
-    AgentProjectionEventContextWire, BeadMutationWriteRequestWire,
+    AgentProjectionEventContextWire, AgentReadDetailResponseWire,
+    AgentReadListResponseWire, BeadMutationWriteRequestWire,
     BeadProjectionEventContextWire, EventAppendRequestWire, EventSourceWire,
     LocalDaemonMutationOutcomeWire, NotificationPendingActionsReadResponseWire,
     NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
-    ProjectionPayloadBoundWire, ProjectionSnapshotReadWire,
-    SourceExportKindWire, SourceExportPlanWire, SourceExportReportWire,
-    SourceExportStatusWire, SourceFingerprintWire,
+    ProjectionPageInfoWire, ProjectionPayloadBoundWire,
+    ProjectionSnapshotReadWire, SourceExportKindWire, SourceExportPlanWire,
+    SourceExportReportWire, SourceExportStatusWire, SourceFingerprintWire,
     WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
@@ -572,6 +577,26 @@ fn handle_read_payload(
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
     match request {
+        LocalDaemonReadRequestWire::AgentActive(request) => {
+            agent_list_payload(request, state, AgentListKind::Active)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentRecent(request) => {
+            agent_list_payload(request, state, AgentListKind::Recent)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentArchive(request) => {
+            agent_archive_payload(request, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentSearch(request) => {
+            agent_list_payload(request, state, AgentListKind::Search)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentDetail(request) => {
+            agent_detail_payload(request.project_id, request.agent_id, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
         LocalDaemonReadRequestWire::NotificationList(_) => {
             notification_list_payload(request, state)
                 .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
@@ -599,6 +624,200 @@ fn handle_read_payload(
             read_surface_name(&other),
         )),
     }
+}
+
+#[derive(Clone, Copy)]
+enum AgentListKind {
+    Active,
+    Recent,
+    Search,
+}
+
+fn agent_list_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+    kind: AgentListKind,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let entries = match kind {
+                AgentListKind::Active => agent_projection_active_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Recent => agent_projection_recent_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Search => {
+                    let query = request.query.as_deref().unwrap_or("*");
+                    agent_projection_search_page(
+                        db.connection(),
+                        &request.project_id,
+                        query,
+                        limit,
+                        offset,
+                        request.include_hidden,
+                    )?
+                }
+            };
+            Ok(AgentReadListResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: entries
+                        .next_offset
+                        .map(|value| value.to_string()),
+                },
+                entries,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            let variant = match kind {
+                AgentListKind::Active => {
+                    LocalDaemonReadResponseWire::AgentActive(response)
+                }
+                AgentListKind::Recent => {
+                    LocalDaemonReadResponseWire::AgentRecent(response)
+                }
+                AgentListKind::Search => {
+                    LocalDaemonReadResponseWire::AgentSearch(response)
+                }
+            };
+            LocalDaemonResponsePayloadWire::Read(Box::new(variant))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_archive_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            Ok(crate::wire::AgentArchiveReadResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: None,
+                },
+                entries: agent_projection_archive_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                )?,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentArchive(response),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_detail_payload(
+    project_id: String,
+    agent_id: String,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let detail =
+                agent_lifecycle_detail(db.connection(), &project_id, &agent_id)?;
+            let Some(summary) = detail.summary else {
+                return Err(sase_core::projections::ProjectionError::Invariant(
+                    format!("agent '{agent_id}' not found in project '{project_id}'"),
+                ));
+            };
+            let children = agent_projection_children(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            let artifacts = agent_projection_artifacts(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            Ok(AgentReadDetailResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                summary,
+                children,
+                artifacts,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentDetail(Box::new(response)),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn read_cursor_offset(
+    cursor: Option<&str>,
+) -> Result<u32, LocalDaemonErrorWire> {
+    cursor
+        .map(|value| {
+            value.parse::<u32>().map_err(|error| {
+                local_error(
+                    LocalDaemonErrorCodeWire::InvalidRequest,
+                    format!("invalid projection cursor '{value}': {error}"),
+                    false,
+                    Some("page.cursor".to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(0))
 }
 
 fn handle_write_payload(
@@ -2199,6 +2418,7 @@ fn local_daemon_capabilities() -> Vec<String> {
         "health.read".to_string(),
         "capabilities.read".to_string(),
         "writes.contract".to_string(),
+        "agents.read".to_string(),
         "agents.write".to_string(),
         "beads.write".to_string(),
         "changespecs.write".to_string(),
@@ -2493,8 +2713,10 @@ mod tests {
         NotificationWire,
     };
     use sase_core::projections::{
-        notification_append_event_request, EventSourceWire,
-        NotificationProjectionEventContextWire,
+        agent_lifecycle_transitioned_event_request,
+        notification_append_event_request, AgentLifecycleProjectionWire,
+        AgentLifecycleStatusWire, AgentProjectionEventContextWire,
+        EventSourceWire, NotificationProjectionEventContextWire,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -3320,6 +3542,85 @@ mod tests {
             other => {
                 panic!("expected notification read response, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn agent_read_surfaces_use_lifecycle_projection_rows() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        projection_service
+            .write_blocking(|db| {
+                db.append_agent_event(
+                    agent_lifecycle_transitioned_event_request(
+                        AgentProjectionEventContextWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            created_at: Some(
+                                "2026-05-14T06:00:00Z".to_string(),
+                            ),
+                            source: EventSourceWire {
+                                source_type: "test".to_string(),
+                                name: "local-transport-test".to_string(),
+                                ..EventSourceWire::default()
+                            },
+                            host_id: "host-a".to_string(),
+                            project_id: "demo".to_string(),
+                            idempotency_key: Some("agent-read-row".to_string()),
+                            causality: Vec::new(),
+                            source_path: None,
+                            source_revision: None,
+                        },
+                        AgentLifecycleProjectionWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            agent_id: "agent:demo:queued-1".to_string(),
+                            lifecycle_status: AgentLifecycleStatusWire::Queued,
+                            project_name: Some("demo".to_string()),
+                            batch_id: Some("batch-1".to_string()),
+                            queue_id: Some("default".to_string()),
+                            ..AgentLifecycleProjectionWire::default()
+                        },
+                    )?,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+
+        let payload =
+            serde_json::to_vec(&request(LocalDaemonRequestPayloadWire::Read(
+                LocalDaemonReadRequestWire::AgentActive(
+                    crate::wire::AgentReadListRequestWire {
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        page: ProjectionPageRequestWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            limit: 10,
+                            cursor: None,
+                        },
+                        project_id: "demo".to_string(),
+                        include_hidden: false,
+                        query: None,
+                    },
+                ),
+            )))
+            .unwrap();
+
+        match response_for_frame(&payload, &state).payload {
+            LocalDaemonResponsePayloadWire::Read(response) => match *response {
+                LocalDaemonReadResponseWire::AgentActive(response) => {
+                    assert_eq!(response.entries.entries.len(), 1);
+                    let row = &response.entries.entries[0];
+                    assert_eq!(row.status, "queued");
+                    assert_eq!(row.batch_id.as_deref(), Some("batch-1"));
+                    assert_eq!(row.queue_id.as_deref(), Some("default"));
+                }
+                other => {
+                    panic!("expected agent active response, got {other:?}")
+                }
+            },
+            other => panic!("expected read response, got {other:?}"),
         }
     }
 
