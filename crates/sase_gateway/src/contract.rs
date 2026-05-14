@@ -1102,6 +1102,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "notifications.write",
             "workflows.write",
             "projection.rebuild",
+            "projection.checkpoint",
+            "projection.backup",
+            "projection.restore",
             "indexing.status",
             "indexing.rebuild",
             "indexing.verify",
@@ -1175,6 +1178,34 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "success": "LocalDaemonRebuildResponseWire",
                 "errors": ["LocalDaemonErrorWire"],
                 "notes": "runs source-store backfill by default; storage_reset_only preserves the explicit projection reset/replay recovery path"
+            },
+            {
+                "type": "projection_checkpoint",
+                "request": "LocalDaemonProjectionCheckpointRequestWire",
+                "success": "LocalDaemonProjectionCheckpointResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "checkpoints projection WAL through the live daemon with an explicit SQLite checkpoint mode"
+            },
+            {
+                "type": "projection_backup",
+                "request": "LocalDaemonProjectionBackupRequestWire",
+                "success": "LocalDaemonProjectionBackupResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "creates a projection-only SQLite snapshot under run_root/backups by default and writes metadata"
+            },
+            {
+                "type": "projection_list_backups",
+                "request": "LocalDaemonProjectionListBackupsRequestWire",
+                "success": "LocalDaemonProjectionListBackupsResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "lists recent metadata-backed projection snapshots"
+            },
+            {
+                "type": "projection_restore",
+                "request": "LocalDaemonProjectionRestoreRequestWire",
+                "success": "LocalDaemonProjectionRestoreResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "restores only the runtime projection database; live restore requires an explicit recovery guard"
             },
             {
                 "type": "indexing_status",
@@ -1259,6 +1290,10 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "write": "LocalDaemonWriteRequestWire",
                 "events": "LocalDaemonEventRequestWire",
                 "rebuild": "LocalDaemonRebuildRequestWire",
+                "projection_checkpoint": "LocalDaemonProjectionCheckpointRequestWire",
+                "projection_backup": "LocalDaemonProjectionBackupRequestWire",
+                "projection_list_backups": "LocalDaemonProjectionListBackupsRequestWire",
+                "projection_restore": "LocalDaemonProjectionRestoreRequestWire",
                 "indexing_status": "LocalDaemonIndexingStatusRequestWire",
                 "verify": "LocalDaemonIndexingVerifyRequestWire",
                 "diff": "LocalDaemonIndexingDiffRequestWire",
@@ -1276,6 +1311,10 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "write": "LocalDaemonWriteResponseWire",
                 "events": "LocalDaemonEventBatchWire",
                 "rebuild": "LocalDaemonRebuildResponseWire",
+                "projection_checkpoint": "LocalDaemonProjectionCheckpointResponseWire",
+                "projection_backup": "LocalDaemonProjectionBackupResponseWire",
+                "projection_list_backups": "LocalDaemonProjectionListBackupsResponseWire",
+                "projection_restore": "LocalDaemonProjectionRestoreResponseWire",
                 "indexing_status": "LocalDaemonIndexingStatusResponseWire",
                 "verify": "LocalDaemonIndexingVerifyResponseWire",
                 "diff": "LocalDaemonIndexingDiffResponseWire",
@@ -1656,7 +1695,80 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "limitation": "string|null",
                 "report": "ProjectionRebuildReportWire JSON or source backfill report JSON",
                 "source_exports": "SourceExportRepairSummary JSON after safe pending-export retries",
-                "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]"
+                "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]",
+                "elapsed_ms": "u64",
+                "next_command": "string|null"
+            },
+            "LocalDaemonProjectionCheckpointRequestWire": {
+                "mode": "passive|full|restart|truncate"
+            },
+            "LocalDaemonProjectionCheckpointResponseWire": {
+                "schema_version": "u32",
+                "report": "ProjectionCheckpointReportWire"
+            },
+            "LocalDaemonProjectionBackupRequestWire": {
+                "path": "string|null; optional .sqlite path under run_root/backups"
+            },
+            "LocalDaemonProjectionBackupResponseWire": {
+                "schema_version": "u32",
+                "report": "ProjectionBackupReportWire"
+            },
+            "LocalDaemonProjectionListBackupsRequestWire": {
+                "limit": "u32|null"
+            },
+            "LocalDaemonProjectionListBackupsResponseWire": {
+                "schema_version": "u32",
+                "backups": "ProjectionBackupListWire"
+            },
+            "LocalDaemonProjectionRestoreRequestWire": {
+                "path": "string; backup .sqlite path under run_root/backups",
+                "live_recovery": "bool; required true for live daemon restore",
+                "allow_host_mismatch": "bool"
+            },
+            "LocalDaemonProjectionRestoreResponseWire": {
+                "schema_version": "u32",
+                "report": "ProjectionRestoreReportWire"
+            },
+            "ProjectionCheckpointReportWire": {
+                "schema_version": "u32",
+                "mode": "passive|full|restart|truncate",
+                "busy": "i64",
+                "log_frames": "i64",
+                "checkpointed_frames": "i64"
+            },
+            "ProjectionBackupMetadataWire": {
+                "schema_version": "u32",
+                "backup_format_version": "u32",
+                "daemon_version": "string",
+                "core_version": "string",
+                "host_identity": "string",
+                "source_sase_home": "string",
+                "created_at": "rfc3339",
+                "projection_schema": "u32",
+                "event_max_sequence": "i64",
+                "source_export_summary": "json",
+                "original_db_path": "string",
+                "snapshot_path": "string"
+            },
+            "ProjectionBackupReportWire": {
+                "schema_version": "u32",
+                "path": "string",
+                "metadata_path": "string",
+                "bytes": "u64",
+                "metadata": "ProjectionBackupMetadataWire"
+            },
+            "ProjectionBackupListWire": {
+                "schema_version": "u32",
+                "backups": "ProjectionBackupReportWire[]"
+            },
+            "ProjectionRestoreReportWire": {
+                "schema_version": "u32",
+                "backup_path": "string",
+                "restored_path": "string",
+                "bytes": "u64",
+                "replaced_existing": "bool",
+                "projection_only": "bool",
+                "metadata": "ProjectionBackupMetadataWire"
             },
             "LocalDaemonIndexingStatusRequestWire": {
                 "surface": "LocalDaemonIndexingSurfaceWire; defaults all",
@@ -1689,7 +1801,8 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "records": "ShadowDiffRecordWire[]",
                 "counts": "ShadowDiffCountsWire",
                 "next_cursor": "string|null",
-                "bounded": "LocalDaemonPayloadBoundWire"
+                "bounded": "LocalDaemonPayloadBoundWire",
+                "next_command": "string|null"
             },
             "LocalDaemonSchedulerStatusRequestWire": {
                 "schema_version": "u32",
@@ -1772,6 +1885,12 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "queued_changes": "u64",
                 "watcher_active": "bool",
                 "diff_counts": "ShadowDiffCountsWire",
+                "scanned_sources": "u64",
+                "indexed_rows": "u64",
+                "skipped_rows": "u64",
+                "parse_failures": "u64",
+                "elapsed_ms": "u64",
+                "next_command": "string|null",
                 "message": "string|null"
             },
             "LocalDaemonErrorWire": {

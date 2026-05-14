@@ -16,7 +16,10 @@ pub use sase_core::projections::{
     NotificationPendingActionsReadResponseWire,
     NotificationProjectionFacetCountsWire, NotificationReadDetailRequestWire,
     NotificationReadDetailResponseWire, NotificationReadListRequestWire,
-    NotificationReadListResponseWire, ProjectionPageRequestWire,
+    NotificationReadListResponseWire, ProjectionBackupListWire,
+    ProjectionBackupMetadataWire, ProjectionBackupReportWire,
+    ProjectionCheckpointReportWire, ProjectionPageRequestWire,
+    ProjectionRestoreReportWire, ProjectionWalCheckpointModeWire,
     SchedulerBatchStatusWire, SchedulerBatchSubmitRequestWire,
     SchedulerBatchSubmitResponseWire, SchedulerCancelRequestWire,
     SourceExportPlanWire, SourceFingerprintWire,
@@ -308,6 +311,10 @@ pub enum LocalDaemonRequestPayloadWire {
     Write(LocalDaemonWriteRequestWire),
     Events(LocalDaemonEventRequestWire),
     Rebuild(LocalDaemonRebuildRequestWire),
+    ProjectionCheckpoint(LocalDaemonProjectionCheckpointRequestWire),
+    ProjectionBackup(LocalDaemonProjectionBackupRequestWire),
+    ProjectionListBackups(LocalDaemonProjectionListBackupsRequestWire),
+    ProjectionRestore(LocalDaemonProjectionRestoreRequestWire),
     IndexingStatus(LocalDaemonIndexingStatusRequestWire),
     Verify(LocalDaemonIndexingVerifyRequestWire),
     Diff(LocalDaemonIndexingDiffRequestWire),
@@ -330,6 +337,10 @@ pub enum LocalDaemonResponsePayloadWire {
     Write(LocalDaemonWriteResponseWire),
     Events(LocalDaemonEventBatchWire),
     Rebuild(LocalDaemonRebuildResponseWire),
+    ProjectionCheckpoint(LocalDaemonProjectionCheckpointResponseWire),
+    ProjectionBackup(LocalDaemonProjectionBackupResponseWire),
+    ProjectionListBackups(LocalDaemonProjectionListBackupsResponseWire),
+    ProjectionRestore(LocalDaemonProjectionRestoreResponseWire),
     IndexingStatus(LocalDaemonIndexingStatusResponseWire),
     Verify(LocalDaemonIndexingVerifyResponseWire),
     Diff(LocalDaemonIndexingDiffResponseWire),
@@ -462,6 +473,61 @@ pub struct LocalDaemonRebuildResponseWire {
     pub source_exports: JsonValue,
     #[serde(default)]
     pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionCheckpointRequestWire {
+    #[serde(default)]
+    pub mode: ProjectionWalCheckpointModeWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionCheckpointResponseWire {
+    pub schema_version: u32,
+    pub report: ProjectionCheckpointReportWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionBackupRequestWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionBackupResponseWire {
+    pub schema_version: u32,
+    pub report: ProjectionBackupReportWire,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionListBackupsRequestWire {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionListBackupsResponseWire {
+    pub schema_version: u32,
+    pub backups: ProjectionBackupListWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionRestoreRequestWire {
+    pub path: String,
+    #[serde(default)]
+    pub live_recovery: bool,
+    #[serde(default)]
+    pub allow_host_mismatch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonProjectionRestoreResponseWire {
+    pub schema_version: u32,
+    pub report: ProjectionRestoreReportWire,
 }
 
 #[derive(
@@ -529,6 +595,8 @@ pub struct LocalDaemonIndexingDiffResponseWire {
     pub counts: ShadowDiffCountsWire,
     pub next_cursor: Option<String>,
     pub bounded: LocalDaemonPayloadBoundWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,6 +611,18 @@ pub struct LocalDaemonIndexingSurfaceSummaryWire {
     pub queued_changes: u64,
     pub watcher_active: bool,
     pub diff_counts: ShadowDiffCountsWire,
+    #[serde(default)]
+    pub scanned_sources: u64,
+    #[serde(default)]
+    pub indexed_rows: u64,
+    #[serde(default)]
+    pub skipped_rows: u64,
+    #[serde(default)]
+    pub parse_failures: u64,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

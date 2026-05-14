@@ -28,6 +28,9 @@
     "notifications.write",
     "workflows.write",
     "projection.rebuild",
+    "projection.checkpoint",
+    "projection.backup",
+    "projection.restore",
     "indexing.status",
     "indexing.rebuild",
     "indexing.verify",
@@ -443,6 +446,7 @@
     "LocalDaemonIndexingDiffResponseWire": {
       "bounded": "LocalDaemonPayloadBoundWire",
       "counts": "ShadowDiffCountsWire",
+      "next_command": "string|null",
       "next_cursor": "string|null",
       "project_id": "string|null",
       "records": "ShadowDiffRecordWire[]",
@@ -460,11 +464,17 @@
     },
     "LocalDaemonIndexingSurfaceSummaryWire": {
       "diff_counts": "ShadowDiffCountsWire",
+      "elapsed_ms": "u64",
+      "indexed_rows": "u64",
       "last_indexed_event_seq": "i64|null",
       "message": "string|null",
+      "next_command": "string|null",
+      "parse_failures": "u64",
       "project_id": "string|null",
       "queued_changes": "u64",
+      "scanned_sources": "u64",
       "schema_version": "u32",
+      "skipped_rows": "u64",
       "state": "ok|degraded|stopped|unknown",
       "surface": "LocalDaemonIndexingSurfaceWire",
       "watcher_active": "bool"
@@ -519,6 +529,36 @@
       "max_payload_bytes": "u32",
       "truncated": "bool"
     },
+    "LocalDaemonProjectionBackupRequestWire": {
+      "path": "string|null; optional .sqlite path under run_root/backups"
+    },
+    "LocalDaemonProjectionBackupResponseWire": {
+      "report": "ProjectionBackupReportWire",
+      "schema_version": "u32"
+    },
+    "LocalDaemonProjectionCheckpointRequestWire": {
+      "mode": "passive|full|restart|truncate"
+    },
+    "LocalDaemonProjectionCheckpointResponseWire": {
+      "report": "ProjectionCheckpointReportWire",
+      "schema_version": "u32"
+    },
+    "LocalDaemonProjectionListBackupsRequestWire": {
+      "limit": "u32|null"
+    },
+    "LocalDaemonProjectionListBackupsResponseWire": {
+      "backups": "ProjectionBackupListWire",
+      "schema_version": "u32"
+    },
+    "LocalDaemonProjectionRestoreRequestWire": {
+      "allow_host_mismatch": "bool",
+      "live_recovery": "bool; required true for live daemon restore",
+      "path": "string; backup .sqlite path under run_root/backups"
+    },
+    "LocalDaemonProjectionRestoreResponseWire": {
+      "report": "ProjectionRestoreReportWire",
+      "schema_version": "u32"
+    },
     "LocalDaemonReadRequestWire": {
       "agent_active": "AgentReadListRequestWire",
       "agent_archive": "AgentReadListRequestWire",
@@ -571,8 +611,10 @@
       "surface": "LocalDaemonIndexingSurfaceWire; defaults all"
     },
     "LocalDaemonRebuildResponseWire": {
+      "elapsed_ms": "u64",
       "limitation": "string|null",
       "mode": "source_backfill|projection_storage_rebuild",
+      "next_command": "string|null",
       "project_id": "string|null",
       "report": "ProjectionRebuildReportWire JSON or source backfill report JSON",
       "schema_version": "u32",
@@ -600,6 +642,10 @@
       "host_call": "HostRequestEnvelopeWire",
       "indexing_status": "LocalDaemonIndexingStatusRequestWire",
       "list": "LocalDaemonListRequestWire",
+      "projection_backup": "LocalDaemonProjectionBackupRequestWire",
+      "projection_checkpoint": "LocalDaemonProjectionCheckpointRequestWire",
+      "projection_list_backups": "LocalDaemonProjectionListBackupsRequestWire",
+      "projection_restore": "LocalDaemonProjectionRestoreRequestWire",
       "read": "LocalDaemonReadRequestWire",
       "rebuild": "LocalDaemonRebuildRequestWire",
       "scheduler_cancel": "SchedulerCancelRequestWire",
@@ -626,6 +672,10 @@
       "host_call": "HostResponseEnvelopeWire",
       "indexing_status": "LocalDaemonIndexingStatusResponseWire",
       "list": "LocalDaemonListResponseWire",
+      "projection_backup": "LocalDaemonProjectionBackupResponseWire",
+      "projection_checkpoint": "LocalDaemonProjectionCheckpointResponseWire",
+      "projection_list_backups": "LocalDaemonProjectionListBackupsResponseWire",
+      "projection_restore": "LocalDaemonProjectionRestoreResponseWire",
       "read": "LocalDaemonReadResponseWire",
       "rebuild": "LocalDaemonRebuildResponseWire",
       "scheduler_cancel": "SchedulerBatchStatusWire",
@@ -704,6 +754,38 @@
       "schema_version": "u32",
       "snapshot": "ProjectionSnapshotReadWire"
     },
+    "ProjectionBackupListWire": {
+      "backups": "ProjectionBackupReportWire[]",
+      "schema_version": "u32"
+    },
+    "ProjectionBackupMetadataWire": {
+      "backup_format_version": "u32",
+      "core_version": "string",
+      "created_at": "rfc3339",
+      "daemon_version": "string",
+      "event_max_sequence": "i64",
+      "host_identity": "string",
+      "original_db_path": "string",
+      "projection_schema": "u32",
+      "schema_version": "u32",
+      "snapshot_path": "string",
+      "source_export_summary": "json",
+      "source_sase_home": "string"
+    },
+    "ProjectionBackupReportWire": {
+      "bytes": "u64",
+      "metadata": "ProjectionBackupMetadataWire",
+      "metadata_path": "string",
+      "path": "string",
+      "schema_version": "u32"
+    },
+    "ProjectionCheckpointReportWire": {
+      "busy": "i64",
+      "checkpointed_frames": "i64",
+      "log_frames": "i64",
+      "mode": "passive|full|restart|truncate",
+      "schema_version": "u32"
+    },
     "ProjectionPageInfoWire": {
       "next_cursor": "opaque string|null",
       "schema_version": "u32"
@@ -717,6 +799,15 @@
       "max_payload_bytes": "u32",
       "schema_version": "u32",
       "truncated": "bool"
+    },
+    "ProjectionRestoreReportWire": {
+      "backup_path": "string",
+      "bytes": "u64",
+      "metadata": "ProjectionBackupMetadataWire",
+      "projection_only": "bool",
+      "replaced_existing": "bool",
+      "restored_path": "string",
+      "schema_version": "u32"
     },
     "ProjectionSnapshotReadWire": {
       "schema_version": "u32",
@@ -891,6 +982,42 @@
       "request": "LocalDaemonRebuildRequestWire",
       "success": "LocalDaemonRebuildResponseWire",
       "type": "rebuild"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "checkpoints projection WAL through the live daemon with an explicit SQLite checkpoint mode",
+      "request": "LocalDaemonProjectionCheckpointRequestWire",
+      "success": "LocalDaemonProjectionCheckpointResponseWire",
+      "type": "projection_checkpoint"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "creates a projection-only SQLite snapshot under run_root/backups by default and writes metadata",
+      "request": "LocalDaemonProjectionBackupRequestWire",
+      "success": "LocalDaemonProjectionBackupResponseWire",
+      "type": "projection_backup"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "lists recent metadata-backed projection snapshots",
+      "request": "LocalDaemonProjectionListBackupsRequestWire",
+      "success": "LocalDaemonProjectionListBackupsResponseWire",
+      "type": "projection_list_backups"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "restores only the runtime projection database; live restore requires an explicit recovery guard",
+      "request": "LocalDaemonProjectionRestoreRequestWire",
+      "success": "LocalDaemonProjectionRestoreResponseWire",
+      "type": "projection_restore"
     },
     {
       "errors": [

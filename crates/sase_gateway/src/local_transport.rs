@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    path::Path,
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -80,7 +80,9 @@ use crate::{
         LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
-        LocalDaemonPayloadBoundWire, LocalDaemonReadRequestWire,
+        LocalDaemonPayloadBoundWire, LocalDaemonProjectionBackupRequestWire,
+        LocalDaemonProjectionListBackupsRequestWire,
+        LocalDaemonProjectionRestoreRequestWire, LocalDaemonReadRequestWire,
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
@@ -214,6 +216,31 @@ pub async fn handle_connection(
             state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
             result
         }
+        LocalDaemonRequestPayloadWire::ProjectionCheckpoint(request) => {
+            let payload =
+                handle_projection_checkpoint_payload(request.mode, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
+        LocalDaemonRequestPayloadWire::ProjectionBackup(request) => {
+            let payload = handle_projection_backup_payload(request, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
+        LocalDaemonRequestPayloadWire::ProjectionRestore(request) => {
+            let payload = handle_projection_restore_payload(request, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
         LocalDaemonRequestPayloadWire::Verify(request) => {
             let payload = handle_verify_payload(request, state).await;
             success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
@@ -320,6 +347,36 @@ fn handle_payload(
                 None,
             ))
         }
+        LocalDaemonRequestPayloadWire::ProjectionCheckpoint(_) => {
+            LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::UnsupportedCapability,
+                "projection checkpoint requires a live daemon connection",
+                false,
+                Some("payload".to_string()),
+                None,
+            ))
+        }
+        LocalDaemonRequestPayloadWire::ProjectionBackup(_) => {
+            LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::UnsupportedCapability,
+                "projection backup requires a live daemon connection",
+                false,
+                Some("payload".to_string()),
+                None,
+            ))
+        }
+        LocalDaemonRequestPayloadWire::ProjectionListBackups(request) => {
+            handle_projection_list_backups_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::ProjectionRestore(_) => {
+            LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::UnsupportedCapability,
+                "projection restore requires a live daemon connection",
+                false,
+                Some("payload".to_string()),
+                None,
+            ))
+        }
         LocalDaemonRequestPayloadWire::IndexingStatus(request) => {
             LocalDaemonResponsePayloadWire::IndexingStatus(
                 state
@@ -404,6 +461,254 @@ async fn handle_rebuild_payload(
             Some("projection_db".to_string()),
             Some(state.projection_service.health_details()),
         )),
+    }
+}
+
+async fn handle_projection_checkpoint_payload(
+    mode: sase_core::projections::ProjectionWalCheckpointModeWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    match state.projection_service.checkpoint(mode).await {
+        Ok(report) => LocalDaemonResponsePayloadWire::ProjectionCheckpoint(
+            crate::wire::LocalDaemonProjectionCheckpointResponseWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                report,
+            },
+        ),
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("projection checkpoint failed: {error}"),
+            false,
+            Some("projection_db".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+async fn handle_projection_backup_payload(
+    request: LocalDaemonProjectionBackupRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let backup_path = match backup_path_for_request(request.path, state) {
+        Ok(path) => path,
+        Err(error) => return LocalDaemonResponsePayloadWire::Error(error),
+    };
+    let metadata = projection_backup_metadata(&backup_path, state);
+    match state.projection_service.backup(backup_path, metadata).await {
+        Ok(report) => LocalDaemonResponsePayloadWire::ProjectionBackup(
+            crate::wire::LocalDaemonProjectionBackupResponseWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                report,
+            },
+        ),
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("projection backup failed: {error}"),
+            false,
+            Some("projection_db".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn handle_projection_list_backups_payload(
+    request: LocalDaemonProjectionListBackupsRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let limit = request
+        .limit
+        .unwrap_or(20)
+        .clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    match state
+        .projection_service
+        .list_backups(&state.paths.run_root.join("backups"))
+    {
+        Ok(mut backups) => {
+            backups.backups.truncate(limit as usize);
+            LocalDaemonResponsePayloadWire::ProjectionListBackups(
+                crate::wire::LocalDaemonProjectionListBackupsResponseWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    backups,
+                },
+            )
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("projection backup listing failed: {error}"),
+            false,
+            Some("projection_backups".to_string()),
+            None,
+        )),
+    }
+}
+
+async fn handle_projection_restore_payload(
+    request: LocalDaemonProjectionRestoreRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    if !request.live_recovery {
+        return LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            "live projection restore requires live_recovery=true; stop the daemon for offline restore",
+            false,
+            Some("live_recovery".to_string()),
+            None,
+        ));
+    }
+    let backup_path = PathBuf::from(&request.path);
+    if let Err(error) =
+        ensure_path_under(&backup_path, &state.paths.run_root.join("backups"))
+    {
+        return LocalDaemonResponsePayloadWire::Error(error);
+    }
+    let metadata_path =
+        sase_core::projections::projection_backup_metadata_path(&backup_path);
+    let metadata = match sase_core::projections::read_projection_backup_metadata(
+        &metadata_path,
+    ) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::InvalidRequest,
+                format!("projection backup metadata is unreadable: {error}"),
+                false,
+                Some("path".to_string()),
+                None,
+            ));
+        }
+    };
+    if !request.allow_host_mismatch
+        && metadata.host_identity != state.host_identity
+    {
+        return LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            format!(
+                "projection backup host {} does not match this daemon host {}",
+                metadata.host_identity, state.host_identity
+            ),
+            false,
+            Some("host_identity".to_string()),
+            None,
+        ));
+    }
+    let target_path = crate::projection_service::default_projection_db_path(
+        &state.paths.run_root,
+    );
+    match state
+        .projection_service
+        .restore_backup(backup_path, target_path)
+        .await
+    {
+        Ok(report) => LocalDaemonResponsePayloadWire::ProjectionRestore(
+            crate::wire::LocalDaemonProjectionRestoreResponseWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                report,
+            },
+        ),
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("projection restore failed: {error}"),
+            false,
+            Some("projection_db".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn backup_path_for_request(
+    request_path: Option<String>,
+    state: &DaemonState,
+) -> Result<PathBuf, LocalDaemonErrorWire> {
+    let backups_dir = state.paths.run_root.join("backups");
+    let path = match request_path {
+        Some(raw) => backup_path_under_root(PathBuf::from(raw), &backups_dir)?,
+        None => backups_dir.join(default_backup_file_name()),
+    };
+    ensure_path_under(&path, &backups_dir)?;
+    if path.extension().and_then(|ext| ext.to_str()) != Some("sqlite") {
+        return Err(local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            "projection backup path must end in .sqlite",
+            false,
+            Some("path".to_string()),
+            None,
+        ));
+    }
+    Ok(path)
+}
+
+fn backup_path_under_root(
+    path: PathBuf,
+    root: &Path,
+) -> Result<PathBuf, LocalDaemonErrorWire> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(local_error(
+            LocalDaemonErrorCodeWire::InvalidRequest,
+            "projection backup path must not contain parent-directory components",
+            false,
+            Some("path".to_string()),
+            None,
+        ));
+    }
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(root.join(path))
+    }
+}
+
+fn ensure_path_under(
+    path: &Path,
+    root: &Path,
+) -> Result<(), LocalDaemonErrorWire> {
+    if path.is_absolute() && path.starts_with(root) {
+        return Ok(());
+    }
+    Err(local_error(
+        LocalDaemonErrorCodeWire::InvalidRequest,
+        format!("projection backup path must stay under {}", root.display()),
+        false,
+        Some("path".to_string()),
+        None,
+    ))
+}
+
+fn default_backup_file_name() -> String {
+    format!("projection-{}.sqlite", Utc::now().format("%Y%m%dT%H%M%SZ"))
+}
+
+fn projection_backup_metadata(
+    backup_path: &Path,
+    state: &DaemonState,
+) -> sase_core::projections::ProjectionBackupMetadataWire {
+    let source_export_summary = state
+        .projection_service
+        .health_details()
+        .get("projection_db")
+        .and_then(|projection| projection.get("source_exports"))
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    sase_core::projections::ProjectionBackupMetadataWire {
+        schema_version: sase_core::projections::PROJECTION_EVENT_SCHEMA_VERSION,
+        backup_format_version: 1,
+        daemon_version: state.build.package_version.clone(),
+        core_version: env!("CARGO_PKG_VERSION").to_string(),
+        host_identity: state.host_identity.clone(),
+        source_sase_home: state.paths.sase_home.display().to_string(),
+        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        projection_schema: sase_core::projections::PROJECTION_SCHEMA_VERSION,
+        event_max_sequence: 0,
+        source_export_summary,
+        original_db_path: state
+            .projection_service
+            .status()
+            .path
+            .display()
+            .to_string(),
+        snapshot_path: backup_path.display().to_string(),
     }
 }
 
@@ -2904,6 +3209,9 @@ fn local_daemon_capabilities() -> Vec<String> {
         "scheduler.read".to_string(),
         "scheduler.cancel".to_string(),
         "projection.rebuild".to_string(),
+        "projection.checkpoint".to_string(),
+        "projection.backup".to_string(),
+        "projection.restore".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
         "indexing.verify".to_string(),

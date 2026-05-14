@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use rusqlite::params;
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 use super::db::{max_event_seq_tx, ProjectionDb};
 use super::error::ProjectionError;
@@ -12,6 +13,7 @@ use super::indexing::{
     SourceChangeOperationWire, SourceChangeWire, SourceIdentityWire,
     INDEXING_WIRE_SCHEMA_VERSION,
 };
+use super::migrations::PROJECTION_SCHEMA_VERSION;
 
 pub const DEFAULT_WAL_SOFT_CAP_BYTES: u64 = 1_073_741_824;
 pub const DEFAULT_CHECKPOINT_INTERVAL_SECS: u64 = 600;
@@ -33,6 +35,12 @@ impl ProjectionWalCheckpointModeWire {
             Self::Restart => "RESTART",
             Self::Truncate => "TRUNCATE",
         }
+    }
+}
+
+impl Default for ProjectionWalCheckpointModeWire {
+    fn default() -> Self {
+        Self::Passive
     }
 }
 
@@ -73,7 +81,42 @@ pub struct ProjectionCheckpointReportWire {
 pub struct ProjectionBackupReportWire {
     pub schema_version: u32,
     pub path: String,
+    pub metadata_path: String,
     pub bytes: u64,
+    pub metadata: ProjectionBackupMetadataWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionBackupMetadataWire {
+    pub schema_version: u32,
+    pub backup_format_version: u32,
+    pub daemon_version: String,
+    pub core_version: String,
+    pub host_identity: String,
+    pub source_sase_home: String,
+    pub created_at: String,
+    pub projection_schema: u32,
+    pub event_max_sequence: i64,
+    pub source_export_summary: JsonValue,
+    pub original_db_path: String,
+    pub snapshot_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionBackupListWire {
+    pub schema_version: u32,
+    pub backups: Vec<ProjectionBackupReportWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionRestoreReportWire {
+    pub schema_version: u32,
+    pub backup_path: String,
+    pub restored_path: String,
+    pub bytes: u64,
+    pub replaced_existing: bool,
+    pub projection_only: bool,
+    pub metadata: ProjectionBackupMetadataWire,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +317,28 @@ impl ProjectionDb {
         &self,
         backup_path: &Path,
     ) -> Result<ProjectionBackupReportWire, ProjectionError> {
+        let metadata = ProjectionBackupMetadataWire {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            backup_format_version: 1,
+            daemon_version: "unknown".to_string(),
+            core_version: env!("CARGO_PKG_VERSION").to_string(),
+            host_identity: "unknown".to_string(),
+            source_sase_home: String::new(),
+            created_at: String::new(),
+            projection_schema: PROJECTION_SCHEMA_VERSION,
+            event_max_sequence: max_event_seq_tx(self.connection())?,
+            source_export_summary: JsonValue::Null,
+            original_db_path: String::new(),
+            snapshot_path: backup_path.display().to_string(),
+        };
+        self.backup_vacuum_into_with_metadata(backup_path, metadata)
+    }
+
+    pub fn backup_vacuum_into_with_metadata(
+        &self,
+        backup_path: &Path,
+        mut metadata: ProjectionBackupMetadataWire,
+    ) -> Result<ProjectionBackupReportWire, ProjectionError> {
         if let Some(parent) = backup_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -281,10 +346,20 @@ impl ProjectionDb {
         self.connection()
             .execute("VACUUM main INTO ?1", params![path])?;
         let bytes = fs::metadata(backup_path)?.len();
+        metadata.schema_version = PROJECTION_EVENT_SCHEMA_VERSION;
+        metadata.backup_format_version = 1;
+        metadata.projection_schema = PROJECTION_SCHEMA_VERSION;
+        metadata.event_max_sequence = max_event_seq_tx(self.connection())?;
+        metadata.snapshot_path = backup_path.display().to_string();
+        let metadata_path = projection_backup_metadata_path(backup_path);
+        let metadata_json = serde_json::to_vec_pretty(&metadata)?;
+        fs::write(&metadata_path, metadata_json)?;
         Ok(ProjectionBackupReportWire {
             schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
             path: backup_path.display().to_string(),
+            metadata_path: metadata_path.display().to_string(),
             bytes,
+            metadata,
         })
     }
 
@@ -325,6 +400,93 @@ impl ProjectionDb {
             compacted_event_types,
         })
     }
+}
+
+pub fn projection_backup_metadata_path(backup_path: &Path) -> PathBuf {
+    let file_name = backup_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("projection.sqlite");
+    backup_path.with_file_name(format!("{file_name}.json"))
+}
+
+pub fn list_projection_backups(
+    backups_dir: &Path,
+) -> Result<ProjectionBackupListWire, ProjectionError> {
+    let mut backups = Vec::new();
+    if !backups_dir.exists() {
+        return Ok(ProjectionBackupListWire {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            backups,
+        });
+    }
+    for entry in fs::read_dir(backups_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("sqlite")
+        {
+            continue;
+        }
+        let metadata_path = projection_backup_metadata_path(&path);
+        if !metadata_path.is_file() {
+            continue;
+        }
+        let metadata = read_projection_backup_metadata(&metadata_path)?;
+        let bytes = fs::metadata(&path)?.len();
+        backups.push(ProjectionBackupReportWire {
+            schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+            path: path.display().to_string(),
+            metadata_path: metadata_path.display().to_string(),
+            bytes,
+            metadata,
+        });
+    }
+    backups.sort_by(|left, right| {
+        right
+            .metadata
+            .created_at
+            .cmp(&left.metadata.created_at)
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    Ok(ProjectionBackupListWire {
+        schema_version: PROJECTION_EVENT_SCHEMA_VERSION,
+        backups,
+    })
+}
+
+pub fn read_projection_backup_metadata(
+    metadata_path: &Path,
+) -> Result<ProjectionBackupMetadataWire, ProjectionError> {
+    let bytes = fs::read(metadata_path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+pub fn validate_projection_backup_file(
+    backup_path: &Path,
+) -> Result<(), ProjectionError> {
+    if !backup_path.is_file() {
+        return Err(ProjectionError::Invariant(format!(
+            "projection backup {} does not exist or is not a file",
+            backup_path.display()
+        )));
+    }
+    let conn = Connection::open_with_flags(
+        backup_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let event_log_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'event_log'",
+        [],
+        |row| row.get(0),
+    )?;
+    if event_log_count != 1 {
+        return Err(ProjectionError::Invariant(format!(
+            "projection backup {} is missing event_log",
+            backup_path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -409,6 +571,12 @@ mod tests {
         let backup = db.backup_vacuum_into(&backup_path).unwrap();
         assert!(backup.bytes > 0);
         assert!(backup_path.is_file());
+        assert!(Path::new(&backup.metadata_path).is_file());
+        validate_projection_backup_file(&backup_path).unwrap();
+
+        let list = list_projection_backups(dir.path()).unwrap();
+        assert_eq!(list.backups.len(), 1);
+        assert_eq!(list.backups[0].metadata.event_max_sequence, 1);
     }
 
     #[test]

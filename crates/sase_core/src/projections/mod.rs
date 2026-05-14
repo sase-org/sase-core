@@ -140,13 +140,16 @@ pub use indexing::{
     SourceIdentityWire, INDEXING_WIRE_SCHEMA_VERSION,
 };
 pub use maintenance::{
+    list_projection_backups, projection_backup_metadata_path,
     projection_checkpoint_decision, projection_reconciliation_plan,
+    read_projection_backup_metadata, validate_projection_backup_file,
+    ProjectionBackupListWire, ProjectionBackupMetadataWire,
     ProjectionBackupReportWire, ProjectionCheckpointDecisionWire,
     ProjectionCheckpointPolicyWire, ProjectionCheckpointReportWire,
     ProjectionReconciliationDiagnosticWire, ProjectionReconciliationPlanWire,
-    ProjectionRetentionPolicyWire, ProjectionRetentionReportWire,
-    ProjectionWalCheckpointModeWire, DEFAULT_CHECKPOINT_INTERVAL_SECS,
-    DEFAULT_WAL_SOFT_CAP_BYTES,
+    ProjectionRestoreReportWire, ProjectionRetentionPolicyWire,
+    ProjectionRetentionReportWire, ProjectionWalCheckpointModeWire,
+    DEFAULT_CHECKPOINT_INTERVAL_SECS, DEFAULT_WAL_SOFT_CAP_BYTES,
 };
 pub use migrations::{
     applied_migrations, known_migrations, run_migrations, AppliedMigrationWire,

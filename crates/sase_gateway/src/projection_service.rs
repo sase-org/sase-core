@@ -7,13 +7,17 @@ use std::{
 };
 
 use sase_core::projections::{
-    scheduler_health_summary, AgentProjectionApplier, BeadProjectionApplier,
-    CatalogProjectionApplier, ChangeSpecProjectionApplier,
-    EventAppendOutcomeWire, EventAppendRequestWire,
-    LocalDaemonMutationOutcomeWire, NotificationProjectionApplier,
-    ProjectionApplier, ProjectionDb, ProjectionError,
+    list_projection_backups, read_projection_backup_metadata,
+    scheduler_health_summary, validate_projection_backup_file,
+    AgentProjectionApplier, BeadProjectionApplier, CatalogProjectionApplier,
+    ChangeSpecProjectionApplier, EventAppendOutcomeWire,
+    EventAppendRequestWire, LocalDaemonMutationOutcomeWire,
+    NotificationProjectionApplier, ProjectionApplier, ProjectionBackupListWire,
+    ProjectionBackupMetadataWire, ProjectionBackupReportWire,
+    ProjectionCheckpointReportWire, ProjectionDb, ProjectionError,
     ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
-    ProjectionRecoveryIssueWire, ProjectionStartupRepairReportWire,
+    ProjectionRecoveryIssueWire, ProjectionRestoreReportWire,
+    ProjectionStartupRepairReportWire, ProjectionWalCheckpointModeWire,
     SchedulerProjectionApplier, SourceExportPlanWire, SourceExportStatusWire,
     WorkflowProjectionApplier,
 };
@@ -36,7 +40,7 @@ impl fmt::Debug for ProjectionService {
 }
 
 struct ProjectionServiceInner {
-    db: Option<Arc<Mutex<ProjectionDb>>>,
+    db: Arc<RwLock<Option<Arc<Mutex<ProjectionDb>>>>>,
     status: Arc<RwLock<ProjectionServiceStatus>>,
     metrics: DaemonMetrics,
 }
@@ -126,7 +130,7 @@ impl ProjectionService {
     ) -> Self {
         Self {
             inner: Arc::new(ProjectionServiceInner {
-                db: None,
+                db: Arc::new(RwLock::new(None)),
                 status: Arc::new(RwLock::new(ProjectionServiceStatus {
                     state: ProjectionServiceState::Degraded,
                     path,
@@ -411,6 +415,130 @@ impl ProjectionService {
         .map_err(|error| ProjectionServiceError::Join(error.to_string()))?
     }
 
+    pub async fn retry_pending_source_exports(
+        &self,
+    ) -> Result<JsonValue, ProjectionServiceError> {
+        self.write(retry_pending_source_exports_with_diagnostics)
+            .await
+    }
+
+    pub async fn checkpoint(
+        &self,
+        mode: ProjectionWalCheckpointModeWire,
+    ) -> Result<ProjectionCheckpointReportWire, ProjectionServiceError> {
+        self.write(move |db| db.wal_checkpoint(mode)).await
+    }
+
+    pub async fn backup(
+        &self,
+        backup_path: PathBuf,
+        metadata: ProjectionBackupMetadataWire,
+    ) -> Result<ProjectionBackupReportWire, ProjectionServiceError> {
+        self.read(move |db| {
+            db.backup_vacuum_into_with_metadata(&backup_path, metadata)
+        })
+        .await
+    }
+
+    pub fn list_backups(
+        &self,
+        backups_dir: &Path,
+    ) -> Result<ProjectionBackupListWire, ProjectionServiceError> {
+        list_projection_backups(backups_dir)
+            .map_err(ProjectionServiceError::from)
+    }
+
+    pub async fn restore_backup(
+        &self,
+        backup_path: PathBuf,
+        target_path: PathBuf,
+    ) -> Result<ProjectionRestoreReportWire, ProjectionServiceError> {
+        let db_lock = Arc::clone(&self.inner.db);
+        let status_lock = Arc::clone(&self.inner.status);
+        let metrics = self.inner.metrics.clone();
+        tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            validate_projection_backup_file(&backup_path)
+                .map_err(ProjectionServiceError::from)?;
+            let metadata_path =
+                sase_core::projections::projection_backup_metadata_path(
+                    &backup_path,
+                );
+            let metadata = read_projection_backup_metadata(&metadata_path)
+                .map_err(ProjectionServiceError::from)?;
+            let mut db_slot = db_lock
+                .write()
+                .map_err(|_| ProjectionServiceError::LockPoisoned)?;
+            if let Some(active_db) = db_slot.as_ref() {
+                let guard = active_db
+                    .lock()
+                    .map_err(|_| ProjectionServiceError::LockPoisoned)?;
+                guard
+                    .wal_checkpoint(ProjectionWalCheckpointModeWire::Truncate)
+                    .map_err(ProjectionServiceError::from)?;
+            }
+            *db_slot = None;
+            if let Some(parent) = target_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    ProjectionServiceError::Projection(error.into())
+                })?;
+            }
+            let replaced_existing = target_path.exists();
+            for sidecar in [
+                target_path.with_file_name(format!(
+                    "{}-wal",
+                    target_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("projection.sqlite")
+                )),
+                target_path.with_file_name(format!(
+                    "{}-shm",
+                    target_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("projection.sqlite")
+                )),
+            ] {
+                if sidecar.exists() {
+                    std::fs::remove_file(&sidecar).map_err(|error| {
+                        ProjectionServiceError::Projection(error.into())
+                    })?;
+                }
+            }
+            std::fs::copy(&backup_path, &target_path).map_err(|error| {
+                ProjectionServiceError::Projection(error.into())
+            })?;
+            let mut restored = ProjectionDb::open(&target_path)
+                .map_err(ProjectionServiceError::from)?;
+            let repair = run_startup_repair_checks(&mut restored)
+                .map_err(ProjectionServiceError::from)?;
+            let status = status_from_report(target_path.clone(), &repair);
+            *db_slot = Some(Arc::new(Mutex::new(restored)));
+            if let Ok(mut guard) = status_lock.write() {
+                *guard = status;
+            }
+            let bytes = std::fs::metadata(&target_path)
+                .map_err(|error| {
+                    ProjectionServiceError::Projection(error.into())
+                })?
+                .len();
+            metrics.record_projection_query(started.elapsed());
+            Ok(ProjectionRestoreReportWire {
+                schema_version:
+                    sase_core::projections::PROJECTION_EVENT_SCHEMA_VERSION,
+                backup_path: backup_path.display().to_string(),
+                restored_path: target_path.display().to_string(),
+                bytes,
+                replaced_existing,
+                projection_only: true,
+                metadata,
+            })
+        })
+        .await
+        .map_err(|error| ProjectionServiceError::Join(error.to_string()))?
+    }
+
     fn from_db(
         db: ProjectionDb,
         status: ProjectionServiceStatus,
@@ -418,7 +546,7 @@ impl ProjectionService {
     ) -> Self {
         Self {
             inner: Arc::new(ProjectionServiceInner {
-                db: Some(Arc::new(Mutex::new(db))),
+                db: Arc::new(RwLock::new(Some(Arc::new(Mutex::new(db))))),
                 status: Arc::new(RwLock::new(status)),
                 metrics,
             }),
@@ -426,12 +554,19 @@ impl ProjectionService {
     }
 
     fn db(&self) -> Result<Arc<Mutex<ProjectionDb>>, ProjectionServiceError> {
-        self.inner.db.clone().ok_or_else(|| {
-            let status = self.status();
-            ProjectionServiceError::Unavailable(status.message.unwrap_or_else(
-                || "projection database is degraded".to_string(),
-            ))
-        })
+        self.inner
+            .db
+            .read()
+            .map_err(|_| ProjectionServiceError::LockPoisoned)?
+            .clone()
+            .ok_or_else(|| {
+                let status = self.status();
+                ProjectionServiceError::Unavailable(
+                    status.message.unwrap_or_else(|| {
+                        "projection database is degraded".to_string()
+                    }),
+                )
+            })
     }
 }
 
@@ -501,15 +636,7 @@ fn run_startup_repair_checks(
 fn repair_pending_source_exports(
     db: &mut ProjectionDb,
 ) -> Result<Vec<ProjectionRecoveryIssueWire>, ProjectionError> {
-    let exports = db.list_pending_source_exports()?;
-    for export in exports {
-        if matches!(
-            export.status,
-            SourceExportStatusWire::Pending | SourceExportStatusWire::Failed
-        ) {
-            db.retry_source_export_once(export.export_id)?;
-        }
-    }
+    retry_pending_source_exports_with_diagnostics(db)?;
 
     let mut issues = Vec::new();
     for export in db.list_pending_source_exports()? {
@@ -536,6 +663,93 @@ fn repair_pending_source_exports(
         });
     }
     Ok(issues)
+}
+
+fn retry_pending_source_exports_with_diagnostics(
+    db: &mut ProjectionDb,
+) -> Result<JsonValue, ProjectionError> {
+    let exports = db.list_pending_source_exports()?;
+    let mut attempted = 0_u64;
+    let mut applied = 0_u64;
+    let mut failed = 0_u64;
+    let mut conflict = 0_u64;
+    let mut preserved_conflicts = 0_u64;
+    let mut examples = Vec::new();
+
+    for export in exports {
+        if matches!(
+            export.status,
+            SourceExportStatusWire::Pending | SourceExportStatusWire::Failed
+        ) {
+            attempted += 1;
+            let report = db.retry_source_export_once(export.export_id)?;
+            match report.status {
+                SourceExportStatusWire::Applied => applied += 1,
+                SourceExportStatusWire::Failed => failed += 1,
+                SourceExportStatusWire::Conflict => conflict += 1,
+                SourceExportStatusWire::Pending => {}
+            }
+            if examples.len() < 10 {
+                examples.push(source_export_retry_example(
+                    report.export_id,
+                    report.event_seq,
+                    &report.target_path,
+                    source_export_status_name(&report.status),
+                    report.attempts,
+                    report.message.as_deref(),
+                    db,
+                )?);
+            }
+        } else if matches!(export.status, SourceExportStatusWire::Conflict) {
+            preserved_conflicts += 1;
+            if examples.len() < 10 {
+                examples.push(source_export_retry_example(
+                    export.export_id,
+                    export.event_seq,
+                    &export.plan.target_path,
+                    "conflict",
+                    export.attempts,
+                    export.last_error.as_deref(),
+                    db,
+                )?);
+            }
+        }
+    }
+
+    Ok(json!({
+        "attempted": attempted,
+        "applied": applied,
+        "failed": failed,
+        "conflict": conflict,
+        "preserved_conflicts": preserved_conflicts,
+        "examples": examples,
+        "next_command": if conflict > 0 || preserved_conflicts > 0 || failed > 0 {
+            Some("sase daemon diff --surface all --json")
+        } else {
+            None
+        },
+    }))
+}
+
+fn source_export_retry_example(
+    export_id: i64,
+    event_seq: i64,
+    target_path: &str,
+    status: &str,
+    attempts: i64,
+    message: Option<&str>,
+    db: &ProjectionDb,
+) -> Result<JsonValue, ProjectionError> {
+    let event_type = db.get_event(event_seq)?.map(|event| event.event_type);
+    Ok(json!({
+        "export_id": export_id,
+        "event_seq": event_seq,
+        "surface": source_export_surface(event_type.as_deref(), target_path),
+        "status": status,
+        "target_path": target_path,
+        "attempts": attempts,
+        "message": message,
+    }))
 }
 
 fn source_export_health_summary(
@@ -601,13 +815,20 @@ fn source_export_health_summary(
         })
         .collect::<Vec<_>>();
     let total = pending + failed + conflict;
+    let message = if total == 0 {
+        None
+    } else if conflict > 0 {
+        Some(format!(
+            "{total} source export(s) still need repair; {conflict} conflict(s) require `sase daemon diff --surface all --json` or manual source review"
+        ))
+    } else {
+        Some(format!(
+            "{total} source export(s) still need repair; rerun `sase daemon doctor --json` or `sase daemon rebuild --surface all --json`"
+        ))
+    };
     Ok(json!({
         "state": if total == 0 { "ok" } else { "degraded" },
-        "message": if total == 0 {
-            None::<String>
-        } else {
-            Some(format!("{total} source export(s) still need repair"))
-        },
+        "message": message,
         "total": total,
         "pending": pending,
         "failed": failed,
@@ -842,6 +1063,119 @@ mod tests {
             json!("notifications")
         );
         assert_eq!(source_exports["examples"][0]["status"], json!("conflict"));
+        assert!(source_exports["message"]
+            .as_str()
+            .unwrap()
+            .contains("manual source review"));
+    }
+
+    #[tokio::test]
+    async fn live_retry_reports_preserved_conflicts_with_targets() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projection.sqlite");
+        let target = dir.path().join("notifications.jsonl");
+        std::fs::write(&target, "{\"id\":\"old\"}\n").unwrap();
+        let expected = source_fingerprint_from_path(&target, true).unwrap();
+        std::fs::write(&target, "{\"id\":\"legacy\"}\n").unwrap();
+        {
+            let mut db = ProjectionDb::open(&db_path).unwrap();
+            let mut plan = SourceExportPlanWire::new(
+                target.display().to_string(),
+                SourceExportKindWire::AtomicJson,
+                "{\"id\":\"new\"}\n",
+            );
+            plan.expected_fingerprint = Some(expected);
+            db.append_mutation_event_with_outbox(
+                event_request("notification.rewrite", "export-conflict-live"),
+                Some("notification:n1".to_string()),
+                vec![plan],
+                None,
+            )
+            .unwrap();
+        }
+
+        let service = ProjectionService::initialize(db_path).await;
+        let retry = service.retry_pending_source_exports().await.unwrap();
+
+        assert_eq!(retry["attempted"], json!(0));
+        assert_eq!(retry["preserved_conflicts"], json!(1));
+        assert_eq!(retry["examples"][0]["surface"], json!("notifications"));
+        assert_eq!(
+            retry["examples"][0]["target_path"],
+            json!(target.display().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_are_projection_only() {
+        let dir = tempdir().unwrap();
+        let db_path = dir
+            .path()
+            .join("run")
+            .join("projections")
+            .join("projection.sqlite");
+        let backup_path = dir
+            .path()
+            .join("run")
+            .join("backups")
+            .join("restore.sqlite");
+        let source_store = dir.path().join("projects").join("demo.sase");
+        std::fs::create_dir_all(source_store.parent().unwrap()).unwrap();
+        std::fs::write(&source_store, "NAME: source\n").unwrap();
+        let service = ProjectionService::initialize(db_path.clone()).await;
+
+        let backup = service
+            .backup(
+                backup_path.clone(),
+                ProjectionBackupMetadataWire {
+                    schema_version: 1,
+                    backup_format_version: 1,
+                    daemon_version: "test".to_string(),
+                    core_version: "test".to_string(),
+                    host_identity: "host-a".to_string(),
+                    source_sase_home: dir.path().display().to_string(),
+                    created_at: "2026-05-14T00:00:00Z".to_string(),
+                    projection_schema: 0,
+                    event_max_sequence: 0,
+                    source_export_summary: json!({"state": "ok"}),
+                    original_db_path: db_path.display().to_string(),
+                    snapshot_path: backup_path.display().to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(Path::new(&backup.metadata_path).is_file());
+
+        let second_issue = issue("sase-restore-2");
+        service
+            .append_projected_event(
+                bead_created_event_request(context(), second_issue).unwrap(),
+            )
+            .await
+            .unwrap();
+        let restored = service
+            .restore_backup(backup_path.clone(), db_path.clone())
+            .await
+            .unwrap();
+
+        assert!(restored.projection_only);
+        assert_eq!(restored.metadata.event_max_sequence, 0);
+        assert_eq!(
+            std::fs::read_to_string(&source_store).unwrap(),
+            "NAME: source\n"
+        );
+        assert_eq!(service.read(|db| db.event_count()).await.unwrap(), 0);
+        assert!(service
+            .read(|db| {
+                bead_projection_show(
+                    db.connection(),
+                    "project-a",
+                    "sase-restore-2",
+                )
+            })
+            .await
+            .is_err());
+        assert_eq!(service.status().state, ProjectionServiceState::Ok);
     }
 
     fn event_request(event_type: &str, key: &str) -> EventAppendRequestWire {
