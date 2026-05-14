@@ -982,8 +982,8 @@ pub fn local_daemon_contract_snapshot() -> Value {
         "host_ipc": {
             "schema_version": PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
             "contract": "sase_provider_host_ipc_v1",
-            "phase": "foundation_contract_only",
-            "production_routing": "none; provider and plugin calls still use existing Python fallback paths",
+            "phase": "subprocess_fake_operations",
+            "production_routing": "fake/no-op host operations may route through the subprocess runtime; real provider and plugin calls still use existing Python fallback paths",
             "advertised_foundation_capabilities": [
                 HOST_CAP_IPC_V1,
                 HOST_CAP_MANIFEST_V1
@@ -1194,6 +1194,13 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "notes": "idempotently cancels a queued/starting/running scheduler batch or slot for operator recovery"
             },
             {
+                "type": "host_call",
+                "request": "HostRequestEnvelopeWire",
+                "success": "HostResponseEnvelopeWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "Phase 8C subprocess host route for fake/no-op operations only; real providers continue to use direct Python fallback"
+            },
+            {
                 "type": "batch",
                 "request": "LocalDaemonBatchRequestWire[]",
                 "success": "LocalDaemonBatchResponseWire[]",
@@ -1233,6 +1240,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "scheduler_submit": "SchedulerBatchSubmitRequestWire",
                 "scheduler_status": "LocalDaemonSchedulerStatusRequestWire",
                 "scheduler_cancel": "SchedulerCancelRequestWire",
+                "host_call": "HostRequestEnvelopeWire",
                 "batch": {"requests": "LocalDaemonBatchRequestWire[]"}
             },
             "LocalDaemonResponsePayloadWire": {
@@ -1249,6 +1257,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "scheduler_submit": "SchedulerBatchSubmitResponseWire",
                 "scheduler_status": "SchedulerBatchStatusWire",
                 "scheduler_cancel": "SchedulerBatchStatusWire",
+                "host_call": "HostResponseEnvelopeWire",
                 "batch": {"responses": "LocalDaemonBatchResponseWire[]"},
                 "error": "LocalDaemonErrorWire"
             },

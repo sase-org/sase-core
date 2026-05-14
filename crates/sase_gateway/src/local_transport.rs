@@ -226,6 +226,28 @@ pub async fn handle_connection(
             state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
             result
         }
+        LocalDaemonRequestPayloadWire::HostCall(request) => {
+            let manager = state.provider_host_manager.clone();
+            let payload = match tokio::task::spawn_blocking(move || {
+                manager.call_blocking(request)
+            })
+            .await
+            {
+                Ok(response) => LocalDaemonResponsePayloadWire::HostCall(response),
+                Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+                    LocalDaemonErrorCodeWire::Internal,
+                    format!("provider host manager task failed: {error}"),
+                    true,
+                    Some("host.call".to_string()),
+                    None,
+                )),
+            };
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
         payload => {
             let payload = handle_payload(payload, state);
             success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
@@ -327,6 +349,11 @@ fn handle_payload(
         }
         LocalDaemonRequestPayloadWire::SchedulerCancel(request) => {
             handle_scheduler_cancel_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::HostCall(request) => {
+            LocalDaemonResponsePayloadWire::HostCall(
+                state.provider_host_manager.call_blocking(request),
+            )
         }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
             let responses = requests
@@ -3195,6 +3222,10 @@ mod tests {
             indexing_service: crate::indexer::IndexingService::disabled(
                 crate::metrics::DaemonMetrics::default(),
             ),
+            provider_host_manager:
+                crate::provider_host_manager::ProviderHostManager::new(vec![
+                    "missing-provider-host".to_string(),
+                ]),
             mobile_gateway: None,
         }
     }

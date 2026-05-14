@@ -143,8 +143,8 @@
       "config",
       "workflow.step"
     ],
-    "phase": "foundation_contract_only",
-    "production_routing": "none; provider and plugin calls still use existing Python fallback paths",
+    "phase": "subprocess_fake_operations",
+    "production_routing": "fake/no-op host operations may route through the subprocess runtime; real provider and plugin calls still use existing Python fallback paths",
     "records": {
       "HostErrorWire": {
         "code": "host error vocabulary string",
@@ -562,6 +562,7 @@
       "health": {
         "include_capabilities": "bool"
       },
+      "host_call": "HostRequestEnvelopeWire",
       "indexing_status": "LocalDaemonIndexingStatusRequestWire",
       "list": "LocalDaemonListRequestWire",
       "read": "LocalDaemonReadRequestWire",
@@ -587,6 +588,7 @@
       "error": "LocalDaemonErrorWire",
       "events": "LocalDaemonEventBatchWire",
       "health": "LocalDaemonHealthResponseWire",
+      "host_call": "HostResponseEnvelopeWire",
       "indexing_status": "LocalDaemonIndexingStatusResponseWire",
       "list": "LocalDaemonListResponseWire",
       "read": "LocalDaemonReadResponseWire",
@@ -898,6 +900,15 @@
       "request": "SchedulerCancelRequestWire",
       "success": "SchedulerBatchStatusWire",
       "type": "scheduler_cancel"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "Phase 8C subprocess host route for fake/no-op operations only; real providers continue to use direct Python fallback",
+      "request": "HostRequestEnvelopeWire",
+      "success": "HostResponseEnvelopeWire",
+      "type": "host_call"
     },
     {
       "errors": [

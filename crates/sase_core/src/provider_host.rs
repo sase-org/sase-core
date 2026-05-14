@@ -742,8 +742,10 @@ mod tests {
 
     #[test]
     fn validation_rejects_oversized_request() {
-        let mut policy = HostValidationPolicy::default();
-        policy.max_request_bytes = 64;
+        let policy = HostValidationPolicy {
+            max_request_bytes: 64,
+            ..HostValidationPolicy::default()
+        };
         let err = validate_host_request(&request(), &policy).unwrap_err();
         assert_eq!(err.code, HostErrorCodeWire::ResourceLimitExceeded);
     }

@@ -10,6 +10,7 @@ pub mod local_transport;
 pub mod metrics;
 pub mod ownership;
 pub mod projection_service;
+pub mod provider_host_manager;
 pub mod push;
 pub mod routes;
 pub mod server;
@@ -55,6 +56,7 @@ pub use projection_service::{
     default_projection_db_path, ProjectionService, ProjectionServiceError,
     ProjectionServiceState, ProjectionServiceStatus,
 };
+pub use provider_host_manager::{ProviderHostManager, ProviderHostStatus};
 pub use push::{
     PushConfig, PushDeliveryAttempt, PushDispatcher, PushProviderMode,
 };

@@ -24,6 +24,7 @@ use crate::{
     projection_service::{
         default_projection_db_path, ProjectionService, ProjectionServiceError,
     },
+    provider_host_manager::ProviderHostManager,
     push::PushConfig,
     routes::GatewayState,
     server::{
@@ -171,6 +172,7 @@ impl DaemonRuntime {
             local_events,
             projection_service,
             indexing_service,
+            provider_host_manager: ProviderHostManager::from_env_or_default(),
             mobile_gateway: config
                 .mobile_http_enabled
                 .then_some(config.mobile_gateway.clone()),
@@ -216,6 +218,7 @@ pub struct DaemonState {
     pub local_events: LocalEventHub,
     pub projection_service: ProjectionService,
     pub indexing_service: IndexingService,
+    pub provider_host_manager: ProviderHostManager,
     pub mobile_gateway: Option<GatewayConfig>,
 }
 
@@ -246,6 +249,18 @@ impl DaemonState {
                         .ok()
                         .and_then(|value| value.clone()),
                     "loopback_only": true,
+                }),
+            );
+            let host_status = self.provider_host_manager.status();
+            object.insert(
+                "provider_host".to_string(),
+                json!({
+                    "command": host_status.command,
+                    "active_calls": host_status.active_calls,
+                    "max_concurrent_calls": host_status.max_concurrent_calls,
+                    "total_started": host_status.total_started,
+                    "total_completed": host_status.total_completed,
+                    "total_failed": host_status.total_failed,
                 }),
             );
             object.insert(
