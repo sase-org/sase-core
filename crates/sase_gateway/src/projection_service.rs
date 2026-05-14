@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -11,8 +12,8 @@ use sase_core::projections::{
     EventAppendRequestWire, LocalDaemonMutationOutcomeWire,
     NotificationProjectionApplier, ProjectionApplier, ProjectionDb,
     ProjectionError, ProjectionRebuildOptionsWire, ProjectionRebuildReportWire,
-    ProjectionStartupRepairReportWire, SourceExportPlanWire,
-    WorkflowProjectionApplier,
+    ProjectionRecoveryIssueWire, ProjectionStartupRepairReportWire,
+    SourceExportPlanWire, SourceExportStatusWire, WorkflowProjectionApplier,
 };
 use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
@@ -162,6 +163,19 @@ impl ProjectionService {
 
     pub fn health_details(&self) -> JsonValue {
         let status = self.status();
+        let source_exports =
+            self.source_export_health_summary().unwrap_or_else(|error| {
+                json!({
+                    "state": "unknown",
+                    "message": error.to_string(),
+                    "total": 0,
+                    "pending": 0,
+                    "failed": 0,
+                    "conflict": 0,
+                    "by_surface": [],
+                    "examples": [],
+                })
+            });
         json!({
             "projection_db": {
                 "state": match status.state {
@@ -175,9 +189,16 @@ impl ProjectionService {
                 "max_event_seq": status.max_event_seq,
                 "gap_count": status.gap_count,
                 "recovery_issue_count": status.recovery_issue_count,
+                "source_exports": source_exports,
                 "message": status.message,
             }
         })
+    }
+
+    fn source_export_health_summary(
+        &self,
+    ) -> Result<JsonValue, ProjectionServiceError> {
+        self.read_blocking(source_export_health_summary)
     }
 
     pub async fn read<T, F>(&self, f: F) -> Result<T, ProjectionServiceError>
@@ -435,7 +456,185 @@ fn run_startup_repair_checks(
         &mut workflows,
         &mut catalogs,
     ];
-    db.repair_projection_gaps(&mut appliers)
+    let mut report = db.repair_projection_gaps(&mut appliers)?;
+    report
+        .recovery_issues
+        .extend(repair_pending_source_exports(db)?);
+    Ok(report)
+}
+
+fn repair_pending_source_exports(
+    db: &mut ProjectionDb,
+) -> Result<Vec<ProjectionRecoveryIssueWire>, ProjectionError> {
+    let exports = db.list_pending_source_exports()?;
+    for export in exports {
+        if matches!(
+            export.status,
+            SourceExportStatusWire::Pending | SourceExportStatusWire::Failed
+        ) {
+            db.retry_source_export_once(export.export_id)?;
+        }
+    }
+
+    let mut issues = Vec::new();
+    for export in db.list_pending_source_exports()? {
+        let event_type = db
+            .get_event(export.event_seq)?
+            .map(|event| event.event_type)
+            .unwrap_or_else(|| "unknown".to_string());
+        issues.push(ProjectionRecoveryIssueWire {
+            projection: format!(
+                "source_export:{}",
+                source_export_surface(Some(&event_type), &export.plan.target_path)
+            ),
+            kind: format!("source_export_{:?}", export.status).to_lowercase(),
+            guidance: format!(
+                "export {} for {} is {:?}: {}; resolve the source conflict or rerun `sase daemon doctor`/`sase daemon rebuild` after the target is safe to rewrite",
+                export.export_id,
+                export.plan.target_path,
+                export.status,
+                export
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("no last export error recorded")
+            ),
+        });
+    }
+    Ok(issues)
+}
+
+fn source_export_health_summary(
+    db: &ProjectionDb,
+) -> Result<JsonValue, ProjectionError> {
+    let exports = db.list_pending_source_exports()?;
+    let mut pending = 0_u64;
+    let mut failed = 0_u64;
+    let mut conflict = 0_u64;
+    let mut by_surface: BTreeMap<String, (u64, u64, u64, u64)> =
+        BTreeMap::new();
+    let mut examples = Vec::new();
+
+    for export in exports {
+        let event_type = db
+            .get_event(export.event_seq)?
+            .map(|event| event.event_type);
+        let surface = source_export_surface(
+            event_type.as_deref(),
+            &export.plan.target_path,
+        )
+        .to_string();
+        let entry = by_surface.entry(surface.clone()).or_default();
+        entry.0 += 1;
+        match &export.status {
+            SourceExportStatusWire::Pending => {
+                pending += 1;
+                entry.1 += 1;
+            }
+            SourceExportStatusWire::Failed => {
+                failed += 1;
+                entry.2 += 1;
+            }
+            SourceExportStatusWire::Conflict => {
+                conflict += 1;
+                entry.3 += 1;
+            }
+            SourceExportStatusWire::Applied => {}
+        }
+        if examples.len() < 10 {
+            examples.push(json!({
+                "export_id": export.export_id,
+                "event_seq": export.event_seq,
+                "surface": surface,
+                "status": source_export_status_name(&export.status),
+                "target_path": export.plan.target_path,
+                "attempts": export.attempts,
+                "message": export.last_error,
+            }));
+        }
+    }
+
+    let by_surface = by_surface
+        .into_iter()
+        .map(|(surface, (total, pending, failed, conflict))| {
+            json!({
+                "surface": surface,
+                "total": total,
+                "pending": pending,
+                "failed": failed,
+                "conflict": conflict,
+            })
+        })
+        .collect::<Vec<_>>();
+    let total = pending + failed + conflict;
+    Ok(json!({
+        "state": if total == 0 { "ok" } else { "degraded" },
+        "message": if total == 0 {
+            None::<String>
+        } else {
+            Some(format!("{total} source export(s) still need repair"))
+        },
+        "total": total,
+        "pending": pending,
+        "failed": failed,
+        "conflict": conflict,
+        "by_surface": by_surface,
+        "examples": examples,
+    }))
+}
+
+fn source_export_surface(
+    event_type: Option<&str>,
+    target_path: &str,
+) -> &'static str {
+    if let Some(event_type) = event_type {
+        if event_type.starts_with("notification.")
+            || event_type.starts_with("pending_action.")
+        {
+            return "notifications";
+        }
+        if event_type.starts_with("changespec.") {
+            return "changespecs";
+        }
+        if event_type.starts_with("agent.") {
+            return "agents";
+        }
+        if event_type.starts_with("bead.") {
+            return "beads";
+        }
+        if event_type.starts_with("workflow.") {
+            return "workflows";
+        }
+    }
+    if target_path.ends_with("notifications.jsonl")
+        || target_path.contains("pending_actions")
+    {
+        "notifications"
+    } else if target_path.ends_with(".sase") || target_path.ends_with(".gp") {
+        "changespecs"
+    } else if target_path.contains("dismissed") || target_path.contains("agent")
+    {
+        "agents"
+    } else if target_path.ends_with("issues.jsonl")
+        || target_path.contains("/beads/")
+    {
+        "beads"
+    } else if target_path.contains("workflow")
+        || target_path.contains("hitl")
+        || target_path.contains("response")
+    {
+        "workflows"
+    } else {
+        "unknown"
+    }
+}
+
+fn source_export_status_name(status: &SourceExportStatusWire) -> &'static str {
+    match status {
+        SourceExportStatusWire::Pending => "pending",
+        SourceExportStatusWire::Applied => "applied",
+        SourceExportStatusWire::Failed => "failed",
+        SourceExportStatusWire::Conflict => "conflict",
+    }
 }
 
 #[cfg(test)]
@@ -444,7 +643,8 @@ mod tests {
     use sase_core::bead::{IssueTypeWire, IssueWire, StatusWire};
     use sase_core::projections::{
         bead_created_event_request, bead_projection_show,
-        BeadProjectionEventContextWire, EventSourceWire,
+        source_fingerprint_from_path, BeadProjectionEventContextWire,
+        EventAppendRequestWire, EventSourceWire, SourceExportKindWire,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -536,6 +736,96 @@ mod tests {
         assert_eq!(report.reset.event_count_before, 0);
         assert_eq!(report.reset.event_count_after, 0);
         assert_eq!(service.status().state, ProjectionServiceState::Ok);
+    }
+
+    #[tokio::test]
+    async fn startup_repairs_pending_source_exports() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projection.sqlite");
+        let target = dir.path().join("notifications.jsonl");
+        {
+            let mut db = ProjectionDb::open(&db_path).unwrap();
+            db.append_mutation_event_with_outbox(
+                event_request("mutation.test", "export-ok"),
+                Some("notification:n1".to_string()),
+                vec![SourceExportPlanWire::new(
+                    target.display().to_string(),
+                    SourceExportKindWire::JsonlAppend,
+                    "{\"id\":\"n1\"}\n",
+                )],
+                None,
+            )
+            .unwrap();
+        }
+
+        let service = ProjectionService::initialize(db_path).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"id\":\"n1\"}\n"
+        );
+        let source_exports =
+            &service.health_details()["projection_db"]["source_exports"];
+        assert_eq!(source_exports["state"], json!("ok"));
+        assert_eq!(source_exports["total"], json!(0));
+    }
+
+    #[tokio::test]
+    async fn startup_reports_conflicted_source_exports_by_surface() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("projection.sqlite");
+        let target = dir.path().join("notifications.jsonl");
+        std::fs::write(&target, "{\"id\":\"old\"}\n").unwrap();
+        let expected = source_fingerprint_from_path(&target, true).unwrap();
+        std::fs::write(&target, "{\"id\":\"legacy\"}\n").unwrap();
+        {
+            let mut db = ProjectionDb::open(&db_path).unwrap();
+            let mut plan = SourceExportPlanWire::new(
+                target.display().to_string(),
+                SourceExportKindWire::AtomicJson,
+                "{\"id\":\"new\"}\n",
+            );
+            plan.expected_fingerprint = Some(expected);
+            db.append_mutation_event_with_outbox(
+                event_request("mutation.test", "export-conflict"),
+                Some("notification:n1".to_string()),
+                vec![plan],
+                None,
+            )
+            .unwrap();
+        }
+
+        let service = ProjectionService::initialize(db_path).await;
+        let source_exports =
+            &service.health_details()["projection_db"]["source_exports"];
+
+        assert_eq!(service.status().state, ProjectionServiceState::Degraded);
+        assert_eq!(source_exports["state"], json!("degraded"));
+        assert_eq!(source_exports["conflict"], json!(1));
+        assert_eq!(
+            source_exports["by_surface"][0]["surface"],
+            json!("notifications")
+        );
+        assert_eq!(source_exports["examples"][0]["status"], json!("conflict"));
+    }
+
+    fn event_request(event_type: &str, key: &str) -> EventAppendRequestWire {
+        EventAppendRequestWire {
+            created_at: Some("2026-05-14T00:00:00.000Z".to_string()),
+            source: EventSourceWire {
+                source_type: "test".to_string(),
+                name: "projection-service-test".to_string(),
+                ..EventSourceWire::default()
+            },
+            host_id: "host-a".to_string(),
+            project_id: "project-a".to_string(),
+            event_type: event_type.to_string(),
+            payload: json!({"ok": true}),
+            idempotency_key: Some(key.to_string()),
+            causality: vec![],
+            source_path: None,
+            source_revision: None,
+        }
     }
 
     fn context() -> BeadProjectionEventContextWire {

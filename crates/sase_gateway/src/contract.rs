@@ -1229,6 +1229,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                         "max_event_seq": "i64|null",
                         "gap_count": "usize",
                         "recovery_issue_count": "usize",
+                        "source_exports": "SourceExportRepairSummary JSON with total/pending/failed/conflict counts, per-surface counts, and bounded examples",
                         "message": "string|null"
                     },
                     "metrics": {
@@ -1470,6 +1471,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "project_id": "string|null",
                 "limitation": "string|null",
                 "report": "ProjectionRebuildReportWire JSON or source backfill report JSON",
+                "source_exports": "SourceExportRepairSummary JSON after safe pending-export retries",
                 "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]"
             },
             "LocalDaemonIndexingStatusRequestWire": {

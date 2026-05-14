@@ -264,6 +264,7 @@
           "recovery_issue_count": "usize",
           "repair_needed": "bool",
           "schema_initialized": "bool",
+          "source_exports": "SourceExportRepairSummary JSON with total/pending/failed/conflict counts, per-surface counts, and bounded examples",
           "state": "ok|degraded"
         }
       },
@@ -422,6 +423,7 @@
       "project_id": "string|null",
       "report": "ProjectionRebuildReportWire JSON or source backfill report JSON",
       "schema_version": "u32",
+      "source_exports": "SourceExportRepairSummary JSON after safe pending-export retries",
       "storage_reset_only": "bool",
       "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]",
       "surface": "LocalDaemonIndexingSurfaceWire"

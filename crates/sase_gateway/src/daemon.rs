@@ -452,12 +452,19 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
     .await;
     if config.rebuild_once {
         let report = projection_service.rebuild_storage_reset_only().await?;
+        let health = projection_service.health_details();
+        let source_exports = health
+            .get("projection_db")
+            .and_then(|projection| projection.get("source_exports"))
+            .cloned()
+            .unwrap_or_else(|| json!({"state": "unknown"}));
         let payload = json!({
             "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
             "mode": "projection_storage_rebuild",
             "storage_reset_only": true,
             "limitation": "domain source rebuild is not active until filesystem indexing lands; this reset replays retained projection events only",
             "report": report,
+            "source_exports": source_exports,
         });
         println!(
             "{}",

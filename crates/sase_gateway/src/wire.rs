@@ -427,6 +427,8 @@ pub struct LocalDaemonRebuildResponseWire {
     pub limitation: Option<String>,
     pub report: JsonValue,
     #[serde(default)]
+    pub source_exports: JsonValue,
+    #[serde(default)]
     pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
 }
 

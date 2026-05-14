@@ -385,6 +385,7 @@ impl IndexingService {
                 .rebuild_storage_reset_only()
                 .await
                 .map_err(|error| error.to_string())?;
+            let source_exports = source_export_health(&projection_service);
             return Ok(LocalDaemonRebuildResponseWire {
                 schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
                 mode: "projection_storage_rebuild".to_string(),
@@ -398,6 +399,7 @@ impl IndexingService {
                 report: serde_json::to_value(report).unwrap_or_else(
                     |error| json!({"error": error.to_string()}),
                 ),
+                source_exports,
                 summaries: Vec::new(),
             });
         }
@@ -423,6 +425,7 @@ impl IndexingService {
             project_id: request.project_id,
             limitation: None,
             report: json!({"summaries": summaries}),
+            source_exports: source_export_health(&projection_service),
             summaries,
         })
     }
@@ -551,6 +554,15 @@ impl IndexingService {
             summaries,
         }
     }
+}
+
+fn source_export_health(projection_service: &ProjectionService) -> JsonValue {
+    projection_service
+        .health_details()
+        .get("projection_db")
+        .and_then(|projection| projection.get("source_exports"))
+        .cloned()
+        .unwrap_or_else(|| json!({"state": "unknown"}))
 }
 
 #[derive(Clone, Debug)]

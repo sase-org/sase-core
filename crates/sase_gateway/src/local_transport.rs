@@ -473,11 +473,23 @@ async fn write_event_batch_frame(
 
 fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
     let projection_status = state.projection_service.status();
+    let details = state.diagnostic_details();
+    let source_exports_degraded = details
+        .get("projection_db")
+        .and_then(|projection| projection.get("source_exports"))
+        .and_then(|source_exports| source_exports.get("state"))
+        .and_then(JsonValue::as_str)
+        == Some("degraded");
     let status = match projection_status.state {
         ProjectionServiceState::Ok => LocalDaemonHealthStatusWire::Ok,
         ProjectionServiceState::Degraded => {
             LocalDaemonHealthStatusWire::Degraded
         }
+    };
+    let status = if source_exports_degraded {
+        LocalDaemonHealthStatusWire::Degraded
+    } else {
+        status
     };
     state
         .metrics
@@ -491,7 +503,7 @@ fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
         min_client_schema_version: LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         max_client_schema_version: LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
         fallback: fallback_unavailable(),
-        details: state.diagnostic_details(),
+        details,
     }
 }
 
