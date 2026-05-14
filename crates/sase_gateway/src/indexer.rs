@@ -1195,7 +1195,6 @@ fn sase_home_from_projects_root(
         .map(Path::to_path_buf)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn summary_from_report(
     surface: LocalDaemonIndexingSurfaceWire,
     project_id: Option<String>,

@@ -18,12 +18,9 @@ use super::migrations::PROJECTION_SCHEMA_VERSION;
 pub const DEFAULT_WAL_SOFT_CAP_BYTES: u64 = 1_073_741_824;
 pub const DEFAULT_CHECKPOINT_INTERVAL_SECS: u64 = 600;
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionWalCheckpointModeWire {
-    #[default]
     Passive,
     Full,
     Restart,
@@ -38,6 +35,12 @@ impl ProjectionWalCheckpointModeWire {
             Self::Restart => "RESTART",
             Self::Truncate => "TRUNCATE",
         }
+    }
+}
+
+impl Default for ProjectionWalCheckpointModeWire {
+    fn default() -> Self {
+        Self::Passive
     }
 }
 
