@@ -250,8 +250,17 @@ impl DaemonState {
         }
     }
 
+    pub fn health_details(&self) -> JsonValue {
+        let details = self.projection_service.basic_health_details();
+        self.with_runtime_details(details)
+    }
+
     pub fn diagnostic_details(&self) -> JsonValue {
-        let mut details = self.projection_service.health_details();
+        let details = self.projection_service.health_details();
+        self.with_runtime_details(details)
+    }
+
+    fn with_runtime_details(&self, mut details: JsonValue) -> JsonValue {
         if let JsonValue::Object(ref mut object) = details {
             object.insert(
                 "indexing".to_string(),

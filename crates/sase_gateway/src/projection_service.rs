@@ -226,6 +226,26 @@ impl ProjectionService {
         })
     }
 
+    pub fn basic_health_details(&self) -> JsonValue {
+        let status = self.status();
+        json!({
+            "projection_db": {
+                "state": match status.state {
+                    ProjectionServiceState::Ok => "ok",
+                    ProjectionServiceState::Degraded => "degraded",
+                },
+                "path_kind": "host_local",
+                "schema_initialized": status.schema_initialized,
+                "migrations_applied": status.migrations_applied,
+                "repair_needed": status.repair_needed,
+                "max_event_seq": status.max_event_seq,
+                "gap_count": status.gap_count,
+                "recovery_issue_count": status.recovery_issue_count,
+                "message": status.message,
+            },
+        })
+    }
+
     fn scheduler_health_summary(
         &self,
     ) -> Result<JsonValue, ProjectionServiceError> {
@@ -567,6 +587,13 @@ impl ProjectionService {
                     }),
                 )
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn db_for_test(
+        &self,
+    ) -> Result<Arc<Mutex<ProjectionDb>>, ProjectionServiceError> {
+        self.db()
     }
 }
 

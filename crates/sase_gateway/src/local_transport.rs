@@ -106,6 +106,7 @@ const LOCAL_DAEMON_CONTRACT_NAME: &str = "sase_local_daemon_framed_json_v1";
 const LOCAL_DAEMON_SERVICE_NAME: &str = "sase_local_daemon";
 const ACCEPT_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
 const SUBSCRIPTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const DETAILED_HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -198,6 +199,17 @@ pub async fn handle_connection(
     let request_id = request.request_id.clone();
 
     match request.payload {
+        LocalDaemonRequestPayloadWire::Health {
+            include_capabilities,
+        } => {
+            let payload =
+                handle_health_payload(include_capabilities, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
         LocalDaemonRequestPayloadWire::Events(events) => {
             let result = stream_event_subscription(
                 &mut stream,
@@ -321,8 +333,11 @@ fn handle_payload(
 ) -> LocalDaemonResponsePayloadWire {
     match payload {
         LocalDaemonRequestPayloadWire::Health {
-            include_capabilities: _,
-        } => LocalDaemonResponsePayloadWire::Health(health_response(state)),
+            include_capabilities,
+        } => LocalDaemonResponsePayloadWire::Health(health_response(
+            state,
+            include_capabilities,
+        )),
         LocalDaemonRequestPayloadWire::Capabilities => {
             LocalDaemonResponsePayloadWire::Capabilities(capabilities_response(
                 state,
@@ -840,9 +855,51 @@ async fn write_event_batch_frame(
     write_response_frame(stream, &response).await
 }
 
-fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
+async fn handle_health_payload(
+    include_diagnostics: bool,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    if !include_diagnostics {
+        return LocalDaemonResponsePayloadWire::Health(health_response(
+            state, false,
+        ));
+    }
+
+    let detailed_state = state.clone();
+    match tokio::time::timeout(
+        DETAILED_HEALTH_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            health_response(&detailed_state, true)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(health)) => LocalDaemonResponsePayloadWire::Health(health),
+        Ok(Err(error)) => LocalDaemonResponsePayloadWire::Health(
+            health_response_with_unavailable_diagnostics(
+                state,
+                format!("detailed health task failed: {error}"),
+            ),
+        ),
+        Err(_) => LocalDaemonResponsePayloadWire::Health(
+            health_response_with_unavailable_diagnostics(
+                state,
+                "detailed health diagnostics timed out",
+            ),
+        ),
+    }
+}
+
+fn health_response(
+    state: &DaemonState,
+    include_diagnostics: bool,
+) -> LocalDaemonHealthResponseWire {
     let projection_status = state.projection_service.status();
-    let details = state.diagnostic_details();
+    let details = if include_diagnostics {
+        state.diagnostic_details()
+    } else {
+        state.health_details()
+    };
     let source_exports_degraded = details
         .get("projection_db")
         .and_then(|projection| projection.get("source_exports"))
@@ -881,6 +938,23 @@ fn health_response(state: &DaemonState) -> LocalDaemonHealthResponseWire {
         fallback: fallback_unavailable(),
         details,
     }
+}
+
+fn health_response_with_unavailable_diagnostics(
+    state: &DaemonState,
+    message: impl Into<String>,
+) -> LocalDaemonHealthResponseWire {
+    let mut health = health_response(state, false);
+    if let Some(details) = health.details.as_object_mut() {
+        details.insert(
+            "diagnostics".to_string(),
+            json!({
+                "available": false,
+                "message": message.into(),
+            }),
+        );
+    }
+    health
 }
 
 fn capabilities_response(
@@ -3628,7 +3702,7 @@ fn prepare_socket_path(path: &Path) -> Result<(), LocalTransportError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::mpsc, time::Duration};
 
     use crate::{
         daemon::{DaemonRuntimePaths, DaemonShutdown, LocalEventHub},
@@ -3756,6 +3830,99 @@ mod tests {
             }
             other => panic!("expected health response, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn basic_health_response_does_not_wait_for_projection_db_lock() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp_dir = tempdir().unwrap();
+        let projection_service =
+            runtime.block_on(ProjectionService::initialize(
+                temp_dir.path().join("projection.sqlite"),
+            ));
+        let db = projection_service.db_for_test().unwrap();
+        let guard = db.lock().unwrap();
+        let state = test_state_with_projection(projection_service);
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Health {
+                include_capabilities: false,
+            },
+        ))
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        let mut handle = Some(std::thread::spawn(move || {
+            let response = response_for_frame(&payload, &state);
+            tx.send(response).ok();
+        }));
+
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(response) => match response.payload {
+                LocalDaemonResponsePayloadWire::Health(health) => {
+                    assert_eq!(health.status, LocalDaemonHealthStatusWire::Ok);
+                    assert_eq!(
+                        health.details["projection_db"]["state"],
+                        json!("ok")
+                    );
+                    assert!(health.details["projection_db"]
+                        .get("source_exports")
+                        .is_none());
+                    assert!(health.details.get("scheduler").is_none());
+                }
+                other => panic!("expected health response, got {other:?}"),
+            },
+            Err(error) => {
+                drop(guard);
+                handle.take().unwrap().join().unwrap();
+                panic!("basic health response waited for projection DB lock: {error}");
+            }
+        }
+
+        drop(guard);
+        if let Some(handle) = handle.take() {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn detailed_health_payload_falls_back_when_projection_db_lock_is_blocked() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let temp_dir = tempdir().unwrap();
+        let projection_service =
+            runtime.block_on(ProjectionService::initialize(
+                temp_dir.path().join("projection.sqlite"),
+            ));
+        let db = projection_service.db_for_test().unwrap();
+        let guard = db.lock().unwrap();
+        let state = test_state_with_projection(projection_service);
+        let started = Instant::now();
+
+        let payload = runtime.block_on(handle_health_payload(true, &state));
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        match payload {
+            LocalDaemonResponsePayloadWire::Health(health) => {
+                assert_eq!(health.status, LocalDaemonHealthStatusWire::Ok);
+                assert_eq!(
+                    health.details["diagnostics"]["available"],
+                    json!(false)
+                );
+                assert_eq!(
+                    health.details["diagnostics"]["message"],
+                    json!("detailed health diagnostics timed out")
+                );
+                assert!(health.details.get("scheduler").is_none());
+            }
+            other => panic!("expected health response, got {other:?}"),
+        }
+
+        drop(guard);
     }
 
     #[test]
