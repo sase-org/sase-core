@@ -225,7 +225,7 @@ pub use projections::{
 };
 pub use provider_host::{
     validate_declared_capabilities, validate_host_request,
-    validate_operation_family, validate_request_size,
+    validate_host_response, validate_operation_family, validate_request_size,
     validate_side_effect_intent, validate_timeout_bounds,
     FakeProviderHostTransport, HostActorWire, HostDeadlineWire,
     HostEnvironmentPolicyWire, HostEnvironmentRequirementWire,
@@ -235,7 +235,8 @@ pub use provider_host::{
     HostResourceUsageWire, HostResponseEnvelopeWire, HostResponseStatusWire,
     HostSideEffectIntentWire, HostValidationError, HostValidationPolicy,
     HostWorkspaceIdentityWire, ProviderHostTransport, HOST_CAP_IPC_V1,
-    HOST_CAP_LLM_METADATA, HOST_CAP_MANIFEST_V1, HOST_CAP_XPROMPT_CATALOG,
+    HOST_CAP_LLM_METADATA, HOST_CAP_MANIFEST_V1,
+    HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS, HOST_CAP_XPROMPT_CATALOG,
     HOST_ERROR_CODES, HOST_OPERATION_FAMILIES,
     PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
 };

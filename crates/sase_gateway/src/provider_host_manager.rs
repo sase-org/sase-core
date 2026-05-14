@@ -1,5 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
+    path::Path,
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -136,6 +137,17 @@ impl ProviderHostManager {
         self.unregister_cancellation(&request.request_id);
         match result {
             Ok(mut response) => {
+                if let Err(error) =
+                    sase_core::provider_host::validate_host_response(
+                        &request, &response,
+                    )
+                {
+                    self.inner.total_failed.fetch_add(1, Ordering::Relaxed);
+                    return response_from_validation_error(
+                        &request.request_id,
+                        error,
+                    );
+                }
                 self.inner.total_completed.fetch_add(1, Ordering::Relaxed);
                 if response.duration_ms == 0 {
                     response.duration_ms = started.elapsed().as_millis() as u64;
@@ -172,6 +184,26 @@ impl ProviderHostManager {
             total_completed: self.inner.total_completed.load(Ordering::Relaxed),
             total_failed: self.inner.total_failed.load(Ordering::Relaxed),
         }
+    }
+
+    pub fn resource_policy_diagnostics(&self) -> JsonValue {
+        json!({
+            "timeout": {
+                "state": "active",
+                "default_ms": DEFAULT_PROVIDER_HOST_TIMEOUT_MS,
+                "source": "request deadlines are bounded by daemon host validation policy"
+            },
+            "rss_soft_cap": {
+                "state": "unavailable",
+                "reason": "portable subprocess RSS cap enforcement is not enabled in v1"
+            },
+            "cgroup_v2_cpu_quota": cgroup_v2_diagnostics(),
+            "seccomp": seccomp_diagnostics(),
+            "compatibility_mode": {
+                "state": "active",
+                "reason": "known built-ins use compatibility manifests until real provider routing lands"
+            }
+        })
     }
 
     fn try_acquire(&self) -> Option<ActiveCallGuard> {
@@ -522,6 +554,54 @@ fn redact_host_log(message: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn cgroup_v2_diagnostics() -> JsonValue {
+    let controllers = Path::new("/sys/fs/cgroup/cgroup.controllers");
+    if controllers.exists() {
+        json!({
+            "state": "available",
+            "enforced": false,
+            "reason": "cgroup v2 detected; quota enforcement is opt-in for provider host v1"
+        })
+    } else {
+        json!({
+            "state": "unavailable",
+            "enforced": false,
+            "reason": "cgroup v2 controllers file is not present"
+        })
+    }
+}
+
+fn seccomp_diagnostics() -> JsonValue {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok();
+        let mode = status
+            .as_deref()
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    line.strip_prefix("Seccomp:")
+                        .map(str::trim)
+                        .map(str::to_string)
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        json!({
+            "state": if mode == "unknown" { "unavailable" } else { "available" },
+            "enforced": mode != "0" && mode != "unknown",
+            "mode": mode,
+            "reason": "seccomp profile detection only; provider host v1 does not install profiles"
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        json!({
+            "state": "unavailable",
+            "enforced": false,
+            "reason": "seccomp detection is Linux-only"
+        })
+    }
 }
 
 #[cfg(test)]

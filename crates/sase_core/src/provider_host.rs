@@ -15,6 +15,8 @@ pub const HOST_CAP_IPC_V1: &str = "host.ipc.v1";
 pub const HOST_CAP_MANIFEST_V1: &str = "host.manifest.v1";
 pub const HOST_CAP_LLM_METADATA: &str = "host.llm.metadata";
 pub const HOST_CAP_XPROMPT_CATALOG: &str = "host.xprompt.catalog";
+pub const HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS: &str =
+    "host.resource_policy.diagnostics";
 
 pub const HOST_OPERATION_FAMILIES: [&str; 6] = [
     "llm",
@@ -289,10 +291,16 @@ impl Default for HostValidationPolicy {
             max_request_bytes: 1_048_576,
             min_timeout_ms: 1,
             max_timeout_ms: 300_000,
-            allowed_capabilities: [HOST_CAP_IPC_V1, HOST_CAP_MANIFEST_V1]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            allowed_capabilities: [
+                HOST_CAP_IPC_V1,
+                HOST_CAP_MANIFEST_V1,
+                HOST_CAP_LLM_METADATA,
+                HOST_CAP_XPROMPT_CATALOG,
+                HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             allowed_operation_families: HOST_OPERATION_FAMILIES
                 .into_iter()
                 .map(str::to_string)
@@ -364,6 +372,37 @@ pub fn validate_host_request(
     validate_declared_capabilities(&request.declared_capabilities, policy)?;
     if let Some(manifest) = &request.manifest {
         validate_manifest_for_request(manifest, request)?;
+    }
+    Ok(())
+}
+
+pub fn validate_host_response(
+    request: &HostRequestEnvelopeWire,
+    response: &HostResponseEnvelopeWire,
+) -> Result<(), HostValidationError> {
+    for intent in &response.side_effects {
+        validate_side_effect_intent(intent)?;
+        if matches!(intent, HostSideEffectIntentWire::NetworkRequest { .. })
+            && !manifest_allows_network(request.manifest.as_ref())
+        {
+            return Err(validation_error(
+                HostErrorCodeWire::NetworkDenied,
+                "manifest network policy denies returned network side-effect intent",
+                Some("side_effect.network_request"),
+            ));
+        }
+    }
+    if response
+        .resource_usage
+        .as_ref()
+        .is_some_and(|usage| usage.network_requests > 0)
+        && !manifest_allows_network(request.manifest.as_ref())
+    {
+        return Err(validation_error(
+            HostErrorCodeWire::NetworkDenied,
+            "manifest network policy denies reported network usage",
+            Some("resource_usage.network_requests"),
+        ));
     }
     Ok(())
 }
@@ -602,21 +641,92 @@ fn validate_manifest_for_request(
         ));
     }
     if !manifest.operation_families.is_empty()
-        && !manifest
-            .operation_families
-            .iter()
-            .any(|family| family == &request.operation.family)
+        && !manifest_allows_operation(manifest, request)
     {
         return Err(validation_error(
             HostErrorCodeWire::OperationUnsupported,
             format!(
                 "manifest does not declare operation family {}",
-                request.operation.family
+                operation_policy_key(request)
             ),
             Some("manifest.operation_families"),
         ));
     }
+    if request_payload_requires_network(&request.payload)
+        && !manifest_allows_network(Some(manifest))
+    {
+        return Err(validation_error(
+            HostErrorCodeWire::NetworkDenied,
+            format!(
+                "manifest network policy denies network use for {}",
+                operation_policy_key(request)
+            ),
+            Some("manifest.network"),
+        ));
+    }
     Ok(())
+}
+
+fn manifest_allows_operation(
+    manifest: &HostManifestWire,
+    request: &HostRequestEnvelopeWire,
+) -> bool {
+    let allowed: BTreeSet<&str> = manifest
+        .operation_families
+        .iter()
+        .map(String::as_str)
+        .collect();
+    operation_policy_keys(request)
+        .iter()
+        .any(|key| allowed.contains(key.as_str()))
+}
+
+fn operation_policy_key(request: &HostRequestEnvelopeWire) -> String {
+    let operation = request.operation.operation.as_str();
+    let family = request.operation.family.as_str();
+    if operation == family || operation.starts_with(&format!("{family}.")) {
+        operation.to_string()
+    } else {
+        format!("{family}.{operation}")
+    }
+}
+
+fn operation_policy_keys(
+    request: &HostRequestEnvelopeWire,
+) -> BTreeSet<String> {
+    [
+        request.operation.family.clone(),
+        request.operation.operation.clone(),
+        operation_policy_key(request),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn request_payload_requires_network(payload: &JsonValue) -> bool {
+    payload
+        .get("network_required")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+        || payload
+            .get("requires_network")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false)
+        || payload
+            .get("network")
+            .and_then(|network| network.get("required"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false)
+}
+
+fn manifest_allows_network(manifest: Option<&HostManifestWire>) -> bool {
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    matches!(
+        manifest.network.mode.as_str(),
+        "allow" | "declared" | "compatibility"
+    )
 }
 
 fn require_nonempty(
@@ -731,7 +841,7 @@ mod tests {
         let mut request = request();
         request
             .declared_capabilities
-            .push(HOST_CAP_LLM_METADATA.to_string());
+            .push("host.future.unsupported".to_string());
         let err =
             validate_host_request(&request, &HostValidationPolicy::default())
                 .unwrap_err();
@@ -761,6 +871,57 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_manifest_undeclared_operation() {
+        let mut request = request();
+        request.manifest = Some(manifest(vec!["llm.metadata"], "deny"));
+
+        let err =
+            validate_host_request(&request, &HostValidationPolicy::default())
+                .unwrap_err();
+
+        assert_eq!(err.code, HostErrorCodeWire::OperationUnsupported);
+        assert_eq!(err.target.as_deref(), Some("manifest.operation_families"));
+    }
+
+    #[test]
+    fn validation_rejects_network_required_by_denied_manifest() {
+        let mut request = request();
+        request.manifest = Some(manifest(vec!["xprompt.catalog"], "deny"));
+        request.payload = json!({"network_required": true});
+
+        let err =
+            validate_host_request(&request, &HostValidationPolicy::default())
+                .unwrap_err();
+
+        assert_eq!(err.code, HostErrorCodeWire::NetworkDenied);
+        assert_eq!(err.target.as_deref(), Some("manifest.network"));
+    }
+
+    #[test]
+    fn response_validation_rejects_network_intent_without_policy() {
+        let mut request = request();
+        request.manifest = Some(manifest(vec!["xprompt.catalog"], "deny"));
+        let response = HostResponseEnvelopeWire {
+            schema_version: PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+            request_id: request.request_id.clone(),
+            status: HostResponseStatusWire::Ok,
+            result: json!({}),
+            error: None,
+            logs: Vec::new(),
+            duration_ms: 1,
+            resource_usage: None,
+            side_effects: vec![HostSideEffectIntentWire::NetworkRequest {
+                method: "GET".to_string(),
+                url: "https://example.test".to_string(),
+            }],
+        };
+
+        let err = validate_host_response(&request, &response).unwrap_err();
+
+        assert_eq!(err.code, HostErrorCodeWire::NetworkDenied);
+    }
+
+    #[test]
     fn fake_transport_validates_and_echoes_request_id() {
         let response = FakeProviderHostTransport::new(json!({"ok": true}))
             .send(request())
@@ -768,5 +929,38 @@ mod tests {
         assert_eq!(response.request_id, "host_req_1");
         assert_eq!(response.status, HostResponseStatusWire::Ok);
         assert_eq!(response.result, json!({"ok": true}));
+    }
+
+    fn manifest(
+        operation_families: Vec<&str>,
+        network_mode: &str,
+    ) -> HostManifestWire {
+        HostManifestWire {
+            schema_version: PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+            plugin_id: "test.plugin".to_string(),
+            version: "1.0.0".to_string(),
+            operation_families: operation_families
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            capabilities: Vec::new(),
+            network: HostNetworkPolicyWire {
+                mode: network_mode.to_string(),
+                allowed_hosts: Vec::new(),
+            },
+            filesystem_roots: Vec::new(),
+            process: HostProcessPolicyWire {
+                spawn_allowed: false,
+                allowed_commands: Vec::new(),
+            },
+            environment: HostEnvironmentRequirementWire {
+                required_vars: Vec::new(),
+                optional_vars: Vec::new(),
+            },
+            timeout_hints_ms: BTreeMap::new(),
+            warm_host_eligible: false,
+            wasm_compatible: false,
+            wasm_notes: None,
+        }
     }
 }

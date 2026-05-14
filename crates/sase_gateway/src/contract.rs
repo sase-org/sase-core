@@ -8,11 +8,12 @@ use thiserror::Error;
 
 use crate::wire::{
     GATEWAY_WIRE_SCHEMA_VERSION, HOST_CAP_IPC_V1, HOST_CAP_LLM_METADATA,
-    HOST_CAP_MANIFEST_V1, HOST_CAP_XPROMPT_CATALOG, HOST_ERROR_CODES,
-    HOST_OPERATION_FAMILIES, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
-    LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
-    LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
-    LOCAL_DAEMON_WIRE_SCHEMA_VERSION, PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
+    HOST_CAP_MANIFEST_V1, HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
+    HOST_CAP_XPROMPT_CATALOG, HOST_ERROR_CODES, HOST_OPERATION_FAMILIES,
+    LOCAL_DAEMON_DEFAULT_PAGE_LIMIT, LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION,
+    LOCAL_DAEMON_MAX_PAGE_LIMIT, LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+    LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+    PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
 };
 
 pub fn api_v1_contract_snapshot() -> Value {
@@ -982,16 +983,16 @@ pub fn local_daemon_contract_snapshot() -> Value {
         "host_ipc": {
             "schema_version": PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
             "contract": "sase_provider_host_ipc_v1",
-            "phase": "subprocess_fake_operations",
-            "production_routing": "fake/no-op host operations may route through the subprocess runtime; real provider and plugin calls still use existing Python fallback paths",
+            "phase": "read_only_metadata_catalog_routing",
+            "production_routing": "fake/no-op host operations plus read-only LLM metadata and xprompt catalog calls may route through the subprocess runtime; side-effecting provider and plugin calls still use existing Python fallback paths",
             "advertised_foundation_capabilities": [
                 HOST_CAP_IPC_V1,
-                HOST_CAP_MANIFEST_V1
-            ],
-            "reserved_routed_capabilities": [
+                HOST_CAP_MANIFEST_V1,
                 HOST_CAP_LLM_METADATA,
-                HOST_CAP_XPROMPT_CATALOG
+                HOST_CAP_XPROMPT_CATALOG,
+                HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS
             ],
+            "reserved_routed_capabilities": [],
             "operation_families": HOST_OPERATION_FAMILIES,
             "error_vocabulary": HOST_ERROR_CODES,
             "validation": {
@@ -999,7 +1000,16 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "request_size": "bounded by daemon host policy before dispatch",
                 "timeout_bounds": "deadline.timeout_ms must be inside daemon host policy bounds when present",
                 "declared_capabilities": "must be advertised by daemon before a routed host call is accepted",
-                "side_effect_intents": "shape-only validation before any daemon state mutation"
+                "manifest_operation_families": "manifest must declare the requested operation family or specific operation",
+                "network_policy": "request network intent and response network side-effect intents must be allowed by the manifest",
+                "side_effect_intents": "shape and manifest policy validation before any daemon state mutation"
+            },
+            "resource_policy": {
+                "timeout": "active; request deadline is bounded by daemon host policy",
+                "rss_soft_cap": "diagnosed explicitly as active or unavailable; portable enforcement is not enabled in v1",
+                "cgroup_v2_cpu_quota": "Linux cgroup v2 support is detected and reported; quota enforcement is opt-in",
+                "seccomp": "Linux seccomp profile state is detected and reported; profile installation is opt-in",
+                "compatibility_mode": "known built-ins use compatibility manifests until routed provider verticals land"
             },
             "records": {
                 "HostRequestEnvelopeWire": {
@@ -1067,6 +1077,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "capabilities.read",
             HOST_CAP_IPC_V1,
             HOST_CAP_MANIFEST_V1,
+            HOST_CAP_LLM_METADATA,
+            HOST_CAP_XPROMPT_CATALOG,
+            HOST_CAP_RESOURCE_POLICY_DIAGNOSTICS,
             "writes.contract",
             "agents.write",
             "beads.write",
