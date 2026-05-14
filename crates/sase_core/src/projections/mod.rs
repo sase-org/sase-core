@@ -24,7 +24,7 @@ pub mod scheduler;
 pub mod workflows;
 
 pub use agents::{
-    ace_agent_snapshot_page, agent_archive_bundle_indexed_event_request,
+    agent_archive_bundle_indexed_event_request,
     agent_archive_bundle_purged_event_request,
     agent_archive_bundle_revived_event_request,
     agent_artifact_associated_event_request,
@@ -186,16 +186,15 @@ pub use notifications::{
     PENDING_ACTION_EVENT_UPDATED,
 };
 pub use read::{
-    projection_read_schema_version, AceAgentSnapshotReadRequestWire,
-    AgentArchiveReadResponseWire, AgentReadDetailRequestWire,
-    AgentReadDetailResponseWire, AgentReadListRequestWire,
-    AgentReadListResponseWire, BeadReadDetailRequestWire,
-    BeadReadDetailResponseWire, BeadReadListRequestWire,
-    BeadReadListResponseWire, BeadReadStatsResponseWire,
-    CatalogReadListRequestWire, CatalogReadResponseWire,
-    ChangeSpecReadDetailRequestWire, ChangeSpecReadDetailResponseWire,
-    ChangeSpecReadListRequestWire, ChangeSpecReadListResponseWire,
-    NotificationPendingActionsReadResponseWire,
+    projection_read_schema_version, AgentArchiveReadResponseWire,
+    AgentReadDetailRequestWire, AgentReadDetailResponseWire,
+    AgentReadListRequestWire, AgentReadListResponseWire,
+    BeadReadDetailRequestWire, BeadReadDetailResponseWire,
+    BeadReadListRequestWire, BeadReadListResponseWire,
+    BeadReadStatsResponseWire, CatalogReadListRequestWire,
+    CatalogReadResponseWire, ChangeSpecReadDetailRequestWire,
+    ChangeSpecReadDetailResponseWire, ChangeSpecReadListRequestWire,
+    ChangeSpecReadListResponseWire, NotificationPendingActionsReadResponseWire,
     NotificationReadDetailRequestWire, NotificationReadDetailResponseWire,
     NotificationReadListRequestWire, NotificationReadListResponseWire,
     ProjectionPageInfoWire, ProjectionPageRequestWire,

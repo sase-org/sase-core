@@ -1077,89 +1077,6 @@ pub fn agent_projection_search_page(
     })
 }
 
-pub fn ace_agent_snapshot_page(
-    conn: &Connection,
-    limit: u32,
-    offset: u32,
-    include_hidden: bool,
-    query: Option<&str>,
-) -> Result<AgentProjectionPageWire, ProjectionError> {
-    let fetch_limit = limit.saturating_add(1);
-    let search_like = query.map(agent_search_like);
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT agent_id, project_id, project_name, project_dir, project_file,
-               workflow_dir_name, artifact_dir, timestamp, status, agent_type,
-               cl_name, agent_name, model, llm_provider, started_at,
-               finished_at, hidden, has_done_marker, has_running_marker,
-               has_waiting_marker, has_workflow_state, batch_id, queue_id,
-               parent_agent_id, workflow_id, retry_of_agent_id,
-               resume_of_agent_id, host_id, pid, workspace_claim_id,
-               last_heartbeat_at, last_check_at, lifecycle_changed_at,
-               stale_reason, last_seq
-        FROM agents
-        WHERE (?1 OR hidden = 0)
-          AND (
-            has_done_marker = 0
-            OR (has_workflow_state = 1 AND status NOT IN ('completed', 'failed', 'cancelled', 'killed', 'noop'))
-            OR has_done_marker = 1
-          )
-          AND (
-            ?2 IS NULL
-            OR project_name LIKE ?2 ESCAPE '\'
-            OR workflow_dir_name LIKE ?2 ESCAPE '\'
-            OR timestamp LIKE ?2 ESCAPE '\'
-            OR COALESCE(cl_name, '') LIKE ?2 ESCAPE '\'
-            OR COALESCE(agent_name, '') LIKE ?2 ESCAPE '\'
-            OR COALESCE(model, '') LIKE ?2 ESCAPE '\'
-            OR COALESCE(llm_provider, '') LIKE ?2 ESCAPE '\'
-          )
-        ORDER BY
-          CASE
-            WHEN has_done_marker = 0
-              OR (has_workflow_state = 1 AND status NOT IN ('completed', 'failed', 'cancelled', 'killed', 'noop'))
-            THEN 0
-            ELSE 1
-          END ASC,
-          CASE
-            WHEN has_done_marker = 0
-              OR (has_workflow_state = 1 AND status NOT IN ('completed', 'failed', 'cancelled', 'killed', 'noop'))
-            THEN timestamp
-            ELSE ''
-          END DESC,
-          CASE
-            WHEN has_done_marker = 1
-            THEN COALESCE(finished_at, 0)
-            ELSE 0
-          END DESC,
-          CASE
-            WHEN has_done_marker = 1
-            THEN timestamp
-            ELSE ''
-          END DESC,
-          project_id ASC,
-          agent_id ASC
-        LIMIT ?3 OFFSET ?4
-        "#,
-    )?;
-    let rows = stmt.query_map(
-        params![
-            include_hidden,
-            search_like.as_deref(),
-            fetch_limit as i64,
-            offset as i64
-        ],
-        agent_row,
-    )?;
-    let mut entries = collect_rows(rows)?;
-    let next_offset = truncate_for_next_offset(&mut entries, limit, offset);
-    Ok(AgentProjectionPageWire {
-        schema_version: AGENT_PROJECTION_WIRE_SCHEMA_VERSION,
-        entries,
-        next_offset,
-    })
-}
-
 pub fn agent_projection_summary(
     conn: &Connection,
     project_id: &str,
@@ -2563,21 +2480,6 @@ fn truncate_for_next_offset<T>(
     } else {
         None
     }
-}
-
-fn agent_search_like(query: &str) -> String {
-    let mut escaped = String::from("%");
-    for ch in query.chars() {
-        match ch {
-            '%' | '_' | '\\' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped.push('%');
-    escaped
 }
 
 fn nonempty(value: String) -> Option<String> {
