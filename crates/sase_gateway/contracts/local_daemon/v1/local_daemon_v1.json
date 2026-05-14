@@ -244,6 +244,7 @@
     }
   },
   "records": {
+    "AceAgentSnapshotReadRequestWire": "schema_version, page, include_hidden, query",
     "AgentArchiveReadResponseWire": "snapshot/page/bounded plus AgentArchiveProjectionPageWire",
     "AgentReadDetailRequestWire": "schema_version, project_id, agent_id",
     "AgentReadDetailResponseWire": "snapshot/bounded plus summary, children, artifacts",
@@ -586,6 +587,7 @@
       "schema_version": "u32"
     },
     "LocalDaemonReadRequestWire": {
+      "ace_agent_snapshot": "AceAgentSnapshotReadRequestWire",
       "agent_active": "AgentReadListRequestWire",
       "agent_archive": "AgentReadListRequestWire",
       "agent_detail": "AgentReadDetailRequestWire",
@@ -609,6 +611,7 @@
       "xprompt_catalog": "CatalogReadListRequestWire"
     },
     "LocalDaemonReadResponseWire": {
+      "ace_agent_snapshot": "AgentReadListResponseWire",
       "agent_active": "AgentReadListResponseWire",
       "agent_archive": "AgentArchiveReadResponseWire",
       "agent_detail": "AgentReadDetailResponseWire",

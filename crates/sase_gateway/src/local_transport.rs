@@ -18,7 +18,7 @@ use sase_core::notifications::{
     NotificationWire, PendingActionStoreWire, PendingActionWire,
 };
 use sase_core::projections::{
-    agent_archive_bundle_indexed_event_request,
+    ace_agent_snapshot_page, agent_archive_bundle_indexed_event_request,
     agent_archive_bundle_purged_event_request,
     agent_archive_bundle_revived_event_request,
     agent_artifact_associated_event_request,
@@ -1085,6 +1085,10 @@ fn handle_read_payload(
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
     match request {
+        LocalDaemonReadRequestWire::AceAgentSnapshot(request) => {
+            ace_agent_snapshot_payload(request, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
         LocalDaemonReadRequestWire::AgentActive(request) => {
             agent_list_payload(request, state, AgentListKind::Active)
                 .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
@@ -1285,6 +1289,52 @@ enum AgentListKind {
     Active,
     Recent,
     Search,
+}
+
+fn ace_agent_snapshot_payload(
+    request: crate::wire::AceAgentSnapshotReadRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let entries = ace_agent_snapshot_page(
+                db.connection(),
+                limit,
+                offset,
+                request.include_hidden,
+                request.query.as_deref(),
+            )?;
+            Ok(AgentReadListResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: entries
+                        .next_offset
+                        .map(|value| value.to_string()),
+                },
+                entries,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AceAgentSnapshot(response),
+            ))
+        })
+        .map_err(projection_error)
 }
 
 fn agent_list_payload(
@@ -3259,6 +3309,9 @@ fn read_surface_name(request: &LocalDaemonReadRequestWire) -> &'static str {
         LocalDaemonReadRequestWire::ChangespecList(_) => "changespecs.list",
         LocalDaemonReadRequestWire::ChangespecSearch(_) => "changespecs.search",
         LocalDaemonReadRequestWire::ChangespecDetail(_) => "changespecs.detail",
+        LocalDaemonReadRequestWire::AceAgentSnapshot(_) => {
+            "agents.ace_snapshot"
+        }
         LocalDaemonReadRequestWire::AgentActive(_) => "agents.active",
         LocalDaemonReadRequestWire::AgentRecent(_) => "agents.recent",
         LocalDaemonReadRequestWire::AgentArchive(_) => "agents.archive",
@@ -3650,7 +3703,8 @@ fn read_response_snapshot_id(
         LocalDaemonReadResponseWire::ChangespecDetail(response) => {
             Some(response.snapshot.snapshot_id.clone())
         }
-        LocalDaemonReadResponseWire::AgentActive(response)
+        LocalDaemonReadResponseWire::AceAgentSnapshot(response)
+        | LocalDaemonReadResponseWire::AgentActive(response)
         | LocalDaemonReadResponseWire::AgentRecent(response)
         | LocalDaemonReadResponseWire::AgentSearch(response) => {
             Some(response.snapshot.snapshot_id.clone())
@@ -3741,9 +3795,10 @@ mod tests {
         daemon::{DaemonRuntimePaths, DaemonShutdown, LocalEventHub},
         projection_service::ProjectionService,
         wire::{
-            GatewayBuildWire, LocalDaemonClientWire,
-            LocalDaemonPageRequestWire, MutationActorWire,
-            ProjectionPageRequestWire, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            AceAgentSnapshotReadRequestWire, GatewayBuildWire,
+            LocalDaemonClientWire, LocalDaemonPageRequestWire,
+            MutationActorWire, ProjectionPageRequestWire,
+            LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
         },
     };
     use sase_core::notifications::{
@@ -5149,6 +5204,102 @@ mod tests {
                     panic!("expected agent active response, got {other:?}")
                 }
             },
+            other => panic!("expected read response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ace_agent_snapshot_reads_agents_across_projects_once() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        projection_service
+            .write_blocking(|db| {
+                for (project_id, timestamp) in
+                    [("demo-a", "20260514100000"), ("demo-b", "20260514110000")]
+                {
+                    db.append_agent_event(
+                        agent_lifecycle_transitioned_event_request(
+                            AgentProjectionEventContextWire {
+                                schema_version:
+                                    LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                                created_at: Some(
+                                    "2026-05-14T06:00:00Z".to_string(),
+                                ),
+                                source: EventSourceWire {
+                                    source_type: "test".to_string(),
+                                    name: "ace-agent-snapshot-test".to_string(),
+                                    ..EventSourceWire::default()
+                                },
+                                host_id: "host-a".to_string(),
+                                project_id: project_id.to_string(),
+                                idempotency_key: Some(format!(
+                                    "agent-read-row-{project_id}"
+                                )),
+                                causality: Vec::new(),
+                                source_path: None,
+                                source_revision: None,
+                            },
+                            AgentLifecycleProjectionWire {
+                                schema_version:
+                                    LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                                agent_id: format!(
+                                    "agent:{project_id}:{timestamp}"
+                                ),
+                                lifecycle_status:
+                                    AgentLifecycleStatusWire::Running,
+                                project_name: Some(project_id.to_string()),
+                                timestamp: Some(timestamp.to_string()),
+                                ..AgentLifecycleProjectionWire::default()
+                            },
+                        )?,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+
+        let payload =
+            serde_json::to_vec(&request(LocalDaemonRequestPayloadWire::Read(
+                LocalDaemonReadRequestWire::AceAgentSnapshot(
+                    AceAgentSnapshotReadRequestWire {
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        page: ProjectionPageRequestWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            limit: 10,
+                            cursor: None,
+                        },
+                        include_hidden: false,
+                        query: None,
+                    },
+                ),
+            )))
+            .unwrap();
+
+        match response_for_frame(&payload, &state).payload {
+            LocalDaemonResponsePayloadWire::Read(response) => {
+                match *response {
+                    LocalDaemonReadResponseWire::AceAgentSnapshot(response) => {
+                        assert_eq!(response.entries.entries.len(), 2);
+                        assert_eq!(
+                            response
+                                .entries
+                                .entries
+                                .iter()
+                                .map(|row| row.project_id.as_str())
+                                .collect::<Vec<_>>(),
+                            vec!["demo-b", "demo-a"],
+                        );
+                        assert_eq!(response.page.next_cursor, None);
+                    }
+                    other => {
+                        panic!("expected ace agent snapshot response, got {other:?}")
+                    }
+                }
+            }
             other => panic!("expected read response, got {other:?}"),
         }
     }

@@ -134,6 +134,17 @@ pub struct AgentReadListRequestWire {
     pub query: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AceAgentSnapshotReadRequestWire {
+    #[serde(default = "projection_read_schema_version")]
+    pub schema_version: u32,
+    pub page: ProjectionPageRequestWire,
+    #[serde(default)]
+    pub include_hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentReadDetailRequestWire {
     #[serde(default = "projection_read_schema_version")]
