@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -22,24 +23,30 @@ use sase_core::projections::{
     agent_archive_bundle_revived_event_request,
     agent_artifact_associated_event_request,
     agent_cleanup_result_recorded_event_request,
-    agent_dismissed_identity_changed_event_request, changespec_handle,
-    notification_append_event_request, notification_projection_counts,
-    notification_projection_detail, notification_projection_page,
-    notification_source_paths, notification_state_update_event_request,
+    agent_dismissed_identity_changed_event_request, agent_lifecycle_detail,
+    agent_projection_active_page, agent_projection_archive_page,
+    agent_projection_artifacts, agent_projection_children,
+    agent_projection_recent_page, agent_projection_search_page,
+    changespec_handle, notification_append_event_request,
+    notification_projection_counts, notification_projection_detail,
+    notification_projection_page, notification_source_paths,
+    notification_state_update_event_request,
     pending_action_cleanup_event_request,
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
-    source_fingerprint_from_path,
+    scheduler_batch_status, source_fingerprint_from_path,
     workflow_action_response_recorded_event_request,
     workflow_run_created_event_request, workflow_run_updated_event_request,
     AgentArtifactAssociationWire, AgentDismissedIdentityWire,
-    AgentProjectionEventContextWire, BeadMutationWriteRequestWire,
+    AgentProjectionEventContextWire, AgentReadDetailResponseWire,
+    AgentReadListResponseWire, BeadMutationWriteRequestWire,
     BeadProjectionEventContextWire, EventAppendRequestWire, EventSourceWire,
     LocalDaemonMutationOutcomeWire, NotificationPendingActionsReadResponseWire,
     NotificationProjectionEventContextWire, NotificationReadDetailResponseWire,
-    ProjectionPayloadBoundWire, ProjectionSnapshotReadWire,
-    SourceExportKindWire, SourceExportPlanWire, SourceExportReportWire,
-    SourceExportStatusWire, SourceFingerprintWire,
+    ProjectionPageInfoWire, ProjectionPayloadBoundWire,
+    ProjectionSnapshotReadWire, SchedulerEventContextWire,
+    SchedulerQueueSettingsWire, SourceExportKindWire, SourceExportPlanWire,
+    SourceExportReportWire, SourceExportStatusWire, SourceFingerprintWire,
     WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
@@ -59,20 +66,22 @@ use crate::{
     projection_service::ProjectionServiceState,
     wire::{
         LocalDaemonBatchResponseWire, LocalDaemonCapabilitiesResponseWire,
-        LocalDaemonCollectionWire, LocalDaemonErrorCodeWire,
-        LocalDaemonErrorWire, LocalDaemonEventBatchWire,
-        LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
-        LocalDaemonEventRequestWire, LocalDaemonFallbackWire,
-        LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
-        LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
+        LocalDaemonCollectionWire, LocalDaemonDeltaOperationWire,
+        LocalDaemonErrorCodeWire, LocalDaemonErrorWire,
+        LocalDaemonEventBatchWire, LocalDaemonEventPayloadWire,
+        LocalDaemonEventRecordWire, LocalDaemonEventRequestWire,
+        LocalDaemonFallbackWire, LocalDaemonHealthResponseWire,
+        LocalDaemonHealthStatusWire, LocalDaemonHeartbeatWire,
+        LocalDaemonIndexingDiffRequestWire,
         LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
         LocalDaemonPayloadBoundWire, LocalDaemonReadRequestWire,
         LocalDaemonReadResponseWire, LocalDaemonRebuildRequestWire,
         LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
         LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
-        LocalDaemonWriteRequestWire, LocalDaemonWriteResponseWire,
-        ProjectionPageRequestWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonSchedulerStatusRequestWire, LocalDaemonWriteRequestWire,
+        LocalDaemonWriteResponseWire, ProjectionPageRequestWire,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -304,6 +313,15 @@ fn handle_payload(
                 Some("payload".to_string()),
                 None,
             ))
+        }
+        LocalDaemonRequestPayloadWire::SchedulerSubmit(request) => {
+            handle_scheduler_submit_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerStatus(request) => {
+            handle_scheduler_status_payload(request, state)
+        }
+        LocalDaemonRequestPayloadWire::SchedulerCancel(request) => {
+            handle_scheduler_cancel_payload(request, state)
         }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
             let responses = requests
@@ -572,6 +590,26 @@ fn handle_read_payload(
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
     match request {
+        LocalDaemonReadRequestWire::AgentActive(request) => {
+            agent_list_payload(request, state, AgentListKind::Active)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentRecent(request) => {
+            agent_list_payload(request, state, AgentListKind::Recent)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentArchive(request) => {
+            agent_archive_payload(request, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentSearch(request) => {
+            agent_list_payload(request, state, AgentListKind::Search)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
+        LocalDaemonReadRequestWire::AgentDetail(request) => {
+            agent_detail_payload(request.project_id, request.agent_id, state)
+                .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
+        }
         LocalDaemonReadRequestWire::NotificationList(_) => {
             notification_list_payload(request, state)
                 .unwrap_or_else(LocalDaemonResponsePayloadWire::Error)
@@ -599,6 +637,336 @@ fn handle_read_payload(
             read_surface_name(&other),
         )),
     }
+}
+
+fn handle_scheduler_submit_payload(
+    request: crate::wire::SchedulerBatchSubmitRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let batch_id_hint = request.batch_id.clone();
+    let result = state.projection_service.write_blocking(move |db| {
+        db.submit_scheduler_batch(
+            context,
+            request,
+            SchedulerQueueSettingsWire::default(),
+        )
+    });
+    match result {
+        Ok(response) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: response.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": response.handle.project_id,
+                        "queue_id": response.handle.queue_id,
+                        "status": response.handle.status,
+                        "slot_count": response.handle.slot_count,
+                        "duplicate": response.duplicate,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler submit failed: {error}"),
+            false,
+            batch_id_hint.or_else(|| Some("scheduler_submit".to_string())),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn handle_scheduler_status_payload(
+    request: LocalDaemonSchedulerStatusRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let result = state.projection_service.read_blocking(move |db| {
+        scheduler_batch_status(
+            db.connection(),
+            &request.project_id,
+            &request.batch_id,
+        )
+    });
+    match result {
+        Ok(Some(status)) => {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status)
+        }
+        Ok(None) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::ResourceNotFound,
+            "scheduler batch not found",
+            false,
+            Some("batch_id".to_string()),
+            None,
+        )),
+        Err(error) => {
+            LocalDaemonResponsePayloadWire::Error(projection_error(error))
+        }
+    }
+}
+
+fn handle_scheduler_cancel_payload(
+    request: crate::wire::SchedulerCancelRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    let context = scheduler_event_context(
+        state,
+        request.project_id.clone(),
+        Some(request.idempotency_key.clone()),
+    );
+    let result = state
+        .projection_service
+        .write_blocking(move |db| db.cancel_scheduler_slots(context, request));
+    match result {
+        Ok(status) => {
+            state
+                .local_events
+                .append(|_| LocalDaemonEventPayloadWire::Delta {
+                    collection: LocalDaemonCollectionWire::Scheduler,
+                    handle: status.handle.batch_id.clone(),
+                    operation: LocalDaemonDeltaOperationWire::Upsert,
+                    fields: json!({
+                        "project_id": status.handle.project_id,
+                        "queue_id": status.handle.queue_id,
+                        "status": status.handle.status,
+                        "slot_count": status.handle.slot_count,
+                    }),
+                });
+            LocalDaemonResponsePayloadWire::SchedulerCancel(status)
+        }
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("scheduler cancel failed: {error}"),
+            false,
+            Some("scheduler_cancel".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+fn scheduler_event_context(
+    state: &DaemonState,
+    project_id: String,
+    idempotency_key: Option<String>,
+) -> SchedulerEventContextWire {
+    SchedulerEventContextWire {
+        schema_version: sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+        created_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        source: EventSourceWire {
+            source_type: "daemon_rpc".to_string(),
+            name: "sase_gateway".to_string(),
+            version: Some(state.build.package_version.clone()),
+            runtime: Some("rust".to_string()),
+            metadata: BTreeMap::new(),
+        },
+        host_id: state.host_identity.clone(),
+        project_id,
+        idempotency_key,
+        causality: Vec::new(),
+        source_path: None,
+        source_revision: None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AgentListKind {
+    Active,
+    Recent,
+    Search,
+}
+
+fn agent_list_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+    kind: AgentListKind,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let entries = match kind {
+                AgentListKind::Active => agent_projection_active_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Recent => agent_projection_recent_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                    request.include_hidden,
+                )?,
+                AgentListKind::Search => {
+                    let query = request.query.as_deref().unwrap_or("*");
+                    agent_projection_search_page(
+                        db.connection(),
+                        &request.project_id,
+                        query,
+                        limit,
+                        offset,
+                        request.include_hidden,
+                    )?
+                }
+            };
+            Ok(AgentReadListResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: entries
+                        .next_offset
+                        .map(|value| value.to_string()),
+                },
+                entries,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            let variant = match kind {
+                AgentListKind::Active => {
+                    LocalDaemonReadResponseWire::AgentActive(response)
+                }
+                AgentListKind::Recent => {
+                    LocalDaemonReadResponseWire::AgentRecent(response)
+                }
+                AgentListKind::Search => {
+                    LocalDaemonReadResponseWire::AgentSearch(response)
+                }
+            };
+            LocalDaemonResponsePayloadWire::Read(Box::new(variant))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_archive_payload(
+    request: crate::wire::AgentReadListRequestWire,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    let max_payload_bytes = LOCAL_DAEMON_MAX_PAYLOAD_BYTES;
+    let limit = request.page.limit.clamp(1, LOCAL_DAEMON_MAX_PAGE_LIMIT);
+    let offset = read_cursor_offset(request.page.cursor.as_deref())?;
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            Ok(crate::wire::AgentArchiveReadResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                page: ProjectionPageInfoWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    next_cursor: None,
+                },
+                entries: agent_projection_archive_page(
+                    db.connection(),
+                    &request.project_id,
+                    limit,
+                    offset,
+                )?,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentArchive(response),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn agent_detail_payload(
+    project_id: String,
+    agent_id: String,
+    state: &DaemonState,
+) -> Result<LocalDaemonResponsePayloadWire, LocalDaemonErrorWire> {
+    let snapshot_id = next_snapshot_id();
+    state
+        .projection_service
+        .read_blocking(move |db| {
+            let detail =
+                agent_lifecycle_detail(db.connection(), &project_id, &agent_id)?;
+            let Some(summary) = detail.summary else {
+                return Err(sase_core::projections::ProjectionError::Invariant(
+                    format!("agent '{agent_id}' not found in project '{project_id}'"),
+                ));
+            };
+            let children = agent_projection_children(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            let artifacts = agent_projection_artifacts(
+                db.connection(),
+                &project_id,
+                &summary.agent_id,
+            )?;
+            Ok(AgentReadDetailResponseWire {
+                schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                snapshot: ProjectionSnapshotReadWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    snapshot_id,
+                },
+                summary,
+                children,
+                artifacts,
+                bounded: ProjectionPayloadBoundWire {
+                    schema_version: PROJECTION_READ_WIRE_SCHEMA_VERSION,
+                    max_payload_bytes: LOCAL_DAEMON_MAX_PAYLOAD_BYTES,
+                    truncated: false,
+                },
+            })
+        })
+        .map(|response| {
+            LocalDaemonResponsePayloadWire::Read(Box::new(
+                LocalDaemonReadResponseWire::AgentDetail(Box::new(response)),
+            ))
+        })
+        .map_err(projection_error)
+}
+
+fn read_cursor_offset(
+    cursor: Option<&str>,
+) -> Result<u32, LocalDaemonErrorWire> {
+    cursor
+        .map(|value| {
+            value.parse::<u32>().map_err(|error| {
+                local_error(
+                    LocalDaemonErrorCodeWire::InvalidRequest,
+                    format!("invalid projection cursor '{value}': {error}"),
+                    false,
+                    Some("page.cursor".to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(0))
 }
 
 fn handle_write_payload(
@@ -1036,17 +1404,16 @@ fn workflow_write_payload(
     })
 }
 
+type WorkflowWritePlan = (
+    EventAppendRequestWire,
+    Option<String>,
+    Vec<SourceExportPlanWire>,
+    Option<JsonValue>,
+);
+
 fn workflow_write_plan(
     request: &LocalDaemonWriteRequestWire,
-) -> Result<
-    (
-        EventAppendRequestWire,
-        Option<String>,
-        Vec<SourceExportPlanWire>,
-        Option<JsonValue>,
-    ),
-    LocalDaemonErrorWire,
-> {
+) -> Result<WorkflowWritePlan, LocalDaemonErrorWire> {
     match request.surface.as_str() {
         "workflow.state" => {
             preflight_source_exports(request)?;
@@ -2126,6 +2493,7 @@ fn collection_capability(
         LocalDaemonCollectionWire::Changespecs => "changespecs.read",
         LocalDaemonCollectionWire::Notifications => "notifications.read",
         LocalDaemonCollectionWire::Workflows => "catalogs.read",
+        LocalDaemonCollectionWire::Scheduler => "scheduler.read",
         LocalDaemonCollectionWire::Xprompts => "catalogs.read",
         LocalDaemonCollectionWire::Indexing => "indexing.status",
         LocalDaemonCollectionWire::Mocked => "mocked.list",
@@ -2200,6 +2568,7 @@ fn local_daemon_capabilities() -> Vec<String> {
         "health.read".to_string(),
         "capabilities.read".to_string(),
         "writes.contract".to_string(),
+        "agents.read".to_string(),
         "agents.write".to_string(),
         "beads.write".to_string(),
         "changespecs.write".to_string(),
@@ -2208,6 +2577,9 @@ fn local_daemon_capabilities() -> Vec<String> {
         "notifications.read".to_string(),
         "notifications.write".to_string(),
         "workflows.write".to_string(),
+        "scheduler.submit".to_string(),
+        "scheduler.read".to_string(),
+        "scheduler.cancel".to_string(),
         "projection.rebuild".to_string(),
         "indexing.status".to_string(),
         "indexing.rebuild".to_string(),
@@ -2494,8 +2866,11 @@ mod tests {
         NotificationWire,
     };
     use sase_core::projections::{
-        notification_append_event_request, EventSourceWire,
-        NotificationProjectionEventContextWire,
+        agent_lifecycle_transitioned_event_request,
+        notification_append_event_request, AgentLifecycleProjectionWire,
+        AgentLifecycleStatusWire, AgentProjectionEventContextWire,
+        EventSourceWire, NotificationProjectionEventContextWire,
+        SchedulerBatchSubmitRequestWire, SchedulerLaunchSpecWire,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -2711,6 +3086,112 @@ mod tests {
             other => {
                 panic!("expected unsupported write error, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn scheduler_submit_status_and_events_use_projection() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service);
+        let submit = SchedulerBatchSubmitRequestWire {
+            schema_version:
+                sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+            project_id: "project-a".to_string(),
+            idempotency_key: "batch-key-1".to_string(),
+            batch_id: Some("batch-a".to_string()),
+            queue_id: Some("agents".to_string()),
+            launch_specs: vec![
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "first".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+                SchedulerLaunchSpecWire {
+                    schema_version:
+                        sase_core::projections::SCHEDULER_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    prompt: "second".to_string(),
+                    cwd: None,
+                    model: None,
+                    parent_agent_id: None,
+                    workflow_id: None,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+            metadata: BTreeMap::new(),
+        };
+        let submit_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerSubmit(submit),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&submit_payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerSubmit(response) => {
+                assert_eq!(response.handle.batch_id, "batch-a");
+                assert_eq!(response.status.slots.len(), 2);
+                assert_eq!(response.status.slots[0].queued_position, Some(1));
+            }
+            other => {
+                panic!("expected scheduler submit response, got {other:?}")
+            }
+        }
+
+        let status_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::SchedulerStatus(
+                LocalDaemonSchedulerStatusRequestWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    project_id: "project-a".to_string(),
+                    batch_id: "batch-a".to_string(),
+                },
+            ),
+        ))
+        .unwrap();
+        let status_response = response_for_frame(&status_payload, &state);
+        match status_response.payload {
+            LocalDaemonResponsePayloadWire::SchedulerStatus(status) => {
+                assert_eq!(status.handle.status, "queued");
+                assert_eq!(status.slots.len(), 2);
+            }
+            other => {
+                panic!("expected scheduler status response, got {other:?}")
+            }
+        }
+
+        let events_payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Events(
+                LocalDaemonEventRequestWire {
+                    since_event_id: Some("0000000000000000".to_string()),
+                    collections: vec![LocalDaemonCollectionWire::Scheduler],
+                    snapshot_id: None,
+                    max_events: 4,
+                },
+            ),
+        ))
+        .unwrap();
+        let events_response = response_for_frame(&events_payload, &state);
+        match events_response.payload {
+            LocalDaemonResponsePayloadWire::Events(events) => {
+                assert!(events.events.iter().any(|event| matches!(
+                    event.payload,
+                    LocalDaemonEventPayloadWire::Delta {
+                        collection: LocalDaemonCollectionWire::Scheduler,
+                        ..
+                    }
+                )));
+            }
+            other => panic!("expected events response, got {other:?}"),
         }
     }
 
@@ -3321,6 +3802,85 @@ mod tests {
             other => {
                 panic!("expected notification read response, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn agent_read_surfaces_use_lifecycle_projection_rows() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        projection_service
+            .write_blocking(|db| {
+                db.append_agent_event(
+                    agent_lifecycle_transitioned_event_request(
+                        AgentProjectionEventContextWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            created_at: Some(
+                                "2026-05-14T06:00:00Z".to_string(),
+                            ),
+                            source: EventSourceWire {
+                                source_type: "test".to_string(),
+                                name: "local-transport-test".to_string(),
+                                ..EventSourceWire::default()
+                            },
+                            host_id: "host-a".to_string(),
+                            project_id: "demo".to_string(),
+                            idempotency_key: Some("agent-read-row".to_string()),
+                            causality: Vec::new(),
+                            source_path: None,
+                            source_revision: None,
+                        },
+                        AgentLifecycleProjectionWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            agent_id: "agent:demo:queued-1".to_string(),
+                            lifecycle_status: AgentLifecycleStatusWire::Queued,
+                            project_name: Some("demo".to_string()),
+                            batch_id: Some("batch-1".to_string()),
+                            queue_id: Some("default".to_string()),
+                            ..AgentLifecycleProjectionWire::default()
+                        },
+                    )?,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let state = test_state_with_projection(projection_service);
+
+        let payload =
+            serde_json::to_vec(&request(LocalDaemonRequestPayloadWire::Read(
+                LocalDaemonReadRequestWire::AgentActive(
+                    crate::wire::AgentReadListRequestWire {
+                        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                        page: ProjectionPageRequestWire {
+                            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                            limit: 10,
+                            cursor: None,
+                        },
+                        project_id: "demo".to_string(),
+                        include_hidden: false,
+                        query: None,
+                    },
+                ),
+            )))
+            .unwrap();
+
+        match response_for_frame(&payload, &state).payload {
+            LocalDaemonResponsePayloadWire::Read(response) => match *response {
+                LocalDaemonReadResponseWire::AgentActive(response) => {
+                    assert_eq!(response.entries.entries.len(), 1);
+                    let row = &response.entries.entries[0];
+                    assert_eq!(row.status, "queued");
+                    assert_eq!(row.batch_id.as_deref(), Some("batch-1"));
+                    assert_eq!(row.queue_id.as_deref(), Some("default"));
+                }
+                other => {
+                    panic!("expected agent active response, got {other:?}")
+                }
+            },
+            other => panic!("expected read response, got {other:?}"),
         }
     }
 
