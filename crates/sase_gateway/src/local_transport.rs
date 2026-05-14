@@ -35,8 +35,11 @@ use sase_core::projections::{
     pending_action_register_event_request, pending_action_update_event_request,
     plan_bead_source_export_mutation, projected_pending_action_store,
     scheduler_batch_status, source_fingerprint_from_path,
-    workflow_action_response_recorded_event_request,
-    workflow_run_created_event_request, workflow_run_updated_event_request,
+    workflow_action_response_recorded_event_request_with_task,
+    workflow_hitl_paused_event_request_with_task,
+    workflow_run_created_event_request_with_task,
+    workflow_run_updated_event_request_with_task,
+    workflow_step_transitioned_event_request_with_task,
     AgentArtifactAssociationWire, AgentDismissedIdentityWire,
     AgentProjectionEventContextWire, AgentReadDetailResponseWire,
     AgentReadListResponseWire, BeadMutationWriteRequestWire,
@@ -47,7 +50,9 @@ use sase_core::projections::{
     ProjectionSnapshotReadWire, SchedulerEventContextWire,
     SchedulerQueueSettingsWire, SourceExportKindWire, SourceExportPlanWire,
     SourceExportReportWire, SourceExportStatusWire, SourceFingerprintWire,
-    WorkflowProjectionEventContextWire, WorkflowRunProjectionWire,
+    WorkflowEventTaskWire, WorkflowProjectionEventContextWire,
+    WorkflowRunProjectionWire, WorkflowSchedulerCauseWire,
+    WorkflowStepProjectionWire, WorkflowTaskProjectionWire,
     CHANGESPEC_ACTIVE_ARCHIVE_MOVED, CHANGESPEC_SECTIONS_UPDATED,
     CHANGESPEC_SPEC_CREATED, CHANGESPEC_SPEC_UPDATED,
     CHANGESPEC_STATUS_TRANSITIONED, PROJECTION_READ_WIRE_SCHEMA_VERSION,
@@ -1351,6 +1356,10 @@ struct WorkflowStateWritePayload {
     workflow_id: Option<String>,
     #[serde(default)]
     event: Option<String>,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1364,6 +1373,33 @@ struct WorkflowActionResponseWritePayload {
     notification_id: Option<String>,
     #[serde(default = "default_action_response_state")]
     state: String,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowStepTransitionWritePayload {
+    workflow_id: String,
+    step: WorkflowStepProjectionWire,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WorkflowHitlRequestWritePayload {
+    workflow_id: String,
+    request_path: String,
+    request_json: JsonValue,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    cause: Option<WorkflowSchedulerCauseWire>,
+    #[serde(default)]
+    task: Option<WorkflowTaskProjectionWire>,
 }
 
 fn default_action_response_state() -> String {
@@ -1451,19 +1487,132 @@ fn workflow_write_plan(
                     .first()
                     .map(|export| export.target_path.clone()),
             );
-            let event_request = if payload.event.as_deref()
-                == Some("run_created")
-            {
-                workflow_run_created_event_request(context, workflow.clone())
-            } else {
-                workflow_run_updated_event_request(context, workflow.clone())
-            }
-            .map_err(workflow_projection_plan_error)?;
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause(
+                    payload.event.as_deref().unwrap_or("run_updated"),
+                    None,
+                    None,
+                ))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &workflow_id,
+                    task_kind: payload
+                        .event
+                        .as_deref()
+                        .unwrap_or("run_updated"),
+                    status: workflow.status.as_str(),
+                    step_id: None,
+                    step_index: None,
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request =
+                if payload.event.as_deref() == Some("run_created") {
+                    workflow_run_created_event_request_with_task(
+                        context,
+                        workflow.clone(),
+                        cause,
+                        task,
+                    )
+                } else {
+                    workflow_run_updated_event_request_with_task(
+                        context,
+                        workflow.clone(),
+                        cause,
+                        task,
+                    )
+                }
+                .map_err(workflow_projection_plan_error)?;
             Ok((
                 event_request,
                 Some(format!("workflow:{workflow_id}")),
                 request.source_exports.clone(),
                 Some(json!({"workflow": workflow})),
+            ))
+        }
+        "workflow.step_transition" => {
+            let payload: WorkflowStepTransitionWritePayload =
+                decode_surface_payload(request)?;
+            let context = workflow_event_context(request, None);
+            let step_id = payload.step.step_id.clone();
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause("step_transition", step_id.clone(), None))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &payload.workflow_id,
+                    task_kind: "step_transition",
+                    status: &payload.step.status,
+                    step_id,
+                    step_index: Some(payload.step.step_index),
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request =
+                workflow_step_transitioned_event_request_with_task(
+                    context,
+                    payload.step.clone(),
+                    cause,
+                    task,
+                )
+                .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!("workflow:{}", payload.workflow_id)),
+                Vec::new(),
+                Some(json!({"step": payload.step})),
+            ))
+        }
+        "workflow.hitl_request" => {
+            let payload: WorkflowHitlRequestWritePayload =
+                decode_surface_payload(request)?;
+            let source_exports = if request.source_exports.is_empty() {
+                vec![workflow_response_source_export(
+                    &payload.request_path,
+                    &payload.request_json,
+                    "hitl_request",
+                )?]
+            } else {
+                request.source_exports.clone()
+            };
+            preflight_source_exports(request)?;
+            let context = workflow_event_context(
+                request,
+                Some(payload.request_path.clone()),
+            );
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause("hitl_pause", None, payload.reason.clone()))
+            });
+            let task = payload.task.clone().or_else(|| {
+                Some(workflow_task(WorkflowTaskPlan {
+                    workflow_id: &payload.workflow_id,
+                    task_kind: "hitl_pause",
+                    status: "waiting",
+                    step_id: None,
+                    step_index: None,
+                    cause: cause.clone(),
+                    created_at: context.created_at.clone(),
+                    log_summary: None,
+                }))
+            });
+            let event_request = workflow_hitl_paused_event_request_with_task(
+                context,
+                payload.workflow_id.clone(),
+                payload.reason.clone(),
+                cause,
+                task,
+            )
+            .map_err(workflow_projection_plan_error)?;
+            Ok((
+                event_request,
+                Some(format!("workflow:{}", payload.workflow_id)),
+                source_exports,
+                Some(json!({"hitl_request": payload})),
             ))
         }
         "workflow.action_response" => {
@@ -1479,8 +1628,33 @@ fn workflow_write_plan(
                 request.source_exports.clone()
             };
             preflight_create_new_exports(&source_exports)?;
+            let cause = payload.cause.clone().or_else(|| {
+                Some(workflow_cause(
+                    "hitl_response",
+                    None,
+                    Some(payload.action_kind.clone()),
+                ))
+            });
+            let task = payload.task.clone().or_else(|| {
+                payload.workflow_id.as_ref().map(|workflow_id| {
+                    workflow_task(WorkflowTaskPlan {
+                        workflow_id,
+                        task_kind: if payload.action_kind == "hitl" {
+                            "hitl_response"
+                        } else {
+                            "action_response"
+                        },
+                        status: "completed",
+                        step_id: None,
+                        step_index: None,
+                        cause: cause.clone(),
+                        created_at: None,
+                        log_summary: None,
+                    })
+                })
+            });
             let event_request =
-                workflow_action_response_recorded_event_request(
+                workflow_action_response_recorded_event_request_with_task(
                     workflow_event_context(
                         request,
                         Some(payload.response_path.clone()),
@@ -1490,6 +1664,7 @@ fn workflow_write_plan(
                     payload.response_path.clone(),
                     payload.notification_id.clone(),
                     payload.state.clone(),
+                    WorkflowEventTaskWire { cause, task },
                 )
                 .map_err(workflow_projection_plan_error)?;
             Ok((
@@ -1531,6 +1706,98 @@ fn workflow_event_context(
         causality: Vec::new(),
         source_path,
         source_revision: None,
+    }
+}
+
+fn workflow_cause(
+    kind: &str,
+    step_id: Option<String>,
+    reason: Option<String>,
+) -> WorkflowSchedulerCauseWire {
+    WorkflowSchedulerCauseWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        kind: kind.to_string(),
+        scheduler_task: None,
+        reason: reason.or(step_id.map(|step_id| format!("step_id={step_id}"))),
+    }
+}
+
+struct WorkflowTaskPlan<'a> {
+    workflow_id: &'a str,
+    task_kind: &'a str,
+    status: &'a str,
+    step_id: Option<String>,
+    step_index: Option<i64>,
+    cause: Option<WorkflowSchedulerCauseWire>,
+    created_at: Option<String>,
+    log_summary: Option<String>,
+}
+
+fn workflow_task(plan: WorkflowTaskPlan<'_>) -> WorkflowTaskProjectionWire {
+    let status = workflow_task_status(plan.status);
+    let timestamp = plan.created_at.unwrap_or_else(|| {
+        Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    });
+    let terminal = matches!(
+        status.as_str(),
+        "completed" | "failed" | "skipped" | "cancelled"
+    );
+    WorkflowTaskProjectionWire {
+        schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+        task_id: workflow_task_id(
+            plan.workflow_id,
+            plan.task_kind,
+            plan.step_id.as_deref(),
+        ),
+        workflow_id: plan.workflow_id.to_string(),
+        task_kind: plan.task_kind.to_string(),
+        status,
+        step_id: plan.step_id,
+        step_index: plan.step_index,
+        started_at: Some(timestamp.clone()),
+        completed_at: terminal.then_some(timestamp),
+        log_summary: plan.log_summary,
+        cause: plan.cause,
+    }
+}
+
+fn workflow_task_status(status: &str) -> String {
+    match status {
+        "completed" => "completed".to_string(),
+        "failed" => "failed".to_string(),
+        "skipped" => "skipped".to_string(),
+        "waiting" | "waiting_hitl" | "paused" => "waiting".to_string(),
+        _ => "running".to_string(),
+    }
+}
+
+fn workflow_task_id(
+    workflow_id: &str,
+    task_kind: &str,
+    step_id: Option<&str>,
+) -> String {
+    let suffix = step_id.unwrap_or("workflow");
+    format!(
+        "workflow-task:{}:{}:{}",
+        sanitize_task_part(workflow_id),
+        sanitize_task_part(task_kind),
+        sanitize_task_part(suffix)
+    )
+}
+
+fn sanitize_task_part(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
     }
 }
 
@@ -2867,10 +3134,12 @@ mod tests {
     };
     use sase_core::projections::{
         agent_lifecycle_transitioned_event_request,
-        notification_append_event_request, AgentLifecycleProjectionWire,
-        AgentLifecycleStatusWire, AgentProjectionEventContextWire,
-        EventSourceWire, NotificationProjectionEventContextWire,
+        notification_append_event_request, workflow_projection_detail,
+        AgentLifecycleProjectionWire, AgentLifecycleStatusWire,
+        AgentProjectionEventContextWire, EventSourceWire,
+        NotificationProjectionEventContextWire,
         SchedulerBatchSubmitRequestWire, SchedulerLaunchSpecWire,
+        WorkflowStepProjectionWire,
     };
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -3803,6 +4072,149 @@ mod tests {
                 panic!("expected notification read response, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn workflow_step_transition_write_records_task_and_event_identity() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let step_id = "wf-001:step:2:verify";
+        let step = WorkflowStepProjectionWire {
+            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            workflow_id: "wf-001".to_string(),
+            step_id: Some(step_id.to_string()),
+            step_index: 2,
+            name: "verify".to_string(),
+            status: "completed".to_string(),
+            step_type: Some("bash".to_string()),
+            step_source: Some("just test".to_string()),
+            ..WorkflowStepProjectionWire::default()
+        };
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "workflow.step_transition".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "workflow-step-wf-001-verify".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "workflow_id": "wf-001",
+                    "step": step,
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(
+                    write.outcome.event_type,
+                    "workflow.step_transitioned"
+                );
+            }
+            other => panic!("expected workflow step response, got {other:?}"),
+        }
+        let detail = projection_service
+            .read_blocking(|db| {
+                workflow_projection_detail(
+                    db.connection(),
+                    "project-a",
+                    "wf-001",
+                )
+            })
+            .unwrap();
+        assert_eq!(detail.steps[0].step_id.as_deref(), Some(step_id));
+        assert_eq!(detail.tasks[0].task_kind, "step_transition");
+        assert_eq!(detail.tasks[0].status, "completed");
+        assert_eq!(detail.events[0].step_id.as_deref(), Some(step_id));
+        assert_eq!(
+            detail.events[0].task_id.as_deref(),
+            Some("workflow-task:wf-001:step_transition:wf-001_step_2_verify")
+        );
+    }
+
+    #[test]
+    fn workflow_hitl_request_materializes_source_and_pause_task() {
+        let dir = tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let projection_service = runtime.block_on(
+            ProjectionService::initialize(dir.path().join("projection.sqlite")),
+        );
+        let state = test_state_with_projection(projection_service.clone());
+        let request_path = dir.path().join("hitl_request.json");
+        let request_json = json!({
+            "step_name": "review",
+            "step_type": "agent",
+            "output": {"ok": true},
+            "has_output": true
+        });
+        let payload = serde_json::to_vec(&request(
+            LocalDaemonRequestPayloadWire::Write(LocalDaemonWriteRequestWire {
+                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                surface: "workflow.hitl_request".to_string(),
+                project_id: "project-a".to_string(),
+                idempotency_key: "workflow-hitl-wf-001".to_string(),
+                actor: MutationActorWire {
+                    schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+                    actor_type: "test".to_string(),
+                    name: "local-transport-test".to_string(),
+                    version: None,
+                    runtime: None,
+                },
+                payload: json!({
+                    "workflow_id": "wf-001",
+                    "request_path": request_path.display().to_string(),
+                    "request_json": request_json,
+                    "reason": "agent:review",
+                }),
+                expected_source_fingerprints: vec![],
+                source_exports: vec![],
+            }),
+        ))
+        .unwrap();
+
+        let response = response_for_frame(&payload, &state);
+
+        match response.payload {
+            LocalDaemonResponsePayloadWire::Write(write) => {
+                assert_eq!(write.outcome.event_type, "workflow.hitl_paused");
+                assert!(request_path.exists());
+            }
+            other => panic!("expected workflow HITL response, got {other:?}"),
+        }
+        let detail = projection_service
+            .read_blocking(|db| {
+                workflow_projection_detail(
+                    db.connection(),
+                    "project-a",
+                    "wf-001",
+                )
+            })
+            .unwrap();
+        assert_eq!(detail.tasks[0].task_kind, "hitl_pause");
+        assert_eq!(detail.tasks[0].status, "waiting");
+        assert_eq!(detail.events[0].event_type, "workflow.hitl_paused");
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(
+                &std::fs::read_to_string(request_path).unwrap()
+            )
+            .unwrap()["step_name"],
+            json!("review")
+        );
     }
 
     #[test]
