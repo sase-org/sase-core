@@ -225,6 +225,8 @@ fn parse_daemon_args(
     let mut run_root = None;
     let mut socket_path = None;
     let mut foreground = false;
+    let mut enable_tokio_console = false;
+    let mut rebuild_once = false;
     let mut mobile_http_enabled = true;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -249,6 +251,13 @@ fn parse_daemon_args(
             }
             "--foreground" => {
                 foreground = true;
+            }
+            "--tokio-console" => {
+                enable_tokio_console = true;
+            }
+            "--rebuild-once" => {
+                rebuild_once = true;
+                mobile_http_enabled = false;
             }
             "--disable-mobile-http" => {
                 mobile_http_enabled = false;
@@ -356,15 +365,17 @@ fn parse_daemon_args(
         helper_bridge_command,
         push_config,
     };
-    let config = DaemonConfig::with_options(
+    let mut config = DaemonConfig::with_options(
         sase_home,
         sase_gateway::host_identity_from_env(),
         run_root,
         socket_path,
         foreground,
+        enable_tokio_console,
         mobile_http_enabled,
         mobile_gateway,
     );
+    config.rebuild_once = rebuild_once;
     Ok(DaemonCli { config })
 }
 
@@ -376,7 +387,7 @@ fn print_gateway_help() {
 
 fn print_daemon_help() {
     println!(
-        "Usage: sase_gateway daemon [--sase-home|-H DIR] [--run-root DIR] [--socket-path PATH] [--foreground] [--disable-mobile-http] [mobile HTTP options]\n\nDaemon mode starts the local SASE state daemon skeleton. Mobile HTTP remains enabled by default and can be configured with --bind, --allow-non-loopback, bridge, and push options."
+        "Usage: sase_gateway daemon [--sase-home|-H DIR] [--run-root DIR] [--socket-path PATH] [--foreground] [--tokio-console] [--disable-mobile-http] [--rebuild-once] [mobile HTTP options]\n\nDaemon mode starts the local SASE state daemon skeleton. Mobile HTTP remains enabled by default and can be configured with --bind, --allow-non-loopback, bridge, and push options. --rebuild-once acquires daemon ownership, rebuilds projection tables from retained events, prints JSON, and exits."
     );
 }
 
@@ -555,6 +566,7 @@ mod tests {
             "--socket-path".to_string(),
             "/tmp/sase.sock".to_string(),
             "--foreground".to_string(),
+            "--tokio-console".to_string(),
             "--disable-mobile-http".to_string(),
             "--bind".to_string(),
             "127.0.0.1:0".to_string(),
@@ -578,6 +590,7 @@ mod tests {
                     PathBuf::from("/tmp/sase.sock")
                 );
                 assert!(cli.config.foreground);
+                assert!(cli.config.enable_tokio_console);
                 assert!(!cli.config.mobile_http_enabled);
                 assert_eq!(
                     cli.config.mobile_gateway.bind,

@@ -982,6 +982,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
             "capabilities.read",
             "mocked.list",
             "mocked.events",
+            "projection.rebuild",
             "batch.request"
         ],
         "bounds": {
@@ -1029,7 +1030,14 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "request": "LocalDaemonEventRequestWire",
                 "success": "LocalDaemonEventBatchWire",
                 "errors": ["LocalDaemonErrorWire"],
-                "notes": "contract-only delta/heartbeat batch shape for future stream or polling transport"
+                "notes": "framed local subscription stream; server writes one or more LocalDaemonEventBatchWire response frames on the same socket until disconnect or shutdown"
+            },
+            {
+                "type": "rebuild",
+                "request": "LocalDaemonRebuildRequestWire",
+                "success": "LocalDaemonRebuildResponseWire",
+                "errors": ["LocalDaemonErrorWire"],
+                "notes": "runs daemon-owned projection reset and replay against retained projection events; domain source-store reindexing is intentionally deferred until filesystem indexing lands"
             },
             {
                 "type": "batch",
@@ -1062,6 +1070,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "capabilities": "no fields",
                 "list": "LocalDaemonListRequestWire",
                 "events": "LocalDaemonEventRequestWire",
+                "rebuild": "LocalDaemonRebuildRequestWire",
                 "batch": {"requests": "LocalDaemonBatchRequestWire[]"}
             },
             "LocalDaemonResponsePayloadWire": {
@@ -1069,6 +1078,7 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "capabilities": "LocalDaemonCapabilitiesResponseWire",
                 "list": "LocalDaemonListResponseWire",
                 "events": "LocalDaemonEventBatchWire",
+                "rebuild": "LocalDaemonRebuildResponseWire",
                 "batch": {"responses": "LocalDaemonBatchResponseWire[]"},
                 "error": "LocalDaemonErrorWire"
             },
@@ -1089,7 +1099,27 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "version": "string",
                 "min_client_schema_version": "u32",
                 "max_client_schema_version": "u32",
-                "fallback": "LocalDaemonFallbackWire"
+                "fallback": "LocalDaemonFallbackWire",
+                "details": {
+                    "projection_db": {
+                        "state": "ok|degraded",
+                        "path_kind": "host_local",
+                        "schema_initialized": "bool",
+                        "migrations_applied": "bool",
+                        "repair_needed": "bool",
+                        "max_event_seq": "i64|null",
+                        "gap_count": "usize",
+                        "recovery_issue_count": "usize",
+                        "message": "string|null"
+                    },
+                    "metrics": {
+                        "endpoint": "string|null; loopback metrics URL when daemon mobile HTTP is enabled",
+                        "loopback_only": "bool"
+                    },
+                    "logs": {
+                        "path": "string; daemon log file path"
+                    }
+                }
             },
             "LocalDaemonFallbackWire": {
                 "available": "bool",
@@ -1138,7 +1168,9 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "truncated": "bool"
             },
             "LocalDaemonEventRequestWire": {
-                "since_event_id": "string|null",
+                "since_event_id": "string|null; treated as after_event_id and retained for compatibility",
+                "after_event_id": "accepted input alias for since_event_id",
+                "collections": "LocalDaemonCollectionWire[]; optional delta collection filters, omitted means all collections",
                 "snapshot_id": "string|null",
                 "max_events": "u32"
             },
@@ -1171,6 +1203,16 @@ pub fn local_daemon_contract_snapshot() -> Value {
                 "schema_version": "u32",
                 "sequence": "u64",
                 "created_at": "rfc3339"
+            },
+            "LocalDaemonRebuildRequestWire": {
+                "storage_reset_only": "bool; defaults false for forward compatibility, current daemon always reports storage_reset_only true"
+            },
+            "LocalDaemonRebuildResponseWire": {
+                "schema_version": "u32",
+                "mode": "projection_storage_rebuild",
+                "storage_reset_only": "bool",
+                "limitation": "string|null",
+                "report": "ProjectionRebuildReportWire JSON"
             },
             "LocalDaemonErrorWire": {
                 "schema_version": "u32",

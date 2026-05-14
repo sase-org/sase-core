@@ -10,6 +10,7 @@
     "capabilities.read",
     "mocked.list",
     "mocked.events",
+    "projection.rebuild",
     "batch.request"
   ],
   "contract": "sase_local_daemon_framed_json_v1",
@@ -150,8 +151,10 @@
       "source": "daemon|filesystem|host_adapter|mock"
     },
     "LocalDaemonEventRequestWire": {
+      "after_event_id": "accepted input alias for since_event_id",
+      "collections": "LocalDaemonCollectionWire[]; optional delta collection filters, omitted means all collections",
       "max_events": "u32",
-      "since_event_id": "string|null",
+      "since_event_id": "string|null; treated as after_event_id and retained for compatibility",
       "snapshot_id": "string|null"
     },
     "LocalDaemonFallbackWire": {
@@ -161,6 +164,26 @@
     },
     "LocalDaemonHealthResponseWire": {
       "daemon_started": "bool; false is expected in Epic 1D contract tests",
+      "details": {
+        "logs": {
+          "path": "string; daemon log file path"
+        },
+        "metrics": {
+          "endpoint": "string|null; loopback metrics URL when daemon mobile HTTP is enabled",
+          "loopback_only": "bool"
+        },
+        "projection_db": {
+          "gap_count": "usize",
+          "max_event_seq": "i64|null",
+          "message": "string|null",
+          "migrations_applied": "bool",
+          "path_kind": "host_local",
+          "recovery_issue_count": "usize",
+          "repair_needed": "bool",
+          "schema_initialized": "bool",
+          "state": "ok|degraded"
+        }
+      },
       "fallback": "LocalDaemonFallbackWire",
       "max_client_schema_version": "u32",
       "min_client_schema_version": "u32",
@@ -204,6 +227,16 @@
       "max_payload_bytes": "u32",
       "truncated": "bool"
     },
+    "LocalDaemonRebuildRequestWire": {
+      "storage_reset_only": "bool; defaults false for forward compatibility, current daemon always reports storage_reset_only true"
+    },
+    "LocalDaemonRebuildResponseWire": {
+      "limitation": "string|null",
+      "mode": "projection_storage_rebuild",
+      "report": "ProjectionRebuildReportWire JSON",
+      "schema_version": "u32",
+      "storage_reset_only": "bool"
+    },
     "LocalDaemonRequestEnvelopeWire": {
       "client": "LocalDaemonClientWire",
       "payload": "LocalDaemonRequestPayloadWire",
@@ -219,7 +252,8 @@
       "health": {
         "include_capabilities": "bool"
       },
-      "list": "LocalDaemonListRequestWire"
+      "list": "LocalDaemonListRequestWire",
+      "rebuild": "LocalDaemonRebuildRequestWire"
     },
     "LocalDaemonResponseEnvelopeWire": {
       "payload": "LocalDaemonResponsePayloadWire",
@@ -235,7 +269,8 @@
       "error": "LocalDaemonErrorWire",
       "events": "LocalDaemonEventBatchWire",
       "health": "LocalDaemonHealthResponseWire",
-      "list": "LocalDaemonListResponseWire"
+      "list": "LocalDaemonListResponseWire",
+      "rebuild": "LocalDaemonRebuildResponseWire"
     }
   },
   "request_envelope": {
@@ -277,10 +312,19 @@
       "errors": [
         "LocalDaemonErrorWire"
       ],
-      "notes": "contract-only delta/heartbeat batch shape for future stream or polling transport",
+      "notes": "framed local subscription stream; server writes one or more LocalDaemonEventBatchWire response frames on the same socket until disconnect or shutdown",
       "request": "LocalDaemonEventRequestWire",
       "success": "LocalDaemonEventBatchWire",
       "type": "events"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "runs daemon-owned projection reset and replay against retained projection events; domain source-store reindexing is intentionally deferred until filesystem indexing lands",
+      "request": "LocalDaemonRebuildRequestWire",
+      "success": "LocalDaemonRebuildResponseWire",
+      "type": "rebuild"
     },
     {
       "errors": [

@@ -40,6 +40,7 @@ use crate::host_bridge::{
     NotificationHostBridge, UnavailableAgentHostBridge,
     UnavailableHelperHostBridge,
 };
+use crate::metrics::DaemonMetrics;
 use crate::push::{PushConfig, PushDispatcher};
 use crate::storage::{
     format_time, generate_pairing_code, generate_prefixed_id,
@@ -85,6 +86,7 @@ pub struct GatewayState {
     helper_bridge: DynHelperHostBridge,
     attachment_tokens: AttachmentTokenStore,
     push_dispatcher: PushDispatcher,
+    daemon_metrics: Option<DaemonMetrics>,
 }
 
 impl GatewayState {
@@ -193,7 +195,13 @@ impl GatewayState {
                 options.max_attachment_bytes,
             ),
             push_dispatcher: PushDispatcher::new(options.push_config),
+            daemon_metrics: None,
         }
+    }
+
+    pub fn with_daemon_metrics(mut self, metrics: DaemonMetrics) -> Self {
+        self.daemon_metrics = Some(metrics);
+        self
     }
 
     pub fn new_with_notification_bridge(
@@ -495,6 +503,7 @@ pub fn app(bind_addr: impl Into<String>) -> Router {
 pub fn app_with_state(state: GatewayState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/api/v1/session/pair/start", post(pair_start))
         .route("/api/v1/session/pair/finish", post(pair_finish))
         .route("/api/v1/session", get(session))
@@ -562,6 +571,21 @@ async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
         bind: state.bind,
         push: state.push_dispatcher.status(),
     })
+}
+
+async fn metrics(State(state): State<GatewayState>) -> Response {
+    if !state.bind.is_loopback {
+        return (StatusCode::FORBIDDEN, "daemon metrics are loopback-only\n")
+            .into_response();
+    }
+    let Some(metrics) = state.daemon_metrics.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        metrics.render_prometheus(),
+    )
+        .into_response()
 }
 
 async fn pair_start(

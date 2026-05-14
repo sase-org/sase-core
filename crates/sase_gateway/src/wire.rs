@@ -268,6 +268,7 @@ pub enum LocalDaemonRequestPayloadWire {
     Capabilities,
     List(LocalDaemonListRequestWire),
     Events(LocalDaemonEventRequestWire),
+    Rebuild(LocalDaemonRebuildRequestWire),
     Batch {
         requests: Vec<LocalDaemonBatchRequestWire>,
     },
@@ -280,6 +281,7 @@ pub enum LocalDaemonResponsePayloadWire {
     Capabilities(LocalDaemonCapabilitiesResponseWire),
     List(LocalDaemonListResponseWire),
     Events(LocalDaemonEventBatchWire),
+    Rebuild(LocalDaemonRebuildResponseWire),
     Batch {
         responses: Vec<LocalDaemonBatchResponseWire>,
     },
@@ -300,6 +302,21 @@ pub struct LocalDaemonBatchResponseWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonRebuildRequestWire {
+    #[serde(default)]
+    pub storage_reset_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonRebuildResponseWire {
+    pub schema_version: u32,
+    pub mode: String,
+    pub storage_reset_only: bool,
+    pub limitation: Option<String>,
+    pub report: JsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalDaemonHealthResponseWire {
     pub schema_version: u32,
     pub status: LocalDaemonHealthStatusWire,
@@ -309,6 +326,7 @@ pub struct LocalDaemonHealthResponseWire {
     pub min_client_schema_version: u32,
     pub max_client_schema_version: u32,
     pub fallback: LocalDaemonFallbackWire,
+    pub details: JsonValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,7 +421,11 @@ pub struct LocalDaemonPayloadBoundWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalDaemonEventRequestWire {
+    #[serde(default, alias = "after_event_id")]
     pub since_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<LocalDaemonCollectionWire>,
+    #[serde(default)]
     pub snapshot_id: Option<String>,
     pub max_events: u32,
 }

@@ -6,7 +6,9 @@ pub mod contract;
 pub mod daemon;
 pub mod host_bridge;
 pub mod local_transport;
+pub mod metrics;
 pub mod ownership;
+pub mod projection_service;
 pub mod push;
 pub mod routes;
 pub mod server;
@@ -37,10 +39,15 @@ pub use local_transport::{
     handle_connection, response_for_frame, serve_local_transport,
     LocalTransportError,
 };
+pub use metrics::{DaemonMetrics, GaugeGuard};
 pub use ownership::{
     DaemonOwnershipGuard, DaemonOwnershipMetadata, DaemonOwnershipPaths,
     OwnershipError, OwnershipRecovery, StaleOwnership,
     DAEMON_LOCK_SCHEMA_VERSION,
+};
+pub use projection_service::{
+    default_projection_db_path, ProjectionService, ProjectionServiceError,
+    ProjectionServiceState, ProjectionServiceStatus,
 };
 pub use push::{
     PushConfig, PushDeliveryAttempt, PushDispatcher, PushProviderMode,
@@ -65,6 +72,7 @@ pub use wire::{
     LocalDaemonHeartbeatWire, LocalDaemonListItemWire,
     LocalDaemonListRequestWire, LocalDaemonListResponseWire,
     LocalDaemonPageRequestWire, LocalDaemonPayloadBoundWire,
+    LocalDaemonRebuildRequestWire, LocalDaemonRebuildResponseWire,
     LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
     LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
     MobileAgentActionAffordancesWire, MobileAgentDisplayLabelsWire,

@@ -1,29 +1,42 @@
 use std::{
+    collections::VecDeque,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
 
+use chrono::{SecondsFormat, Utc};
+use serde_json::{json, Value as JsonValue};
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tracing::{debug, info, info_span, warn, Instrument};
 
 use crate::{
     local_transport::{serve_local_transport, LocalTransportError},
+    metrics::DaemonMetrics,
     ownership::{DaemonOwnershipGuard, OwnershipError},
+    projection_service::{
+        default_projection_db_path, ProjectionService, ProjectionServiceError,
+    },
     push::PushConfig,
     routes::GatewayState,
     server::{
         serve_listener_with_state, validate_bind_policy, GatewayConfig,
         GatewayRunError,
     },
-    wire::GatewayBuildWire,
+    wire::{
+        GatewayBuildWire, LocalDaemonCollectionWire,
+        LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
+        LocalDaemonEventSourceWire, LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+    },
 };
 
 const DAEMON_SOCKET_NAME: &str = "sase-daemon.sock";
+const LOCAL_EVENT_BUFFER_CAPACITY: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonRuntimePaths {
@@ -37,6 +50,8 @@ pub struct DaemonConfig {
     pub paths: DaemonRuntimePaths,
     pub host_identity: String,
     pub foreground: bool,
+    pub enable_tokio_console: bool,
+    pub rebuild_once: bool,
     pub mobile_http_enabled: bool,
     pub mobile_gateway: GatewayConfig,
 }
@@ -49,6 +64,7 @@ impl DaemonConfig {
             None,
             None,
             false,
+            false,
             true,
             GatewayConfig::default(),
         )
@@ -60,6 +76,7 @@ impl DaemonConfig {
         run_root: Option<PathBuf>,
         socket_path: Option<PathBuf>,
         foreground: bool,
+        enable_tokio_console: bool,
         mobile_http_enabled: bool,
         mut mobile_gateway: GatewayConfig,
     ) -> Self {
@@ -78,6 +95,8 @@ impl DaemonConfig {
             },
             host_identity,
             foreground,
+            enable_tokio_console,
+            rebuild_once: false,
             mobile_http_enabled,
             mobile_gateway,
         }
@@ -97,7 +116,12 @@ pub struct DaemonRuntime {
 }
 
 impl DaemonRuntime {
-    pub fn new(config: DaemonConfig, ownership: DaemonOwnershipGuard) -> Self {
+    pub fn new(
+        config: DaemonConfig,
+        ownership: DaemonOwnershipGuard,
+        projection_service: ProjectionService,
+        metrics: DaemonMetrics,
+    ) -> Self {
         let ownership = Arc::new(ownership);
         let state = DaemonState {
             build: GatewayBuildWire {
@@ -107,6 +131,13 @@ impl DaemonRuntime {
             host_identity: config.host_identity.clone(),
             paths: config.paths.clone(),
             shutdown: DaemonShutdown::default(),
+            metrics: metrics.clone(),
+            metrics_endpoint: Arc::new(RwLock::new(None)),
+            local_events: LocalEventHub::new(
+                LOCAL_EVENT_BUFFER_CAPACITY,
+                metrics,
+            ),
+            projection_service,
             mobile_gateway: config
                 .mobile_http_enabled
                 .then_some(config.mobile_gateway.clone()),
@@ -127,13 +158,16 @@ impl DaemonRuntime {
         local_addr: SocketAddr,
     ) -> Option<GatewayState> {
         let config = self.state.mobile_gateway.as_ref()?;
-        Some(GatewayState::new_with_sase_home_and_bridge_commands(
-            local_addr.to_string(),
-            config.sase_home.clone(),
-            config.agent_bridge_command.clone(),
-            config.helper_bridge_command.clone(),
-            config.push_config.clone(),
-        ))
+        Some(
+            GatewayState::new_with_sase_home_and_bridge_commands(
+                local_addr.to_string(),
+                config.sase_home.clone(),
+                config.agent_bridge_command.clone(),
+                config.helper_bridge_command.clone(),
+                config.push_config.clone(),
+            )
+            .with_daemon_metrics(self.state.metrics.clone()),
+        )
     }
 }
 
@@ -143,7 +177,176 @@ pub struct DaemonState {
     pub host_identity: String,
     pub paths: DaemonRuntimePaths,
     pub shutdown: DaemonShutdown,
+    pub metrics: DaemonMetrics,
+    pub metrics_endpoint: Arc<RwLock<Option<String>>>,
+    pub local_events: LocalEventHub,
+    pub projection_service: ProjectionService,
     pub mobile_gateway: Option<GatewayConfig>,
+}
+
+impl DaemonState {
+    pub fn log_path(&self) -> PathBuf {
+        self.paths.run_root.join("daemon.log")
+    }
+
+    pub fn set_metrics_endpoint(&self, endpoint: Option<String>) {
+        if let Ok(mut guard) = self.metrics_endpoint.write() {
+            *guard = endpoint;
+        }
+    }
+
+    pub fn diagnostic_details(&self) -> JsonValue {
+        let mut details = self.projection_service.health_details();
+        if let JsonValue::Object(ref mut object) = details {
+            object.insert(
+                "metrics".to_string(),
+                json!({
+                    "endpoint": self
+                        .metrics_endpoint
+                        .read()
+                        .ok()
+                        .and_then(|value| value.clone()),
+                    "loopback_only": true,
+                }),
+            );
+            object.insert(
+                "logs".to_string(),
+                json!({
+                    "path": self.log_path(),
+                }),
+            );
+        }
+        details
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalEventHub {
+    inner: Arc<Mutex<LocalEventHubInner>>,
+    buffer_capacity: usize,
+    metrics: DaemonMetrics,
+}
+
+#[derive(Debug)]
+struct LocalEventHubInner {
+    next_id: u64,
+    snapshot_id: String,
+    buffer: VecDeque<LocalDaemonEventRecordWire>,
+}
+
+impl LocalEventHub {
+    pub(crate) fn new(buffer_capacity: usize, metrics: DaemonMetrics) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(LocalEventHubInner {
+                next_id: 1,
+                snapshot_id: format!(
+                    "events_{}",
+                    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+                ),
+                buffer: VecDeque::new(),
+            })),
+            buffer_capacity,
+            metrics,
+        }
+    }
+
+    pub(crate) fn append_heartbeat(&self) -> LocalDaemonEventRecordWire {
+        self.append(|sequence| LocalDaemonEventPayloadWire::Heartbeat {
+            sequence,
+        })
+    }
+
+    pub(crate) fn append_resync_required(
+        &self,
+        reason: impl Into<String>,
+    ) -> LocalDaemonEventRecordWire {
+        let reason = reason.into();
+        self.append(|_| LocalDaemonEventPayloadWire::ResyncRequired { reason })
+    }
+
+    fn append(
+        &self,
+        make_payload: impl FnOnce(u64) -> LocalDaemonEventPayloadWire,
+    ) -> LocalDaemonEventRecordWire {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("local daemon event hub mutex poisoned");
+        let sequence = inner.next_id;
+        inner.next_id += 1;
+        let record = LocalDaemonEventRecordWire {
+            schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            event_id: format_local_event_id(sequence),
+            snapshot_id: inner.snapshot_id.clone(),
+            created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            source: LocalDaemonEventSourceWire::Daemon,
+            payload: make_payload(sequence),
+        };
+        inner.buffer.push_back(record.clone());
+        while inner.buffer.len() > self.buffer_capacity {
+            inner.buffer.pop_front();
+            self.metrics.record_dropped_event();
+        }
+        record
+    }
+
+    pub(crate) fn replay_after(
+        &self,
+        event_id: &str,
+        collections: &[LocalDaemonCollectionWire],
+        limit: usize,
+    ) -> Option<Vec<LocalDaemonEventRecordWire>> {
+        let after = parse_local_event_id(event_id)?;
+        let inner = self
+            .inner
+            .lock()
+            .expect("local daemon event hub mutex poisoned");
+        let oldest = inner
+            .buffer
+            .front()
+            .and_then(|record| parse_local_event_id(&record.event_id))?;
+        if after.saturating_add(1) < oldest {
+            return None;
+        }
+        Some(
+            inner
+                .buffer
+                .iter()
+                .filter(|record| {
+                    parse_local_event_id(&record.event_id)
+                        .map(|id| id > after)
+                        .unwrap_or(false)
+                })
+                .filter(|record| event_matches_collections(record, collections))
+                .take(limit)
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+fn event_matches_collections(
+    record: &LocalDaemonEventRecordWire,
+    collections: &[LocalDaemonCollectionWire],
+) -> bool {
+    if collections.is_empty() {
+        return true;
+    }
+    match &record.payload {
+        LocalDaemonEventPayloadWire::Delta { collection, .. } => {
+            collections.iter().any(|candidate| candidate == collection)
+        }
+        LocalDaemonEventPayloadWire::Heartbeat { .. }
+        | LocalDaemonEventPayloadWire::ResyncRequired { .. } => true,
+    }
+}
+
+fn format_local_event_id(id: u64) -> String {
+    format!("{id:016}")
+}
+
+fn parse_local_event_id(id: &str) -> Option<u64> {
+    id.parse::<u64>().ok()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -169,6 +372,8 @@ pub enum DaemonRunError {
     LocalTransport(#[from] LocalTransportError),
     #[error(transparent)]
     MobileGateway(#[from] GatewayRunError),
+    #[error(transparent)]
+    ProjectionService(#[from] ProjectionServiceError),
     #[error("failed to wait for daemon shutdown signal: {0}")]
     ShutdownSignal(std::io::Error),
     #[error("daemon task failed: {0}")]
@@ -176,11 +381,23 @@ pub enum DaemonRunError {
 }
 
 pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
+    initialize_daemon_tracing();
+    initialize_tokio_console(config.enable_tokio_console);
     validate_daemon_config(&config)?;
+    let startup_span = info_span!(
+        "daemon_startup",
+        host = %config.host_identity,
+        run_root = %config.paths.run_root.display(),
+        socket = %config.paths.socket_path.display(),
+    );
+    async move {
+    info!("starting local SASE daemon");
     let build = GatewayBuildWire {
         package_version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: None,
     };
+    let lock_span = info_span!("daemon_lock_acquire");
+    let _lock_span_guard = lock_span.enter();
     let ownership = DaemonOwnershipGuard::acquire(
         config.paths.run_root.clone(),
         config.paths.socket_path.clone(),
@@ -188,7 +405,32 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
         config.paths.sase_home.clone(),
         &build,
     )?;
-    let runtime = DaemonRuntime::new(config, ownership);
+    debug!("daemon ownership lock acquired");
+    drop(_lock_span_guard);
+    let metrics = DaemonMetrics::default();
+    let projection_service = ProjectionService::initialize_with_metrics(
+        default_projection_db_path(&config.paths.run_root),
+        metrics.clone(),
+    )
+    .await;
+    if config.rebuild_once {
+        let report = projection_service.rebuild_storage_reset_only().await?;
+        let payload = json!({
+            "schema_version": LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
+            "mode": "projection_storage_rebuild",
+            "storage_reset_only": true,
+            "limitation": "domain source rebuild is not active until filesystem indexing lands; this reset replays retained projection events only",
+            "report": report,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .unwrap_or_else(|_| payload.to_string())
+        );
+        return Ok(());
+    }
+    let runtime =
+        DaemonRuntime::new(config, ownership, projection_service, metrics);
 
     let mut local_transport_task =
         tokio::spawn(serve_local_transport(runtime.state().clone()));
@@ -203,9 +445,17 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
                 })?;
         let local_addr =
             listener.local_addr().map_err(GatewayRunError::Serve)?;
+        if local_addr.ip().is_loopback() {
+            runtime.state().set_metrics_endpoint(Some(format!(
+                "http://{local_addr}/metrics"
+            )));
+        } else {
+            runtime.state().set_metrics_endpoint(None);
+        }
         let state = runtime.mobile_gateway_state(local_addr).expect(
             "mobile gateway state is available when mobile HTTP is enabled",
         );
+        info!(bind = %local_addr, "mobile HTTP gateway started in daemon mode");
         let mut mobile_task =
             tokio::spawn(serve_listener_with_state(listener, state));
         tokio::select! {
@@ -222,6 +472,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
             },
             signal = tokio::signal::ctrl_c() => {
                 signal.map_err(DaemonRunError::ShutdownSignal)?;
+                info!("shutdown signal received");
                 runtime.state().shutdown.request();
                 mobile_task.abort();
                 wait_for_local_transport_shutdown(local_transport_task).await?;
@@ -234,11 +485,41 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), DaemonRunError> {
         result = &mut local_transport_task => task_result(result)?,
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(DaemonRunError::ShutdownSignal)?;
+            info!("shutdown signal received");
             runtime.state().shutdown.request();
             wait_for_local_transport_shutdown(local_transport_task).await?;
         }
     }
+    info!("local SASE daemon shutdown complete");
     Ok(())
+    }
+    .instrument(startup_span)
+    .await
+}
+
+fn initialize_daemon_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "sase_gateway=info,tower_http=warn".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
+}
+
+#[cfg(feature = "tokio-console")]
+fn initialize_tokio_console(enable: bool) {
+    if enable {
+        console_subscriber::init();
+    }
+}
+
+#[cfg(not(feature = "tokio-console"))]
+fn initialize_tokio_console(enable: bool) {
+    if enable {
+        warn!(
+            "tokio console requested but sase_gateway was built without the tokio-console feature"
+        );
+    }
 }
 
 fn task_result(
@@ -336,6 +617,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             true,
             GatewayConfig::default(),
         );
@@ -362,6 +644,7 @@ mod tests {
             None,
             true,
             false,
+            false,
             GatewayConfig::default(),
         );
 
@@ -381,6 +664,7 @@ mod tests {
             "workstation",
             Some(PathBuf::from("/tmp/run-root")),
             Some(PathBuf::from("/tmp/custom.sock")),
+            false,
             false,
             true,
             GatewayConfig::default(),
@@ -405,6 +689,7 @@ mod tests {
             "workstation",
             None,
             None,
+            false,
             false,
             false,
             GatewayConfig {
