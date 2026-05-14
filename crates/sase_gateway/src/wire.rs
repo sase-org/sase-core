@@ -311,7 +311,7 @@ pub enum LocalDaemonRequestPayloadWire {
     SchedulerSubmit(SchedulerBatchSubmitRequestWire),
     SchedulerStatus(LocalDaemonSchedulerStatusRequestWire),
     SchedulerCancel(SchedulerCancelRequestWire),
-    HostCall(HostRequestEnvelopeWire),
+    HostCall(Box<HostRequestEnvelopeWire>),
     Batch {
         requests: Vec<LocalDaemonBatchRequestWire>,
     },

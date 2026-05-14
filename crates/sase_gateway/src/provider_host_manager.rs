@@ -116,7 +116,6 @@ impl ProviderHostManager {
                     "max_concurrent_calls": self.inner.max_concurrent_calls,
                 })),
                 0,
-                Vec::new(),
             );
         };
 
@@ -341,7 +340,6 @@ impl ProviderHostCallError {
                 Some("host.process".to_string()),
                 None,
                 duration.as_millis() as u64,
-                Vec::new(),
             ),
             Self::Timeout(timeout) => error_response(
                 request_id,
@@ -354,7 +352,6 @@ impl ProviderHostCallError {
                 Some("deadline.timeout_ms".to_string()),
                 None,
                 duration.as_millis() as u64,
-                Vec::new(),
             ),
             Self::Cancelled => error_response(
                 request_id,
@@ -364,7 +361,6 @@ impl ProviderHostCallError {
                 Some("request_id".to_string()),
                 None,
                 duration.as_millis() as u64,
-                Vec::new(),
             ),
             Self::Protocol(message) => error_response(
                 request_id,
@@ -374,7 +370,6 @@ impl ProviderHostCallError {
                 Some("host.protocol".to_string()),
                 None,
                 duration.as_millis() as u64,
-                Vec::new(),
             ),
             Self::Execution(message) => error_response(
                 request_id,
@@ -384,7 +379,6 @@ impl ProviderHostCallError {
                 Some("host.process".to_string()),
                 None,
                 duration.as_millis() as u64,
-                Vec::new(),
             ),
         }
     }
@@ -472,7 +466,6 @@ fn error_response(
     target: Option<String>,
     details: Option<JsonValue>,
     duration_ms: u64,
-    logs: Vec<HostLogRecordWire>,
 ) -> HostResponseEnvelopeWire {
     HostResponseEnvelopeWire {
         schema_version: PROVIDER_HOST_IPC_WIRE_SCHEMA_VERSION,
@@ -499,7 +492,7 @@ fn error_response(
                 ),
             },
         }),
-        logs,
+        logs: Vec::new(),
         duration_ms,
         resource_usage: Some(HostResourceUsageWire {
             wall_ms: duration_ms,

@@ -229,7 +229,7 @@ pub async fn handle_connection(
         LocalDaemonRequestPayloadWire::HostCall(request) => {
             let manager = state.provider_host_manager.clone();
             let payload = match tokio::task::spawn_blocking(move || {
-                manager.call_blocking(request)
+                manager.call_blocking(*request)
             })
             .await
             {
@@ -352,7 +352,7 @@ fn handle_payload(
         }
         LocalDaemonRequestPayloadWire::HostCall(request) => {
             LocalDaemonResponsePayloadWire::HostCall(
-                state.provider_host_manager.call_blocking(request),
+                state.provider_host_manager.call_blocking(*request),
             )
         }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
