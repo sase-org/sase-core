@@ -266,6 +266,19 @@
           "schema_initialized": "bool",
           "source_exports": "SourceExportRepairSummary JSON with total/pending/failed/conflict counts, per-surface counts, and bounded examples",
           "state": "ok|degraded"
+        },
+        "scheduler": {
+          "active_tasks": "u64",
+          "blocked_tasks": "u64",
+          "by_queue": "per-queue scheduler counters",
+          "host_bridge": "json availability/mode details",
+          "projection_lag": "json last scheduler event seq, last applied seq, and pending events",
+          "queue_depth": "u64",
+          "running_tasks": "u64",
+          "schema_version": "u32",
+          "stale_starts": "u64",
+          "starting_tasks": "u64",
+          "state": "ok|degraded|unknown"
         }
       },
       "fallback": "LocalDaemonFallbackWire",
@@ -448,6 +461,9 @@
       "list": "LocalDaemonListRequestWire",
       "read": "LocalDaemonReadRequestWire",
       "rebuild": "LocalDaemonRebuildRequestWire",
+      "scheduler_cancel": "SchedulerCancelRequestWire",
+      "scheduler_status": "LocalDaemonSchedulerStatusRequestWire",
+      "scheduler_submit": "SchedulerBatchSubmitRequestWire",
       "verify": "LocalDaemonIndexingVerifyRequestWire",
       "write": "LocalDaemonWriteRequestWire"
     },
@@ -470,8 +486,16 @@
       "list": "LocalDaemonListResponseWire",
       "read": "LocalDaemonReadResponseWire",
       "rebuild": "LocalDaemonRebuildResponseWire",
+      "scheduler_cancel": "SchedulerBatchStatusWire",
+      "scheduler_status": "SchedulerBatchStatusWire",
+      "scheduler_submit": "SchedulerBatchSubmitResponseWire",
       "verify": "LocalDaemonIndexingVerifyResponseWire",
       "write": "LocalDaemonWriteResponseWire"
+    },
+    "LocalDaemonSchedulerStatusRequestWire": {
+      "batch_id": "string",
+      "project_id": "string",
+      "schema_version": "u32"
     },
     "LocalDaemonWriteRequestWire": {
       "actor": "MutationActorWire",
@@ -555,6 +579,73 @@
     "ProjectionSnapshotReadWire": {
       "schema_version": "u32",
       "snapshot_id": "opaque string"
+    },
+    "SchedulerBatchHandleWire": {
+      "batch_id": "string",
+      "created_at": "rfc3339",
+      "idempotency_key": "string",
+      "project_id": "string",
+      "queue_id": "string",
+      "schema_version": "u32",
+      "slot_count": "u32",
+      "status": "queued|starting|running|terminal"
+    },
+    "SchedulerBatchStatusWire": {
+      "handle": "SchedulerBatchHandleWire",
+      "schema_version": "u32",
+      "slots": "SchedulerSlotProjectionWire[]"
+    },
+    "SchedulerBatchSubmitRequestWire": {
+      "batch_id": "string|null",
+      "idempotency_key": "string",
+      "launch_specs": "SchedulerLaunchSpecWire[]",
+      "metadata": "json object",
+      "project_id": "string",
+      "queue_id": "string|null",
+      "schema_version": "u32"
+    },
+    "SchedulerBatchSubmitResponseWire": {
+      "duplicate": "bool",
+      "handle": "SchedulerBatchHandleWire",
+      "schema_version": "u32",
+      "status": "SchedulerBatchStatusWire"
+    },
+    "SchedulerCancelRequestWire": {
+      "batch_id": "string",
+      "idempotency_key": "string",
+      "project_id": "string",
+      "reason": "string|null",
+      "schema_version": "u32",
+      "slot_id": "string|null"
+    },
+    "SchedulerLaunchSpecWire": {
+      "cwd": "string|null",
+      "metadata": "json object",
+      "model": "string|null",
+      "parent_agent_id": "string|null",
+      "project_id": "string",
+      "prompt": "string",
+      "schema_version": "u32",
+      "workflow_id": "string|null"
+    },
+    "SchedulerSlotProjectionWire": {
+      "created_at": "rfc3339",
+      "launch_spec": "SchedulerLaunchSpecWire",
+      "project_id": "string",
+      "queued_position": "u32|null",
+      "reason": "string|null",
+      "schema_version": "u32",
+      "slot_index": "u32",
+      "status": "planned|queued|starting|running|completed|failed|cancelled|killed|stale",
+      "task_id": "SchedulerTaskIdWire",
+      "terminal": "bool",
+      "updated_at": "rfc3339"
+    },
+    "SchedulerTaskIdWire": {
+      "batch_id": "string",
+      "queue_id": "string",
+      "schema_version": "u32",
+      "slot_id": "string"
     },
     "SourceExportPlanWire": {
       "content_sha256": "hex sha256 of content_utf8",
@@ -675,6 +766,33 @@
       "request": "LocalDaemonIndexingDiffRequestWire",
       "success": "LocalDaemonIndexingDiffResponseWire",
       "type": "diff"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "records queued scheduler slots transactionally and returns a durable batch handle",
+      "request": "SchedulerBatchSubmitRequestWire",
+      "success": "SchedulerBatchSubmitResponseWire",
+      "type": "scheduler_submit"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "reads current scheduler batch and per-slot state from projections",
+      "request": "LocalDaemonSchedulerStatusRequestWire",
+      "success": "SchedulerBatchStatusWire",
+      "type": "scheduler_status"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "idempotently cancels a queued/starting/running scheduler batch or slot for operator recovery",
+      "request": "SchedulerCancelRequestWire",
+      "success": "SchedulerBatchStatusWire",
+      "type": "scheduler_cancel"
     },
     {
       "errors": [

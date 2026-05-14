@@ -277,9 +277,17 @@ fn recover_scheduler_starting_slots(state: &DaemonState) {
         source_path: None,
         source_revision: None,
     };
-    let _ = state
+    let recovered = state
         .projection_service
         .write_blocking(|db| db.recover_scheduler_starting_slots(context));
+    match recovered {
+        Ok(count) => state
+            .metrics
+            .record_scheduler_recovery_repairs(u64::from(count)),
+        Err(error) => {
+            warn!(%error, "failed to recover scheduler starting slots")
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
