@@ -24,12 +24,13 @@ use crate::{
         LocalDaemonEventPayloadWire, LocalDaemonEventRecordWire,
         LocalDaemonEventRequestWire, LocalDaemonFallbackWire,
         LocalDaemonHealthResponseWire, LocalDaemonHealthStatusWire,
-        LocalDaemonHeartbeatWire, LocalDaemonListItemWire,
+        LocalDaemonHeartbeatWire, LocalDaemonIndexingDiffRequestWire,
+        LocalDaemonIndexingVerifyRequestWire, LocalDaemonListItemWire,
         LocalDaemonListRequestWire, LocalDaemonListResponseWire,
         LocalDaemonPayloadBoundWire, LocalDaemonRebuildRequestWire,
-        LocalDaemonRebuildResponseWire, LocalDaemonRequestEnvelopeWire,
-        LocalDaemonRequestPayloadWire, LocalDaemonResponseEnvelopeWire,
-        LocalDaemonResponsePayloadWire, LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
+        LocalDaemonRequestEnvelopeWire, LocalDaemonRequestPayloadWire,
+        LocalDaemonResponseEnvelopeWire, LocalDaemonResponsePayloadWire,
+        LOCAL_DAEMON_DEFAULT_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_CLIENT_SCHEMA_VERSION, LOCAL_DAEMON_MAX_PAGE_LIMIT,
         LOCAL_DAEMON_MAX_PAYLOAD_BYTES, LOCAL_DAEMON_MIN_CLIENT_SCHEMA_VERSION,
         LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
@@ -153,6 +154,22 @@ pub async fn handle_connection(
             state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
             result
         }
+        LocalDaemonRequestPayloadWire::Verify(request) => {
+            let payload = handle_verify_payload(request, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
+        LocalDaemonRequestPayloadWire::Diff(request) => {
+            let payload = handle_diff_payload(request, state).await;
+            success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
+            let response = envelope(request_id, None, payload);
+            let result = write_response_frame(&mut stream, &response).await;
+            state.metrics.record_rpc(started.elapsed(), success && result.is_ok());
+            result
+        }
         payload => {
             let payload = handle_payload(payload, state);
             success = !matches!(payload, LocalDaemonResponsePayloadWire::Error(_));
@@ -215,6 +232,31 @@ fn handle_payload(
                 None,
             ))
         }
+        LocalDaemonRequestPayloadWire::IndexingStatus(request) => {
+            LocalDaemonResponsePayloadWire::IndexingStatus(
+                state
+                    .indexing_service
+                    .indexing_status(request, &state.projection_service),
+            )
+        }
+        LocalDaemonRequestPayloadWire::Verify(_) => {
+            LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::UnsupportedCapability,
+                "indexing verify requires a live daemon connection",
+                false,
+                Some("payload".to_string()),
+                None,
+            ))
+        }
+        LocalDaemonRequestPayloadWire::Diff(_) => {
+            LocalDaemonResponsePayloadWire::Error(local_error(
+                LocalDaemonErrorCodeWire::UnsupportedCapability,
+                "indexing diff requires a live daemon connection",
+                false,
+                Some("payload".to_string()),
+                None,
+            ))
+        }
         LocalDaemonRequestPayloadWire::Batch { requests } => {
             let responses = requests
                 .into_iter()
@@ -244,28 +286,58 @@ fn handle_payload(
 }
 
 async fn handle_rebuild_payload(
-    _request: LocalDaemonRebuildRequestWire,
+    request: LocalDaemonRebuildRequestWire,
     state: &DaemonState,
 ) -> LocalDaemonResponsePayloadWire {
-    let report = state.projection_service.rebuild_storage_reset_only().await;
+    let report = state
+        .indexing_service
+        .rebuild(request, state.projection_service.clone())
+        .await;
     match report {
-        Ok(report) => LocalDaemonResponsePayloadWire::Rebuild(
-            LocalDaemonRebuildResponseWire {
-                schema_version: LOCAL_DAEMON_WIRE_SCHEMA_VERSION,
-                mode: "projection_storage_rebuild".to_string(),
-                storage_reset_only: true,
-                limitation: Some(
-                    "domain source rebuild is not active until filesystem indexing lands; this reset replays retained projection events only"
-                        .to_string(),
-                ),
-                report: serde_json::to_value(report).unwrap_or_else(|error| {
-                    json!({"serialization_error": error.to_string()})
-                }),
-            },
-        ),
+        Ok(report) => LocalDaemonResponsePayloadWire::Rebuild(report),
         Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
             LocalDaemonErrorCodeWire::Internal,
-            format!("projection rebuild failed: {error}"),
+            format!("indexing rebuild failed: {error}"),
+            false,
+            Some("projection_db".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+async fn handle_verify_payload(
+    request: LocalDaemonIndexingVerifyRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    match state
+        .indexing_service
+        .verify(request, state.projection_service.clone())
+        .await
+    {
+        Ok(response) => LocalDaemonResponsePayloadWire::Verify(response),
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("indexing verify failed: {error}"),
+            false,
+            Some("projection_db".to_string()),
+            Some(state.projection_service.health_details()),
+        )),
+    }
+}
+
+async fn handle_diff_payload(
+    request: LocalDaemonIndexingDiffRequestWire,
+    state: &DaemonState,
+) -> LocalDaemonResponsePayloadWire {
+    match state
+        .indexing_service
+        .diff(request, state.projection_service.clone())
+        .await
+    {
+        Ok(response) => LocalDaemonResponsePayloadWire::Diff(response),
+        Err(error) => LocalDaemonResponsePayloadWire::Error(local_error(
+            LocalDaemonErrorCodeWire::Internal,
+            format!("indexing diff failed: {error}"),
             false,
             Some("projection_db".to_string()),
             Some(state.projection_service.health_details()),
@@ -488,6 +560,10 @@ fn local_daemon_capabilities() -> Vec<String> {
         "mocked.list".to_string(),
         "mocked.events".to_string(),
         "projection.rebuild".to_string(),
+        "indexing.status".to_string(),
+        "indexing.rebuild".to_string(),
+        "indexing.verify".to_string(),
+        "indexing.diff".to_string(),
         "batch.request".to_string(),
     ]
 }

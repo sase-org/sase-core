@@ -1,12 +1,15 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::bead::read::{
     blocked_issues_in_issues, get_epic_children_in_issues,
-    list_issues_in_issues, ready_issues_in_issues, show_issue_in_issues,
-    stats_for_issues,
+    list_issues_in_issues, read_store_issues, ready_issues_in_issues,
+    show_issue_in_issues, stats_for_issues,
 };
 use crate::bead::wire::BeadTierWire;
 use crate::bead::work::{
@@ -14,8 +17,9 @@ use crate::bead::work::{
     EpicWorkPlanWire, LegendWorkPlanWire,
 };
 use crate::bead::{
-    BeadMutationOutcomeWire, BeadPreclaimRollbackWire, DependencyWire,
-    IssueTypeWire, IssueWire, JsonlLoadOutcome, StatusWire,
+    import_issues_from_jsonl, BeadMutationOutcomeWire,
+    BeadPreclaimRollbackWire, DependencyWire, IssueTypeWire, IssueWire,
+    JsonlLoadOutcome, StatusWire,
 };
 
 use super::db::{append_event_tx, set_projection_last_seq_tx, ProjectionDb};
@@ -24,9 +28,16 @@ use super::event::{
     EventAppendOutcomeWire, EventAppendRequestWire, EventCausalityWire,
     EventEnvelopeWire, EventSourceWire,
 };
+use super::indexing::{
+    source_event_idempotency_key, source_fingerprint_from_path,
+    ShadowDiffCategoryWire, ShadowDiffCountsWire, ShadowDiffRecordWire,
+    ShadowDiffReportWire, SourceChangeOperationWire, SourceIdentityWire,
+    INDEXING_WIRE_SCHEMA_VERSION,
+};
 use super::replay::ProjectionApplier;
 
 pub const BEAD_PROJECTION_NAME: &str = "beads";
+pub const BEAD_INDEXING_DOMAIN: &str = "beads";
 
 pub const BEAD_EVENT_SNAPSHOT_OBSERVED: &str = "bead.snapshot_observed";
 pub const BEAD_EVENT_CREATED: &str = "bead.created";
@@ -106,6 +117,18 @@ pub struct BeadProjectedEventWire {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadStoreSourceWire {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub layout: String,
+    pub beads_dir: String,
+    pub issues_path: String,
+    pub config_path: String,
+    pub sqlite_paths: Vec<String>,
+    pub source_paths: Vec<String>,
+}
+
 pub struct BeadProjectionApplier;
 
 impl ProjectionApplier for BeadProjectionApplier {
@@ -140,6 +163,106 @@ impl ProjectionDb {
             Ok(outcome)
         })
     }
+}
+
+pub fn discover_bead_stores(
+    project_root: &Path,
+    project_id: Option<&str>,
+) -> Vec<BeadStoreSourceWire> {
+    let project_id = project_id
+        .map(str::to_string)
+        .unwrap_or_else(|| inferred_project_id(project_root));
+    let candidates = [
+        ("vc", project_root.join("sdd").join("beads")),
+        (
+            "non_vc",
+            project_root.join(".sase").join("sdd").join("beads"),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .filter_map(|(layout, beads_dir)| {
+            beads_dir.is_dir().then(|| {
+                bead_store_source(project_id.clone(), layout, beads_dir)
+            })
+        })
+        .collect()
+}
+
+pub fn bead_store_source(
+    project_id: String,
+    layout: impl Into<String>,
+    beads_dir: PathBuf,
+) -> BeadStoreSourceWire {
+    let issues_path = beads_dir.join("issues.jsonl");
+    let config_path = beads_dir.join("config.json");
+    let sqlite_candidates = [
+        beads_dir.join("beads.db"),
+        beads_dir.join("beads.db-wal"),
+        beads_dir.join("beads.db-shm"),
+    ];
+    let sqlite_paths: Vec<String> = sqlite_candidates
+        .iter()
+        .filter(|path| path.exists())
+        .map(|path| display_path(path))
+        .collect();
+    let mut source_paths =
+        vec![display_path(&issues_path), display_path(&config_path)];
+    source_paths.extend(sqlite_paths.iter().cloned());
+    BeadStoreSourceWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        project_id,
+        layout: layout.into(),
+        beads_dir: display_path(&beads_dir),
+        issues_path: display_path(&issues_path),
+        config_path: display_path(&config_path),
+        sqlite_paths,
+        source_paths,
+    }
+}
+
+pub fn bead_source_identity(
+    project_id: impl Into<String>,
+    path: &Path,
+) -> SourceIdentityWire {
+    SourceIdentityWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: BEAD_INDEXING_DOMAIN.to_string(),
+        project_id: Some(project_id.into()),
+        source_path: display_path(path),
+        is_archive: false,
+        fingerprint: source_fingerprint_from_path(path, true),
+        last_indexed_event_seq: None,
+    }
+}
+
+pub fn bead_backfill_snapshot_event_request(
+    mut context: BeadProjectionEventContextWire,
+    beads_dir: &Path,
+) -> Result<EventAppendRequestWire, ProjectionError> {
+    let issues_path = beads_dir.join("issues.jsonl");
+    let outcome = import_issues_from_jsonl(&issues_path).map_err(bead_error)?;
+    if context.source_path.is_none() {
+        context.source_path = Some(display_path(&issues_path));
+    }
+    if context.idempotency_key.is_none() {
+        let identity =
+            bead_source_identity(context.project_id.clone(), &issues_path);
+        context.idempotency_key = Some(source_event_idempotency_key(
+            &SourceChangeOperationWire::Rewrite,
+            &identity,
+        ));
+    }
+    bead_snapshot_observed_event_request(context, outcome)
+}
+
+pub fn bead_backfill_snapshot(
+    db: &mut ProjectionDb,
+    context: BeadProjectionEventContextWire,
+    beads_dir: &Path,
+) -> Result<EventAppendOutcomeWire, ProjectionError> {
+    let request = bead_backfill_snapshot_event_request(context, beads_dir)?;
+    db.append_bead_event(request)
 }
 
 pub fn bead_snapshot_observed_event_request(
@@ -436,6 +559,160 @@ pub fn bead_projection_events(
         events.push(row?);
     }
     Ok(events)
+}
+
+pub fn bead_projection_shadow_diff(
+    conn: &Connection,
+    project_id: &str,
+    beads_dir: &Path,
+) -> Result<ShadowDiffReportWire, ProjectionError> {
+    let issues_path = beads_dir.join("issues.jsonl");
+    let source_path = display_path(&issues_path);
+    let source_outcome =
+        import_issues_from_jsonl(&issues_path).map_err(bead_error)?;
+    let mut source_issues = source_outcome.issues.clone();
+    normalize_issues_for_diff(&mut source_issues);
+    let mut projected_issues = bead_projection_issues(conn, project_id)?;
+    normalize_issues_for_diff(&mut projected_issues);
+
+    let mut records = Vec::new();
+    if source_outcome.invalid_json_lines > 0 {
+        records.push(diff_record(
+            ShadowDiffCategoryWire::Corrupt,
+            &source_path,
+            Some("issues.jsonl"),
+            format!(
+                "{} invalid JSONL line(s)",
+                source_outcome.invalid_json_lines
+            ),
+        ));
+    }
+    if source_outcome.invalid_record_lines > 0 {
+        records.push(diff_record(
+            ShadowDiffCategoryWire::Corrupt,
+            &source_path,
+            Some("issues.jsonl"),
+            format!(
+                "{} invalid bead record line(s)",
+                source_outcome.invalid_record_lines
+            ),
+        ));
+    }
+
+    let source_by_id = issues_by_id(&source_issues);
+    let projected_by_id = issues_by_id(&projected_issues);
+    for (issue_id, source_issue) in &source_by_id {
+        match projected_by_id.get(issue_id) {
+            None => records.push(diff_record(
+                ShadowDiffCategoryWire::Missing,
+                &source_path,
+                Some(issue_id),
+                "bead exists in source store but not projection",
+            )),
+            Some(projected_issue) if projected_issue != source_issue => {
+                records.push(diff_record(
+                    ShadowDiffCategoryWire::Stale,
+                    &source_path,
+                    Some(issue_id),
+                    "projected bead row differs from source store",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    for issue_id in projected_by_id.keys() {
+        if !source_by_id.contains_key(issue_id) {
+            records.push(diff_record(
+                ShadowDiffCategoryWire::Extra,
+                &source_path,
+                Some(issue_id),
+                "projection contains bead missing from source store",
+            ));
+        }
+    }
+
+    compare_issue_id_sets(
+        &mut records,
+        &source_path,
+        "list",
+        source_issues.iter().map(|issue| issue.id.clone()).collect(),
+        projected_issues
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect(),
+    );
+    compare_issue_id_sets(
+        &mut records,
+        &source_path,
+        "ready",
+        ready_issues_in_issues(source_issues.clone())
+            .map_err(bead_error)?
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect(),
+        bead_projection_ready(conn, project_id)?
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect(),
+    );
+    compare_issue_id_sets(
+        &mut records,
+        &source_path,
+        "blocked",
+        blocked_issues_in_issues(source_issues.clone())
+            .map_err(bead_error)?
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect(),
+        bead_projection_blocked(conn, project_id)?
+            .into_iter()
+            .map(|issue| issue.id)
+            .collect(),
+    );
+
+    let source_stats = stats_for_issues(&source_issues);
+    let projected_stats = bead_projection_stats(conn, project_id)?;
+    if source_stats != projected_stats {
+        records.push(diff_record(
+            ShadowDiffCategoryWire::Stale,
+            &source_path,
+            Some("stats"),
+            "projected bead stats differ from source store",
+        ));
+    }
+
+    let counts = diff_counts(&records);
+    Ok(ShadowDiffReportWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: BEAD_INDEXING_DOMAIN.to_string(),
+        records,
+        counts,
+    })
+}
+
+pub fn bead_store_shadow_diff(
+    conn: &Connection,
+    project_id: &str,
+    beads_dir: &Path,
+) -> Result<ShadowDiffReportWire, ProjectionError> {
+    match read_store_issues(beads_dir) {
+        Ok(_) => bead_projection_shadow_diff(conn, project_id, beads_dir),
+        Err(error) => {
+            let source_path = display_path(&beads_dir.join("issues.jsonl"));
+            let records = vec![diff_record(
+                ShadowDiffCategoryWire::Corrupt,
+                &source_path,
+                Some("issues.jsonl"),
+                format!("failed to load bead store: {error}"),
+            )];
+            Ok(ShadowDiffReportWire {
+                schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                domain: BEAD_INDEXING_DOMAIN.to_string(),
+                counts: diff_counts(&records),
+                records,
+            })
+        }
+    }
 }
 
 fn apply_bead_event_tx(
@@ -881,6 +1158,92 @@ fn tier_value(tier: &BeadTierWire) -> &'static str {
         BeadTierWire::Epic => "epic",
         BeadTierWire::Legend => "legend",
     }
+}
+
+fn inferred_project_id(project_root: &Path) -> String {
+    project_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("default")
+        .to_string()
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn normalize_issues_for_diff(issues: &mut [IssueWire]) {
+    for issue in issues.iter_mut() {
+        issue.dependencies.sort_by(|a, b| {
+            (
+                a.issue_id.as_str(),
+                a.depends_on_id.as_str(),
+                a.created_at.as_str(),
+            )
+                .cmp(&(
+                    b.issue_id.as_str(),
+                    b.depends_on_id.as_str(),
+                    b.created_at.as_str(),
+                ))
+        });
+    }
+    issues.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
+fn issues_by_id(issues: &[IssueWire]) -> BTreeMap<String, IssueWire> {
+    issues
+        .iter()
+        .map(|issue| (issue.id.clone(), issue.clone()))
+        .collect()
+}
+
+fn compare_issue_id_sets(
+    records: &mut Vec<ShadowDiffRecordWire>,
+    source_path: &str,
+    handle: &str,
+    mut source_ids: Vec<String>,
+    mut projected_ids: Vec<String>,
+) {
+    source_ids.sort();
+    projected_ids.sort();
+    if source_ids != projected_ids {
+        records.push(diff_record(
+            ShadowDiffCategoryWire::Stale,
+            source_path,
+            Some(handle),
+            format!("projected bead {handle} result differs from source store"),
+        ));
+    }
+}
+
+fn diff_record(
+    category: ShadowDiffCategoryWire,
+    source_path: &str,
+    handle: Option<&str>,
+    message: impl Into<String>,
+) -> ShadowDiffRecordWire {
+    ShadowDiffRecordWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: BEAD_INDEXING_DOMAIN.to_string(),
+        category,
+        source_path: source_path.to_string(),
+        handle: handle.map(str::to_string),
+        message: message.into(),
+    }
+}
+
+fn diff_counts(records: &[ShadowDiffRecordWire]) -> ShadowDiffCountsWire {
+    let mut counts = ShadowDiffCountsWire::default();
+    for record in records {
+        match record.category {
+            ShadowDiffCategoryWire::Missing => counts.missing += 1,
+            ShadowDiffCategoryWire::Stale => counts.stale += 1,
+            ShadowDiffCategoryWire::Extra => counts.extra += 1,
+            ShadowDiffCategoryWire::Corrupt => counts.corrupt += 1,
+        }
+    }
+    counts
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -7,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::db::{max_event_seq_tx, ProjectionDb};
 use super::error::ProjectionError;
 use super::event::PROJECTION_EVENT_SCHEMA_VERSION;
+use super::indexing::{
+    SourceChangeOperationWire, SourceChangeWire, SourceIdentityWire,
+    INDEXING_WIRE_SCHEMA_VERSION,
+};
 
 pub const DEFAULT_WAL_SOFT_CAP_BYTES: u64 = 1_073_741_824;
 pub const DEFAULT_CHECKPOINT_INTERVAL_SECS: u64 = 600;
@@ -90,6 +95,28 @@ pub struct ProjectionRetentionReportWire {
     pub compacted_event_types: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionReconciliationDiagnosticWire {
+    pub schema_version: u32,
+    pub domain: String,
+    pub source_path: String,
+    pub reason: String,
+    pub guidance: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectionReconciliationPlanWire {
+    pub schema_version: u32,
+    pub scanned_sources: u64,
+    pub known_sources: u64,
+    pub created_sources: u64,
+    pub stale_sources: u64,
+    pub deleted_sources: u64,
+    pub bounded: bool,
+    pub changes: Vec<SourceChangeWire>,
+    pub diagnostics: Vec<ProjectionReconciliationDiagnosticWire>,
+}
+
 pub fn projection_checkpoint_decision(
     wal_bytes: u64,
     seconds_since_last_checkpoint: u64,
@@ -108,6 +135,115 @@ pub fn projection_checkpoint_decision(
         wal_bytes,
         seconds_since_last_checkpoint,
         reasons,
+    }
+}
+
+pub fn projection_reconciliation_plan(
+    known_sources: impl IntoIterator<Item = SourceIdentityWire>,
+    discovered_sources: impl IntoIterator<Item = SourceIdentityWire>,
+    max_changes: Option<usize>,
+) -> ProjectionReconciliationPlanWire {
+    let known = known_sources
+        .into_iter()
+        .map(|identity| (identity.stable_key(), identity))
+        .collect::<BTreeMap<_, _>>();
+    let discovered = discovered_sources
+        .into_iter()
+        .map(|identity| (identity.stable_key(), identity))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut plan = ProjectionReconciliationPlanWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        scanned_sources: discovered.len() as u64,
+        known_sources: known.len() as u64,
+        ..ProjectionReconciliationPlanWire::default()
+    };
+
+    for (key, discovered_identity) in &discovered {
+        match known.get(key) {
+            None => {
+                plan.created_sources += 1;
+                plan.changes.push(reconciliation_change(
+                    discovered_identity.clone(),
+                    SourceChangeOperationWire::Reconcile,
+                    "source discovered during reconciliation",
+                ));
+            }
+            Some(known_identity)
+                if known_identity.fingerprint
+                    != discovered_identity.fingerprint =>
+            {
+                plan.stale_sources += 1;
+                plan.changes.push(reconciliation_change(
+                    discovered_identity.clone(),
+                    SourceChangeOperationWire::Reconcile,
+                    "source fingerprint changed since last index",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (key, known_identity) in &known {
+        if discovered.contains_key(key) {
+            continue;
+        }
+        plan.deleted_sources += 1;
+        plan.changes.push(reconciliation_change(
+            known_identity.clone(),
+            SourceChangeOperationWire::Delete,
+            "source missing during reconciliation",
+        ));
+    }
+
+    plan.changes.sort_by(|left, right| {
+        left.identity
+            .stable_key()
+            .cmp(&right.identity.stable_key())
+            .then_with(|| {
+                operation_sort_key(&left.operation)
+                    .cmp(&operation_sort_key(&right.operation))
+            })
+    });
+
+    if let Some(max_changes) = max_changes {
+        if plan.changes.len() > max_changes {
+            plan.bounded = true;
+            plan.changes.truncate(max_changes);
+            plan.diagnostics.push(ProjectionReconciliationDiagnosticWire {
+                schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                domain: "indexing".to_string(),
+                source_path: String::new(),
+                reason: "reconciliation_change_bound_exceeded".to_string(),
+                guidance: format!(
+                    "Reconciliation found more than {max_changes} source changes; run a daemon indexing rebuild or raise the reconciliation bound."
+                ),
+            });
+        }
+    }
+
+    plan
+}
+
+fn reconciliation_change(
+    identity: SourceIdentityWire,
+    operation: SourceChangeOperationWire,
+    reason: &str,
+) -> SourceChangeWire {
+    SourceChangeWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        identity,
+        operation,
+        reason: Some(reason.to_string()),
+    }
+}
+
+fn operation_sort_key(operation: &SourceChangeOperationWire) -> u8 {
+    match operation {
+        SourceChangeOperationWire::Delete => 0,
+        SourceChangeOperationWire::Reconcile => 1,
+        SourceChangeOperationWire::Rewrite => 2,
+        SourceChangeOperationWire::Upsert => 3,
     }
 }
 
@@ -198,6 +334,7 @@ mod tests {
 
     use super::*;
     use crate::projections::event::{EventAppendRequestWire, EventSourceWire};
+    use crate::projections::{SourceFingerprintWire, SourceIdentityWire};
 
     fn request(event_type: &str, key: &str) -> EventAppendRequestWire {
         EventAppendRequestWire {
@@ -215,6 +352,24 @@ mod tests {
             causality: Vec::new(),
             source_path: None,
             source_revision: None,
+        }
+    }
+
+    fn identity(path: &str, size: u64) -> SourceIdentityWire {
+        SourceIdentityWire {
+            schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+            domain: "changespec".to_string(),
+            project_id: Some("project-a".to_string()),
+            source_path: path.to_string(),
+            is_archive: false,
+            fingerprint: Some(SourceFingerprintWire {
+                schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                file_size: Some(size),
+                modified_at_unix_millis: Some(1),
+                inode: Some(size),
+                content_sha256: None,
+            }),
+            last_indexed_event_seq: None,
         }
     }
 
@@ -281,5 +436,55 @@ mod tests {
             .event_type
             .starts_with("durable."));
         assert!(db.get_event(3).unwrap().is_some());
+    }
+
+    #[test]
+    fn reconciliation_plan_detects_created_stale_and_deleted_sources() {
+        let unchanged = identity("/tmp/unchanged.sase", 10);
+        let stale_known = identity("/tmp/stale.sase", 20);
+        let mut stale_discovered = identity("/tmp/stale.sase", 21);
+        stale_discovered
+            .fingerprint
+            .as_mut()
+            .unwrap()
+            .modified_at_unix_millis = Some(2);
+        let deleted = identity("/tmp/deleted.sase", 30);
+        let created = identity("/tmp/created.sase", 40);
+
+        let plan = projection_reconciliation_plan(
+            [unchanged.clone(), stale_known, deleted],
+            [unchanged, stale_discovered, created],
+            None,
+        );
+
+        assert_eq!(plan.created_sources, 1);
+        assert_eq!(plan.stale_sources, 1);
+        assert_eq!(plan.deleted_sources, 1);
+        assert_eq!(plan.changes.len(), 3);
+        assert!(plan.changes.iter().any(|change| {
+            change.identity.source_path == "/tmp/deleted.sase"
+                && change.operation == SourceChangeOperationWire::Delete
+        }));
+        assert!(plan.changes.iter().any(|change| {
+            change.identity.source_path == "/tmp/stale.sase"
+                && change.operation == SourceChangeOperationWire::Reconcile
+        }));
+    }
+
+    #[test]
+    fn reconciliation_plan_reports_bounded_changes() {
+        let plan = projection_reconciliation_plan(
+            Vec::<SourceIdentityWire>::new(),
+            [identity("/tmp/a.sase", 1), identity("/tmp/b.sase", 2)],
+            Some(1),
+        );
+
+        assert!(plan.bounded);
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.diagnostics.len(), 1);
+        assert_eq!(
+            plan.diagnostics[0].reason,
+            "reconciliation_change_bound_exceeded"
+        );
     }
 }

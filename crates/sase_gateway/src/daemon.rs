@@ -127,11 +127,29 @@ impl DaemonRuntime {
         let shutdown = DaemonShutdown::default();
         let local_events =
             LocalEventHub::new(LOCAL_EVENT_BUFFER_CAPACITY, metrics.clone());
+        let projects_root = config.paths.sase_home.join("projects");
+        let mut watch_roots = Vec::new();
+        for root in [
+            projects_root.clone(),
+            config.paths.sase_home.join("notifications"),
+            config.paths.sase_home.join("pending_actions"),
+            config.paths.sase_home.join("telegram"),
+        ] {
+            if root.exists() {
+                watch_roots.push(root);
+            }
+        }
         let indexing_service = IndexingService::start(
-            IndexingConfig::default(),
+            IndexingConfig {
+                watch_roots,
+                projects_root: Some(projects_root),
+                host_id: config.host_identity.clone(),
+                ..IndexingConfig::default()
+            },
             shutdown.clone(),
             metrics.clone(),
             local_events.clone(),
+            projection_service.clone(),
         );
         let state = DaemonState {
             build: GatewayBuildWire {

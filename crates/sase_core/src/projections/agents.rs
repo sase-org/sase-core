@@ -1,15 +1,29 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
+
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use crate::agent_archive::AgentArchiveSummaryWire;
-use crate::agent_scan::AgentArtifactRecordWire;
+use crate::agent_scan::{
+    scan_agent_artifact_dir, AgentArtifactRecordWire,
+    AgentArtifactScanOptionsWire, AgentArtifactScanWire,
+};
 
 use super::db::{append_event_tx, set_projection_last_seq_tx, ProjectionDb};
 use super::error::ProjectionError;
 use super::event::{
     EventAppendOutcomeWire, EventAppendRequestWire, EventCausalityWire,
     EventEnvelopeWire, EventSourceWire,
+};
+use super::indexing::{
+    ShadowDiffCategoryWire, ShadowDiffCountsWire, ShadowDiffRecordWire,
+    ShadowDiffReportWire, SourceChangeOperationWire, SourceChangeWire,
+    SourceIdentityWire, INDEXING_WIRE_SCHEMA_VERSION,
 };
 use super::replay::ProjectionApplier;
 
@@ -30,6 +44,18 @@ pub const AGENT_EVENT_ARCHIVE_BUNDLE_PURGED: &str =
     "agent.archive_bundle_purged";
 
 const AGENT_PROJECTION_WIRE_SCHEMA_VERSION: u32 = 1;
+const AGENT_INDEXING_DOMAIN: &str = "agents";
+
+pub const AGENT_INDEXED_MARKER_FILES: &[&str] = &[
+    "done.json",
+    "agent_meta.json",
+    "running.json",
+    "waiting.json",
+    "pending_question.json",
+    "workflow_state.json",
+    "plan_path.json",
+    "raw_xprompt.md",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentProjectionEventContextWire {
@@ -375,6 +401,226 @@ pub fn agent_archive_bundle_purged_event_request(
     )
 }
 
+pub fn is_agent_indexed_marker_file_name(name: &str) -> bool {
+    AGENT_INDEXED_MARKER_FILES.contains(&name)
+        || (name.starts_with("prompt_step_") && name.ends_with(".json"))
+}
+
+pub fn agent_artifact_dir_for_source_path(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() && is_agent_artifact_dir(path) {
+        return Some(path.to_path_buf());
+    }
+    let file_name = path.file_name()?.to_str()?;
+    if !is_agent_indexed_marker_file_name(file_name) {
+        return None;
+    }
+    let parent = path.parent()?;
+    if is_agent_artifact_dir(parent) {
+        Some(parent.to_path_buf())
+    } else {
+        None
+    }
+}
+
+pub fn agent_source_change_from_path(
+    projects_root: Option<&Path>,
+    path: &Path,
+    operation: SourceChangeOperationWire,
+    reason: Option<String>,
+) -> Option<SourceChangeWire> {
+    let artifact_dir = agent_artifact_dir_for_source_path(path)?;
+    let project_id =
+        project_name_for_artifact_dir(projects_root, &artifact_dir);
+    Some(SourceChangeWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        identity: SourceIdentityWire {
+            schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+            domain: AGENT_INDEXING_DOMAIN.to_string(),
+            project_id,
+            source_path: artifact_dir.to_string_lossy().into_owned(),
+            is_archive: false,
+            fingerprint: None,
+            last_indexed_event_seq: None,
+        },
+        operation,
+        reason,
+    })
+}
+
+pub fn agent_projection_event_request_for_artifact_dir(
+    mut context: AgentProjectionEventContextWire,
+    projects_root: &Path,
+    artifact_dir: &Path,
+    options: &AgentArtifactScanOptionsWire,
+) -> Result<Option<EventAppendRequestWire>, ProjectionError> {
+    let Some(record) =
+        scan_agent_artifact_dir(projects_root, artifact_dir, options)
+    else {
+        return Ok(None);
+    };
+    let record_json = serde_json::to_vec(&record)?;
+    let source_path = artifact_dir.to_string_lossy().into_owned();
+    context.project_id = record.project_name.clone();
+    context.source_path = Some(source_path.clone());
+    context.idempotency_key = Some(format!(
+        "indexer:agents:artifact_dir:{source_path}:{}",
+        hex::encode(Sha256::digest(&record_json))
+    ));
+    agent_lifecycle_marker_observed_event_request(context, record).map(Some)
+}
+
+pub fn backfill_agent_projection_from_scan(
+    db: &mut ProjectionDb,
+    context: AgentProjectionEventContextWire,
+    scan: &AgentArtifactScanWire,
+) -> Result<u64, ProjectionError> {
+    let mut appended = 0;
+    for record in &scan.records {
+        let mut record_context = context.clone();
+        let record_json = serde_json::to_vec(record)?;
+        record_context.project_id = record.project_name.clone();
+        record_context.source_path = Some(record.artifact_dir.clone());
+        record_context.idempotency_key = Some(format!(
+            "indexer:agents:backfill:{}:{}",
+            record.artifact_dir,
+            hex::encode(Sha256::digest(&record_json))
+        ));
+        let outcome = db.append_agent_event(
+            agent_lifecycle_marker_observed_event_request(
+                record_context,
+                record.clone(),
+            )?,
+        )?;
+        if !outcome.duplicate {
+            appended += 1;
+        }
+    }
+    Ok(appended)
+}
+
+pub fn agent_projection_shadow_diff(
+    conn: &Connection,
+    project_id: &str,
+    scan: &AgentArtifactScanWire,
+) -> Result<ShadowDiffReportWire, ProjectionError> {
+    let mut expected: BTreeMap<String, &AgentArtifactRecordWire> =
+        BTreeMap::new();
+    for record in scan
+        .records
+        .iter()
+        .filter(|record| record.project_name == project_id)
+    {
+        expected.insert(record.artifact_dir.clone(), record);
+    }
+
+    let mut projected: BTreeMap<String, AgentArtifactRecordWire> =
+        BTreeMap::new();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT artifact_dir, record_json
+        FROM agents
+        WHERE project_id = ?1
+        ORDER BY artifact_dir ASC
+        "#,
+    )?;
+    let rows = stmt.query_map([project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut records = Vec::new();
+    let mut counts = ShadowDiffCountsWire::default();
+    for row in rows {
+        let (artifact_dir, json) = row?;
+        match serde_json::from_str::<AgentArtifactRecordWire>(&json) {
+            Ok(record) => {
+                projected.insert(artifact_dir, record);
+            }
+            Err(error) => {
+                counts.corrupt += 1;
+                records.push(ShadowDiffRecordWire {
+                    schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                    domain: AGENT_INDEXING_DOMAIN.to_string(),
+                    category: ShadowDiffCategoryWire::Corrupt,
+                    source_path: artifact_dir,
+                    handle: None,
+                    message: format!(
+                        "projected agent record is corrupt: {error}"
+                    ),
+                });
+            }
+        }
+    }
+
+    for (artifact_dir, expected_record) in &expected {
+        match projected.get(artifact_dir) {
+            None => {
+                counts.missing += 1;
+                records.push(ShadowDiffRecordWire {
+                    schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                    domain: AGENT_INDEXING_DOMAIN.to_string(),
+                    category: ShadowDiffCategoryWire::Missing,
+                    source_path: artifact_dir.clone(),
+                    handle: Some(agent_id_for_record(expected_record)),
+                    message:
+                        "agent artifact directory is missing from projection"
+                            .to_string(),
+                });
+            }
+            Some(projected_record) if projected_record != *expected_record => {
+                counts.stale += 1;
+                records.push(ShadowDiffRecordWire {
+                    schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                    domain: AGENT_INDEXING_DOMAIN.to_string(),
+                    category: ShadowDiffCategoryWire::Stale,
+                    source_path: artifact_dir.clone(),
+                    handle: Some(agent_id_for_record(expected_record)),
+                    message:
+                        "projected agent record differs from scanner output"
+                            .to_string(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    let expected_paths: BTreeSet<&String> = expected.keys().collect();
+    for artifact_dir in projected.keys() {
+        if !expected_paths.contains(artifact_dir) {
+            counts.extra += 1;
+            records.push(ShadowDiffRecordWire {
+                schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+                domain: AGENT_INDEXING_DOMAIN.to_string(),
+                category: ShadowDiffCategoryWire::Extra,
+                source_path: artifact_dir.clone(),
+                handle: projected.get(artifact_dir).map(agent_id_for_record),
+                message: "projected agent row has no scanner source"
+                    .to_string(),
+            });
+        }
+    }
+
+    if scan.stats.json_decode_errors > 0 || scan.stats.os_errors > 0 {
+        counts.corrupt += scan.stats.json_decode_errors + scan.stats.os_errors;
+        records.push(ShadowDiffRecordWire {
+            schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+            domain: AGENT_INDEXING_DOMAIN.to_string(),
+            category: ShadowDiffCategoryWire::Corrupt,
+            source_path: scan.projects_root.clone(),
+            handle: None,
+            message: format!(
+                "scanner reported {} JSON decode errors and {} OS errors",
+                scan.stats.json_decode_errors, scan.stats.os_errors
+            ),
+        });
+    }
+
+    Ok(ShadowDiffReportWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: AGENT_INDEXING_DOMAIN.to_string(),
+        records,
+        counts,
+    })
+}
+
 pub fn agent_projection_active_page(
     conn: &Connection,
     project_id: &str,
@@ -668,9 +914,17 @@ fn upsert_record_tx(
     let attempt = attempt_from_record(&agent_id, record);
     upsert_attempt_tx(conn, event, &attempt)?;
 
+    conn.execute(
+        "DELETE FROM agent_edges WHERE project_id = ?1 AND child_agent_id = ?2",
+        params![event.project_id, agent_id],
+    )?;
     for edge in edges_from_record(record, &agent_id) {
         upsert_edge_tx(conn, event, &edge)?;
     }
+    conn.execute(
+        "DELETE FROM agent_artifacts WHERE project_id = ?1 AND agent_id = ?2",
+        params![event.project_id, agent_id],
+    )?;
     for artifact in artifacts_from_record(record, &agent_id) {
         upsert_artifact_tx(conn, event, &artifact)?;
     }
@@ -1296,6 +1550,46 @@ fn nonempty(value: String) -> Option<String> {
     }
 }
 
+fn is_agent_artifact_dir(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.windows(3).any(|window| {
+        window[0] == "artifacts"
+            && !window[1].is_empty()
+            && !window[2].is_empty()
+    })
+}
+
+fn project_name_for_artifact_dir(
+    projects_root: Option<&Path>,
+    artifact_dir: &Path,
+) -> Option<String> {
+    if let Some(projects_root) = projects_root {
+        if let Ok(relative) = artifact_dir.strip_prefix(projects_root) {
+            let parts: Vec<String> = relative
+                .components()
+                .map(|component| {
+                    component.as_os_str().to_string_lossy().into_owned()
+                })
+                .collect();
+            if parts.len() >= 4 && parts[1] == "artifacts" {
+                return Some(parts[0].clone());
+            }
+        }
+    }
+
+    let parts: Vec<String> = artifact_dir
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts
+        .windows(4)
+        .find(|window| window[1] == "artifacts")
+        .map(|window| window[0].clone())
+}
+
 fn is_agent_event(event_type: &str) -> bool {
     matches!(
         event_type,
@@ -1584,5 +1878,114 @@ mod tests {
             archive_page.entries[0].revived_at.as_deref(),
             Some("2026-05-13T21:05:00Z")
         );
+    }
+
+    #[test]
+    fn marker_path_resolves_to_one_artifact_directory_change() {
+        let path = std::path::Path::new(
+            "/tmp/.sase/projects/myproj/artifacts/ace-run/20260513120000/done.json",
+        );
+        let change = agent_source_change_from_path(
+            None,
+            path,
+            SourceChangeOperationWire::Upsert,
+            Some("test".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(change.identity.domain, "agents");
+        assert_eq!(change.identity.project_id.as_deref(), Some("myproj"));
+        assert!(change
+            .identity
+            .source_path
+            .ends_with("myproj/artifacts/ace-run/20260513120000"));
+
+        let prompt_step = std::path::Path::new(
+            "/tmp/.sase/projects/myproj/artifacts/ace-run/20260513120000/prompt_step_01.json",
+        );
+        assert!(agent_artifact_dir_for_source_path(prompt_step).is_some());
+        assert!(agent_artifact_dir_for_source_path(std::path::Path::new(
+            "/tmp/.sase/projects/myproj/artifacts/ace-run/20260513120000/notes.txt",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn backfill_and_shadow_diff_converge_with_scanner_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture_root(&tmp);
+        let snapshot = scan_agent_artifacts(
+            &root,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+
+        let missing =
+            agent_projection_shadow_diff(db.connection(), "myproj", &snapshot)
+                .unwrap();
+        assert_eq!(missing.counts.missing, snapshot.records.len() as u64);
+
+        let appended =
+            backfill_agent_projection_from_scan(&mut db, context(), &snapshot)
+                .unwrap();
+        assert_eq!(appended, snapshot.records.len() as u64);
+
+        let clean =
+            agent_projection_shadow_diff(db.connection(), "myproj", &snapshot)
+                .unwrap();
+        assert_eq!(clean.counts, ShadowDiffCountsWire::default());
+        assert!(clean.records.is_empty());
+    }
+
+    #[test]
+    fn changed_marker_replaces_stale_artifact_associations() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture_root(&tmp);
+        let artifact_dir = root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260513120000");
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+
+        let request = agent_projection_event_request_for_artifact_dir(
+            context(),
+            &root,
+            &artifact_dir,
+            &AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap()
+        .unwrap();
+        db.append_agent_event(request).unwrap();
+
+        write_json(
+            &artifact_dir.join("done.json"),
+            &json!({
+                "outcome": "completed",
+                "finished_at": 1800000001.0,
+                "cl_name": "feature_alpha",
+                "name": "parent",
+                "plan_path": "/tmp/plan.md"
+            }),
+        );
+        let request = agent_projection_event_request_for_artifact_dir(
+            context(),
+            &root,
+            &artifact_dir,
+            &AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap()
+        .unwrap();
+        db.append_agent_event(request).unwrap();
+
+        let agent_id = agent_id_from_timestamp("myproj", "20260513120000");
+        let artifacts =
+            agent_projection_artifacts(db.connection(), "myproj", &agent_id)
+                .unwrap();
+        let kinds: Vec<_> = artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["plan"]);
     }
 }

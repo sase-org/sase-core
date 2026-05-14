@@ -11,6 +11,10 @@
     "mocked.list",
     "mocked.events",
     "projection.rebuild",
+    "indexing.status",
+    "indexing.rebuild",
+    "indexing.verify",
+    "indexing.diff",
     "batch.request"
   ],
   "contract": "sase_local_daemon_framed_json_v1",
@@ -165,6 +169,20 @@
     "LocalDaemonHealthResponseWire": {
       "daemon_started": "bool; false is expected in Epic 1D contract tests",
       "details": {
+        "indexing": {
+          "coalesced_changes": "u64",
+          "diff_counts": "ShadowDiffCountsWire",
+          "dropped_changes": "u64",
+          "enabled": "bool",
+          "failed_parses": "u64",
+          "indexed_sources": "u64",
+          "message": "string|null",
+          "queued_changes": "u64",
+          "recent_reports": "IndexingDomainReportWire[]",
+          "schema_version": "u32",
+          "state": "ok|degraded|stopped",
+          "watcher_active": "bool"
+        },
         "logs": {
           "path": "string; daemon log file path"
         },
@@ -197,13 +215,58 @@
       "schema_version": "u32",
       "sequence": "u64"
     },
+    "LocalDaemonIndexingDiffRequestWire": {
+      "max_payload_bytes": "u32|null",
+      "page": "LocalDaemonPageRequestWire",
+      "project_id": "string|null",
+      "surface": "LocalDaemonIndexingSurfaceWire; defaults all"
+    },
+    "LocalDaemonIndexingDiffResponseWire": {
+      "bounded": "LocalDaemonPayloadBoundWire",
+      "counts": "ShadowDiffCountsWire",
+      "next_cursor": "string|null",
+      "project_id": "string|null",
+      "records": "ShadowDiffRecordWire[]",
+      "schema_version": "u32",
+      "surface": "LocalDaemonIndexingSurfaceWire"
+    },
+    "LocalDaemonIndexingStatusRequestWire": {
+      "project_id": "string|null",
+      "surface": "LocalDaemonIndexingSurfaceWire; defaults all"
+    },
+    "LocalDaemonIndexingStatusResponseWire": {
+      "schema_version": "u32",
+      "service": "IndexingServiceStatusWire JSON",
+      "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]"
+    },
+    "LocalDaemonIndexingSurfaceSummaryWire": {
+      "diff_counts": "ShadowDiffCountsWire",
+      "last_indexed_event_seq": "i64|null",
+      "message": "string|null",
+      "project_id": "string|null",
+      "queued_changes": "u64",
+      "schema_version": "u32",
+      "state": "ok|degraded|stopped|unknown",
+      "surface": "LocalDaemonIndexingSurfaceWire",
+      "watcher_active": "bool"
+    },
+    "LocalDaemonIndexingSurfaceWire": "all|changespecs|notifications|agents|beads|catalogs",
+    "LocalDaemonIndexingVerifyRequestWire": {
+      "project_id": "string|null",
+      "surface": "LocalDaemonIndexingSurfaceWire; defaults all"
+    },
+    "LocalDaemonIndexingVerifyResponseWire": {
+      "ok": "bool",
+      "schema_version": "u32",
+      "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]"
+    },
     "LocalDaemonListItemWire": {
       "handle": "string",
       "schema_version": "u32",
       "summary": "json"
     },
     "LocalDaemonListRequestWire": {
-      "collection": "agents|artifacts|beads|changespecs|notifications|workflows|xprompts|mocked",
+      "collection": "agents|artifacts|beads|changespecs|notifications|workflows|xprompts|indexing|mocked",
       "filters": "json|null",
       "max_payload_bytes": "u32|null",
       "page": "LocalDaemonPageRequestWire",
@@ -228,14 +291,19 @@
       "truncated": "bool"
     },
     "LocalDaemonRebuildRequestWire": {
-      "storage_reset_only": "bool; defaults false for forward compatibility, current daemon always reports storage_reset_only true"
+      "project_id": "string|null",
+      "storage_reset_only": "bool; false requests source-store backfill, true requests projection table reset/replay",
+      "surface": "LocalDaemonIndexingSurfaceWire; defaults all"
     },
     "LocalDaemonRebuildResponseWire": {
       "limitation": "string|null",
-      "mode": "projection_storage_rebuild",
-      "report": "ProjectionRebuildReportWire JSON",
+      "mode": "source_backfill|projection_storage_rebuild",
+      "project_id": "string|null",
+      "report": "ProjectionRebuildReportWire JSON or source backfill report JSON",
       "schema_version": "u32",
-      "storage_reset_only": "bool"
+      "storage_reset_only": "bool",
+      "summaries": "LocalDaemonIndexingSurfaceSummaryWire[]",
+      "surface": "LocalDaemonIndexingSurfaceWire"
     },
     "LocalDaemonRequestEnvelopeWire": {
       "client": "LocalDaemonClientWire",
@@ -248,12 +316,15 @@
         "requests": "LocalDaemonBatchRequestWire[]"
       },
       "capabilities": "no fields",
+      "diff": "LocalDaemonIndexingDiffRequestWire",
       "events": "LocalDaemonEventRequestWire",
       "health": {
         "include_capabilities": "bool"
       },
+      "indexing_status": "LocalDaemonIndexingStatusRequestWire",
       "list": "LocalDaemonListRequestWire",
-      "rebuild": "LocalDaemonRebuildRequestWire"
+      "rebuild": "LocalDaemonRebuildRequestWire",
+      "verify": "LocalDaemonIndexingVerifyRequestWire"
     },
     "LocalDaemonResponseEnvelopeWire": {
       "payload": "LocalDaemonResponsePayloadWire",
@@ -266,11 +337,14 @@
         "responses": "LocalDaemonBatchResponseWire[]"
       },
       "capabilities": "LocalDaemonCapabilitiesResponseWire",
+      "diff": "LocalDaemonIndexingDiffResponseWire",
       "error": "LocalDaemonErrorWire",
       "events": "LocalDaemonEventBatchWire",
       "health": "LocalDaemonHealthResponseWire",
+      "indexing_status": "LocalDaemonIndexingStatusResponseWire",
       "list": "LocalDaemonListResponseWire",
-      "rebuild": "LocalDaemonRebuildResponseWire"
+      "rebuild": "LocalDaemonRebuildResponseWire",
+      "verify": "LocalDaemonIndexingVerifyResponseWire"
     }
   },
   "request_envelope": {
@@ -321,10 +395,37 @@
       "errors": [
         "LocalDaemonErrorWire"
       ],
-      "notes": "runs daemon-owned projection reset and replay against retained projection events; domain source-store reindexing is intentionally deferred until filesystem indexing lands",
+      "notes": "runs source-store backfill by default; storage_reset_only preserves the explicit projection reset/replay recovery path",
       "request": "LocalDaemonRebuildRequestWire",
       "success": "LocalDaemonRebuildResponseWire",
       "type": "rebuild"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "returns watcher health, queue counters, and compact per-surface indexing summaries",
+      "request": "LocalDaemonIndexingStatusRequestWire",
+      "success": "LocalDaemonIndexingStatusResponseWire",
+      "type": "indexing_status"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "compares projected shadow rows to current source-store loaders and returns compact diff counts",
+      "request": "LocalDaemonIndexingVerifyRequestWire",
+      "success": "LocalDaemonIndexingVerifyResponseWire",
+      "type": "verify"
+    },
+    {
+      "errors": [
+        "LocalDaemonErrorWire"
+      ],
+      "notes": "returns bounded pages of shadow diff records",
+      "request": "LocalDaemonIndexingDiffRequestWire",
+      "success": "LocalDaemonIndexingDiffResponseWire",
+      "type": "diff"
     },
     {
       "errors": [
@@ -352,7 +453,7 @@
     },
     "implemented": true,
     "phase": "local_transport",
-    "production_routing": "health, capabilities, batch, and bounded mock/empty list reads are available; current source stores remain authoritative until indexed reads land",
+    "production_routing": "health, capabilities, batch, bounded mock/empty list reads, and shadow-index diagnostics are available; current source stores remain authoritative until indexed reads land",
     "transport": "unix_domain_socket_framed_json"
   },
   "versioning": {

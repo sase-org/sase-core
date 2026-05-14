@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use sase_core::projections::{ShadowDiffCountsWire, ShadowDiffRecordWire};
+
 pub use sase_core::host_bridge::{
     MobileBeadDetailWire, MobileBeadListRequestWire,
     MobileBeadListResponseWire, MobileBeadShowRequestWire,
@@ -269,6 +271,9 @@ pub enum LocalDaemonRequestPayloadWire {
     List(LocalDaemonListRequestWire),
     Events(LocalDaemonEventRequestWire),
     Rebuild(LocalDaemonRebuildRequestWire),
+    IndexingStatus(LocalDaemonIndexingStatusRequestWire),
+    Verify(LocalDaemonIndexingVerifyRequestWire),
+    Diff(LocalDaemonIndexingDiffRequestWire),
     Batch {
         requests: Vec<LocalDaemonBatchRequestWire>,
     },
@@ -282,6 +287,9 @@ pub enum LocalDaemonResponsePayloadWire {
     List(LocalDaemonListResponseWire),
     Events(LocalDaemonEventBatchWire),
     Rebuild(LocalDaemonRebuildResponseWire),
+    IndexingStatus(LocalDaemonIndexingStatusResponseWire),
+    Verify(LocalDaemonIndexingVerifyResponseWire),
+    Diff(LocalDaemonIndexingDiffResponseWire),
     Batch {
         responses: Vec<LocalDaemonBatchResponseWire>,
     },
@@ -305,6 +313,10 @@ pub struct LocalDaemonBatchResponseWire {
 pub struct LocalDaemonRebuildRequestWire {
     #[serde(default)]
     pub storage_reset_only: bool,
+    #[serde(default)]
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -312,8 +324,99 @@ pub struct LocalDaemonRebuildResponseWire {
     pub schema_version: u32,
     pub mode: String,
     pub storage_reset_only: bool,
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub limitation: Option<String>,
     pub report: JsonValue,
+    #[serde(default)]
+    pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDaemonIndexingSurfaceWire {
+    All,
+    Changespecs,
+    Notifications,
+    Agents,
+    Beads,
+    Catalogs,
+}
+
+impl Default for LocalDaemonIndexingSurfaceWire {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingStatusRequestWire {
+    #[serde(default)]
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingVerifyRequestWire {
+    #[serde(default)]
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingDiffRequestWire {
+    #[serde(default)]
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub page: LocalDaemonPageRequestWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_payload_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingStatusResponseWire {
+    pub schema_version: u32,
+    pub service: JsonValue,
+    pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingVerifyResponseWire {
+    pub schema_version: u32,
+    pub ok: bool,
+    pub summaries: Vec<LocalDaemonIndexingSurfaceSummaryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingDiffResponseWire {
+    pub schema_version: u32,
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub records: Vec<ShadowDiffRecordWire>,
+    pub counts: ShadowDiffCountsWire,
+    pub next_cursor: Option<String>,
+    pub bounded: LocalDaemonPayloadBoundWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDaemonIndexingSurfaceSummaryWire {
+    pub schema_version: u32,
+    pub surface: LocalDaemonIndexingSurfaceWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_indexed_event_seq: Option<i64>,
+    pub queued_changes: u64,
+    pub watcher_active: bool,
+    pub diff_counts: ShadowDiffCountsWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

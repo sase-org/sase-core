@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -10,7 +13,17 @@ use super::event::{
     EventAppendOutcomeWire, EventAppendRequestWire, EventEnvelopeWire,
     EventSourceWire,
 };
+use super::indexing::{
+    source_event_idempotency_key, source_fingerprint_from_path,
+    ShadowDiffCategoryWire, ShadowDiffCountsWire, ShadowDiffRecordWire,
+    ShadowDiffReportWire, SourceChangeOperationWire, SourceChangeWire,
+    SourceIdentityWire, INDEXING_WIRE_SCHEMA_VERSION,
+};
 use super::replay::ProjectionApplier;
+use crate::notifications::{
+    legacy_telegram_pending_actions_path, pending_action_store_path,
+    read_notifications_snapshot_with_options, read_pending_action_store,
+};
 use crate::notifications::{
     mobile_notification_error_from_wire,
     mobile_notification_priority_from_wire, NotificationCountsWire,
@@ -31,6 +44,24 @@ pub const PENDING_ACTION_EVENT_CLEANED_UP: &str =
     "notification.pending_action.cleaned_up";
 pub const PENDING_ACTION_EVENT_STORE_REWRITTEN: &str =
     "notification.pending_action.store_rewritten";
+
+const NOTIFICATION_INDEXING_WIRE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationSourceKindWire {
+    Notifications,
+    PendingActions,
+    LegacyTelegramPendingActions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationSourcePathsWire {
+    #[serde(default = "notification_indexing_schema_version")]
+    pub schema_version: u32,
+    pub notifications_path: String,
+    pub pending_actions_path: String,
+    pub legacy_telegram_pending_actions_path: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NotificationProjectionEventContextWire {
@@ -122,6 +153,234 @@ impl ProjectionDb {
             Ok(outcome)
         })
     }
+}
+
+pub fn notification_source_paths(
+    sase_home: &Path,
+) -> NotificationSourcePathsWire {
+    NotificationSourcePathsWire {
+        schema_version: NOTIFICATION_INDEXING_WIRE_SCHEMA_VERSION,
+        notifications_path: sase_home
+            .join("notifications")
+            .join("notifications.jsonl")
+            .to_string_lossy()
+            .to_string(),
+        pending_actions_path: pending_action_store_path(sase_home)
+            .to_string_lossy()
+            .to_string(),
+        legacy_telegram_pending_actions_path:
+            legacy_telegram_pending_actions_path(sase_home)
+                .to_string_lossy()
+                .to_string(),
+    }
+}
+
+pub fn notification_source_kind_from_path(
+    sase_home: &Path,
+    path: &Path,
+) -> Option<NotificationSourceKindWire> {
+    let paths = notification_source_paths(sase_home);
+    let path = path.to_string_lossy();
+    if path == paths.notifications_path {
+        Some(NotificationSourceKindWire::Notifications)
+    } else if path == paths.pending_actions_path {
+        Some(NotificationSourceKindWire::PendingActions)
+    } else if path == paths.legacy_telegram_pending_actions_path {
+        Some(NotificationSourceKindWire::LegacyTelegramPendingActions)
+    } else {
+        None
+    }
+}
+
+pub fn notification_source_change_from_path(
+    sase_home: &Path,
+    path: &Path,
+    operation: SourceChangeOperationWire,
+    reason: Option<String>,
+) -> Option<SourceChangeWire> {
+    notification_source_kind_from_path(sase_home, path)?;
+    Some(SourceChangeWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        identity: notification_source_identity(path),
+        operation,
+        reason,
+    })
+}
+
+pub fn notification_backfill_event_requests(
+    sase_home: &Path,
+    source: EventSourceWire,
+    host_id: impl Into<String>,
+) -> Result<Vec<EventAppendRequestWire>, ProjectionError> {
+    let host_id = host_id.into();
+    let paths = notification_source_paths(sase_home);
+    let context = NotificationProjectionEventContextWire {
+        created_at: None,
+        source,
+        host_id,
+        project_id: "home".to_string(),
+        idempotency_key: None,
+        source_path: Some(paths.notifications_path.clone()),
+        source_revision: None,
+    };
+    Ok(vec![
+        notification_rewrite_event_request(
+            NotificationProjectionEventContextWire {
+                idempotency_key: Some(notification_source_idempotency_key(
+                    SourceChangeOperationWire::Rewrite,
+                    Path::new(&paths.notifications_path),
+                )),
+                ..context.clone()
+            },
+            expected_notification_snapshot(&paths)?.notifications,
+        )?,
+        pending_action_store_rewrite_event_request(
+            NotificationProjectionEventContextWire {
+                idempotency_key: Some(notification_source_idempotency_key(
+                    SourceChangeOperationWire::Rewrite,
+                    Path::new(&paths.pending_actions_path),
+                )),
+                source_path: Some(paths.pending_actions_path.clone()),
+                ..context
+            },
+            expected_pending_action_store(&paths)?,
+        )?,
+    ])
+}
+
+pub fn notification_event_requests_for_source_change(
+    sase_home: &Path,
+    change: &SourceChangeWire,
+    source: EventSourceWire,
+    host_id: impl Into<String>,
+) -> Result<Vec<EventAppendRequestWire>, ProjectionError> {
+    let kind = notification_source_kind_from_path(
+        sase_home,
+        Path::new(&change.identity.source_path),
+    );
+    let Some(kind) = kind else {
+        return Ok(Vec::new());
+    };
+    let paths = notification_source_paths(sase_home);
+    let context = NotificationProjectionEventContextWire {
+        created_at: None,
+        source,
+        host_id: host_id.into(),
+        project_id: change
+            .identity
+            .project_id
+            .clone()
+            .unwrap_or_else(|| "home".to_string()),
+        idempotency_key: Some(notification_source_idempotency_key(
+            change.operation.clone(),
+            Path::new(&change.identity.source_path),
+        )),
+        source_path: Some(change.identity.source_path.clone()),
+        source_revision: None,
+    };
+    match kind {
+        NotificationSourceKindWire::Notifications => {
+            Ok(vec![notification_rewrite_event_request(
+                context,
+                expected_notification_snapshot(&paths)?.notifications,
+            )?])
+        }
+        NotificationSourceKindWire::PendingActions
+        | NotificationSourceKindWire::LegacyTelegramPendingActions => {
+            Ok(vec![pending_action_store_rewrite_event_request(
+                context,
+                expected_pending_action_store(&paths)?,
+            )?])
+        }
+    }
+}
+
+pub fn notification_shadow_diff(
+    conn: &Connection,
+    sase_home: &Path,
+) -> Result<ShadowDiffReportWire, ProjectionError> {
+    let paths = notification_source_paths(sase_home);
+    let mut records = Vec::new();
+    let expected_snapshot = match expected_notification_snapshot(&paths) {
+        Ok(snapshot) => {
+            if snapshot.stats.invalid_json_lines > 0
+                || snapshot.stats.invalid_record_lines > 0
+            {
+                records.push(notification_diff_record(
+                    ShadowDiffCategoryWire::Corrupt,
+                    paths.notifications_path.clone(),
+                    None,
+                    format!(
+                        "notification source has {} invalid JSON line(s) and {} invalid record line(s)",
+                        snapshot.stats.invalid_json_lines,
+                        snapshot.stats.invalid_record_lines
+                    ),
+                ));
+            }
+            snapshot
+        }
+        Err(error) => {
+            records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Corrupt,
+                paths.notifications_path.clone(),
+                None,
+                format!("failed to load notification source: {error}"),
+            ));
+            NotificationStoreSnapshotWire {
+                schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+                stats: NotificationStoreStatsWire::default(),
+                notifications: Vec::new(),
+                counts: NotificationCountsWire::default(),
+                expired_ids: Vec::new(),
+            }
+        }
+    };
+    let projected_snapshot = notification_projection_snapshot(conn, true)?;
+    diff_notifications(
+        &mut records,
+        &paths.notifications_path,
+        &expected_snapshot.notifications,
+        &projected_snapshot.notifications,
+    )?;
+
+    let expected_pending = match expected_pending_action_store(&paths) {
+        Ok(store) => store,
+        Err(error) => {
+            records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Corrupt,
+                paths.pending_actions_path.clone(),
+                None,
+                format!("failed to load pending-action source: {error}"),
+            ));
+            PendingActionStoreWire::default()
+        }
+    };
+    let projected_pending = projected_pending_action_store(conn)?;
+    diff_pending_actions(
+        &mut records,
+        &paths.pending_actions_path,
+        &expected_pending,
+        &projected_pending,
+    )?;
+
+    records.sort_by(|left, right| {
+        (
+            notification_diff_sort_key(&left.category),
+            &left.source_path,
+            &left.handle,
+        )
+            .cmp(&(
+                notification_diff_sort_key(&right.category),
+                &right.source_path,
+                &right.handle,
+            ))
+    });
+    Ok(ShadowDiffReportWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: NOTIFICATION_PROJECTION_NAME.to_string(),
+        counts: notification_diff_counts(&records),
+        records,
+    })
 }
 
 pub fn notification_append_event_request(
@@ -573,6 +832,214 @@ fn notification_search_text(notification: &NotificationWire) -> String {
     parts.join("\n")
 }
 
+fn expected_notification_snapshot(
+    paths: &NotificationSourcePathsWire,
+) -> Result<NotificationStoreSnapshotWire, ProjectionError> {
+    read_notifications_snapshot_with_options(
+        Path::new(&paths.notifications_path),
+        true,
+        false,
+    )
+    .map_err(|error| {
+        ProjectionError::Invariant(format!(
+            "failed to read notification store: {error}"
+        ))
+    })
+}
+
+fn expected_pending_action_store(
+    paths: &NotificationSourcePathsWire,
+) -> Result<PendingActionStoreWire, ProjectionError> {
+    read_pending_action_store(
+        Path::new(&paths.pending_actions_path),
+        Some(Path::new(&paths.legacy_telegram_pending_actions_path)),
+    )
+    .map_err(|error| {
+        ProjectionError::Invariant(format!(
+            "failed to read pending action store: {error}"
+        ))
+    })
+}
+
+fn notification_source_identity(path: &Path) -> SourceIdentityWire {
+    SourceIdentityWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: NOTIFICATION_PROJECTION_NAME.to_string(),
+        project_id: Some("home".to_string()),
+        source_path: path.to_string_lossy().to_string(),
+        is_archive: false,
+        fingerprint: source_fingerprint_from_path(path, true),
+        last_indexed_event_seq: None,
+    }
+}
+
+fn notification_source_idempotency_key(
+    operation: SourceChangeOperationWire,
+    path: &Path,
+) -> String {
+    source_event_idempotency_key(
+        &operation,
+        &notification_source_identity(path),
+    )
+}
+
+fn diff_notifications(
+    records: &mut Vec<ShadowDiffRecordWire>,
+    source_path: &str,
+    expected: &[NotificationWire],
+    projected: &[NotificationWire],
+) -> Result<(), ProjectionError> {
+    let expected = notifications_by_id(expected)?;
+    let projected = notifications_by_id(projected)?;
+    let keys = expected
+        .keys()
+        .chain(projected.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in keys {
+        match (expected.get(&key), projected.get(&key)) {
+            (Some(_), None) => records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Missing,
+                source_path.to_string(),
+                Some(key.clone()),
+                format!(
+                    "notification '{key}' is present in source but missing from projection"
+                ),
+            )),
+            (None, Some(_)) => records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Extra,
+                source_path.to_string(),
+                Some(key.clone()),
+                format!(
+                    "notification '{key}' is projected but absent from source"
+                ),
+            )),
+            (Some(expected), Some(projected)) if expected != projected => {
+                records.push(notification_diff_record(
+                    ShadowDiffCategoryWire::Stale,
+                    source_path.to_string(),
+                    Some(key.clone()),
+                    format!("notification '{key}' differs from source"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn notifications_by_id(
+    notifications: &[NotificationWire],
+) -> Result<BTreeMap<String, JsonValue>, ProjectionError> {
+    let mut rows = BTreeMap::new();
+    for notification in notifications {
+        rows.insert(
+            notification.id.clone(),
+            serde_json::to_value(notification)?,
+        );
+    }
+    Ok(rows)
+}
+
+fn diff_pending_actions(
+    records: &mut Vec<ShadowDiffRecordWire>,
+    source_path: &str,
+    expected: &PendingActionStoreWire,
+    projected: &PendingActionStoreWire,
+) -> Result<(), ProjectionError> {
+    let expected = pending_actions_by_prefix(expected)?;
+    let projected = pending_actions_by_prefix(projected)?;
+    let keys = expected
+        .keys()
+        .chain(projected.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for key in keys {
+        match (expected.get(&key), projected.get(&key)) {
+            (Some(_), None) => records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Missing,
+                source_path.to_string(),
+                Some(key.clone()),
+                format!(
+                    "pending action '{key}' is present in source but missing from projection"
+                ),
+            )),
+            (None, Some(_)) => records.push(notification_diff_record(
+                ShadowDiffCategoryWire::Extra,
+                source_path.to_string(),
+                Some(key.clone()),
+                format!(
+                    "pending action '{key}' is projected but absent from source"
+                ),
+            )),
+            (Some(expected), Some(projected)) if expected != projected => {
+                records.push(notification_diff_record(
+                    ShadowDiffCategoryWire::Stale,
+                    source_path.to_string(),
+                    Some(key.clone()),
+                    format!("pending action '{key}' differs from source"),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn pending_actions_by_prefix(
+    store: &PendingActionStoreWire,
+) -> Result<BTreeMap<String, JsonValue>, ProjectionError> {
+    let mut rows = BTreeMap::new();
+    for (prefix, action) in &store.actions {
+        rows.insert(prefix.clone(), serde_json::to_value(action)?);
+    }
+    Ok(rows)
+}
+
+fn notification_diff_record(
+    category: ShadowDiffCategoryWire,
+    source_path: String,
+    handle: Option<String>,
+    message: String,
+) -> ShadowDiffRecordWire {
+    ShadowDiffRecordWire {
+        schema_version: INDEXING_WIRE_SCHEMA_VERSION,
+        domain: NOTIFICATION_PROJECTION_NAME.to_string(),
+        category,
+        source_path,
+        handle,
+        message,
+    }
+}
+
+fn notification_diff_counts(
+    records: &[ShadowDiffRecordWire],
+) -> ShadowDiffCountsWire {
+    let mut counts = ShadowDiffCountsWire::default();
+    for record in records {
+        match record.category {
+            ShadowDiffCategoryWire::Missing => counts.missing += 1,
+            ShadowDiffCategoryWire::Stale => counts.stale += 1,
+            ShadowDiffCategoryWire::Extra => counts.extra += 1,
+            ShadowDiffCategoryWire::Corrupt => counts.corrupt += 1,
+        }
+    }
+    counts
+}
+
+fn notification_diff_sort_key(category: &ShadowDiffCategoryWire) -> u8 {
+    match category {
+        ShadowDiffCategoryWire::Missing => 0,
+        ShadowDiffCategoryWire::Stale => 1,
+        ShadowDiffCategoryWire::Extra => 2,
+        ShadowDiffCategoryWire::Corrupt => 3,
+    }
+}
+
+fn notification_indexing_schema_version() -> u32 {
+    NOTIFICATION_INDEXING_WIRE_SCHEMA_VERSION
+}
+
 #[allow(dead_code)]
 fn payload_kind(payload: &JsonValue) -> Option<&str> {
     payload.get("kind").and_then(JsonValue::as_str)
@@ -580,13 +1047,15 @@ fn payload_kind(payload: &JsonValue) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, io::Write};
 
     use super::*;
     use crate::notifications::{
-        pending_action_from_notification, MobileActionStateWire,
+        append_notification, pending_action_from_notification,
+        register_pending_action, MobileActionStateWire,
         NotificationStateUpdateWire,
     };
+    use tempfile::tempdir;
 
     fn context() -> NotificationProjectionEventContextWire {
         NotificationProjectionEventContextWire {
@@ -802,5 +1271,75 @@ mod tests {
             projected_pending_action_store(live.connection()).unwrap(),
             projected_pending_action_store(replayed.connection()).unwrap()
         );
+    }
+
+    #[test]
+    fn backfill_and_shadow_diff_cover_notification_and_pending_sources() {
+        let dir = tempdir().unwrap();
+        let paths = notification_source_paths(dir.path());
+        let mut n = notification("abcdef01-notification");
+        n.action = Some("PlanApproval".to_string());
+        n.action_data
+            .insert("response_dir".to_string(), "/tmp/plan".to_string());
+        append_notification(Path::new(&paths.notifications_path), &n).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths.notifications_path)
+            .unwrap()
+            .write_all(b"{not-json}\n")
+            .unwrap();
+        let action = pending_action_from_notification(&n, 10.0).unwrap();
+        register_pending_action(
+            Path::new(&paths.pending_actions_path),
+            &action,
+        )
+        .unwrap();
+
+        let mut db = ProjectionDb::open_in_memory().unwrap();
+        let diff =
+            notification_shadow_diff(db.connection(), dir.path()).unwrap();
+        assert_eq!(diff.counts.missing, 2);
+        assert_eq!(diff.counts.corrupt, 1);
+
+        for event in notification_backfill_event_requests(
+            dir.path(),
+            EventSourceWire {
+                source_type: "test".to_string(),
+                name: "notification-backfill".to_string(),
+                ..EventSourceWire::default()
+            },
+            "host-a",
+        )
+        .unwrap()
+        {
+            db.append_projected_event(event).unwrap();
+        }
+
+        let diff =
+            notification_shadow_diff(db.connection(), dir.path()).unwrap();
+        assert_eq!(diff.counts.missing, 0);
+        assert_eq!(diff.counts.stale, 0);
+        assert_eq!(diff.counts.extra, 0);
+        assert_eq!(diff.counts.corrupt, 1);
+
+        let change = notification_source_change_from_path(
+            dir.path(),
+            Path::new(&paths.pending_actions_path),
+            SourceChangeOperationWire::Rewrite,
+            Some("test".to_string()),
+        )
+        .unwrap();
+        let events = notification_event_requests_for_source_change(
+            dir.path(),
+            &change,
+            EventSourceWire {
+                source_type: "test".to_string(),
+                name: "notification-watch".to_string(),
+                ..EventSourceWire::default()
+            },
+            "host-a",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
     }
 }
