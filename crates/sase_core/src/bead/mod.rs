@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod events;
 pub mod jsonl;
 pub mod mutation;
 pub mod read;
@@ -20,6 +21,12 @@ pub use cli::{
 pub use config::{
     default_config, load_config, load_config_from_str, save_config,
     BeadConfigWire,
+};
+pub use events::{
+    import_issues_to_event_streams, reduce_event_streams,
+    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
+    BeadEventStoreManifestWire, BeadEventStreamWire,
+    BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
@@ -44,8 +51,8 @@ pub use schema::{
     needs_issue_type_migration, needs_model_migration, BEAD_SQLITE_SCHEMA,
 };
 pub use wire::{
-    validate_model_value, BeadError, DependencyWire, IssueTypeWire, IssueWire,
-    OperationOutcomeWire, StatusWire,
+    validate_model_value, BeadError, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, OperationOutcomeWire, StatusWire,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues,
