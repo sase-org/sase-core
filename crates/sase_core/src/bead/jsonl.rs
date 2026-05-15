@@ -1,12 +1,16 @@
 //! JSONL import/export for git-portable bead storage.
 
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use std::collections::BTreeSet;
 
+use super::events::{
+    BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
+};
 use super::wire::{
     deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
     IssueTypeWire, IssueWire,
@@ -85,12 +89,176 @@ pub fn export_issues_to_jsonl(
     Ok(output)
 }
 
+pub fn write_issues_jsonl(
+    beads_dir: &Path,
+    issues: &[IssueWire],
+) -> Result<(), BeadError> {
+    let jsonl = export_issues_to_jsonl(issues)?;
+    write_file_atomic(&beads_dir.join("issues.jsonl"), jsonl.as_bytes())
+}
+
+pub fn event_store_present(beads_dir: &Path) -> bool {
+    event_manifest_path(beads_dir).exists()
+        || event_streams_dir(beads_dir).exists()
+}
+
+pub fn event_manifest_path(beads_dir: &Path) -> PathBuf {
+    beads_dir.join("events").join("manifest.json")
+}
+
+pub fn event_streams_dir(beads_dir: &Path) -> PathBuf {
+    beads_dir.join("events").join("streams")
+}
+
+pub fn read_event_store(
+    beads_dir: &Path,
+) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
+    let manifest_path = event_manifest_path(beads_dir);
+    let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead events manifest {}: {err}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest: BeadEventStoreManifestWire =
+        serde_json::from_str(&manifest_text)?;
+    manifest.validate()?;
+
+    let streams_dir = event_streams_dir(beads_dir);
+    let mut stream_paths = Vec::new();
+    for entry in fs::read_dir(&streams_dir).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead event streams directory {}: {err}",
+            streams_dir.display()
+        ))
+    })? {
+        let path = entry
+            .map_err(|err| {
+                BeadError::io(format!(
+                    "failed to read bead event stream entry: {err}"
+                ))
+            })?
+            .path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            stream_paths.push(path);
+        }
+    }
+    stream_paths.sort();
+
+    if manifest.stream_count != stream_paths.len() {
+        return Err(BeadError::validation(format!(
+            "bead event manifest stream_count mismatch: {} != {}",
+            manifest.stream_count,
+            stream_paths.len()
+        )));
+    }
+
+    let streams = stream_paths
+        .into_iter()
+        .map(|path| read_event_stream_file(&path))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((manifest, streams))
+}
+
+pub fn write_event_store(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+) -> Result<(), BeadError> {
+    let events_dir = beads_dir.join("events");
+    let streams_dir = event_streams_dir(beads_dir);
+    fs::create_dir_all(&streams_dir)?;
+
+    let mut streams = streams.to_vec();
+    streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
+    for stream in &streams {
+        stream.validate()?;
+        let mut output = String::new();
+        for event in &stream.events {
+            output.push_str(&serde_json::to_string(event)?);
+            output.push('\n');
+        }
+        write_file_atomic(
+            &streams_dir.join(format!("{}.jsonl", stream.stream_id)),
+            output.as_bytes(),
+        )?;
+    }
+
+    let manifest = BeadEventStoreManifestWire::from_streams(&streams);
+    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    write_file_atomic(&events_dir.join("manifest.json"), &manifest_json)?;
+    Ok(())
+}
+
 fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
     let kind_order = match issue.issue_type {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
     };
     (kind_order, issue.id.as_str())
+}
+
+fn read_event_stream_file(
+    path: &Path,
+) -> Result<BeadEventStreamWire, BeadError> {
+    let stream_id = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            BeadError::validation(format!(
+                "invalid bead event stream filename: {}",
+                path.display()
+            ))
+        })?
+        .to_string();
+    let contents = fs::read_to_string(path).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead event stream {}: {err}",
+            path.display()
+        ))
+    })?;
+    let mut events = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: BeadEventRecordWire =
+            serde_json::from_str(line).map_err(|err| {
+                BeadError::validation(format!(
+                    "invalid bead event stream {} line {}: {err}",
+                    path.display(),
+                    index + 1
+                ))
+            })?;
+        events.push(event);
+    }
+    let stream = BeadEventStreamWire {
+        stream_id: stream_id.clone(),
+        root_issue_id: stream_id,
+        events,
+    };
+    stream.validate()?;
+    Ok(stream)
+}
+
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
+    let parent = path.parent().ok_or_else(|| {
+        BeadError::io(format!(
+            "cannot determine parent directory for {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    let tmp_path = path.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, path)?;
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_missing_tiers(issues: &mut [IssueWire]) {

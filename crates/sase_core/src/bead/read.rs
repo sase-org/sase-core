@@ -1,15 +1,13 @@
 //! Read-only bead store queries.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 
-use super::events::{
-    reduce_event_streams, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire,
+use super::events::reduce_event_streams;
+use super::jsonl::{
+    event_manifest_path, event_store_present, event_streams_dir,
+    export_issues_to_jsonl, import_issues_from_jsonl, read_event_store,
 };
-use super::jsonl::export_issues_to_jsonl;
-use super::jsonl::import_issues_from_jsonl;
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
@@ -127,16 +125,7 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
         }
         Err(err) => return Err(err),
     };
-    let ids: BTreeSet<&str> =
-        issues.iter().map(|issue| issue.id.as_str()).collect();
-    let orphan_ids: Vec<&str> = issues
-        .iter()
-        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
-        .filter_map(|issue| {
-            let parent_id = issue.parent_id.as_deref()?;
-            (!ids.contains(parent_id)).then_some(issue.id.as_str())
-        })
-        .collect();
+    let orphan_ids = orphan_phase_ids(&issues);
     if !orphan_ids.is_empty() {
         messages.push(format!(
             "WARNING: orphan phase records after reduction: {}",
@@ -146,6 +135,13 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
 
     if event_store_is_present && legacy_path.exists() {
         let legacy_issues = read_legacy_jsonl_issues(beads_dir)?;
+        let legacy_orphan_ids = orphan_phase_ids(&legacy_issues);
+        if !legacy_orphan_ids.is_empty() {
+            messages.push(format!(
+                "WARNING: orphan phase records in issues.jsonl: {}",
+                legacy_orphan_ids.join(", ")
+            ));
+        }
         if export_issues_to_jsonl(&issues)?
             != export_issues_to_jsonl(&legacy_issues)?
         {
@@ -162,110 +158,17 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
     Ok(messages)
 }
 
-fn event_store_present(beads_dir: &Path) -> bool {
-    event_manifest_path(beads_dir).exists()
-        || event_streams_dir(beads_dir).exists()
-}
-
-fn event_manifest_path(beads_dir: &Path) -> std::path::PathBuf {
-    beads_dir.join("events").join("manifest.json")
-}
-
-fn event_streams_dir(beads_dir: &Path) -> std::path::PathBuf {
-    beads_dir.join("events").join("streams")
-}
-
-fn read_event_store(
-    beads_dir: &Path,
-) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
-    let manifest_path = event_manifest_path(beads_dir);
-    let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
-        BeadError::io(format!(
-            "failed to read bead events manifest {}: {err}",
-            manifest_path.display()
-        ))
-    })?;
-    let manifest: BeadEventStoreManifestWire =
-        serde_json::from_str(&manifest_text)?;
-    manifest.validate()?;
-
-    let streams_dir = event_streams_dir(beads_dir);
-    let mut stream_paths = Vec::new();
-    for entry in fs::read_dir(&streams_dir).map_err(|err| {
-        BeadError::io(format!(
-            "failed to read bead event streams directory {}: {err}",
-            streams_dir.display()
-        ))
-    })? {
-        let path = entry
-            .map_err(|err| {
-                BeadError::io(format!(
-                    "failed to read bead event stream entry: {err}"
-                ))
-            })?
-            .path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            stream_paths.push(path);
-        }
-    }
-    stream_paths.sort();
-
-    if manifest.stream_count != stream_paths.len() {
-        return Err(BeadError::validation(format!(
-            "bead event manifest stream_count mismatch: {} != {}",
-            manifest.stream_count,
-            stream_paths.len()
-        )));
-    }
-
-    let streams = stream_paths
-        .into_iter()
-        .map(|path| read_event_stream_file(&path))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((manifest, streams))
-}
-
-fn read_event_stream_file(
-    path: &Path,
-) -> Result<BeadEventStreamWire, BeadError> {
-    let stream_id = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            BeadError::validation(format!(
-                "invalid bead event stream filename: {}",
-                path.display()
-            ))
-        })?
-        .to_string();
-    let contents = fs::read_to_string(path).map_err(|err| {
-        BeadError::io(format!(
-            "failed to read bead event stream {}: {err}",
-            path.display()
-        ))
-    })?;
-    let mut events = Vec::new();
-    for (index, line) in contents.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let event: BeadEventRecordWire =
-            serde_json::from_str(line).map_err(|err| {
-                BeadError::validation(format!(
-                    "invalid bead event stream {} line {}: {err}",
-                    path.display(),
-                    index + 1
-                ))
-            })?;
-        events.push(event);
-    }
-    let stream = BeadEventStreamWire {
-        stream_id: stream_id.clone(),
-        root_issue_id: stream_id,
-        events,
-    };
-    stream.validate()?;
-    Ok(stream)
+fn orphan_phase_ids(issues: &[IssueWire]) -> Vec<&str> {
+    let ids: BTreeSet<&str> =
+        issues.iter().map(|issue| issue.id.as_str()).collect();
+    issues
+        .iter()
+        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
+        .filter_map(|issue| {
+            let parent_id = issue.parent_id.as_deref()?;
+            (!ids.contains(parent_id)).then_some(issue.id.as_str())
+        })
+        .collect()
 }
 
 fn show_issue_in_issues(

@@ -357,12 +357,11 @@ pub fn reduce_event_streams(
 ) -> Result<Vec<IssueWire>, BeadError> {
     let mut stream_ids = BTreeSet::new();
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
-    let mut creation_events = Vec::new();
-    let mut mutation_events = Vec::new();
+    let mut ordered_events = Vec::new();
 
     let mut streams = streams.to_vec();
     streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
-    for stream in &streams {
+    for (stream_index, stream) in streams.iter().enumerate() {
         stream.validate()?;
         if !stream_ids.insert(stream.stream_id.clone()) {
             return Err(BeadError::validation(format!(
@@ -370,20 +369,18 @@ pub fn reduce_event_streams(
                 stream.stream_id
             )));
         }
-        for event in &stream.events {
-            match event.operation {
-                BeadEventOperationWire::IssueCreated => {
-                    creation_events.push(event);
-                }
-                _ => mutation_events.push(event),
-            }
+        for (event_index, event) in stream.events.iter().enumerate() {
+            ordered_events.push(OrderedEvent {
+                event,
+                stream_index,
+                event_index,
+            });
         }
     }
-    for event in creation_events {
-        apply_event(&mut issues, event)?;
-    }
-    for event in mutation_events {
-        apply_event(&mut issues, event)?;
+    ordered_events.sort_by(compare_ordered_events);
+
+    for ordered in ordered_events {
+        apply_event(&mut issues, ordered.event)?;
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
@@ -392,6 +389,36 @@ pub fn reduce_event_streams(
         issue.validate()?;
     }
     Ok(reduced)
+}
+
+struct OrderedEvent<'a> {
+    event: &'a BeadEventRecordWire,
+    stream_index: usize,
+    event_index: usize,
+}
+
+fn compare_ordered_events(
+    left: &OrderedEvent<'_>,
+    right: &OrderedEvent<'_>,
+) -> std::cmp::Ordering {
+    if left.stream_index == right.stream_index {
+        return left.event_index.cmp(&right.event_index);
+    }
+    let timestamp_order = left.event.timestamp.cmp(&right.event.timestamp);
+    if !timestamp_order.is_eq() {
+        return timestamp_order;
+    }
+    event_operation_priority(left.event.operation)
+        .cmp(&event_operation_priority(right.event.operation))
+        .then_with(|| left.event.event_id.cmp(&right.event.event_id))
+}
+
+fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
+    match operation {
+        BeadEventOperationWire::IssueCreated => 0,
+        BeadEventOperationWire::DependencyAdded => 2,
+        _ => 1,
+    }
 }
 
 fn apply_event(
