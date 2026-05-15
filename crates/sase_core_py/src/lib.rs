@@ -2917,9 +2917,10 @@ mod tests {
             .unwrap();
             let after_value = py_to_json_value(after.bind(py)).unwrap();
             assert_eq!(after_value["notifications"][0]["id"], json!("n2"));
+            assert_eq!(after_value["notifications"][1]["id"], json!("n1"));
             assert_eq!(
                 after_value["notifications"].as_array().unwrap().len(),
-                1
+                2
             );
 
             let _ = fs::remove_file(&path);
