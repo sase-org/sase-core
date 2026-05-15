@@ -265,8 +265,8 @@ curl -sS "$BASE_URL/api/v1/update/job_123" \
 ```
 
 Every helper success response includes a common `result` object with `status`, `message`, `warnings`, `skipped`, and
-`partial_failure_count`. Clients should use the structured status and skipped rows for control flow; `message` is
-display text. Update status polling is authoritative in the MVP, even though update start/status checks also publish
+`partial_failure_count`. Clients should use the structured status and skipped rows for control flow; `message` is display
+text. Update status polling is authoritative in the MVP, even though update start/status checks also publish
 `helpers_changed` events.
 
 Duplicate, stale, ambiguous-prefix, already-handled, unsupported, and missing-target cases return typed `ApiErrorWire`
@@ -292,56 +292,6 @@ cargo run -p sase_gateway -- \
   --fcm-dry-run
 ```
 
-## Local Daemon Shadow Indexing
-
-The same binary also runs the host-local daemon used by `sase daemon start`. Daemon mode owns a Unix-socket framed JSON
-RPC surface, projection storage, shadow indexing, and watcher health diagnostics. It does not make daemon projections
-authoritative for CLI, ACE, editor, mobile, or workflow reads yet: current source stores remain the source of truth
-until a later indexed-read epic routes those callers deliberately.
-
-Supported shadow-index surfaces are:
-
-- `changespecs` for active and archive project spec files.
-- `notifications` for notification and pending-action stores.
-- `agents` for agent artifact directories, marker files, archives, and dismissed state.
-- `beads` for project bead stores and dependency/ready/query projections.
-- `catalogs` for xprompt/workflow/config/memory/file-history style catalogs.
-- `all` for a combined operation over every supported surface.
-
-Useful operator commands from the Python checkout:
-
-```bash
-sase daemon start
-sase daemon doctor --json
-sase daemon rebuild --surface all --json
-sase daemon verify --surface all
-sase daemon diff --surface all --limit 100 --json
-```
-
-`sase daemon rebuild` performs source-store backfill through the live daemon. Pass
-`--surface changespecs|notifications|agents|beads|catalogs` to narrow the operation, and `--project <id>` for
-project-scoped surfaces. The `--reset-storage` flag keeps the lower-level projection-table reset/replay recovery path;
-this is the only rebuild mode available when the daemon is stopped.
-
-`sase daemon verify` returns compact per-surface diff counts and exits nonzero when any projected row disagrees with the
-current loaders. `sase daemon diff` returns bounded diff records categorized as `missing`, `stale`, `extra`, or
-`corrupt`, with source paths and handles where available. These commands are diagnostic surfaces only; an empty diff
-means the shadow index agrees with the current loaders, not that production reads are using the daemon.
-
-### Shadow Indexing Playbook
-
-- Indexing degraded: run `sase daemon doctor --json` and check `details.indexing`. If `watcher_active` is false or
-  dropped/coalesced counters keep rising, restart the daemon and then run a scoped rebuild for the affected surface.
-- Projection/source mismatch: run `sase daemon diff --surface <surface> --json` and inspect the diff categories. Use
-  scoped rebuild first; only use `--reset-storage` when the projection database itself is suspect.
-- Stale watcher roots: confirm the source path exists under the expected SASE home or project root, then run
-  `sase daemon rebuild --surface <surface>`. Reconciliation should repair missed watcher events, but missing roots
-  require the daemon to be started with the correct `--sase-home` and project context.
-- Corrupt projection database: stop the daemon, run `sase daemon rebuild --reset-storage --json`, start the daemon
-  again, then run `sase daemon verify --surface all`.
-- Large rebuild in progress: prefer `sase daemon doctor --json` over repeated diffs. The doctor payload reports queue
-  counters and recent reports without requesting large diff pages.
-
 ## Contract Snapshot
 
 The committed mobile API contract snapshot lives at:
@@ -356,28 +306,6 @@ payloads for future mobile/client phases. Regenerate it after route or wire-shap
 ```bash
 cargo run -p sase_gateway -- --contract-out crates/sase_gateway/contracts/api_v1/mobile_api_v1.json
 ```
-
-The committed local daemon contract scaffold lives separately at:
-
-```text
-crates/sase_gateway/contracts/local_daemon/v1/local_daemon_v1.json
-```
-
-It records the Unix-socket framed-JSON envelope, schema compatibility policy, health/capabilities/list/event shapes,
-shadow-index diagnostics, paging/cursor/snapshot bounds, and explicit no-daemon fallback signaling. Regenerate it after
-intentional local daemon wire-shape changes with:
-
-```bash
-cargo run -p sase_gateway -- --local-daemon-contract-out crates/sase_gateway/contracts/local_daemon/v1/local_daemon_v1.json
-```
-
-Epic 4 handoff: local daemon transport, startup, shadow source-store indexing, rebuild/verify/diff diagnostics, and
-contract snapshots are available. Production read routing remains intentionally deferred to the indexed-read epic.
-Validation: `cargo test -p sase_gateway` and focused projection tests in `../sase-core`, plus `just install` and
-`just check` in the Python checkout after Python-side changes.
-
-The SASE checkout's Phase 1E readiness review links this local daemon snapshot to the fixture, perf, and compatibility
-matrix artifacts at `sdd/research/202605/rust_daemon_epic1_readiness.md`.
 
 MVP limitations: notification reads are polling-backed REST reads; only gateway mutations publish state-change SSE
 events; oversized or path-unsafe attachments are listed without tokens; agent project context selects only known SASE

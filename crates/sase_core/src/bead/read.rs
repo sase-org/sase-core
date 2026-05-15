@@ -105,7 +105,7 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
     Ok(messages)
 }
 
-pub(crate) fn show_issue_in_issues(
+fn show_issue_in_issues(
     issues: Vec<IssueWire>,
     issue_id: &str,
 ) -> Result<IssueWire, BeadError> {
@@ -118,7 +118,7 @@ pub(crate) fn show_issue_in_issues(
         })
 }
 
-pub(crate) fn list_issues_in_issues(
+fn list_issues_in_issues(
     mut issues: Vec<IssueWire>,
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
@@ -145,7 +145,7 @@ pub(crate) fn list_issues_in_issues(
     Ok(issues)
 }
 
-pub(crate) fn ready_issues_in_issues(
+fn ready_issues_in_issues(
     mut issues: Vec<IssueWire>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     sort_by_created_at(&mut issues);
@@ -166,7 +166,7 @@ fn is_ready_surface_issue(issue: &IssueWire) -> bool {
         || issue.tier == Some(BeadTierWire::Epic)
 }
 
-pub(crate) fn blocked_issues_in_issues(
+fn blocked_issues_in_issues(
     mut issues: Vec<IssueWire>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     sort_by_created_at(&mut issues);
@@ -180,7 +180,7 @@ pub(crate) fn blocked_issues_in_issues(
         .collect())
 }
 
-pub(crate) fn get_epic_children_in_issues(
+fn get_epic_children_in_issues(
     mut issues: Vec<IssueWire>,
     epic_id: &str,
 ) -> Result<Vec<IssueWire>, BeadError> {
@@ -202,9 +202,7 @@ fn has_active_blocker(
     })
 }
 
-pub(crate) fn stats_for_issues(
-    issues: &[IssueWire],
-) -> BTreeMap<String, usize> {
+fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
     let mut stats = BTreeMap::new();
     for issue in issues {
         *stats

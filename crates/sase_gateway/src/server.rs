@@ -193,34 +193,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listener_serves_loopback_daemon_metrics_when_enabled() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let state = GatewayState::new_with_sase_home(
-            addr.to_string(),
-            tempfile::tempdir().unwrap().path(),
-        )
-        .with_daemon_metrics(crate::metrics::DaemonMetrics::default());
-        let handle = tokio::spawn(async move {
-            serve_listener_with_state(listener, state).await
-        });
-
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream
-            .write_all(
-                b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.unwrap();
-
-        assert!(response.starts_with("HTTP/1.1 200 OK"));
-        assert!(response.contains("sase_daemon_rpc_requests_total"));
-        handle.abort();
-    }
-
-    #[tokio::test]
     async fn listener_smoke_exercises_pairing_auth_and_session() {
         let tmp = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

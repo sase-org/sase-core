@@ -128,35 +128,6 @@ pub fn register_pending_action(
     result
 }
 
-pub fn register_pending_action_in_store(
-    mut store: PendingActionStoreWire,
-    action: &PendingActionWire,
-) -> PendingActionStoreWire {
-    let mut next = action.clone();
-    if let Some(existing) = store.actions.get(&action.prefix) {
-        next.created_at_unix = existing.created_at_unix;
-        for transport in &existing.transports {
-            if !next
-                .transports
-                .iter()
-                .any(|item| item.transport == transport.transport)
-            {
-                next.transports.push(transport.clone());
-            }
-        }
-    }
-    store.actions.insert(action.prefix.clone(), next);
-    store
-}
-
-pub fn update_pending_action_in_store(
-    mut store: PendingActionStoreWire,
-    action: &PendingActionWire,
-) -> PendingActionStoreWire {
-    store.actions.insert(action.prefix.clone(), action.clone());
-    store
-}
-
 #[allow(clippy::incompatible_msrv)]
 pub fn read_pending_action_store(
     path: &Path,
@@ -197,32 +168,6 @@ pub fn cleanup_stale_pending_actions(
     })();
     unlock(lock)?;
     result
-}
-
-pub fn cleanup_stale_pending_actions_in_store(
-    store: &mut PendingActionStoreWire,
-    now_unix: f64,
-) -> Vec<String> {
-    let stale: Vec<String> = store
-        .actions
-        .iter()
-        .filter(|(_, entry)| entry.stale_deadline_unix <= now_unix)
-        .map(|(prefix, _)| prefix.clone())
-        .collect();
-    for prefix in &stale {
-        store.actions.remove(prefix);
-    }
-    stale
-}
-
-pub fn pending_action_store_json(
-    store: &PendingActionStoreWire,
-) -> Result<String, String> {
-    let mut content = serde_json::to_string_pretty(store).map_err(|e| {
-        format!("failed to serialize pending action store: {e}")
-    })?;
-    content.push('\n');
-    Ok(content)
 }
 
 pub fn resolve_pending_action_prefix(

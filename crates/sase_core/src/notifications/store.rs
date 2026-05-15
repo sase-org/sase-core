@@ -105,15 +105,6 @@ pub fn append_notification_counts(
     append_notification_with_options(path, notification, false)
 }
 
-pub fn notification_append_jsonl(
-    notification: &NotificationWire,
-) -> Result<String, String> {
-    let mut line = serde_json::to_string(notification)
-        .map_err(|e| format!("failed to serialize notification: {e}"))?;
-    line.push('\n');
-    Ok(line)
-}
-
 fn append_notification_with_options(
     path: &Path,
     notification: &NotificationWire,
@@ -224,34 +215,6 @@ pub fn apply_notification_state_update_counts(
     update: &NotificationStateUpdateWire,
 ) -> Result<NotificationUpdateOutcomeWire, String> {
     apply_notification_state_update_with_options(path, update, false)
-}
-
-pub fn plan_notification_state_update_export(
-    path: &Path,
-    update: &NotificationStateUpdateWire,
-    include_notifications: bool,
-) -> Result<(NotificationUpdateOutcomeWire, String), String> {
-    let Some(parent) = path.parent() else {
-        return Err(format!(
-            "notification path has no parent: {}",
-            path.display()
-        ));
-    };
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let lock = open_lock_file(path)?;
-    FileExt::lock_shared(&lock).map_err(|e| e.to_string())?;
-    let result = (|| {
-        let (rows, stats_before) = read_rows_unlocked(path, true)?;
-        let (outcome, planned_rows) = notification_state_update_plan_from_rows(
-            rows,
-            stats_before,
-            update,
-            include_notifications,
-        );
-        Ok((outcome, notifications_jsonl(&planned_rows)?))
-    })();
-    unlock(lock)?;
-    result
 }
 
 fn apply_notification_state_update_with_options(
@@ -475,197 +438,6 @@ fn apply_notification_state_update_with_options(
     result
 }
 
-fn notification_state_update_plan_from_rows(
-    mut rows: Vec<NotificationWire>,
-    stats_before: NotificationStoreStatsWire,
-    update: &NotificationStateUpdateWire,
-    include_notifications: bool,
-) -> (NotificationUpdateOutcomeWire, Vec<NotificationWire>) {
-    if let NotificationStateUpdateWire::RewriteAll { notifications } = update {
-        let notifications = notifications.clone();
-        let outcome = if include_notifications {
-            outcome_from_rows(
-                notifications.clone(),
-                NotificationStoreStatsWire {
-                    total_lines: notifications.len() as u64,
-                    loaded_rows: notifications.len() as u64,
-                    ..NotificationStoreStatsWire::default()
-                },
-                notifications.len() as u64,
-                notifications.len() as u64,
-                0,
-                true,
-                Vec::new(),
-            )
-        } else {
-            outcome_without_rows(
-                notifications.len() as u64,
-                notifications.len() as u64,
-                0,
-                true,
-                Vec::new(),
-            )
-        };
-        return (outcome, notifications);
-    }
-
-    let mut matched_count = 0_u64;
-    let mut changed_count = 0_u64;
-    let mut expired_ids = Vec::new();
-
-    match update {
-        NotificationStateUpdateWire::MarkRead { id } => {
-            for n in &mut rows {
-                if n.id == *id {
-                    matched_count += 1;
-                    if !n.read {
-                        n.read = true;
-                        changed_count += 1;
-                    }
-                    break;
-                }
-            }
-        }
-        NotificationStateUpdateWire::MarkAllRead => {
-            for n in &mut rows {
-                if !n.read {
-                    matched_count += 1;
-                    n.read = true;
-                    changed_count += 1;
-                }
-            }
-        }
-        NotificationStateUpdateWire::MarkDismissed { id } => {
-            for n in &mut rows {
-                if n.id == *id {
-                    matched_count += 1;
-                    if !n.dismissed {
-                        n.dismissed = true;
-                        changed_count += 1;
-                    }
-                    break;
-                }
-            }
-        }
-        NotificationStateUpdateWire::MarkManyDismissed { ids } => {
-            let ids: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
-            for n in &mut rows {
-                if ids.contains(n.id.as_str()) {
-                    matched_count += 1;
-                    if !n.dismissed {
-                        n.dismissed = true;
-                        changed_count += 1;
-                    }
-                }
-            }
-        }
-        NotificationStateUpdateWire::MarkMuted { id, muted } => {
-            for n in &mut rows {
-                if n.id == *id {
-                    matched_count += 1;
-                    if n.muted != *muted || (!*muted && n.snooze_until.is_some()) {
-                        n.muted = *muted;
-                        if !*muted {
-                            n.snooze_until = None;
-                        }
-                        changed_count += 1;
-                    }
-                    break;
-                }
-            }
-        }
-        NotificationStateUpdateWire::MarkSnoozed { id, until } => {
-            for n in &mut rows {
-                if n.id == *id {
-                    matched_count += 1;
-                    if !n.muted || n.snooze_until.as_deref() != Some(until.as_str()) {
-                        n.muted = true;
-                        n.snooze_until = Some(until.clone());
-                        changed_count += 1;
-                    }
-                    break;
-                }
-            }
-        }
-        NotificationStateUpdateWire::ExpireSnoozes { now } => {
-            for n in &mut rows {
-                let Some(deadline) = &n.snooze_until else {
-                    continue;
-                };
-                if iso_timestamp_due(deadline, now) {
-                    matched_count += 1;
-                    if n.muted || n.snooze_until.is_some() {
-                        n.muted = false;
-                        n.snooze_until = None;
-                        expired_ids.push(n.id.clone());
-                        changed_count += 1;
-                    }
-                }
-            }
-        }
-        NotificationStateUpdateWire::DismissMatchingAgents { agents } => {
-            for n in &mut rows {
-                if n.dismissed {
-                    continue;
-                }
-                if matches_agent_notification(n, agents) {
-                    matched_count += 1;
-                    n.dismissed = true;
-                    changed_count += 1;
-                }
-            }
-        }
-        NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
-            agents,
-        } => {
-            for n in &mut rows {
-                if n.dismissed {
-                    continue;
-                }
-                if matches_agent_completion_notification_for_agents(n, agents) {
-                    matched_count += 1;
-                    n.dismissed = true;
-                    changed_count += 1;
-                }
-            }
-        }
-        NotificationStateUpdateWire::DismissAgentCompletions => {
-            for n in &mut rows {
-                if n.dismissed {
-                    continue;
-                }
-                if matches_agent_completion_notification(n) {
-                    matched_count += 1;
-                    n.dismissed = true;
-                    changed_count += 1;
-                }
-            }
-        }
-        NotificationStateUpdateWire::RewriteAll { .. } => unreachable!(),
-    }
-
-    let outcome = if include_notifications {
-        outcome_from_rows(
-            rows.clone(),
-            stats_before,
-            matched_count,
-            changed_count,
-            0,
-            changed_count > 0,
-            expired_ids,
-        )
-    } else {
-        outcome_without_rows(
-            matched_count,
-            changed_count,
-            0,
-            changed_count > 0,
-            expired_ids,
-        )
-    };
-    (outcome, rows)
-}
-
 fn read_rows(
     path: &Path,
     include_dismissed: bool,
@@ -759,16 +531,6 @@ fn rewrite_notifications_unlocked(
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
-}
-
-fn notifications_jsonl(
-    notifications: &[NotificationWire],
-) -> Result<String, String> {
-    let mut content = String::new();
-    for notification in notifications {
-        content.push_str(&notification_append_jsonl(notification)?);
-    }
-    Ok(content)
 }
 
 fn snapshot_from_rows(
