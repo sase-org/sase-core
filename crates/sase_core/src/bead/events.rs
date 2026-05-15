@@ -103,8 +103,7 @@ impl BeadEventRecordWire {
         if self.timestamp.is_empty() {
             return Err(BeadError::validation("bead event timestamp is empty"));
         }
-        self.payload
-            .validate_for(self.operation, &self.issue_id)
+        self.payload.validate_for(self.operation, &self.issue_id)
     }
 }
 
