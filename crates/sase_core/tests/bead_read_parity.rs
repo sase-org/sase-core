@@ -110,6 +110,61 @@ fn event_store_wins_over_stale_legacy_projection() {
 }
 
 #[test]
+fn doctor_reports_orphans_in_stale_legacy_projection() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+
+    let canonical_jsonl = [
+        issue(
+            "beads-1",
+            "Epic",
+            "plan",
+            None,
+            "open",
+            "2026-01-01T00:00:00Z",
+            "",
+        ),
+        issue(
+            "beads-1.1",
+            "Child",
+            "phase",
+            Some("beads-1"),
+            "open",
+            "2026-01-01T00:01:00Z",
+            "",
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    let canonical_issues =
+        import_issues_from_jsonl_content(&canonical_jsonl).unwrap();
+    write_event_store(&beads_dir, &canonical_issues).unwrap();
+
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        issue(
+            "beads-1.1",
+            "Child",
+            "phase",
+            Some("beads-1"),
+            "open",
+            "2026-01-01T00:01:00Z",
+            "",
+        ) + "\n",
+    )
+    .unwrap();
+
+    let messages = bead_doctor(&beads_dir).unwrap();
+    assert!(messages.iter().any(|message| {
+        message.contains("orphan phase records in issues.jsonl")
+            && message.contains("beads-1.1")
+    }));
+}
+
+#[test]
 fn event_store_supports_read_queries_without_legacy_projection() {
     let temp = tempdir().unwrap();
     let beads_dir = temp.path().join("sdd/beads");
