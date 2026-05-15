@@ -136,6 +136,9 @@ use sase_core::bead::{
     mark_ready_to_work as core_bead_mark_ready_to_work,
     open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
+    read_event_store_issues as core_bead_read_event_store_issues,
+    read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
+    read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
     remove_issue as core_bead_remove_issue, show_issue as core_bead_show_issue,
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
@@ -969,6 +972,45 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
 }
 
 // --- Bead read bindings ---------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "bead_read_store")]
+fn py_bead_read_store<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_read_store_issues(&beads_dir)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_read_event_store")]
+fn py_bead_read_event_store<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_read_event_store_issues(&beads_dir)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_read_legacy_jsonl")]
+fn py_bead_read_legacy_jsonl<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_read_legacy_jsonl_issues(&beads_dir)),
+    )
+}
 
 #[pyfunction]
 #[pyo3(name = "bead_show")]
@@ -2274,6 +2316,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;

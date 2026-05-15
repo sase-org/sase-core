@@ -312,6 +312,65 @@ fn reducer_removes_plan_children_and_dependency_edges_on_cascade_remove() {
 }
 
 #[test]
+fn cross_stream_dependencies_resolve_after_all_creates() {
+    let dependent = issue(
+        "alpha",
+        "Dependent",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let target = issue(
+        "omega",
+        "Target",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:01:00Z",
+    );
+    let streams = [
+        BeadEventStreamWire {
+            stream_id: "alpha".to_string(),
+            root_issue_id: "alpha".to_string(),
+            events: vec![
+                event(
+                    "alpha",
+                    "2026-01-01T00:00:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated { issue: dependent },
+                ),
+                event(
+                    "alpha",
+                    "2026-01-01T00:02:00Z",
+                    BeadEventOperationWire::DependencyAdded,
+                    BeadEventPayloadWire::DependencyAdded {
+                        dependency: DependencyWire {
+                            issue_id: "alpha".to_string(),
+                            depends_on_id: "omega".to_string(),
+                            created_at: "2026-01-01T00:02:00Z".to_string(),
+                            created_by: String::new(),
+                        },
+                    },
+                ),
+            ],
+        },
+        BeadEventStreamWire {
+            stream_id: "omega".to_string(),
+            root_issue_id: "omega".to_string(),
+            events: vec![event(
+                "omega",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: target },
+            )],
+        },
+    ];
+
+    let reduced = reduce_event_streams(&streams).unwrap();
+    let alpha = reduced.iter().find(|issue| issue.id == "alpha").unwrap();
+    assert_eq!(alpha.dependencies[0].depends_on_id, "omega");
+}
+
+#[test]
 fn event_validation_rejects_operation_payload_mismatch() {
     let invalid = event(
         "gold-1",

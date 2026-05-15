@@ -357,6 +357,8 @@ pub fn reduce_event_streams(
 ) -> Result<Vec<IssueWire>, BeadError> {
     let mut stream_ids = BTreeSet::new();
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
+    let mut creation_events = Vec::new();
+    let mut mutation_events = Vec::new();
 
     let mut streams = streams.to_vec();
     streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
@@ -369,8 +371,19 @@ pub fn reduce_event_streams(
             )));
         }
         for event in &stream.events {
-            apply_event(&mut issues, event)?;
+            match event.operation {
+                BeadEventOperationWire::IssueCreated => {
+                    creation_events.push(event);
+                }
+                _ => mutation_events.push(event),
+            }
         }
+    }
+    for event in creation_events {
+        apply_event(&mut issues, event)?;
+    }
+    for event in mutation_events {
+        apply_event(&mut issues, event)?;
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
