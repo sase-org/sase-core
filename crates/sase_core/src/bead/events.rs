@@ -104,7 +104,7 @@ impl BeadEventRecordWire {
             return Err(BeadError::validation("bead event timestamp is empty"));
         }
         self.payload
-            .validate_for(self.operation.clone(), &self.issue_id)
+            .validate_for(self.operation, &self.issue_id)
     }
 }
 
@@ -285,7 +285,7 @@ pub fn import_issues_to_event_streams(
     issues: &[IssueWire],
 ) -> Result<Vec<BeadEventStreamWire>, BeadError> {
     let mut issues = issues.to_vec();
-    issues.sort_by(|a, b| event_issue_key(a).cmp(&event_issue_key(b)));
+    issues.sort_by_key(event_issue_key);
     let root_by_issue = root_issue_ids(&issues);
     let mut streams: BTreeMap<String, Vec<PendingEvent>> = BTreeMap::new();
 
@@ -384,7 +384,7 @@ pub fn reduce_event_streams(
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
-    reduced.sort_by(|a, b| event_issue_key(a).cmp(&event_issue_key(b)));
+    reduced.sort_by_key(event_issue_key);
     for issue in &reduced {
         issue.validate()?;
     }
