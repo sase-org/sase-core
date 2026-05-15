@@ -122,15 +122,15 @@ fn notification_append_and_rewrite_round_trip_jsonl() {
     let path = store_path(temp.path());
     let mut n = notification("one");
     n.sender = "crs".to_string();
-    append_notification(&path, &n).unwrap();
+    append_notification(&path, &n.clone()).unwrap();
 
-    let mut replacement = notification("two");
-    replacement.silent = true;
-    rewrite_notifications(&path, &[replacement.clone()]).unwrap();
+    let mut added = notification("two");
+    added.silent = true;
+    rewrite_notifications(&path, &[added.clone()]).unwrap();
 
     let snapshot = read_notifications_snapshot(&path, true).unwrap();
-    assert_eq!(snapshot.notifications, vec![replacement]);
-    assert_eq!(snapshot.stats.loaded_rows, 1);
+    assert_eq!(snapshot.notifications, vec![added, n]);
+    assert_eq!(snapshot.stats.loaded_rows, 2);
 }
 
 #[test]
@@ -278,8 +278,16 @@ fn notification_batch_dismiss_and_rewrite_all_update_the_store() {
         },
     )
     .unwrap();
-    assert_eq!(outcome.notifications.len(), 1);
-    assert_eq!(outcome.notifications[0].id, "replacement");
+    let ids: Vec<&str> = outcome
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["replacement", "a", "b", "c"]);
+    assert_eq!(
+        outcome.notifications.iter().filter(|n| n.dismissed).count(),
+        2
+    );
 }
 
 #[test]
@@ -834,6 +842,88 @@ fn notification_rewrite_counts_produces_byte_identical_jsonl() {
     let baseline = fs::read_to_string(&path_baseline).unwrap();
     let counts = fs::read_to_string(&path_counts).unwrap();
     assert_eq!(baseline, counts);
+}
+
+#[test]
+fn notification_rewrite_preserves_unseen_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
+
+    let mut a_modified = notification("a");
+    a_modified.read = true;
+    rewrite_notifications(&path, &[a_modified, notification("d")]).unwrap();
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let ids: Vec<&str> = snapshot
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["a", "d", "b", "c"]);
+    let a = snapshot.notifications.iter().find(|n| n.id == "a").unwrap();
+    assert!(a.read);
+}
+
+#[test]
+fn notification_rewrite_counts_preserves_unseen_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications_counts(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
+
+    let mut a_modified = notification("a");
+    a_modified.read = true;
+    rewrite_notifications_counts(&path, &[a_modified, notification("d")])
+        .unwrap();
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let ids: Vec<&str> = snapshot
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["a", "d", "b", "c"]);
+    let a = snapshot.notifications.iter().find(|n| n.id == "a").unwrap();
+    assert!(a.read);
+}
+
+#[test]
+fn notification_rewrite_all_preserves_unseen_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
+
+    let mut a_modified = notification("a");
+    a_modified.read = true;
+    apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::RewriteAll {
+            notifications: vec![a_modified, notification("d")],
+        },
+    )
+    .unwrap();
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let ids: Vec<&str> = snapshot
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["a", "d", "b", "c"]);
+    let a = snapshot.notifications.iter().find(|n| n.id == "a").unwrap();
+    assert!(a.read);
 }
 
 #[test]

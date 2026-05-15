@@ -78,7 +78,7 @@ fn read_notifications_snapshot_expiring_snoozes(
             }
         }
         if !expired_ids.is_empty() {
-            rewrite_notifications_unlocked(path, &rows)?;
+            merge_and_rewrite_notifications_unlocked(path, &rows)?;
         }
         let (notifications, stats) =
             read_rows_unlocked(path, include_dismissed)?;
@@ -177,8 +177,8 @@ fn rewrite_notifications_with_options(
 ) -> Result<NotificationUpdateOutcomeWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
-    let result =
-        rewrite_notifications_unlocked(path, notifications).and_then(|()| {
+    let result = merge_and_rewrite_notifications_unlocked(path, notifications)
+        .and_then(|()| {
             if !include_notifications {
                 return Ok(outcome_without_rows(
                     notifications.len() as u64,
@@ -229,7 +229,7 @@ fn apply_notification_state_update_with_options(
         if let NotificationStateUpdateWire::RewriteAll { notifications } =
             update
         {
-            rewrite_notifications_unlocked(path, notifications)?;
+            merge_and_rewrite_notifications_unlocked(path, notifications)?;
             if !include_notifications {
                 return Ok(outcome_without_rows(
                     notifications.len() as u64,
@@ -393,7 +393,7 @@ fn apply_notification_state_update_with_options(
         }
 
         if changed_count > 0 {
-            rewrite_notifications_unlocked(path, &rows)?;
+            merge_and_rewrite_notifications_unlocked(path, &rows)?;
             if !include_notifications {
                 return Ok(outcome_without_rows(
                     matched_count,
@@ -499,7 +499,27 @@ fn read_rows_unlocked(
     Ok((rows, stats))
 }
 
-fn rewrite_notifications_unlocked(
+// Rewrite is a _merge_: caller's rows win on id collision; rows present on
+// disk but absent from the input are preserved (they may be concurrent appends
+// from another thread). Callers cannot use this to delete rows by passing a
+// shorter list — if replacement semantics are ever needed, add a separate API.
+fn merge_and_rewrite_notifications_unlocked(
+    path: &Path,
+    input: &[NotificationWire],
+) -> Result<(), String> {
+    let (existing, _) = read_rows_unlocked(path, true)?;
+    let input_ids: BTreeSet<&str> =
+        input.iter().map(|n| n.id.as_str()).collect();
+    let mut merged: Vec<NotificationWire> = input.to_vec();
+    for row in existing {
+        if !input_ids.contains(row.id.as_str()) {
+            merged.push(row);
+        }
+    }
+    write_notifications_atomic(path, &merged)
+}
+
+fn write_notifications_atomic(
     path: &Path,
     notifications: &[NotificationWire],
 ) -> Result<(), String> {
