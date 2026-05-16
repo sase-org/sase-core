@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
@@ -57,6 +57,8 @@ pub struct AgentArtifactIndexQueryWire {
     /// dismissed completion remains visible.
     #[serde(default = "default_true")]
     pub include_dismissed: bool,
+    #[serde(default)]
+    pub parent_timestamps: Vec<String>,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -68,6 +70,7 @@ impl Default for AgentArtifactIndexQueryWire {
             recent_completed_limit: Some(200),
             include_hidden: false,
             include_dismissed: true,
+            parent_timestamps: Vec::new(),
         }
     }
 }
@@ -297,11 +300,22 @@ pub fn query_agent_artifact_index(
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
 
+    if !query.parent_timestamps.is_empty() {
+        select_records_for_parent_timestamps(
+            &conn,
+            &query.parent_timestamps,
+            options.include_prompt_step_markers,
+            &mut stats,
+            &mut by_dir,
+        )?;
+    }
+
     if query.include_active {
         select_records(
             &conn,
             &active_where(query.include_hidden),
             None,
+            options.include_prompt_step_markers,
             &mut stats,
             &mut by_dir,
         )?;
@@ -312,6 +326,7 @@ pub fn query_agent_artifact_index(
             &conn,
             &completed_where(query.include_hidden, !query.include_dismissed),
             query.recent_completed_limit,
+            options.include_prompt_step_markers,
             &mut stats,
             &mut by_dir,
         )?;
@@ -322,6 +337,7 @@ pub fn query_agent_artifact_index(
             &conn,
             &visible_where(query.include_hidden, !query.include_dismissed),
             None,
+            options.include_prompt_step_markers,
             &mut stats,
             &mut by_dir,
         )?;
@@ -604,6 +620,7 @@ fn select_records(
     conn: &Connection,
     where_sql: &str,
     limit: Option<u32>,
+    include_prompt_step_markers: bool,
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
 ) -> Result<(), String> {
@@ -624,7 +641,54 @@ fn select_records(
         let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
         let record_json: String = row.get(1).map_err(|e| e.to_string())?;
         match serde_json::from_str::<AgentArtifactRecordWire>(&record_json) {
-            Ok(record) => {
+            Ok(mut record) => {
+                if include_prompt_step_markers {
+                    stats.prompt_step_markers_parsed +=
+                        record.prompt_steps.len() as u64;
+                } else {
+                    record.prompt_steps.clear();
+                }
+                by_dir.insert(artifact_dir, record);
+            }
+            Err(_) => {
+                stats.json_decode_errors += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn select_records_for_parent_timestamps(
+    conn: &Connection,
+    parent_timestamps: &[String],
+    include_prompt_step_markers: bool,
+    stats: &mut AgentArtifactScanStatsWire,
+    by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
+) -> Result<(), String> {
+    let placeholders = std::iter::repeat("?")
+        .take(parent_timestamps.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT artifact_dir, record_json FROM agent_artifacts \
+         WHERE timestamp IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params_from_iter(parent_timestamps.iter()))
+        .map_err(|e| e.to_string())?;
+
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+        let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+        match serde_json::from_str::<AgentArtifactRecordWire>(&record_json) {
+            Ok(mut record) => {
+                if include_prompt_step_markers {
+                    stats.prompt_step_markers_parsed +=
+                        record.prompt_steps.len() as u64;
+                } else {
+                    record.prompt_steps.clear();
+                }
                 by_dir.insert(artifact_dir, record);
             }
             Err(_) => {
@@ -969,6 +1033,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 include_dismissed: true,
+                parent_timestamps: Vec::new(),
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -1112,7 +1177,77 @@ mod tests {
             recent_completed_limit: None,
             include_hidden: false,
             include_dismissed: false,
+            parent_timestamps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn index_query_can_strip_prompt_steps_until_parent_expansion() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        let workflow = projects
+            .join("proj")
+            .join("artifacts")
+            .join("workflow-build")
+            .join("20260601130400");
+        write_json(
+            &workflow.join("workflow_state.json"),
+            json!({
+                "workflow_name": "build",
+                "cl_name": "cl_workflow",
+                "status": "completed",
+            }),
+        );
+        write_json(
+            &workflow.join("prompt_step_001_plan.json"),
+            json!({
+                "workflow_name": "build",
+                "step_name": "plan",
+                "status": "completed",
+                "step_type": "agent"
+            }),
+        );
+
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let collapsed = query_agent_artifact_index(
+            &index,
+            &projects,
+            inbox_query(),
+            AgentArtifactScanOptionsWire {
+                include_prompt_step_markers: false,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(collapsed.records.len(), 1);
+        assert!(collapsed.records[0].prompt_steps.is_empty());
+        assert_eq!(collapsed.stats.prompt_step_markers_parsed, 0);
+
+        let expanded = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: false,
+                recent_completed_limit: None,
+                include_hidden: true,
+                include_dismissed: true,
+                parent_timestamps: vec!["20260601130400".to_string()],
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(expanded.records.len(), 1);
+        assert_eq!(expanded.records[0].prompt_steps.len(), 1);
+        assert_eq!(expanded.stats.prompt_step_markers_parsed, 1);
     }
 
     #[test]

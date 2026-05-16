@@ -815,6 +815,7 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             recent_completed_limit: Some(10),
             include_hidden: false,
             include_dismissed: true,
+            parent_timestamps: Vec::new(),
         },
         AgentArtifactScanOptionsWire::default(),
     )
