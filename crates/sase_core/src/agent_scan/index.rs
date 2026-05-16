@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 use super::scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
 use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 2;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -386,8 +386,6 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
-            has_pending_question_marker INTEGER NOT NULL DEFAULT 0,
-            has_agent_meta_active_signal INTEGER NOT NULL DEFAULT 0,
             has_workflow_state INTEGER NOT NULL,
             workflow_status TEXT,
             hidden INTEGER NOT NULL,
@@ -408,6 +406,8 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             record_json TEXT NOT NULL,
             indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_active
+            ON agent_artifacts(hidden, has_done_marker, workflow_status, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_recent_completed
             ON agent_artifacts(hidden, has_done_marker, finished_at, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_cl_name
@@ -426,65 +426,12 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
-    ensure_agent_artifact_columns(&conn)?;
-    conn.execute_batch(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_active
-            ON agent_artifacts(
-                hidden,
-                has_done_marker,
-                has_running_marker,
-                has_waiting_marker,
-                has_pending_question_marker,
-                has_agent_meta_active_signal,
-                has_workflow_state,
-                workflow_status,
-                timestamp
-            );
-        "#,
-    )
-    .map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
         [AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
-}
-
-fn ensure_agent_artifact_columns(conn: &Connection) -> Result<(), String> {
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(agent_artifacts)")
-        .map_err(|e| e.to_string())?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    if !columns
-        .iter()
-        .any(|name| name == "has_pending_question_marker")
-    {
-        conn.execute(
-            "ALTER TABLE agent_artifacts
-             ADD COLUMN has_pending_question_marker INTEGER NOT NULL DEFAULT 0",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if !columns
-        .iter()
-        .any(|name| name == "has_agent_meta_active_signal")
-    {
-        conn.execute(
-            "ALTER TABLE agent_artifacts
-             ADD COLUMN has_agent_meta_active_signal INTEGER NOT NULL DEFAULT 0",
-            [],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 fn upsert_record(
@@ -503,7 +450,6 @@ fn upsert_record(
             workflow_dir_name, timestamp, status, agent_type, cl_name,
             agent_name, model, llm_provider, started_at, finished_at,
             has_done_marker, has_running_marker, has_waiting_marker,
-            has_pending_question_marker, has_agent_meta_active_signal,
             has_workflow_state, workflow_status, hidden, parent_timestamp,
             step_index, step_name, retry_of_timestamp, retried_as_timestamp,
             retry_chain_root_timestamp, retry_attempt, agent_meta_sig, done_sig,
@@ -513,7 +459,7 @@ fn upsert_record(
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, CURRENT_TIMESTAMP
+            ?31, ?32, ?33, ?34, ?35, ?36, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -533,8 +479,6 @@ fn upsert_record(
             has_done_marker = excluded.has_done_marker,
             has_running_marker = excluded.has_running_marker,
             has_waiting_marker = excluded.has_waiting_marker,
-            has_pending_question_marker = excluded.has_pending_question_marker,
-            has_agent_meta_active_signal = excluded.has_agent_meta_active_signal,
             has_workflow_state = excluded.has_workflow_state,
             workflow_status = excluded.workflow_status,
             hidden = excluded.hidden,
@@ -574,8 +518,6 @@ fn upsert_record(
             record.has_done_marker as i64,
             record.running.is_some() as i64,
             record.waiting.is_some() as i64,
-            record.pending_question.is_some() as i64,
-            summary.has_agent_meta_active_signal as i64,
             record.workflow_state.is_some() as i64,
             summary.workflow_status,
             summary.hidden as i64,
@@ -639,11 +581,18 @@ fn active_where(include_hidden: bool) -> String {
     // Active/incomplete rows are never filtered by dismissal state. A
     // still-RUNNING artifact whose identity has been dismissed for an older
     // completed alias must remain visible.
-    let predicate = format!("({})", active_predicate_sql());
     if include_hidden {
-        format!("WHERE {predicate} ORDER BY timestamp DESC")
+        "WHERE has_done_marker = 0
+         OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
+         ORDER BY timestamp DESC"
+            .to_string()
     } else {
-        format!("WHERE hidden = 0 AND {predicate} ORDER BY timestamp DESC")
+        "WHERE hidden = 0 AND (
+            has_done_marker = 0
+            OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
+         )
+         ORDER BY timestamp DESC"
+            .to_string()
     }
 }
 
@@ -653,8 +602,7 @@ fn dismissed_filter_sql() -> &'static str {
     // the artifact timestamp.
     " AND NOT EXISTS (
         SELECT 1 FROM dismissed_agents d
-        WHERE d.agent_type = agent_artifacts.agent_type
-          AND d.cl_name = agent_artifacts.cl_name
+        WHERE d.cl_name = agent_artifacts.cl_name
           AND (d.raw_suffix = '' OR d.raw_suffix = agent_artifacts.timestamp)
     )"
 }
@@ -662,11 +610,10 @@ fn dismissed_filter_sql() -> &'static str {
 fn completed_where(include_hidden: bool, exclude_dismissed: bool) -> String {
     let mut sql = String::new();
     if include_hidden {
-        sql.push_str("WHERE ");
+        sql.push_str("WHERE has_done_marker = 1");
     } else {
-        sql.push_str("WHERE hidden = 0 AND ");
+        sql.push_str("WHERE hidden = 0 AND has_done_marker = 1");
     }
-    sql.push_str(completed_predicate_sql());
     if exclude_dismissed {
         sql.push_str(dismissed_filter_sql());
     }
@@ -683,9 +630,7 @@ fn visible_where(include_hidden: bool, exclude_dismissed: bool) -> String {
         // Active rows always pass; completed rows must not match a
         // dismissed-agent identity.
         clauses.push(format!(
-            "({active} OR ({completed}{filter}))",
-            active = active_predicate_sql(),
-            completed = completed_predicate_sql(),
+            "(has_done_marker = 0 OR (has_done_marker = 1{filter}))",
             filter = dismissed_filter_sql(),
         ));
     }
@@ -700,27 +645,6 @@ fn visible_where(include_hidden: bool, exclude_dismissed: bool) -> String {
     sql
 }
 
-fn completed_predicate_sql() -> &'static str {
-    "(has_done_marker = 1
-      OR (
-          has_workflow_state = 1
-          AND COALESCE(workflow_status, '') IN
-              ('completed', 'failed', 'cancelled', 'noop')
-      ))"
-}
-
-fn active_predicate_sql() -> &'static str {
-    "has_running_marker = 1
-     OR has_waiting_marker = 1
-     OR has_pending_question_marker = 1
-     OR has_agent_meta_active_signal = 1
-     OR (
-         has_workflow_state = 1
-         AND COALESCE(workflow_status, '') NOT IN
-             ('completed', 'failed', 'cancelled', 'noop')
-     )"
-}
-
 #[derive(Default)]
 struct RecordSummary {
     status: String,
@@ -732,7 +656,6 @@ struct RecordSummary {
     started_at: Option<String>,
     finished_at: Option<f64>,
     workflow_status: Option<String>,
-    has_agent_meta_active_signal: bool,
     hidden: bool,
     parent_timestamp: Option<String>,
     step_index: Option<i64>,
@@ -753,8 +676,6 @@ impl RecordSummary {
         let first_step = record.prompt_steps.first();
 
         let workflow_status = workflow_state.map(|w| w.status.clone());
-        let has_agent_meta_active_signal =
-            meta.is_some_and(agent_meta_has_active_signal);
         let status = if waiting.is_some() {
             "waiting"
         } else if let Some(workflow_status) = workflow_status.as_deref() {
@@ -778,7 +699,7 @@ impl RecordSummary {
             agent_type: if workflow_state.is_some() {
                 "workflow".to_string()
             } else {
-                "run".to_string()
+                "agent".to_string()
             },
             cl_name: done
                 .and_then(|d| d.cl_name.clone())
@@ -803,7 +724,6 @@ impl RecordSummary {
                 .or_else(|| workflow_state.and_then(|w| w.start_time.clone())),
             finished_at: done.and_then(|d| d.finished_at),
             workflow_status,
-            has_agent_meta_active_signal,
             hidden: meta.map(|m| m.hidden).unwrap_or(false)
                 || done.map(|d| d.hidden).unwrap_or(false)
                 || workflow_state.map(|w| w.hidden).unwrap_or(false)
@@ -823,20 +743,6 @@ impl RecordSummary {
             retry_attempt: meta.and_then(|m| m.retry_attempt),
         }
     }
-}
-
-fn agent_meta_has_active_signal(meta: &AgentMetaWire) -> bool {
-    meta.pid.is_some()
-        || meta.run_started_at.is_some()
-        || meta.wait_completed_at.is_some()
-        || !meta.wait_for.is_empty()
-        || meta.wait_duration.is_some()
-        || meta.wait_until.is_some()
-        || !meta.plan_submitted_at.is_empty()
-        || meta.epic_started_at.is_some()
-        || !meta.feedback_submitted_at.is_empty()
-        || !meta.questions_submitted_at.is_empty()
-        || !meta.retry_started_at.is_empty()
 }
 
 #[derive(Default)]
@@ -1116,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_meta_is_bumped_to_phase_three() {
+    fn schema_version_meta_is_bumped_to_phase_two() {
         let tmp = tempdir().unwrap();
         let index = tmp.path().join("agent_artifact_index.sqlite");
         open_index(&index).unwrap();
@@ -1129,7 +1035,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
-        const _: () = assert!(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION >= 3);
+        const _: () = assert!(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION >= 2);
 
         // dismissed_agents sidecar exists and starts empty.
         let count: i64 = conn
@@ -1182,205 +1088,6 @@ mod tests {
         assert!(
             !dirs.contains(&dismissed_done.to_string_lossy().as_ref()),
             "dismissed completed row must be filtered from the inbox"
-        );
-    }
-
-    #[test]
-    fn inbox_query_excludes_stale_sparse_no_done_rows() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let stale = artifact(&projects, "20260601130000");
-        write_json(
-            &stale.join("agent_meta.json"),
-            json!({"name": "stale_sparse", "cl_name": "cl_alpha"}),
-        );
-        write_json(
-            &stale.join("prompt_step_000_code.json"),
-            json!({
-                "workflow_name": "stale",
-                "step_name": "code",
-                "status": "completed",
-            }),
-        );
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert!(
-            snapshot.records.is_empty(),
-            "no-done rows without active signals must not be inbox-active"
-        );
-    }
-
-    #[test]
-    fn inbox_query_keeps_explicit_active_signal_rows() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let running = artifact(&projects, "20260601130000");
-        write_json(&running.join("running.json"), json!({"cl_name": "cl_run"}));
-
-        let waiting = artifact(&projects, "20260601130100");
-        write_json(
-            &waiting.join("waiting.json"),
-            json!({"waiting_for": ["upstream"]}),
-        );
-
-        let pending = artifact(&projects, "20260601130200");
-        write_json(
-            &pending.join("pending_question.json"),
-            json!({"session_id": "s1"}),
-        );
-
-        let meta_active = artifact(&projects, "20260601130300");
-        write_json(
-            &meta_active.join("agent_meta.json"),
-            json!({"name": "meta", "run_started_at": "2026-06-01T13:03:00Z"}),
-        );
-
-        let workflow = projects
-            .join("proj")
-            .join("artifacts")
-            .join("workflow-build")
-            .join("20260601130400");
-        write_json(
-            &workflow.join("workflow_state.json"),
-            json!({
-                "workflow_name": "build",
-                "cl_name": "cl_workflow",
-                "status": "waiting_hitl",
-            }),
-        );
-
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let timestamps: std::collections::BTreeSet<&str> = snapshot
-            .records
-            .iter()
-            .map(|record| record.timestamp.as_str())
-            .collect();
-        assert_eq!(
-            timestamps,
-            [
-                "20260601130000",
-                "20260601130100",
-                "20260601130200",
-                "20260601130300",
-                "20260601130400",
-            ]
-            .into_iter()
-            .collect()
-        );
-    }
-
-    #[test]
-    fn completed_phase_rows_remain_visible_when_not_dismissed() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let phase = artifact(&projects, "20260601130500");
-        write_json(
-            &phase.join("agent_meta.json"),
-            json!({"name": "phase", "parent_timestamp": "20260601120000"}),
-        );
-        write_json(
-            &phase.join("done.json"),
-            json!({
-                "outcome": "completed",
-                "finished_at": 1782011000.0,
-                "name": "phase",
-                "cl_name": "sase-3s.2",
-            }),
-        );
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert!(snapshot
-            .records
-            .iter()
-            .any(|record| record.timestamp == "20260601130500"));
-    }
-
-    #[test]
-    fn dismissed_filter_uses_agent_type_not_only_cl_name() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let done = artifact(&projects, "20260601130600");
-        write_json(
-            &done.join("done.json"),
-            json!({
-                "outcome": "completed",
-                "finished_at": 1782012000.0,
-                "name": "done",
-                "cl_name": "shared",
-            }),
-        );
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "workflow".to_string(),
-                cl_name: "shared".to_string(),
-                raw_suffix: Some("20260601130600".to_string()),
-                dismissed_at: None,
-            },
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert!(
-            snapshot
-                .records
-                .iter()
-                .any(|record| record.timestamp == "20260601130600"),
-            "a workflow dismissal must not hide a run agent with the same CL"
         );
     }
 
