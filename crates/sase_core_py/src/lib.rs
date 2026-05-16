@@ -567,7 +567,10 @@ fn py_delete_dismissed_agent_visibility<'py>(
     let update = py
         .allow_threads(|| {
             core_delete_dismissed_agent_visibility(
-                &index, agent_type, cl_name, raw_suffix,
+                &index,
+                agent_type,
+                cl_name,
+                raw_suffix,
             )
         })
         .map_err(PyRuntimeError::new_err)?;
@@ -2394,10 +2397,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_dismissed_agent_visibility, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_dismissed_agent_visibility, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        py_replace_dismissed_agent_visibility,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(py_replace_dismissed_agent_visibility, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
     m.add_function(wrap_pyfunction!(

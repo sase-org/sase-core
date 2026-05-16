@@ -639,9 +639,7 @@ fn visible_where(include_hidden: bool, exclude_dismissed: bool) -> String {
         sql.push_str("WHERE ");
         sql.push_str(&clauses.join(" AND "));
     }
-    sql.push_str(
-        " ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC",
-    );
+    sql.push_str(" ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC");
     sql
 }
 
@@ -1034,14 +1032,19 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
-        const _: () = assert!(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION >= 2);
+        assert_eq!(
+            version,
+            AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()
+        );
+        assert!(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION >= 2);
 
         // dismissed_agents sidecar exists and starts empty.
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM dismissed_agents", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM dismissed_agents",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -1072,11 +1075,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         assert!(
             dirs.contains(&active.to_string_lossy().as_ref()),
             "active row must always be visible"
@@ -1107,11 +1107,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
     }
 
@@ -1144,11 +1141,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         assert!(
             dirs.contains(&active.to_string_lossy().as_ref()),
             "running alias must stay visible even when identity is dismissed"
@@ -1240,11 +1234,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         // The previously dismissed cl_alpha completion is back; the newly
         // dismissed cl_beta completion is gone.
         assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
@@ -1301,11 +1292,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
     }
 
@@ -1337,11 +1325,8 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let dirs: Vec<&str> = snapshot
-            .records
-            .iter()
-            .map(|r| r.artifact_dir.as_str())
-            .collect();
+        let dirs: Vec<&str> =
+            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
         assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
     }
 }
