@@ -17,9 +17,6 @@
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
-//! - `upsert_dismissed_agent_visibility(index_path: str, identity: dict) -> dict`
-//! - `delete_dismissed_agent_visibility(index_path: str, agent_type: str, cl_name: str, raw_suffix: str | None = None) -> dict`
-//! - `replace_dismissed_agent_visibility(index_path: str, identities: list[dict]) -> dict`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
@@ -117,15 +114,11 @@ use sase_core::agent_launch::{
 };
 use sase_core::agent_scan::{
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
-    delete_dismissed_agent_visibility as core_delete_dismissed_agent_visibility,
     query_agent_artifact_index as core_query_agent_artifact_index,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
-    replace_dismissed_agent_visibility as core_replace_dismissed_agent_visibility,
     scan_agent_artifacts as core_scan_agent_artifacts,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
-    upsert_dismissed_agent_visibility as core_upsert_dismissed_agent_visibility,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    DismissedAgentIdentityWire,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -508,103 +501,6 @@ fn py_query_agent_artifact_index<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&snapshot).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
-}
-
-fn dismissed_agent_identity_from_pydict(
-    dict: &Bound<'_, PyDict>,
-) -> PyResult<DismissedAgentIdentityWire> {
-    let json = py_to_json_value(dict)?;
-    serde_json::from_value::<DismissedAgentIdentityWire>(json).map_err(|e| {
-        PyValueError::new_err(format!(
-            "identity is not a valid DismissedAgentIdentityWire dict: {e}"
-        ))
-    })
-}
-
-/// Upsert one dismissed-agent identity into the artifact index sidecar.
-///
-/// Added in Phase 2 of ``sase-3r`` (Fast Agents Tab Disk Loading). The
-/// sidecar lets visibility-aware queries exclude completed artifact rows
-/// whose identity is dismissed. Active/incomplete rows are never filtered
-/// by dismissal state so a still-RUNNING alias stays visible.
-#[pyfunction]
-#[pyo3(name = "upsert_dismissed_agent_visibility")]
-fn py_upsert_dismissed_agent_visibility<'py>(
-    py: Python<'py>,
-    index_path: &str,
-    identity: &Bound<'py, PyDict>,
-) -> PyResult<PyObject> {
-    let identity_wire = dismissed_agent_identity_from_pydict(identity)?;
-    let index = PathBuf::from(index_path);
-    let update = py
-        .allow_threads(|| {
-            core_upsert_dismissed_agent_visibility(&index, identity_wire)
-        })
-        .map_err(PyRuntimeError::new_err)?;
-    let value = serde_json::to_value(&update).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
-}
-
-/// Remove one dismissed-agent identity from the sidecar table.
-#[pyfunction]
-#[pyo3(
-    name = "delete_dismissed_agent_visibility",
-    signature = (index_path, agent_type, cl_name, raw_suffix = None)
-)]
-fn py_delete_dismissed_agent_visibility<'py>(
-    py: Python<'py>,
-    index_path: &str,
-    agent_type: &str,
-    cl_name: &str,
-    raw_suffix: Option<&str>,
-) -> PyResult<PyObject> {
-    let index = PathBuf::from(index_path);
-    let update = py
-        .allow_threads(|| {
-            core_delete_dismissed_agent_visibility(
-                &index,
-                agent_type,
-                cl_name,
-                raw_suffix,
-            )
-        })
-        .map_err(PyRuntimeError::new_err)?;
-    let value = serde_json::to_value(&update).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
-}
-
-/// Atomically replace the dismissed-agent sidecar contents.
-#[pyfunction]
-#[pyo3(name = "replace_dismissed_agent_visibility")]
-fn py_replace_dismissed_agent_visibility<'py>(
-    py: Python<'py>,
-    index_path: &str,
-    identities: &Bound<'py, PyList>,
-) -> PyResult<PyObject> {
-    let mut identity_wires: Vec<DismissedAgentIdentityWire> =
-        Vec::with_capacity(identities.len());
-    for item in identities.iter() {
-        let dict = item.downcast::<PyDict>().map_err(|_| {
-            PyValueError::new_err(
-                "identities must be a list of DismissedAgentIdentityWire dicts",
-            )
-        })?;
-        identity_wires.push(dismissed_agent_identity_from_pydict(dict)?);
-    }
-    let index = PathBuf::from(index_path);
-    let update = py
-        .allow_threads(|| {
-            core_replace_dismissed_agent_visibility(&index, identity_wires)
-        })
-        .map_err(PyRuntimeError::new_err)?;
-    let value = serde_json::to_value(&update).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -2395,9 +2291,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
-    m.add_function(wrap_pyfunction!(py_upsert_dismissed_agent_visibility, m)?)?;
-    m.add_function(wrap_pyfunction!(py_delete_dismissed_agent_visibility, m)?)?;
-    m.add_function(wrap_pyfunction!(py_replace_dismissed_agent_visibility, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
     m.add_function(wrap_pyfunction!(

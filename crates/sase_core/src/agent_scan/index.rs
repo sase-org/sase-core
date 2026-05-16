@@ -21,7 +21,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 1;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -31,10 +31,6 @@ const MARKER_FILES: &[&str] = &[
     "workflow_state.json",
     "plan_path.json",
 ];
-
-fn default_true() -> bool {
-    true
-}
 
 /// Query knobs for the persistent artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,14 +45,6 @@ pub struct AgentArtifactIndexQueryWire {
     pub recent_completed_limit: Option<u32>,
     #[serde(default)]
     pub include_hidden: bool,
-    /// When ``true`` (default), the completed-row branch returns every
-    /// matching row regardless of dismissal state. When ``false``, completed
-    /// rows whose ``(cl_name, timestamp)`` identity appears in the
-    /// ``dismissed_agents`` sidecar are excluded. Active/incomplete rows are
-    /// never filtered by dismissal state so a still-RUNNING alias of a
-    /// dismissed completion remains visible.
-    #[serde(default = "default_true")]
-    pub include_dismissed: bool,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -67,26 +55,8 @@ impl Default for AgentArtifactIndexQueryWire {
             include_full_history: false,
             recent_completed_limit: Some(200),
             include_hidden: false,
-            include_dismissed: true,
         }
     }
-}
-
-/// One dismissed-agent identity persisted alongside the artifact index.
-///
-/// Identity matches the Python ``(AgentType, cl_name, raw_suffix)`` tuple
-/// stored in ``~/.sase/dismissed_agents.json``. ``raw_suffix`` may be ``None``
-/// for identities that dismiss every artifact-backed row sharing the
-/// ``(agent_type, cl_name)`` prefix; when ``Some(...)`` it must equal the
-/// artifact directory's ``timestamp`` for the match to apply.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DismissedAgentIdentityWire {
-    pub agent_type: String,
-    pub cl_name: String,
-    #[serde(default)]
-    pub raw_suffix: Option<String>,
-    #[serde(default)]
-    pub dismissed_at: Option<String>,
 }
 
 /// Summary of one index mutation/rebuild.
@@ -187,105 +157,6 @@ pub fn delete_agent_artifact_index_row(
     })
 }
 
-/// Upsert one dismissed-agent identity into the sidecar table.
-///
-/// ``identity.raw_suffix`` of ``None`` is persisted as the empty-string
-/// sentinel meaning "every artifact suffix sharing this
-/// ``(agent_type, cl_name)`` prefix is dismissed".
-pub fn upsert_dismissed_agent_visibility(
-    index_path: &Path,
-    identity: DismissedAgentIdentityWire,
-) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let conn = open_index(index_path)?;
-    upsert_dismissed_row(&conn, &identity)?;
-    Ok(AgentArtifactIndexUpdateWire {
-        schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
-        index_path: index_path.to_string_lossy().into_owned(),
-        projects_root: String::new(),
-        rows_indexed: 1,
-        rows_deleted: 0,
-        rows_skipped: 0,
-    })
-}
-
-/// Delete one dismissed-agent identity from the sidecar table.
-pub fn delete_dismissed_agent_visibility(
-    index_path: &Path,
-    agent_type: &str,
-    cl_name: &str,
-    raw_suffix: Option<&str>,
-) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let conn = open_index(index_path)?;
-    let suffix = raw_suffix.unwrap_or("");
-    let deleted = conn
-        .execute(
-            "DELETE FROM dismissed_agents
-             WHERE agent_type = ?1 AND cl_name = ?2 AND raw_suffix = ?3",
-            params![agent_type, cl_name, suffix],
-        )
-        .map_err(|e| e.to_string())? as u64;
-    Ok(AgentArtifactIndexUpdateWire {
-        schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
-        index_path: index_path.to_string_lossy().into_owned(),
-        projects_root: String::new(),
-        rows_indexed: 0,
-        rows_deleted: deleted,
-        rows_skipped: 0,
-    })
-}
-
-/// Replace the entire dismissed-agent sidecar with the supplied set.
-///
-/// Mirrors the bulk-sync path the Python TUI uses when it loads the legacy
-/// ``dismissed_agents.json`` file at startup. The replace is transactional:
-/// either every supplied row is visible afterwards or the table is
-/// unchanged.
-pub fn replace_dismissed_agent_visibility(
-    index_path: &Path,
-    identities: Vec<DismissedAgentIdentityWire>,
-) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let mut conn = open_index(index_path)?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let deleted = tx
-        .execute("DELETE FROM dismissed_agents", [])
-        .map_err(|e| e.to_string())? as u64;
-    let mut rows_indexed = 0u64;
-    for identity in &identities {
-        upsert_dismissed_row(&tx, identity)?;
-        rows_indexed += 1;
-    }
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(AgentArtifactIndexUpdateWire {
-        schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
-        index_path: index_path.to_string_lossy().into_owned(),
-        projects_root: String::new(),
-        rows_indexed,
-        rows_deleted: deleted,
-        rows_skipped: 0,
-    })
-}
-
-fn upsert_dismissed_row(
-    conn: &Connection,
-    identity: &DismissedAgentIdentityWire,
-) -> Result<(), String> {
-    let suffix = identity.raw_suffix.clone().unwrap_or_default();
-    conn.execute(
-        "INSERT INTO dismissed_agents (agent_type, cl_name, raw_suffix, dismissed_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(agent_type, cl_name, raw_suffix) DO UPDATE SET
-             dismissed_at = excluded.dismissed_at",
-        params![
-            identity.agent_type,
-            identity.cl_name,
-            suffix,
-            identity.dismissed_at,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Query indexed rows and return scanner-shaped records.
 pub fn query_agent_artifact_index(
     index_path: &Path,
@@ -300,7 +171,7 @@ pub fn query_agent_artifact_index(
     if query.include_active {
         select_records(
             &conn,
-            &active_where(query.include_hidden),
+            active_where(query.include_hidden),
             None,
             &mut stats,
             &mut by_dir,
@@ -310,7 +181,7 @@ pub fn query_agent_artifact_index(
     if query.include_recent_completed {
         select_records(
             &conn,
-            &completed_where(query.include_hidden, !query.include_dismissed),
+            completed_where(query.include_hidden),
             query.recent_completed_limit,
             &mut stats,
             &mut by_dir,
@@ -320,7 +191,7 @@ pub fn query_agent_artifact_index(
     if query.include_full_history {
         select_records(
             &conn,
-            &visible_where(query.include_hidden, !query.include_dismissed),
+            visible_where(query.include_hidden),
             None,
             &mut stats,
             &mut by_dir,
@@ -414,15 +285,6 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             ON agent_artifacts(cl_name);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_project_workflow
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
-        CREATE TABLE IF NOT EXISTS dismissed_agents (
-            agent_type TEXT NOT NULL,
-            cl_name TEXT NOT NULL,
-            raw_suffix TEXT NOT NULL DEFAULT '',
-            dismissed_at TEXT,
-            PRIMARY KEY (agent_type, cl_name, raw_suffix)
-        );
-        CREATE INDEX IF NOT EXISTS idx_dismissed_agents_cl
-            ON dismissed_agents(cl_name, raw_suffix);
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -577,70 +439,37 @@ fn select_records(
     Ok(())
 }
 
-fn active_where(include_hidden: bool) -> String {
-    // Active/incomplete rows are never filtered by dismissal state. A
-    // still-RUNNING artifact whose identity has been dismissed for an older
-    // completed alias must remain visible.
+fn active_where(include_hidden: bool) -> &'static str {
     if include_hidden {
         "WHERE has_done_marker = 0
          OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          ORDER BY timestamp DESC"
-            .to_string()
     } else {
         "WHERE hidden = 0 AND (
             has_done_marker = 0
             OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          )
          ORDER BY timestamp DESC"
-            .to_string()
     }
 }
 
-fn dismissed_filter_sql() -> &'static str {
-    // ``raw_suffix = ''`` is the sentinel for "any artifact suffix sharing
-    // this (agent_type, cl_name) prefix"; otherwise the suffix must equal
-    // the artifact timestamp.
-    " AND NOT EXISTS (
-        SELECT 1 FROM dismissed_agents d
-        WHERE d.cl_name = agent_artifacts.cl_name
-          AND (d.raw_suffix = '' OR d.raw_suffix = agent_artifacts.timestamp)
-    )"
-}
-
-fn completed_where(include_hidden: bool, exclude_dismissed: bool) -> String {
-    let mut sql = String::new();
+fn completed_where(include_hidden: bool) -> &'static str {
     if include_hidden {
-        sql.push_str("WHERE has_done_marker = 1");
+        "WHERE has_done_marker = 1
+         ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
     } else {
-        sql.push_str("WHERE hidden = 0 AND has_done_marker = 1");
+        "WHERE hidden = 0 AND has_done_marker = 1
+         ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
     }
-    if exclude_dismissed {
-        sql.push_str(dismissed_filter_sql());
-    }
-    sql.push_str(" ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC");
-    sql
 }
 
-fn visible_where(include_hidden: bool, exclude_dismissed: bool) -> String {
-    let mut clauses: Vec<String> = Vec::new();
-    if !include_hidden {
-        clauses.push("hidden = 0".to_string());
+fn visible_where(include_hidden: bool) -> &'static str {
+    if include_hidden {
+        "ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
+    } else {
+        "WHERE hidden = 0
+         ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
     }
-    if exclude_dismissed {
-        // Active rows always pass; completed rows must not match a
-        // dismissed-agent identity.
-        clauses.push(format!(
-            "(has_done_marker = 0 OR (has_done_marker = 1{filter}))",
-            filter = dismissed_filter_sql(),
-        ));
-    }
-    let mut sql = String::new();
-    if !clauses.is_empty() {
-        sql.push_str("WHERE ");
-        sql.push_str(&clauses.join(" AND "));
-    }
-    sql.push_str(" ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC");
-    sql
 }
 
 #[derive(Default)]
@@ -872,7 +701,6 @@ mod tests {
                 include_full_history: true,
                 recent_completed_limit: Some(10),
                 include_hidden: false,
-                include_dismissed: true,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -958,375 +786,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "running");
-    }
-
-    /// Build a small index with one active row, one completed dismissed row,
-    /// and one older non-dismissed completed row sharing the active row's
-    /// ``cl_name``. Phase 2 visibility-aware tests build on this fixture.
-    fn build_inbox_fixture(
-        projects: &Path,
-        index: &Path,
-    ) -> (PathBuf, PathBuf, PathBuf) {
-        let active = artifact(projects, "20260601120000");
-        write_json(
-            &active.join("agent_meta.json"),
-            json!({"name": "active", "pid": 7, "cl_name": "cl_alpha"}),
-        );
-        write_json(
-            &active.join("running.json"),
-            json!({"pid": 7, "cl_name": "cl_alpha"}),
-        );
-
-        let dismissed_done = artifact(projects, "20260601100000");
-        write_json(
-            &dismissed_done.join("done.json"),
-            json!({
-                "outcome": "completed",
-                "finished_at": 1782000000.0,
-                "name": "old",
-                "cl_name": "cl_alpha",
-            }),
-        );
-
-        let other_done = artifact(projects, "20260601110000");
-        write_json(
-            &other_done.join("done.json"),
-            json!({
-                "outcome": "completed",
-                "finished_at": 1782010000.0,
-                "name": "untouched",
-                "cl_name": "cl_beta",
-            }),
-        );
-
-        rebuild_agent_artifact_index(
-            index,
-            projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        (active, dismissed_done, other_done)
-    }
-
-    fn inbox_query() -> AgentArtifactIndexQueryWire {
-        AgentArtifactIndexQueryWire {
-            include_active: true,
-            include_recent_completed: true,
-            include_full_history: false,
-            recent_completed_limit: None,
-            include_hidden: false,
-            include_dismissed: false,
-        }
-    }
-
-    #[test]
-    fn schema_version_meta_is_bumped_to_phase_two() {
-        let tmp = tempdir().unwrap();
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        open_index(&index).unwrap();
-        let conn = Connection::open(&index).unwrap();
-        let version: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            version,
-            AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()
-        );
-        assert!(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION >= 2);
-
-        // dismissed_agents sidecar exists and starts empty.
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dismissed_agents",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn inbox_query_excludes_dismissed_completed_rows() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (active, dismissed_done, other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_alpha".to_string(),
-                raw_suffix: Some("20260601100000".to_string()),
-                dismissed_at: Some("2026-06-01T11:00:00Z".to_string()),
-            },
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        assert!(
-            dirs.contains(&active.to_string_lossy().as_ref()),
-            "active row must always be visible"
-        );
-        assert!(
-            dirs.contains(&other_done.to_string_lossy().as_ref()),
-            "non-dismissed completed row must remain visible"
-        );
-        assert!(
-            !dirs.contains(&dismissed_done.to_string_lossy().as_ref()),
-            "dismissed completed row must be filtered from the inbox"
-        );
-    }
-
-    #[test]
-    fn inbox_query_keeps_old_non_dismissed_completed_rows() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (_active, dismissed_done, _other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        // No dismissals registered: every completed row stays visible.
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
-    }
-
-    #[test]
-    fn running_alias_of_dismissed_completion_stays_visible() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (active, _dismissed_done, _other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        // A whole-identity dismissal (empty raw_suffix) would still leave the
-        // active RUNNING row visible because the active branch never consults
-        // dismissal state.
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_alpha".to_string(),
-                raw_suffix: None,
-                dismissed_at: None,
-            },
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        assert!(
-            dirs.contains(&active.to_string_lossy().as_ref()),
-            "running alias must stay visible even when identity is dismissed"
-        );
-    }
-
-    #[test]
-    fn hidden_rows_remain_excluded_unless_requested() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let hidden = artifact(&projects, "20260602000000");
-        write_json(
-            &hidden.join("done.json"),
-            json!({
-                "outcome": "completed",
-                "finished_at": 1782020000.0,
-                "name": "hidden",
-                "cl_name": "cl_hidden",
-                "hidden": true,
-            }),
-        );
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert!(snapshot.records.is_empty());
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactIndexQueryWire {
-                include_hidden: true,
-                ..inbox_query()
-            },
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert_eq!(snapshot.records.len(), 1);
-    }
-
-    #[test]
-    fn replace_dismissed_agent_visibility_is_atomic() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (_active, dismissed_done, _other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_alpha".to_string(),
-                raw_suffix: Some("20260601100000".to_string()),
-                dismissed_at: None,
-            },
-        )
-        .unwrap();
-
-        // Replace with a different identity. The old row must disappear.
-        let update = replace_dismissed_agent_visibility(
-            &index,
-            vec![DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_beta".to_string(),
-                raw_suffix: Some("20260601110000".to_string()),
-                dismissed_at: None,
-            }],
-        )
-        .unwrap();
-        assert_eq!(update.rows_indexed, 1);
-        assert_eq!(update.rows_deleted, 1);
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        // The previously dismissed cl_alpha completion is back; the newly
-        // dismissed cl_beta completion is gone.
-        assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
-        assert!(snapshot
-            .records
-            .iter()
-            .all(|r| r.timestamp != "20260601110000"));
-    }
-
-    #[test]
-    fn delete_dismissed_agent_visibility_revives_completion() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (_active, dismissed_done, _other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_alpha".to_string(),
-                raw_suffix: Some("20260601100000".to_string()),
-                dismissed_at: None,
-            },
-        )
-        .unwrap();
-
-        // Confirm dismissed first.
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        assert!(snapshot.records.iter().all(|r| {
-            r.artifact_dir != dismissed_done.to_string_lossy().as_ref()
-        }));
-
-        let update = delete_dismissed_agent_visibility(
-            &index,
-            "run",
-            "cl_alpha",
-            Some("20260601100000"),
-        )
-        .unwrap();
-        assert_eq!(update.rows_deleted, 1);
-
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            inbox_query(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
-    }
-
-    #[test]
-    fn include_dismissed_default_is_backward_compatible() {
-        let tmp = tempdir().unwrap();
-        let projects = tmp.path().join("projects");
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        let (_active, dismissed_done, _other_done) =
-            build_inbox_fixture(&projects, &index);
-
-        upsert_dismissed_agent_visibility(
-            &index,
-            DismissedAgentIdentityWire {
-                agent_type: "run".to_string(),
-                cl_name: "cl_alpha".to_string(),
-                raw_suffix: Some("20260601100000".to_string()),
-                dismissed_at: None,
-            },
-        )
-        .unwrap();
-
-        // Default query has include_dismissed = true, so the dismissed
-        // completion is still returned. Phase 1 callers see no change.
-        let snapshot = query_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactIndexQueryWire::default(),
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let dirs: Vec<&str> =
-            snapshot.records.iter().map(|r| r.artifact_dir.as_str()).collect();
-        assert!(dirs.contains(&dismissed_done.to_string_lossy().as_ref()));
     }
 }

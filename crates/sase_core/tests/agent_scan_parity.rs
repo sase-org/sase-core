@@ -814,7 +814,6 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             include_full_history: true,
             recent_completed_limit: Some(10),
             include_hidden: false,
-            include_dismissed: true,
         },
         AgentArtifactScanOptionsWire::default(),
     )
