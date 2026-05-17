@@ -587,6 +587,9 @@ fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
         &dir.join("agent_meta.json"),
         &json!({
             "name": "planner",
+            "agent_family": "planner",
+            "agent_family_role": "root",
+            "plan_chain_root": true,
             "plan_submitted_at": "2026-04-29T17:20:22.951546+00:00",
             "epic_started_at": "2026-04-29T17:21:22.951546+00:00",
         }),
@@ -597,6 +600,9 @@ fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
     let rec = record_by_timestamp(&snapshot, "20260429131818");
     let meta = rec.agent_meta.as_ref().unwrap();
 
+    assert_eq!(meta.agent_family.as_deref(), Some("planner"));
+    assert_eq!(meta.agent_family_role.as_deref(), Some("root"));
+    assert!(meta.plan_chain_root);
     assert_eq!(
         meta.plan_submitted_at,
         vec!["2026-04-29T17:20:22.951546+00:00".to_string()]
