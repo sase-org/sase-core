@@ -203,6 +203,12 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub workflow_name: Option<String>,
     #[serde(default)]
+    pub agent_family: Option<String>,
+    #[serde(default)]
+    pub agent_family_role: Option<String>,
+    #[serde(default)]
+    pub plan_chain_root: bool,
+    #[serde(default)]
     pub tag: Option<String>,
     #[serde(default)]
     pub pid: Option<i64>,
