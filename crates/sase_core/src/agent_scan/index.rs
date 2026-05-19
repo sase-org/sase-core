@@ -172,7 +172,7 @@ pub fn query_agent_artifact_index(
         select_records(
             &conn,
             active_where(query.include_hidden),
-            None,
+            query.recent_completed_limit,
             &mut stats,
             &mut by_dir,
         )?;
@@ -786,5 +786,48 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn tier1_active_query_is_bounded_to_newest_incomplete_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for index in 0..5 {
+            let artifact_dir =
+                artifact(&projects, &format!("2026051312000{index}"));
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({"name": format!("stale-{index}")}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                recent_completed_limit: Some(2),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let timestamps: Vec<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(timestamps, vec!["20260513120003", "20260513120004"]);
     }
 }
