@@ -613,6 +613,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         sdd_plan_path: coerce_str(data.get("sdd_plan_path")),
         question_request_path: coerce_str(data.get("question_request_path")),
         question_response_path: coerce_str(data.get("question_response_path")),
+        question_session_id: coerce_str(data.get("question_session_id")),
         epic_bead_id: coerce_str(data.get("epic_bead_id")),
         phase_bead_id: coerce_str(data.get("phase_bead_id")),
         legend_bead_id: coerce_str(data.get("legend_bead_id")),

@@ -183,6 +183,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub question_response_path: Option<String>,
     #[serde(default)]
+    pub question_session_id: Option<String>,
+    #[serde(default)]
     pub epic_bead_id: Option<String>,
     #[serde(default)]
     pub phase_bead_id: Option<String>,
