@@ -14,6 +14,8 @@ use std::time::UNIX_EPOCH;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_cleanup::AgentCleanupIdentityWire;
+
 use super::scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
 use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
@@ -157,6 +159,43 @@ pub fn delete_agent_artifact_index_row(
     })
 }
 
+/// Replace the dismissed identity table used by normal index visibility.
+pub fn replace_agent_artifact_index_dismissed_agents(
+    index_path: &Path,
+    dismissed: &[AgentCleanupIdentityWire],
+) -> Result<AgentArtifactIndexUpdateWire, String> {
+    let mut conn = open_index(index_path)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let deleted = tx
+        .execute("DELETE FROM dismissed_agents", [])
+        .map_err(|e| e.to_string())? as u64;
+    for identity in dismissed {
+        tx.execute(
+            r#"
+            INSERT OR REPLACE INTO dismissed_agents (
+                agent_type, cl_name, raw_suffix
+            ) VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                identity.agent_type,
+                identity.cl_name,
+                identity.raw_suffix,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(AgentArtifactIndexUpdateWire {
+        schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+        index_path: index_path.to_string_lossy().into_owned(),
+        projects_root: String::new(),
+        rows_indexed: dismissed.len() as u64,
+        rows_deleted: deleted,
+        rows_skipped: 0,
+    })
+}
+
 /// Query indexed rows and return scanner-shaped records.
 pub fn query_agent_artifact_index(
     index_path: &Path,
@@ -285,6 +324,15 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             ON agent_artifacts(cl_name);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_project_workflow
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
+        CREATE TABLE IF NOT EXISTS dismissed_agents (
+            agent_type TEXT NOT NULL,
+            cl_name TEXT NOT NULL,
+            raw_suffix TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (agent_type, cl_name, raw_suffix)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dismissed_agents_suffix
+            ON dismissed_agents(raw_suffix, cl_name, agent_type);
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -449,6 +497,20 @@ fn active_where(include_hidden: bool) -> &'static str {
             has_done_marker = 0
             OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          )
+         AND NOT EXISTS (
+             SELECT 1 FROM dismissed_agents dismissed
+             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
+               AND dismissed.agent_type =
+                   CASE agent_artifacts.agent_type
+                       WHEN 'workflow' THEN 'workflow'
+                       ELSE 'run'
+                   END
+               AND (
+                   dismissed.cl_name = agent_artifacts.cl_name
+                   OR dismissed.cl_name = 'unknown'
+                   OR agent_artifacts.cl_name IS NULL
+               )
+         )
          ORDER BY timestamp DESC"
     }
 }
@@ -459,6 +521,20 @@ fn completed_where(include_hidden: bool) -> &'static str {
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
     } else {
         "WHERE hidden = 0 AND has_done_marker = 1
+         AND NOT EXISTS (
+             SELECT 1 FROM dismissed_agents dismissed
+             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
+               AND dismissed.agent_type =
+                   CASE agent_artifacts.agent_type
+                       WHEN 'workflow' THEN 'workflow'
+                       ELSE 'run'
+                   END
+               AND (
+                   dismissed.cl_name = agent_artifacts.cl_name
+                   OR dismissed.cl_name = 'unknown'
+                   OR agent_artifacts.cl_name IS NULL
+               )
+         )
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
     }
 }
@@ -468,6 +544,20 @@ fn visible_where(include_hidden: bool) -> &'static str {
         "ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
     } else {
         "WHERE hidden = 0
+         AND NOT EXISTS (
+             SELECT 1 FROM dismissed_agents dismissed
+             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
+               AND dismissed.agent_type =
+                   CASE agent_artifacts.agent_type
+                       WHEN 'workflow' THEN 'workflow'
+                       ELSE 'run'
+                   END
+               AND (
+                   dismissed.cl_name = agent_artifacts.cl_name
+                   OR dismissed.cl_name = 'unknown'
+                   OR agent_artifacts.cl_name IS NULL
+               )
+         )
          ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
     }
 }
@@ -829,5 +919,147 @@ mod tests {
             .map(|record| record.timestamp.as_str())
             .collect();
         assert_eq!(timestamps, vec!["20260513120003", "20260513120004"]);
+    }
+
+    #[test]
+    fn active_query_excludes_dismissed_identity_after_rebuild() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260514120000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "dismissed-active", "pid": 123}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "unknown".to_string(),
+                raw_suffix: Some("20260514120000".to_string()),
+            }],
+        )
+        .unwrap();
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let visible = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(visible.records.is_empty());
+    }
+
+    #[test]
+    fn hidden_inclusive_full_history_can_inspect_dismissed_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260514123000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "dismissed-active", "pid": 123}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "unknown".to_string(),
+                raw_suffix: Some("20260514123000".to_string()),
+            }],
+        )
+        .unwrap();
+
+        let visible = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(visible.records.is_empty());
+
+        let all = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                recent_completed_limit: None,
+                include_hidden: true,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(all.records.len(), 1);
+        assert_eq!(all.records[0].timestamp, "20260514123000");
+    }
+
+    #[test]
+    fn recent_completed_rows_remain_visible_when_not_dismissed() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260514130000");
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1777900100.0,
+                "name": "done-visible",
+                "cl_name": "cl_visible"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260514130000");
     }
 }

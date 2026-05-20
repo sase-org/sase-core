@@ -17,9 +17,10 @@ pub mod wire;
 
 pub use index::{
     delete_agent_artifact_index_row, query_agent_artifact_index,
-    rebuild_agent_artifact_index, upsert_agent_artifact_index_row,
-    AgentArtifactIndexQueryWire, AgentArtifactIndexUpdateWire,
-    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    rebuild_agent_artifact_index,
+    replace_agent_artifact_index_dismissed_agents,
+    upsert_agent_artifact_index_row, AgentArtifactIndexQueryWire,
+    AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 pub use scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
 pub use wire::{

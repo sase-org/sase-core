@@ -16,6 +16,7 @@
 //! - `rebuild_agent_artifact_index(index_path: str, projects_root: str, options: dict | None = None) -> dict`
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
+//! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict]) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
@@ -116,6 +117,7 @@ use sase_core::agent_scan::{
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     query_agent_artifact_index as core_query_agent_artifact_index,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
+    replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
     scan_agent_artifacts as core_scan_agent_artifacts,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
@@ -456,6 +458,41 @@ fn py_delete_agent_artifact_index_row<'py>(
     let update = py
         .allow_threads(|| {
             core_delete_agent_artifact_index_row(&index, &artifact)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Replace dismissed identities in the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "replace_agent_artifact_index_dismissed_agents")]
+fn py_replace_agent_artifact_index_dismissed_agents<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    identities: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let mut wire_identities: Vec<AgentCleanupIdentityWire> =
+        Vec::with_capacity(identities.len());
+    for (idx, item) in identities.iter().enumerate() {
+        let json = py_to_json_value(&item)?;
+        let identity: AgentCleanupIdentityWire =
+            serde_json::from_value(json).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "identities[{idx}] is not a valid AgentCleanupIdentityWire dict: {e}"
+                ))
+            })?;
+        wire_identities.push(identity);
+    }
+    let index = PathBuf::from(index_path);
+    let update = py
+        .allow_threads(|| {
+            core_replace_agent_artifact_index_dismissed_agents(
+                &index,
+                &wire_identities,
+            )
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&update).map_err(|e| {
@@ -2290,6 +2327,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rebuild_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_replace_agent_artifact_index_dismissed_agents,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
