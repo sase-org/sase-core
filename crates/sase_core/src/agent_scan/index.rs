@@ -23,7 +23,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 2;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -269,7 +269,7 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if let Some(parent) = index_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let conn = Connection::open(index_path).map_err(|e| e.to_string())?;
+    let mut conn = Connection::open(index_path).map_err(|e| e.to_string())?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     conn.execute_batch(
@@ -339,12 +339,68 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
         "#,
     )
     .map_err(|e| e.to_string())?;
+
+    let prior_version: Option<u32> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok());
+
+    if prior_version.map_or(false, |v| v < 2) {
+        migrate_recompute_hidden_v2(&mut conn)?;
+    }
+
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
         [AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// One-shot v1 → v2 migration: recompute `hidden` for previously-indexed
+/// rows that the old projection marked hidden purely because the workflow
+/// was anonymous (`is_anonymous = true`). Idempotent; safe to run on an
+/// already-migrated index (no rows will change because `is_anonymous` no
+/// longer participates in `RecordSummary::from_record`).
+fn migrate_recompute_hidden_v2(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let updates: Vec<(String, i64)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT artifact_dir, record_json FROM agent_artifacts \
+                 WHERE hidden = 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut updates: Vec<(String, i64)> = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let Ok(record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            let new_hidden = RecordSummary::from_record(&record).hidden;
+            if !new_hidden {
+                updates.push((artifact_dir, 0));
+            }
+        }
+        updates
+    };
+    for (artifact_dir, hidden) in updates {
+        tx.execute(
+            "UPDATE agent_artifacts SET hidden = ?1 WHERE artifact_dir = ?2",
+            params![hidden, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn upsert_record(
@@ -652,8 +708,7 @@ impl RecordSummary {
             workflow_status,
             hidden: meta.map(|m| m.hidden).unwrap_or(false)
                 || done.map(|d| d.hidden).unwrap_or(false)
-                || workflow_state.map(|w| w.hidden).unwrap_or(false)
-                || workflow_state.map(|w| w.is_anonymous).unwrap_or(false),
+                || workflow_state.map(|w| w.hidden).unwrap_or(false),
             parent_timestamp: meta.and_then(|m| m.parent_timestamp.clone()),
             step_index: first_step.and_then(|s| s.step_index),
             step_name: first_step.map(|s| s.step_name.clone()),
@@ -1246,5 +1301,215 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.records.len(), 1);
         assert_eq!(snapshot.records[0].timestamp, "20260514140000");
+    }
+
+    #[test]
+    fn anonymous_appears_as_agent_workflow_is_not_hidden() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521100533");
+        write_json(
+            &artifact_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "tmp_260521_104058",
+                "status": "completed",
+                "appears_as_agent": true,
+                "is_anonymous": true,
+                "hidden": false,
+                "start_time": "2026-05-21T10:05:33Z",
+                "steps": []
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "tmp_260521_104058",
+                "cl_name": "cl_anon",
+                "hidden": false
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260521100533");
+    }
+
+    #[test]
+    fn explicit_workflow_state_hidden_is_still_filtered() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521100600");
+        write_json(
+            &artifact_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "tmp_260521_104100",
+                "status": "completed",
+                "appears_as_agent": true,
+                "is_anonymous": true,
+                "hidden": true,
+                "start_time": "2026-05-21T10:06:00Z",
+                "steps": []
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "tmp_260521_104100",
+                "cl_name": "cl_hidden"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn migration_recomputes_hidden_for_v1_indexes() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        // Visible-but-anonymous: would have been wrongly hidden by v1.
+        let anon_dir = artifact(&projects, "20260521110000");
+        write_json(
+            &anon_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "tmp_anon",
+                "status": "completed",
+                "appears_as_agent": true,
+                "is_anonymous": true,
+                "hidden": false,
+                "steps": []
+            }),
+        );
+        write_json(
+            &anon_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "tmp_anon",
+                "cl_name": "cl_anon"
+            }),
+        );
+        // Truly hidden: workflow_state.hidden = true. Must stay hidden.
+        let hidden_dir = artifact(&projects, "20260521110001");
+        write_json(
+            &hidden_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "wf_hidden",
+                "status": "completed",
+                "hidden": true,
+                "steps": []
+            }),
+        );
+        write_json(
+            &hidden_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "wf_hidden",
+                "cl_name": "cl_hidden"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        // Force the index back to the v1 state: schema_version=1 in meta,
+        // and the anonymous row's hidden bit flipped to 1 (matching what
+        // the buggy v1 projection would have written).
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) \
+                 VALUES ('schema_version', '1')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE agent_artifacts SET hidden = 1 WHERE artifact_dir = ?1",
+                [anon_dir.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        }
+
+        // Re-opening must run the migration and clear the spurious hidden
+        // bit on the anonymous row, while leaving the explicit-hidden row
+        // untouched.
+        let _conn = open_index(&index).unwrap();
+        let conn = Connection::open(&index).unwrap();
+        let anon_hidden: i64 = conn
+            .query_row(
+                "SELECT hidden FROM agent_artifacts WHERE artifact_dir = ?1",
+                [anon_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(anon_hidden, 0);
+        let hidden_hidden: i64 = conn
+            .query_row(
+                "SELECT hidden FROM agent_artifacts WHERE artifact_dir = ?1",
+                [hidden_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hidden_hidden, 1);
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
     }
 }
