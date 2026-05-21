@@ -271,7 +271,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
 }
 
 #[tokio::test]
-async fn stdio_jsonrpc_frontmatter_input_type_diagnostic() {
+async fn stdio_jsonrpc_frontmatter_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
     let definition_path = temp.path().join("foo.md");
     fs::write(&definition_path, "foo").unwrap();
@@ -328,7 +328,7 @@ async fn stdio_jsonrpc_frontmatter_input_type_diagnostic() {
                     "uri": "file:///tmp/bad_pick_plan_xprompt.md",
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "---\ninput:\n  name: wordd\n---\nBody"
+                    "text": "---\nowner: me\ninput:\n  target: wordd\nsnippet: bad-trigger!\nkeywords: [topic]\nskill: true\n---\nBody"
                 }
             }
         }),
@@ -344,15 +344,27 @@ async fn stdio_jsonrpc_frontmatter_input_type_diagnostic() {
             saw_frontmatter_diagnostic = message["params"]["diagnostics"]
                 .as_array()
                 .is_some_and(|diagnostics| {
-                    diagnostics.iter().any(|diagnostic| {
+                    let expected_codes = [
+                        "unknown_xprompt_frontmatter_field",
+                        "invalid_xprompt_frontmatter_input_type",
+                        "invalid_xprompt_frontmatter_snippet_trigger",
+                        "missing_xprompt_memory_tag",
+                        "missing_xprompt_skill_description",
+                    ];
+                    expected_codes.iter().all(|code| {
+                        diagnostics.iter().any(|diagnostic| {
+                            diagnostic["source"] == "sase-xprompt"
+                                && diagnostic["code"] == *code
+                        })
+                    }) && diagnostics.iter().any(|diagnostic| {
                         diagnostic["source"] == "sase-xprompt"
                             && diagnostic["severity"] == 1
                             && diagnostic["code"]
                                 == "invalid_xprompt_frontmatter_input_type"
-                            && diagnostic["range"]["start"]["line"] == 2
-                            && diagnostic["range"]["start"]["character"] == 8
-                            && diagnostic["range"]["end"]["line"] == 2
-                            && diagnostic["range"]["end"]["character"] == 13
+                            && diagnostic["range"]["start"]["line"] == 3
+                            && diagnostic["range"]["start"]["character"] == 10
+                            && diagnostic["range"]["end"]["line"] == 3
+                            && diagnostic["range"]["end"]["character"] == 15
                     })
                 });
             if saw_frontmatter_diagnostic {

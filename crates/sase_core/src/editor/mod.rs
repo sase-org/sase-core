@@ -3,6 +3,7 @@ pub mod definition;
 pub mod diagnostics;
 pub mod directive;
 pub mod file;
+mod frontmatter;
 pub mod hover;
 pub mod token;
 pub mod wire;
