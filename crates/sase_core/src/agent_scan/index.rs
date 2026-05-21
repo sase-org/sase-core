@@ -44,6 +44,8 @@ pub struct AgentArtifactIndexQueryWire {
     #[serde(default)]
     pub include_full_history: bool,
     #[serde(default)]
+    pub active_limit: Option<u32>,
+    #[serde(default)]
     pub recent_completed_limit: Option<u32>,
     #[serde(default)]
     pub include_hidden: bool,
@@ -55,6 +57,7 @@ impl Default for AgentArtifactIndexQueryWire {
             include_active: true,
             include_recent_completed: true,
             include_full_history: false,
+            active_limit: None,
             recent_completed_limit: Some(200),
             include_hidden: false,
         }
@@ -211,7 +214,7 @@ pub fn query_agent_artifact_index(
         select_records(
             &conn,
             active_where(query.include_hidden),
-            query.recent_completed_limit,
+            query.active_limit,
             &mut stats,
             &mut by_dir,
         )?;
@@ -789,6 +792,7 @@ mod tests {
                 include_active: true,
                 include_recent_completed: true,
                 include_full_history: true,
+                active_limit: None,
                 recent_completed_limit: Some(10),
                 include_hidden: false,
             },
@@ -906,7 +910,8 @@ mod tests {
                 include_active: true,
                 include_recent_completed: false,
                 include_full_history: false,
-                recent_completed_limit: Some(2),
+                active_limit: Some(2),
+                recent_completed_limit: Some(10),
                 include_hidden: false,
             },
             AgentArtifactScanOptionsWire::default(),
@@ -919,6 +924,74 @@ mod tests {
             .map(|record| record.timestamp.as_str())
             .collect();
         assert_eq!(timestamps, vec!["20260513120003", "20260513120004"]);
+    }
+
+    #[test]
+    fn recent_completed_limit_does_not_bound_active_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for index in 0..3 {
+            let artifact_dir =
+                artifact(&projects, &format!("2026051313000{index}"));
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({"name": format!("active-{index}")}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(1),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.records.len(), 3);
+    }
+
+    #[test]
+    fn index_query_wire_round_trips_active_limit() {
+        let query: AgentArtifactIndexQueryWire =
+            serde_json::from_value(json!({
+                "include_active": true,
+                "include_recent_completed": false,
+                "include_full_history": false,
+                "active_limit": 7,
+                "recent_completed_limit": 11,
+                "include_hidden": true,
+            }))
+            .unwrap();
+
+        assert_eq!(query.active_limit, Some(7));
+        let payload = serde_json::to_value(&query).unwrap();
+        assert_eq!(payload["active_limit"], json!(7));
+
+        let legacy: AgentArtifactIndexQueryWire =
+            serde_json::from_value(json!({
+                "include_active": true,
+                "include_recent_completed": true,
+                "include_full_history": false,
+                "recent_completed_limit": 5,
+                "include_hidden": false,
+            }))
+            .unwrap();
+        assert_eq!(legacy.active_limit, None);
     }
 
     #[test]
@@ -955,6 +1028,7 @@ mod tests {
                 include_active: true,
                 include_recent_completed: false,
                 include_full_history: false,
+                active_limit: None,
                 recent_completed_limit: Some(10),
                 include_hidden: false,
             },
@@ -998,6 +1072,7 @@ mod tests {
                 include_active: false,
                 include_recent_completed: false,
                 include_full_history: true,
+                active_limit: None,
                 recent_completed_limit: None,
                 include_hidden: false,
             },
@@ -1013,6 +1088,7 @@ mod tests {
                 include_active: false,
                 include_recent_completed: false,
                 include_full_history: true,
+                active_limit: None,
                 recent_completed_limit: None,
                 include_hidden: true,
             },
@@ -1053,6 +1129,7 @@ mod tests {
                 include_active: false,
                 include_recent_completed: true,
                 include_full_history: false,
+                active_limit: None,
                 recent_completed_limit: Some(10),
                 include_hidden: false,
             },

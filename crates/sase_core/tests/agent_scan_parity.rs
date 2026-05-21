@@ -818,6 +818,7 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             include_active: true,
             include_recent_completed: true,
             include_full_history: true,
+            active_limit: None,
             recent_completed_limit: Some(10),
             include_hidden: false,
         },
