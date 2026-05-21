@@ -457,7 +457,7 @@ fn upsert_record(
 
 fn select_records(
     conn: &Connection,
-    where_sql: &str,
+    where_sql: String,
     limit: Option<u32>,
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
@@ -490,80 +490,86 @@ fn select_records(
     Ok(())
 }
 
-fn active_where(include_hidden: bool) -> &'static str {
+fn active_where(include_hidden: bool) -> String {
     if include_hidden {
         "WHERE has_done_marker = 0
          OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          ORDER BY timestamp DESC"
+            .to_string()
     } else {
-        "WHERE hidden = 0 AND (
+        format!(
+            "WHERE hidden = 0 AND (
             has_done_marker = 0
             OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          )
-         AND NOT EXISTS (
-             SELECT 1 FROM dismissed_agents dismissed
-             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
-               AND dismissed.agent_type =
-                   CASE agent_artifacts.agent_type
-                       WHEN 'workflow' THEN 'workflow'
-                       ELSE 'run'
-                   END
-               AND (
-                   dismissed.cl_name = agent_artifacts.cl_name
-                   OR dismissed.cl_name = 'unknown'
-                   OR agent_artifacts.cl_name IS NULL
-               )
-         )
+         AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY timestamp DESC"
+        )
     }
 }
 
-fn completed_where(include_hidden: bool) -> &'static str {
+fn completed_where(include_hidden: bool) -> String {
     if include_hidden {
         "WHERE has_done_marker = 1
+         OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
+            .to_string()
     } else {
-        "WHERE hidden = 0 AND has_done_marker = 1
-         AND NOT EXISTS (
-             SELECT 1 FROM dismissed_agents dismissed
-             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
-               AND dismissed.agent_type =
-                   CASE agent_artifacts.agent_type
-                       WHEN 'workflow' THEN 'workflow'
-                       ELSE 'run'
-                   END
-               AND (
-                   dismissed.cl_name = agent_artifacts.cl_name
-                   OR dismissed.cl_name = 'unknown'
-                   OR agent_artifacts.cl_name IS NULL
-               )
+        format!(
+            "WHERE hidden = 0
+         AND (
+             has_done_marker = 1
+             OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')
          )
+         AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
+        )
     }
 }
 
-fn visible_where(include_hidden: bool) -> &'static str {
+fn visible_where(include_hidden: bool) -> String {
     if include_hidden {
         "ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
+            .to_string()
     } else {
-        "WHERE hidden = 0
-         AND NOT EXISTS (
-             SELECT 1 FROM dismissed_agents dismissed
-             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
-               AND dismissed.agent_type =
-                   CASE agent_artifacts.agent_type
-                       WHEN 'workflow' THEN 'workflow'
-                       ELSE 'run'
-                   END
-               AND (
-                   dismissed.cl_name = agent_artifacts.cl_name
-                   OR dismissed.cl_name = 'unknown'
-                   OR agent_artifacts.cl_name IS NULL
-               )
-         )
+        format!(
+            "WHERE hidden = 0
+         AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
+        )
     }
 }
+
+const DISMISSED_NORMAL_VISIBILITY_FILTER: &str = r#"NOT EXISTS (
+             SELECT 1 FROM dismissed_agents dismissed
+             WHERE dismissed.raw_suffix = agent_artifacts.timestamp
+               AND (
+                   (
+                       agent_artifacts.has_done_marker = 1
+                       OR agent_artifacts.workflow_status IN (
+                           'completed', 'failed', 'cancelled', 'noop'
+                       )
+                       OR (
+                           agent_artifacts.has_running_marker = 0
+                           AND agent_artifacts.has_waiting_marker = 0
+                           AND agent_artifacts.has_workflow_state = 0
+                           AND agent_artifacts.has_done_marker = 0
+                       )
+                   )
+                   OR (
+                       dismissed.agent_type =
+                           CASE agent_artifacts.agent_type
+                               WHEN 'workflow' THEN 'workflow'
+                               ELSE 'run'
+                           END
+                       AND (
+                           dismissed.cl_name = agent_artifacts.cl_name
+                           OR dismissed.cl_name = 'unknown'
+                           OR agent_artifacts.cl_name IS NULL
+                       )
+                   )
+               )
+         )"#;
 
 #[derive(Default)]
 struct RecordSummary {
@@ -1039,6 +1045,66 @@ mod tests {
     }
 
     #[test]
+    fn stale_dismissed_suffixes_do_not_consume_active_limit() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let mut dismissed = Vec::new();
+        for index in 0..1_000 {
+            let timestamp = format!("20260515{index:06}");
+            let artifact_dir = artifact(&projects, &timestamp);
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({
+                    "name": format!("stale-dismissed-{index}"),
+                    "cl_name": "current_shape",
+                }),
+            );
+            dismissed.push(AgentCleanupIdentityWire {
+                agent_type: "workflow".to_string(),
+                cl_name: "historical_shape".to_string(),
+                raw_suffix: Some(timestamp),
+            });
+        }
+        for timestamp in ["20260514000001", "20260514000002"] {
+            write_json(
+                &artifact(&projects, timestamp).join("agent_meta.json"),
+                json!({"name": format!("visible-{timestamp}")}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        replace_agent_artifact_index_dismissed_agents(&index, &dismissed)
+            .unwrap();
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let visible = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: Some(5),
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: Vec<&str> = visible
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(timestamps, vec!["20260514000001", "20260514000002"]);
+    }
+
+    #[test]
     fn hidden_inclusive_full_history_can_inspect_dismissed_rows() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
@@ -1138,5 +1204,47 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.records.len(), 1);
         assert_eq!(snapshot.records[0].timestamp, "20260514130000");
+    }
+
+    #[test]
+    fn terminal_workflow_state_rows_are_recent_completed_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260514140000");
+        write_json(
+            &artifact_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "wf",
+                "status": "failed",
+                "cl_name": "cl_failed",
+                "start_time": "2026-05-14T14:00:00Z",
+                "steps": []
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260514140000");
     }
 }
