@@ -23,16 +23,20 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 3;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
     "done.json",
     "running.json",
     "waiting.json",
+    "pending_question.json",
     "workflow_state.json",
     "plan_path.json",
 ];
+
+const TERMINAL_WORKFLOW_STATUSES: &[&str] =
+    &["completed", "failed", "cancelled", "noop"];
 
 /// Query knobs for the persistent artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,12 +213,15 @@ pub fn query_agent_artifact_index(
     let conn = open_index(index_path)?;
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
+    repair_stale_rows_for_query(&conn, &query, &options)?;
 
     if query.include_active {
         select_records(
             &conn,
             active_where(query.include_hidden),
             query.active_limit,
+            RecordSelection::Active,
+            query.include_hidden,
             &mut stats,
             &mut by_dir,
             &options,
@@ -226,6 +233,8 @@ pub fn query_agent_artifact_index(
             &conn,
             completed_where(query.include_hidden),
             query.recent_completed_limit,
+            RecordSelection::Completed,
+            query.include_hidden,
             &mut stats,
             &mut by_dir,
             &options,
@@ -237,6 +246,8 @@ pub fn query_agent_artifact_index(
             &conn,
             visible_where(query.include_hidden),
             None,
+            RecordSelection::Visible,
+            query.include_hidden,
             &mut stats,
             &mut by_dir,
             &options,
@@ -316,6 +327,7 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             done_sig TEXT,
             running_sig TEXT,
             waiting_sig TEXT,
+            pending_question_sig TEXT,
             workflow_state_sig TEXT,
             plan_path_sig TEXT,
             prompt_steps_sig TEXT,
@@ -355,6 +367,9 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if prior_version.map_or(false, |v| v < 2) {
         migrate_recompute_hidden_v2(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 3) {
+        ensure_agent_artifacts_column(&conn, "pending_question_sig", "TEXT")?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -362,6 +377,31 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+fn ensure_agent_artifacts_column(
+    conn: &Connection,
+    column: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(agent_artifacts)")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let existing: String = row.get(1).map_err(|e| e.to_string())?;
+        if existing == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!(
+            "ALTER TABLE agent_artifacts ADD COLUMN {column} {column_type}"
+        ),
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn open_index_for_rebuild(index_path: &Path) -> Result<Connection, String> {
@@ -478,13 +518,14 @@ fn upsert_record(
             has_workflow_state, workflow_status, hidden, parent_timestamp,
             step_index, step_name, retry_of_timestamp, retried_as_timestamp,
             retry_chain_root_timestamp, retry_attempt, agent_meta_sig, done_sig,
-            running_sig, waiting_sig, workflow_state_sig, plan_path_sig,
-            prompt_steps_sig, record_json, indexed_at
+            running_sig, waiting_sig, pending_question_sig,
+            workflow_state_sig, plan_path_sig, prompt_steps_sig, record_json,
+            indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, ?33, ?34, ?35, ?36, CURRENT_TIMESTAMP
+            ?31, ?32, ?33, ?34, ?35, ?36, ?37, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -518,6 +559,7 @@ fn upsert_record(
             done_sig = excluded.done_sig,
             running_sig = excluded.running_sig,
             waiting_sig = excluded.waiting_sig,
+            pending_question_sig = excluded.pending_question_sig,
             workflow_state_sig = excluded.workflow_state_sig,
             plan_path_sig = excluded.plan_path_sig,
             prompt_steps_sig = excluded.prompt_steps_sig,
@@ -557,6 +599,7 @@ fn upsert_record(
             signatures.done,
             signatures.running,
             signatures.waiting,
+            signatures.pending_question,
             signatures.workflow_state,
             signatures.plan_path,
             signatures.prompt_steps,
@@ -567,10 +610,71 @@ fn upsert_record(
     Ok(())
 }
 
+fn repair_stale_rows_for_query(
+    conn: &Connection,
+    query: &AgentArtifactIndexQueryWire,
+    options: &AgentArtifactScanOptionsWire,
+) -> Result<(), String> {
+    let mut clauses: Vec<&str> = Vec::new();
+    if !query.include_hidden {
+        clauses.push("hidden = 1");
+    }
+    if query.include_recent_completed {
+        clauses.push(
+            "(has_done_marker = 0
+              OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop'))",
+        );
+    }
+    if clauses.is_empty() {
+        return Ok(());
+    }
+
+    let where_sql = format!("WHERE {}", clauses.join(" OR "));
+    refresh_stale_rows(conn, &where_sql, options)
+}
+
+fn refresh_stale_rows(
+    conn: &Connection,
+    where_sql: &str,
+    options: &AgentArtifactScanOptionsWire,
+) -> Result<(), String> {
+    let sql = format!(
+        "SELECT artifact_dir, projects_root, record_json, \
+         agent_meta_sig, done_sig, running_sig, waiting_sig, \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig FROM agent_artifacts {where_sql}"
+    );
+    let mut pending: Vec<PendingRow> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            pending.push(pending_row_from_sql(row)?);
+        }
+    }
+
+    for row in pending {
+        let current = MarkerSignatures::from_artifact_dir(&row.artifact_dir);
+        if row.stored == current {
+            continue;
+        }
+        let projects_root = PathBuf::from(&row.row_projects_root);
+        let artifact_dir = PathBuf::from(&row.artifact_dir);
+        if let Some(refreshed) =
+            scan_agent_artifact_dir(&projects_root, &artifact_dir, options)
+        {
+            let _ = upsert_record(conn, &projects_root, &refreshed);
+        }
+    }
+    Ok(())
+}
+
 fn select_records(
     conn: &Connection,
     where_sql: String,
     limit: Option<u32>,
+    selection: RecordSelection,
+    include_hidden: bool,
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
     options: &AgentArtifactScanOptionsWire,
@@ -578,7 +682,8 @@ fn select_records(
     let mut sql = format!(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
-         workflow_state_sig, plan_path_sig, prompt_steps_sig \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig \
          FROM agent_artifacts {where_sql}"
     );
     if limit.is_some() {
@@ -599,24 +704,10 @@ fn select_records(
             if by_dir.contains_key(&artifact_dir) {
                 continue;
             }
-            let row_projects_root: String =
-                row.get(1).map_err(|e| e.to_string())?;
-            let record_json: String = row.get(2).map_err(|e| e.to_string())?;
-            let stored = MarkerSignatures {
-                agent_meta: row.get(3).map_err(|e| e.to_string())?,
-                done: row.get(4).map_err(|e| e.to_string())?,
-                running: row.get(5).map_err(|e| e.to_string())?,
-                waiting: row.get(6).map_err(|e| e.to_string())?,
-                workflow_state: row.get(7).map_err(|e| e.to_string())?,
-                plan_path: row.get(8).map_err(|e| e.to_string())?,
-                prompt_steps: row.get(9).map_err(|e| e.to_string())?,
-            };
-            pending.push(PendingRow {
+            pending.push(pending_row_from_sql_with_artifact_dir(
+                row,
                 artifact_dir,
-                row_projects_root,
-                record_json,
-                stored,
-            });
+            )?);
         }
     }
 
@@ -661,9 +752,139 @@ fn select_records(
                 },
             }
         };
-        by_dir.insert(row.artifact_dir, record);
+        if record_matches_selection(conn, &record, selection, include_hidden)? {
+            by_dir.insert(row.artifact_dir, record);
+        }
     }
     Ok(())
+}
+
+fn pending_row_from_sql(row: &rusqlite::Row<'_>) -> Result<PendingRow, String> {
+    let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+    pending_row_from_sql_with_artifact_dir(row, artifact_dir)
+}
+
+fn pending_row_from_sql_with_artifact_dir(
+    row: &rusqlite::Row<'_>,
+    artifact_dir: String,
+) -> Result<PendingRow, String> {
+    let row_projects_root: String = row.get(1).map_err(|e| e.to_string())?;
+    let record_json: String = row.get(2).map_err(|e| e.to_string())?;
+    let stored = MarkerSignatures {
+        agent_meta: row.get(3).map_err(|e| e.to_string())?,
+        done: row.get(4).map_err(|e| e.to_string())?,
+        running: row.get(5).map_err(|e| e.to_string())?,
+        waiting: row.get(6).map_err(|e| e.to_string())?,
+        pending_question: row.get(7).map_err(|e| e.to_string())?,
+        workflow_state: row.get(8).map_err(|e| e.to_string())?,
+        plan_path: row.get(9).map_err(|e| e.to_string())?,
+        prompt_steps: row.get(10).map_err(|e| e.to_string())?,
+    };
+    Ok(PendingRow {
+        artifact_dir,
+        row_projects_root,
+        record_json,
+        stored,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordSelection {
+    Active,
+    Completed,
+    Visible,
+}
+
+fn record_matches_selection(
+    conn: &Connection,
+    record: &AgentArtifactRecordWire,
+    selection: RecordSelection,
+    include_hidden: bool,
+) -> Result<bool, String> {
+    let summary = RecordSummary::from_record(record);
+    if !include_hidden {
+        if summary.hidden {
+            return Ok(false);
+        }
+        if record_is_dismissed(conn, record, &summary)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(match selection {
+        RecordSelection::Active => record_is_active(record),
+        RecordSelection::Completed => record_is_completed(record),
+        RecordSelection::Visible => true,
+    })
+}
+
+fn record_is_active(record: &AgentArtifactRecordWire) -> bool {
+    !record.has_done_marker
+        || record.workflow_state.as_ref().is_some_and(|workflow| {
+            !is_terminal_workflow_status(&workflow.status)
+        })
+}
+
+fn record_is_completed(record: &AgentArtifactRecordWire) -> bool {
+    record.has_done_marker
+        || record.workflow_state.as_ref().is_some_and(|workflow| {
+            is_terminal_workflow_status(&workflow.status)
+        })
+}
+
+fn is_terminal_workflow_status(status: &str) -> bool {
+    TERMINAL_WORKFLOW_STATUSES.contains(&status)
+}
+
+fn record_is_dismissed(
+    conn: &Connection,
+    record: &AgentArtifactRecordWire,
+    summary: &RecordSummary,
+) -> Result<bool, String> {
+    let workflow_terminal = record
+        .workflow_state
+        .as_ref()
+        .is_some_and(|workflow| is_terminal_workflow_status(&workflow.status));
+    let inert_without_markers = record.running.is_none()
+        && record.waiting.is_none()
+        && record.workflow_state.is_none()
+        && !record.has_done_marker;
+    let terminal_or_inert =
+        record.has_done_marker || workflow_terminal || inert_without_markers;
+    let dismissed_agent_type = if summary.agent_type == "workflow" {
+        "workflow"
+    } else {
+        "run"
+    };
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT 1 FROM dismissed_agents dismissed
+            WHERE dismissed.raw_suffix = ?1
+              AND (
+                  ?2 = 1
+                  OR (
+                      dismissed.agent_type = ?3
+                      AND (
+                          dismissed.cl_name = ?4
+                          OR dismissed.cl_name = 'unknown'
+                          OR ?4 IS NULL
+                      )
+                  )
+              )
+            LIMIT 1
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params![
+            record.timestamp.as_str(),
+            terminal_or_inert as i64,
+            dismissed_agent_type,
+            summary.cl_name.as_deref(),
+        ])
+        .map_err(|e| e.to_string())?;
+    Ok(rows.next().map_err(|e| e.to_string())?.is_some())
 }
 
 struct PendingRow {
@@ -859,6 +1080,7 @@ struct MarkerSignatures {
     done: Option<String>,
     running: Option<String>,
     waiting: Option<String>,
+    pending_question: Option<String>,
     workflow_state: Option<String>,
     plan_path: Option<String>,
     prompt_steps: Option<String>,
@@ -872,6 +1094,9 @@ impl MarkerSignatures {
             done: marker_signature(&dir.join("done.json")),
             running: marker_signature(&dir.join("running.json")),
             waiting: marker_signature(&dir.join("waiting.json")),
+            pending_question: marker_signature(
+                &dir.join("pending_question.json"),
+            ),
             workflow_state: marker_signature(&dir.join("workflow_state.json")),
             plan_path: marker_signature(&dir.join("plan_path.json")),
             prompt_steps: None,
@@ -1937,6 +2162,244 @@ mod tests {
     }
 
     #[test]
+    fn query_self_heals_hidden_to_visible_before_visible_filter() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521153100");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "hidden-then-visible",
+                "run_started_at": "2026-05-21T15:31:00Z",
+                "hidden": true,
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let hidden = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(hidden.records.is_empty());
+
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "hidden-then-visible",
+                "run_started_at": "2026-05-21T15:31:00Z",
+                "hidden": false,
+            }),
+        );
+
+        let visible = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(visible.records.len(), 1);
+        assert_eq!(visible.records[0].timestamp, "20260521153100");
+    }
+
+    #[test]
+    fn query_self_heals_waiting_deletion_to_running() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521153200");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "wait-then-run",
+                "run_started_at": "2026-05-21T15:32:00Z",
+            }),
+        );
+        write_json(
+            &artifact_dir.join("waiting.json"),
+            json!({"waiting_for": ["parent"]}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        fs::remove_file(artifact_dir.join("waiting.json")).unwrap();
+
+        let refreshed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(refreshed.records.len(), 1);
+        assert!(refreshed.records[0].waiting.is_none());
+
+        let status: String = Connection::open(&index)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn query_self_heals_pending_question_creation_and_deletion() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521153300");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "question-agent",
+                "run_started_at": "2026-05-21T15:33:00Z",
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        write_json(
+            &artifact_dir.join("pending_question.json"),
+            json!({
+                "session_id": "question-session",
+                "request_path": "/tmp/question_request.json",
+            }),
+        );
+        let with_question = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            with_question.records[0]
+                .pending_question
+                .as_ref()
+                .and_then(|marker| marker.session_id.as_deref()),
+            Some("question-session")
+        );
+
+        fs::remove_file(artifact_dir.join("pending_question.json")).unwrap();
+        let without_question = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(without_question.records[0].pending_question.is_none());
+    }
+
+    #[test]
+    fn query_self_heals_done_creation_before_completed_filter() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521153400");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "active-then-done",
+                "run_started_at": "2026-05-21T15:34:00Z",
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "active-then-done",
+                "cl_name": "cl_completed",
+            }),
+        );
+
+        let completed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(completed.records.len(), 1);
+        assert_eq!(completed.records[0].timestamp, "20260521153400");
+        assert!(completed.records[0].has_done_marker);
+    }
+
+    #[test]
     fn query_skips_rescan_when_signatures_match() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
@@ -1979,10 +2442,7 @@ mod tests {
             conn.execute(
                 "UPDATE agent_artifacts SET record_json = ?1 \
                  WHERE artifact_dir = ?2",
-                params![
-                    record_json,
-                    artifact_dir.to_string_lossy().as_ref(),
-                ],
+                params![record_json, artifact_dir.to_string_lossy().as_ref(),],
             )
             .unwrap();
         }
