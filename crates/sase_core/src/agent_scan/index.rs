@@ -81,7 +81,7 @@ pub fn rebuild_agent_artifact_index(
     projects_root: &Path,
     options: AgentArtifactScanOptionsWire,
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let mut conn = open_index(index_path)?;
+    let mut conn = open_index_for_rebuild(index_path)?;
     let snapshot = scan_agent_artifacts(projects_root, options);
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM agent_artifacts", [])
@@ -359,6 +359,59 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+fn open_index_for_rebuild(index_path: &Path) -> Result<Connection, String> {
+    match open_index(index_path) {
+        Ok(conn) => Ok(conn),
+        Err(err)
+            if index_path.exists()
+                && is_sqlite_index_corruption_error(&err) =>
+        {
+            replace_unusable_index_file(index_path)?;
+            open_index(index_path).map_err(|retry_err| {
+                format!(
+                    "{retry_err} (after replacing corrupt artifact index: {err})"
+                )
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_sqlite_index_corruption_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("database disk image is malformed")
+        || lower.contains("file is not a database")
+        || lower.contains("not a database")
+        || lower.contains("malformed database schema")
+        || lower.contains("unsupported file format")
+}
+
+fn replace_unusable_index_file(index_path: &Path) -> Result<(), String> {
+    for path in [
+        index_path.to_path_buf(),
+        sqlite_sidecar_path(index_path, "-wal"),
+        sqlite_sidecar_path(index_path, "-shm"),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to remove unusable artifact index {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(index_path: &Path, suffix: &str) -> PathBuf {
+    let mut raw = index_path.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
 }
 
 /// One-shot v1 → v2 migration: recompute `hidden` for previously-indexed
@@ -865,6 +918,69 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         );
         assert_eq!(indexed.records, source.records);
+    }
+
+    #[test]
+    fn rebuild_replaces_corrupt_existing_index() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521143000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "active", "pid": 123}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        fs::write(&index, b"this is not a sqlite database").unwrap();
+        fs::write(sqlite_sidecar_path(&index, "-wal"), b"stale wal").unwrap();
+        fs::write(sqlite_sidecar_path(&index, "-shm"), b"stale shm").unwrap();
+
+        let update = rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(update.rows_indexed, 1);
+
+        let conn = Connection::open(&index).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+
+        let indexed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire::default(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(indexed.records.len(), 1);
+        assert_eq!(indexed.records[0].timestamp, "20260521143000");
+    }
+
+    #[test]
+    fn query_keeps_corrupt_existing_index_strict() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        fs::write(&index, b"this is not a sqlite database").unwrap();
+
+        let err = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire::default(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap_err();
+
+        assert!(is_sqlite_index_corruption_error(&err), "{err}");
+        assert_eq!(fs::read(&index).unwrap(), b"this is not a sqlite database");
     }
 
     #[test]
