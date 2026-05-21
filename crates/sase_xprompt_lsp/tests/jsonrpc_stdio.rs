@@ -271,6 +271,117 @@ async fn stdio_jsonrpc_initialize_and_completion() {
 }
 
 #[tokio::test]
+async fn stdio_jsonrpc_frontmatter_input_type_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/bad_pick_plan_xprompt.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "---\ninput:\n  name: wordd\n---\nBody"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_frontmatter_diagnostic = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            saw_frontmatter_diagnostic = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "sase-xprompt"
+                            && diagnostic["severity"] == 1
+                            && diagnostic["code"]
+                                == "invalid_xprompt_frontmatter_input_type"
+                            && diagnostic["range"]["start"]["line"] == 2
+                            && diagnostic["range"]["start"]["character"] == 8
+                            && diagnostic["range"]["end"]["line"] == 2
+                            && diagnostic["range"]["end"]["character"] == 13
+                    })
+                });
+            if saw_frontmatter_diagnostic {
+                break;
+            }
+        }
+    }
+    assert!(saw_frontmatter_diagnostic);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(2)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn stdio_jsonrpc_bare_snippet_completion() {
     let temp = tempfile::tempdir().unwrap();
     let definition_path = temp.path().join("foo.md");
