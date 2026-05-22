@@ -53,6 +53,7 @@ impl HelperHostBridge for FixtureBridge {
                 inputs: vec![MobileXpromptInputWire {
                     name: "path".to_string(),
                     r#type: "path".to_string(),
+                    description: Some("File to process".to_string()),
                     required: true,
                     default_display: None,
                     position: 0,

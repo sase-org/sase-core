@@ -486,6 +486,7 @@
     },
     "MobileXpromptInputWire": {
       "default_display": "string|null",
+      "description": "string|null; default null when absent",
       "name": "string",
       "position": "u32",
       "required": "bool",

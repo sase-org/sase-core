@@ -645,6 +645,8 @@ pub struct MobileXpromptInputWire {
     pub name: String,
     #[serde(rename = "type")]
     pub r#type: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub required: bool,
     pub default_display: Option<String>,
     pub position: u32,
@@ -859,6 +861,7 @@ mod tests {
                     inputs: vec![MobileXpromptInputWire {
                         name: "bead_id".to_string(),
                         r#type: "word".to_string(),
+                        description: None,
                         required: true,
                         default_display: None,
                         position: 0,
@@ -991,6 +994,7 @@ mod tests {
                     "inputs": [{
                         "name": "bead_id",
                         "type": "word",
+                        "description": null,
                         "required": true,
                         "default_display": null,
                         "position": 0
@@ -1153,7 +1157,13 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
             "project": null,
             "tags": [],
             "input_signature": null,
-            "inputs": [],
+            "inputs": [{
+                "name": "path",
+                "type": "path",
+                "required": true,
+                "default_display": null,
+                "position": 0
+            }],
             "is_skill": false,
             "content_preview": null,
             "source_path_display": "xprompts/review.md"
@@ -1162,6 +1172,7 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
             serde_json::from_value(old_json).unwrap();
         assert_eq!(old_entry.definition_path, None);
         assert_eq!(old_entry.definition_range, None);
+        assert_eq!(old_entry.inputs[0].description, None);
         assert_eq!(
             serde_json::to_value(&old_entry).unwrap(),
             json!({
@@ -1175,7 +1186,14 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
                 "project": null,
                 "tags": [],
                 "input_signature": null,
-                "inputs": [],
+                "inputs": [{
+                    "name": "path",
+                    "type": "path",
+                    "description": null,
+                    "required": true,
+                    "default_display": null,
+                    "position": 0
+                }],
                 "is_skill": false,
                 "content_preview": null,
                 "source_path_display": "xprompts/review.md"

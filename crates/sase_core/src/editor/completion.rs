@@ -44,6 +44,7 @@ pub fn assist_entries_from_catalog(
                     .map(|input| XpromptInputHint {
                         name: input.name.clone(),
                         r#type: input.r#type.clone(),
+                        description: input.description.clone(),
                         required: input.required,
                         default_display: input.default_display.clone(),
                         position: input.position,
@@ -183,10 +184,7 @@ pub fn build_xprompt_arg_name_candidates(
             display: insertion.clone(),
             insertion: insertion.clone(),
             detail: Some(input_label(input)),
-            documentation: input
-                .default_display
-                .as_ref()
-                .map(|default| format!("default: {default}")),
+            documentation: input_documentation(input),
             is_dir: false,
             name: input.name.clone(),
             replacement: replacement_range.map(|range| EditorTextEdit {
@@ -351,6 +349,7 @@ fn paren_arg_context(
         let placeholder = XpromptInputHint {
             name: String::new(),
             r#type: String::new(),
+            description: None,
             required: false,
             default_display: None,
             position: 0,
@@ -513,6 +512,25 @@ fn input_label(input: &XpromptInputHint) -> String {
     format!("{}{suffix}: {}", input.name, input.r#type)
 }
 
+fn input_documentation(input: &XpromptInputHint) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(description) = input
+        .description
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(description.to_string());
+    }
+    if let Some(default) = &input.default_display {
+        parts.push(format!("default: {default}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 fn snippet_documentation(entry: &EditorSnippetEntryWire) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(description) = entry
@@ -614,6 +632,7 @@ mod tests {
                     MobileXpromptInputWire {
                         name: "path".to_string(),
                         r#type: "path".to_string(),
+                        description: Some("Path to review".to_string()),
                         required: true,
                         default_display: None,
                         position: 0,
@@ -621,6 +640,7 @@ mod tests {
                     MobileXpromptInputWire {
                         name: "deep".to_string(),
                         r#type: "bool".to_string(),
+                        description: Some("Run a deeper pass".to_string()),
                         required: false,
                         default_display: Some("false".to_string()),
                         position: 1,
@@ -794,6 +814,7 @@ mod tests {
             inputs: vec![XpromptInputHint {
                 name: "arg".to_string(),
                 r#type: "word".to_string(),
+                description: None,
                 required: true,
                 default_display: None,
                 position: 0,
@@ -820,5 +841,9 @@ mod tests {
             None,
         );
         assert_eq!(list.candidates[0].insertion, "deep=");
+        assert_eq!(
+            list.candidates[0].documentation.as_deref(),
+            Some("Run a deeper pass\n\ndefault: false")
+        );
     }
 }

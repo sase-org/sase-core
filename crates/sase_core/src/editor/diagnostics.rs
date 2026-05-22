@@ -431,6 +431,7 @@ mod tests {
         XpromptInputHint {
             name: name.to_string(),
             r#type: r#type.to_string(),
+            description: None,
             required,
             default_display: None,
             position,
@@ -678,6 +679,36 @@ mod tests {
                         != "invalid_xprompt_frontmatter_input_default"
             }),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_input_descriptions_and_reports_invalid_shapes() {
+        for valid in [
+            "---\ninput:\n  short:\n    type: word\n    description: Short input description\n---\nBody",
+            "---\ninput:\n  - name: long\n    type: text\n    description: Long input description\n---\nBody",
+        ] {
+            let diagnostics = diagnostics_for(valid);
+            assert!(
+                diagnostics.iter().all(|diagnostic| {
+                    diagnostic.code != "unknown_xprompt_frontmatter_input_field"
+                        && diagnostic.code
+                            != "invalid_xprompt_frontmatter_input_description"
+                }),
+                "{diagnostics:?}"
+            );
+        }
+
+        let invalid =
+            "---\ninput:\n  short:\n    type: word\n    description: {}\n---\nBody";
+        let diagnostics = diagnostics_for(invalid);
+        assert_eq!(
+            diagnostic(
+                &diagnostics,
+                "invalid_xprompt_frontmatter_input_description"
+            )
+            .severity,
+            DiagnosticSeverity::Error
         );
     }
 

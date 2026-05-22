@@ -1335,6 +1335,7 @@ mod tests {
                     inputs: vec![MobileXpromptInputWire {
                         name: "topic".to_string(),
                         r#type: "word".to_string(),
+                        description: Some("Workflow topic".to_string()),
                         required: true,
                         default_display: None,
                         position: 0,
@@ -1390,6 +1391,7 @@ mod tests {
                     "inputs": [{
                         "name": "topic",
                         "type": "word",
+                        "description": "Workflow topic",
                         "required": true,
                         "default_display": null,
                         "position": 0

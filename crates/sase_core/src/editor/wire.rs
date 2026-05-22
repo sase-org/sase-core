@@ -83,6 +83,8 @@ pub struct XpromptInputHint {
     pub name: String,
     #[serde(rename = "type")]
     pub r#type: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub required: bool,
     pub default_display: Option<String>,
     pub position: u32,

@@ -46,6 +46,7 @@ impl XpromptCatalogLoadOptions {
 struct CatalogInput {
     name: String,
     type_name: String,
+    description: Option<String>,
     required: bool,
     default_display: Option<String>,
     default_snippet_value: Option<String>,
@@ -74,8 +75,10 @@ struct CatalogWorkflow {
     name: String,
     inputs: Vec<CatalogInput>,
     steps: Vec<CatalogStep>,
+    local_xprompts: Vec<CatalogXprompt>,
     source_path: Option<String>,
     tags: BTreeSet<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,10 +280,35 @@ fn filter_structured_sources(
                 }
             }
             if let Some(query) = normalized_query.as_deref() {
+                let input_descriptions = entry
+                    .workflow
+                    .inputs
+                    .iter()
+                    .filter_map(|input| input.description.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let local_xprompt_text = entry
+                    .workflow
+                    .local_xprompts
+                    .iter()
+                    .flat_map(|xprompt| {
+                        xprompt
+                            .description
+                            .iter()
+                            .map(String::as_str)
+                            .chain(std::iter::once(xprompt.content.as_str()))
+                            .chain(xprompt.inputs.iter().filter_map(|input| {
+                                input.description.as_deref()
+                            }))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 let haystack = format!(
-                    "{}\n{}\n{}\n{}",
+                    "{}\n{}\n{}\n{}\n{}\n{}",
                     entry.name,
                     entry.description.as_deref().unwrap_or_default(),
+                    input_descriptions,
+                    local_xprompt_text,
                     entry.content,
                     entry
                         .workflow
@@ -334,6 +362,7 @@ fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileXpromptInputWire> {
         .map(|(position, input)| MobileXpromptInputWire {
             name: input.name.clone(),
             r#type: input.type_name.clone(),
+            description: input.description.clone(),
             required: input.required,
             default_display: input.default_display.clone(),
             position: position as u32,
@@ -636,10 +665,10 @@ impl CatalogLoader {
                 let content = workflow_prompt_part(&workflow);
                 sources.push(StructuredSource {
                     name,
+                    description: workflow.description.clone(),
                     workflow,
                     bucket,
                     project: source_project,
-                    description: None,
                     is_skill: false,
                     content,
                     definition_section: DefinitionSection::Workflows,
@@ -1534,6 +1563,20 @@ fn workflow_from_mapping(
     let tags = mapping_get(data, "tags")
         .map(parse_tags)
         .unwrap_or_default();
+    let description =
+        mapping_get(data, "description").and_then(value_as_string);
+    let local_xprompts = mapping_get(data, "xprompts")
+        .and_then(Value::as_mapping)
+        .map(|xprompts| {
+            xprompts
+                .iter()
+                .filter_map(|(name, value)| {
+                    let name = value_as_string(name)?;
+                    xprompt_from_config_entry(&name, value, source_path)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let mut inputs = mapping_get(data, "input")
         .map(parse_inputs)
         .unwrap_or_default();
@@ -1559,6 +1602,7 @@ fn workflow_from_mapping(
             inputs.push(CatalogInput {
                 name: step.name.clone(),
                 type_name: "line".to_string(),
+                description: None,
                 required: true,
                 default_display: None,
                 default_snippet_value: None,
@@ -1570,8 +1614,10 @@ fn workflow_from_mapping(
         name: name.to_string(),
         inputs,
         steps,
+        local_xprompts,
         source_path: Some(source_path.to_string()),
         tags,
+        description,
     }
 }
 
@@ -1651,8 +1697,10 @@ fn xprompt_to_workflow(xprompt: &CatalogXprompt) -> CatalogWorkflow {
             prompt_part: Some(xprompt.content.clone()),
             has_output: false,
         }],
+        local_xprompts: Vec::new(),
         source_path: xprompt.source_path.clone(),
         tags: xprompt.tags.clone(),
+        description: xprompt.description.clone(),
     }
 }
 
@@ -1664,6 +1712,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                 let name = value_as_string(name)?;
                 let (
                     type_name,
+                    description,
                     required,
                     default_display,
                     default_snippet_value,
@@ -1671,6 +1720,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                 Some(CatalogInput {
                     name,
                     type_name,
+                    description,
                     required,
                     default_display,
                     default_snippet_value,
@@ -1691,9 +1741,12 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     .map(|raw| parse_input_type(&raw))
                     .unwrap_or_else(|| "line".to_string());
                 let default = mapping_get(mapping, "default");
+                let description = mapping_get(mapping, "description")
+                    .and_then(value_as_string);
                 Some(CatalogInput {
                     name,
                     type_name,
+                    description,
                     required: default.is_none(),
                     default_display: default.and_then(default_display),
                     default_snippet_value: default.map(snippet_default_value),
@@ -1707,15 +1760,18 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
 
 fn parse_short_input_value(
     value: &Value,
-) -> (String, bool, Option<String>, Option<String>) {
+) -> (String, Option<String>, bool, Option<String>, Option<String>) {
     if let Some(mapping) = value.as_mapping() {
         let type_name = mapping_get(mapping, "type")
             .and_then(value_as_string)
             .map(|raw| parse_input_type(&raw))
             .unwrap_or_else(|| "line".to_string());
         let default = mapping_get(mapping, "default");
+        let description =
+            mapping_get(mapping, "description").and_then(value_as_string);
         (
             type_name,
+            description,
             default.is_none(),
             default.and_then(default_display),
             default.map(snippet_default_value),
@@ -1725,6 +1781,7 @@ fn parse_short_input_value(
             parse_input_type(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
             ),
+            None,
             true,
             None,
             None,
@@ -2128,6 +2185,87 @@ mod tests {
                 ("count", "int", false, Some("3"), 3),
                 ("enabled", "bool", false, Some("false"), 4),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_xprompt_workflow_and_input_descriptions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join("xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("long.md"),
+            "---\ndescription: Long prompt\ninput:\n  - name: prompt\n    type: text\n    description: User request for the prompt.\n---\nBody {{ prompt }}",
+        )
+        .unwrap();
+        fs::write(
+            xprompts.join("nested.md"),
+            "---\ninput:\n  target:\n    type: word\n    description: Target name to inspect.\n---\nTarget {{ target }}",
+        )
+        .unwrap();
+        fs::write(
+            xprompts.join("ship.yml"),
+            "description: Ship workflow\ninput:\n  path:\n    type: path\n    description: Source path for workflow.\nxprompts:\n  _helper:\n    description: Local helper summary.\n    input:\n      topic:\n        type: word\n        description: Local topic description.\n    content: Helper {{ topic }}\nsteps:\n  - name: main\n    prompt_part: Ship {{ path }}\n",
+        )
+        .unwrap();
+
+        let response = load_editor_xprompt_catalog(
+            &request(),
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let by_name = response
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_name["long"].description.as_deref(), Some("Long prompt"));
+        assert_eq!(
+            by_name["long"].inputs[0].description.as_deref(),
+            Some("User request for the prompt.")
+        );
+        assert_eq!(
+            by_name["nested"].inputs[0].description.as_deref(),
+            Some("Target name to inspect.")
+        );
+        assert_eq!(
+            by_name["ship"].description.as_deref(),
+            Some("Ship workflow")
+        );
+        assert_eq!(
+            by_name["ship"].inputs[0].description.as_deref(),
+            Some("Source path for workflow.")
+        );
+        let mut filtered_request = request();
+        filtered_request.query = Some("local helper summary".to_string());
+        let filtered = load_editor_xprompt_catalog(
+            &filtered_request,
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        assert_eq!(
+            filtered
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ship"]
+        );
+        filtered_request.query = Some("local topic description".to_string());
+        let filtered = load_editor_xprompt_catalog(
+            &filtered_request,
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        assert_eq!(
+            filtered
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ship"]
         );
     }
 
@@ -2695,8 +2833,10 @@ mod tests {
                     prompt_part: Some("body".to_string()),
                     has_output: false,
                 }],
+                local_xprompts: Vec::new(),
                 source_path: Some("plugin:module/plugin.md".to_string()),
                 tags: BTreeSet::new(),
+                description: None,
             },
             bucket: "plugin".to_string(),
             project: None,

@@ -3099,6 +3099,7 @@ mod tests {
                         inputs: vec![crate::wire::MobileXpromptInputWire {
                             name: "topic".to_string(),
                             r#type: "word".to_string(),
+                            description: Some("Workflow topic".to_string()),
                             required: true,
                             default_display: None,
                             position: 0,

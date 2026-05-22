@@ -218,10 +218,12 @@ pub fn query_agent_artifact_index(
     if query.include_active {
         select_records(
             &conn,
-            active_where(query.include_hidden),
-            query.active_limit,
-            RecordSelection::Active,
-            query.include_hidden,
+            SelectRecordsQuery {
+                where_sql: active_where(query.include_hidden),
+                limit: query.active_limit,
+                selection: RecordSelection::Active,
+                include_hidden: query.include_hidden,
+            },
             &mut stats,
             &mut by_dir,
             &options,
@@ -231,10 +233,12 @@ pub fn query_agent_artifact_index(
     if query.include_recent_completed {
         select_records(
             &conn,
-            completed_where(query.include_hidden),
-            query.recent_completed_limit,
-            RecordSelection::Completed,
-            query.include_hidden,
+            SelectRecordsQuery {
+                where_sql: completed_where(query.include_hidden),
+                limit: query.recent_completed_limit,
+                selection: RecordSelection::Completed,
+                include_hidden: query.include_hidden,
+            },
             &mut stats,
             &mut by_dir,
             &options,
@@ -244,10 +248,12 @@ pub fn query_agent_artifact_index(
     if query.include_full_history {
         select_records(
             &conn,
-            visible_where(query.include_hidden),
-            None,
-            RecordSelection::Visible,
-            query.include_hidden,
+            SelectRecordsQuery {
+                where_sql: visible_where(query.include_hidden),
+                limit: None,
+                selection: RecordSelection::Visible,
+                include_hidden: query.include_hidden,
+            },
             &mut stats,
             &mut by_dir,
             &options,
@@ -364,7 +370,7 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
         .ok()
         .and_then(|raw| raw.parse::<u32>().ok());
 
-    if prior_version.map_or(false, |v| v < 2) {
+    if prior_version.is_some_and(|v| v < 2) {
         migrate_recompute_hidden_v2(&mut conn)?;
     }
     if prior_version.map_or(true, |v| v < 3) {
@@ -671,10 +677,7 @@ fn refresh_stale_rows(
 
 fn select_records(
     conn: &Connection,
-    where_sql: String,
-    limit: Option<u32>,
-    selection: RecordSelection,
-    include_hidden: bool,
+    query: SelectRecordsQuery,
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
     options: &AgentArtifactScanOptionsWire,
@@ -684,16 +687,17 @@ fn select_records(
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
          prompt_steps_sig \
-         FROM agent_artifacts {where_sql}"
+         FROM agent_artifacts {}",
+        query.where_sql
     );
-    if limit.is_some() {
+    if query.limit.is_some() {
         sql.push_str(" LIMIT ?1");
     }
 
     let mut pending: Vec<PendingRow> = Vec::new();
     {
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = if let Some(limit) = limit {
+        let mut rows = if let Some(limit) = query.limit {
             stmt.query([limit]).map_err(|e| e.to_string())?
         } else {
             stmt.query([]).map_err(|e| e.to_string())?
@@ -752,7 +756,12 @@ fn select_records(
                 },
             }
         };
-        if record_matches_selection(conn, &record, selection, include_hidden)? {
+        if record_matches_selection(
+            conn,
+            &record,
+            query.selection,
+            query.include_hidden,
+        )? {
             by_dir.insert(row.artifact_dir, record);
         }
     }
@@ -793,6 +802,13 @@ enum RecordSelection {
     Active,
     Completed,
     Visible,
+}
+
+struct SelectRecordsQuery {
+    where_sql: String,
+    limit: Option<u32>,
+    selection: RecordSelection,
+    include_hidden: bool,
 }
 
 fn record_matches_selection(

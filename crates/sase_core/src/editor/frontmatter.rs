@@ -352,6 +352,16 @@ fn validate_shortform_inputs(
             }),
             item_range,
         );
+        if let Some(mapping) = raw.as_mapping() {
+            validate_input_description(
+                builder,
+                yaml_mapping_get(mapping, "description"),
+                source
+                    .as_ref()
+                    .and_then(|source| source.field("description")),
+                item_range,
+            );
+        }
         validate_nested_input_unknown_keys(builder, source.as_ref());
     }
 }
@@ -438,6 +448,14 @@ fn validate_longform_inputs(
                     .and_then(|field| field.scalar.as_ref())
                     .map(|scalar| scalar.range)
             }),
+            item_range,
+        );
+        validate_input_description(
+            builder,
+            yaml_mapping_get(mapping, "description"),
+            source
+                .as_ref()
+                .and_then(|source| source.field("description")),
             item_range,
         );
         validate_longform_unknown_keys(builder, source.as_ref());
@@ -619,6 +637,39 @@ fn validate_input_default(
     }
 }
 
+fn validate_input_description(
+    builder: &mut FrontmatterDiagnosticBuilder<'_>,
+    description: Option<&Value>,
+    source: Option<&KeyValueSource>,
+    fallback_range: (usize, usize),
+) {
+    let Some(description) = description else {
+        return;
+    };
+    let range = source
+        .and_then(|source| source.scalar.as_ref())
+        .map(|scalar| scalar.range)
+        .or_else(|| source.map(|source| source.value_range))
+        .unwrap_or(fallback_range);
+    let Some(raw) = yaml_scalar_to_string(description) else {
+        builder.push(
+            range,
+            DiagnosticSeverity::Error,
+            "invalid_xprompt_frontmatter_input_description",
+            "Xprompt input description must be a scalar string value",
+        );
+        return;
+    };
+    if raw.contains('\n') {
+        builder.push(
+            range,
+            DiagnosticSeverity::Warning,
+            "multiline_xprompt_frontmatter_input_description",
+            "Xprompt input description should be a single line",
+        );
+    }
+}
+
 fn validate_nested_input_unknown_keys(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     source: Option<&ShortInputSource>,
@@ -627,7 +678,7 @@ fn validate_nested_input_unknown_keys(
         return;
     };
     for field in source.fields {
-        if matches!(field.key.as_str(), "type" | "default") {
+        if matches!(field.key.as_str(), "type" | "default" | "description") {
             continue;
         }
         builder.push(
@@ -650,7 +701,10 @@ fn validate_longform_unknown_keys(
         return;
     };
     for field in source.fields {
-        if matches!(field.key.as_str(), "name" | "type" | "default") {
+        if matches!(
+            field.key.as_str(),
+            "name" | "type" | "default" | "description"
+        ) {
             continue;
         }
         builder.push(
@@ -1299,6 +1353,12 @@ fn attach_type_and_default(source: &mut ShortInputSource) {
         } else if field.key == "default" {
             source.default_value = field.scalar.clone();
         }
+    }
+}
+
+impl ShortInputSource {
+    fn field(&self, key: &str) -> Option<&KeyValueSource> {
+        self.fields.iter().find(|field| field.key == key)
     }
 }
 

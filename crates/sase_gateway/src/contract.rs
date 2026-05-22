@@ -654,6 +654,7 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileXpromptInputWire": {
                 "name": "string",
                 "type": "string",
+                "description": "string|null; default null when absent",
                 "required": "bool",
                 "default_display": "string|null",
                 "position": "u32"

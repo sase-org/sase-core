@@ -152,10 +152,20 @@ fn active_input_markdown(
             .as_ref()
             .map(|value| format!(", default `{value}`"))
             .unwrap_or_default();
+        let description = input
+            .description
+            .as_ref()
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(" - {value}"))
+            .unwrap_or_default();
         lines.push(format!(
             "{marker}{}{close}: `{}` ({required}{default})",
             input.name, input.r#type
         ));
+        if !description.is_empty() {
+            let last = lines.last_mut().expect("just pushed input hover line");
+            last.push_str(&description);
+        }
     }
     lines.join("\n")
 }
@@ -180,6 +190,7 @@ mod tests {
             inputs: vec![XpromptInputHint {
                 name: "path".to_string(),
                 r#type: "path".to_string(),
+                description: Some("Path to review".to_string()),
                 required: true,
                 default_display: None,
                 position: 0,
@@ -213,5 +224,6 @@ mod tests {
         )
         .unwrap();
         assert!(arg_hover.markdown.contains("path"));
+        assert!(arg_hover.markdown.contains("Path to review"));
     }
 }

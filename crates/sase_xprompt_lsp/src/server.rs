@@ -1213,6 +1213,7 @@ mod tests {
         MobileXpromptInputWire {
             name: name.to_string(),
             r#type: r#type.to_string(),
+            description: None,
             required,
             default_display: None,
             position,
