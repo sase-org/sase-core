@@ -176,9 +176,29 @@ impl XpromptLspServer {
         &self,
         text: String,
     ) -> Vec<lsp_types::Diagnostic> {
+        self.diagnostics_for_document(DocumentSnapshot::new(text))
+            .await
+    }
+
+    pub async fn diagnostics_for_uri_text(
+        &self,
+        uri: &Uri,
+        text: String,
+    ) -> Vec<lsp_types::Diagnostic> {
+        let document = if let Some(path) = uri.to_file_path() {
+            DocumentSnapshot::with_source_path(text, path.into_owned())
+        } else {
+            DocumentSnapshot::new(text)
+        };
+        self.diagnostics_for_document(document).await
+    }
+
+    async fn diagnostics_for_document(
+        &self,
+        document: DocumentSnapshot,
+    ) -> Vec<lsp_types::Diagnostic> {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
-        let document = DocumentSnapshot::new(text);
         editor_analyze_document(&document, entries.as_slice())
             .into_iter()
             .map(lsp_diagnostic)
@@ -482,7 +502,7 @@ impl XpromptLspServer {
     }
 
     async fn publish_document_diagnostics(&self, uri: Uri, text: String) {
-        let diagnostics = self.diagnostics_for_text(text).await;
+        let diagnostics = self.diagnostics_for_uri_text(&uri, text).await;
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -1235,6 +1255,19 @@ mod tests {
         }
     }
 
+    fn diagnostics_contain_code(
+        diagnostics: &[lsp_types::Diagnostic],
+        expected_code: &str,
+    ) -> bool {
+        diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(lsp_types::NumberOrString::String(code))
+                    if code == expected_code
+            )
+        })
+    }
+
     #[tokio::test]
     async fn completes_xprompt_from_static_catalog() {
         let (service, _) = LspService::new(|client| {
@@ -1511,6 +1544,49 @@ mod tests {
             panic!("expected scalar definition");
         };
         assert_eq!(location.uri, uri);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_for_uri_text_honors_memory_long_file_uri() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory_dir = temp.path().join("memory").join("long");
+        fs::create_dir_all(&memory_dir).unwrap();
+        let memory_uri =
+            Uri::from_file_path(memory_dir.join("generated_skills.md"))
+                .unwrap();
+        let normal_uri =
+            Uri::from_file_path(temp.path().join("xprompts").join("foo.md"))
+                .unwrap();
+        let text = "---\nkeywords: [topic]\n---\nBody".to_string();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let memory_diagnostics = server
+            .diagnostics_for_uri_text(&memory_uri, text.clone())
+            .await;
+        assert!(
+            !diagnostics_contain_code(
+                &memory_diagnostics,
+                "missing_xprompt_memory_tag"
+            ),
+            "{memory_diagnostics:?}"
+        );
+
+        let normal_diagnostics =
+            server.diagnostics_for_uri_text(&normal_uri, text).await;
+        assert!(
+            diagnostics_contain_code(
+                &normal_diagnostics,
+                "missing_xprompt_memory_tag"
+            ),
+            "{normal_diagnostics:?}"
+        );
     }
 
     #[tokio::test]

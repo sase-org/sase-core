@@ -1,25 +1,48 @@
+use std::path::{Component, Path, PathBuf};
+
 use super::wire::{EditorPosition, EditorRange, TokenInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentSnapshot {
     text: String,
     line_starts: Vec<usize>,
+    source_path: Option<PathBuf>,
 }
 
 impl DocumentSnapshot {
     pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
+        Self::from_parts(text.into(), None)
+    }
+
+    pub fn with_source_path(
+        text: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        Self::from_parts(text.into(), Some(path.into()))
+    }
+
+    fn from_parts(text: String, source_path: Option<PathBuf>) -> Self {
         let mut line_starts = vec![0];
         for (idx, byte) in text.bytes().enumerate() {
             if byte == b'\n' {
                 line_starts.push(idx + 1);
             }
         }
-        Self { text, line_starts }
+        Self {
+            text,
+            line_starts,
+            source_path,
+        }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn has_implicit_memory_tag(&self) -> bool {
+        self.source_path
+            .as_deref()
+            .is_some_and(is_memory_long_markdown_path)
     }
 
     pub fn line_count(&self) -> usize {
@@ -96,6 +119,30 @@ impl DocumentSnapshot {
             start: self.byte_offset_to_position(byte_start)?,
             end: self.byte_offset_to_position(byte_end)?,
         })
+    }
+}
+
+fn is_memory_long_markdown_path(path: &Path) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return false;
+    }
+    path.parent().is_some_and(|parent| {
+        let mut previous_was_memory = false;
+        for component in parent.components() {
+            let name = component_name(component);
+            if previous_was_memory && name == Some("long") {
+                return true;
+            }
+            previous_was_memory = name == Some("memory");
+        }
+        false
+    })
+}
+
+fn component_name(component: Component<'_>) -> Option<&str> {
+    match component {
+        Component::Normal(name) => name.to_str(),
+        _ => None,
     }
 }
 
@@ -274,6 +321,31 @@ mod tests {
                 character: 3
             })
         );
+    }
+
+    #[test]
+    fn recognizes_memory_long_markdown_source_paths() {
+        assert!(DocumentSnapshot::with_source_path(
+            "body",
+            "/repo/memory/long/generated_skills.md"
+        )
+        .has_implicit_memory_tag());
+        assert!(DocumentSnapshot::with_source_path(
+            "body",
+            "/repo/.sase/memory/long/generated_skills.md"
+        )
+        .has_implicit_memory_tag());
+        assert!(!DocumentSnapshot::new("body").has_implicit_memory_tag());
+        assert!(!DocumentSnapshot::with_source_path(
+            "body",
+            "/repo/memory/longer/generated_skills.md"
+        )
+        .has_implicit_memory_tag());
+        assert!(!DocumentSnapshot::with_source_path(
+            "body",
+            "/repo/memory/long/generated_skills.txt"
+        )
+        .has_implicit_memory_tag());
     }
 
     #[test]

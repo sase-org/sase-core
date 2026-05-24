@@ -748,6 +748,40 @@ mod tests {
     }
 
     #[test]
+    fn memory_long_source_path_supplies_implicit_memory_tag() {
+        let text = "---\nkeywords: [topic]\n---\nBody";
+        let diagnostics = diagnostics_for(text);
+        assert_eq!(
+            diagnostic(&diagnostics, "missing_xprompt_memory_tag").severity,
+            DiagnosticSeverity::Warning
+        );
+
+        let doc = DocumentSnapshot::with_source_path(
+            text,
+            "/repo/memory/long/generated_skills.md",
+        );
+        let diagnostics = analyze_document(&doc, &catalog());
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    != "missing_xprompt_memory_tag"),
+            "{diagnostics:?}"
+        );
+
+        let invalid_doc = DocumentSnapshot::with_source_path(
+            "---\nkeywords: [{}]\n---\nBody",
+            "/repo/memory/long/generated_skills.md",
+        );
+        let diagnostics = analyze_document(&invalid_doc, &catalog());
+        assert_eq!(
+            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_keywords")
+                .severity,
+            DiagnosticSeverity::Error
+        );
+    }
+
+    #[test]
     fn reports_flow_style_input_default_on_offending_scalar() {
         let text = "---\ninput: [{name: target, type: word, default: \"two words\"}]\n---\nBody";
         let diagnostics = diagnostics_for(text);

@@ -920,7 +920,9 @@ fn validate_keywords(
             "Xprompt keyword entries must be non-empty scalars",
         );
     }
-    if !tags_contain_memory(mapping) {
+    if !tags_contain_memory(mapping)
+        && !builder.document.has_implicit_memory_tag()
+    {
         builder.push(
             builder.field_key_range("keywords"),
             DiagnosticSeverity::Warning,
