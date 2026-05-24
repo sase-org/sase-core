@@ -2877,6 +2877,7 @@ mod tests {
                     "sender": "axe",
                     "notes": [],
                     "files": [],
+                    "tags": [],
                     "action": null,
                     "action_data": {},
                     "read": false,
