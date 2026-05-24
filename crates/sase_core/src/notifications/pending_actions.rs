@@ -484,6 +484,7 @@ mod tests {
             sender: "test".to_string(),
             notes: Vec::new(),
             files: Vec::new(),
+            tags: Vec::new(),
             action: Some(action.to_string()),
             action_data: BTreeMap::from([(
                 dir_key.to_string(),

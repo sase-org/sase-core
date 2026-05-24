@@ -27,6 +27,7 @@ fn notification(id: &str) -> NotificationWire {
         sender: "test-sender".to_string(),
         notes: Vec::new(),
         files: Vec::new(),
+        tags: Vec::new(),
         action: None,
         action_data: BTreeMap::new(),
         read: false,
@@ -72,6 +73,7 @@ fn notification_loads_legacy_defaults_and_skips_bad_rows() {
     assert!(!loaded.silent);
     assert!(!loaded.muted);
     assert_eq!(loaded.snooze_until, None);
+    assert!(loaded.tags.is_empty());
     assert_eq!(snapshot.stats.blank_lines, 1);
     assert_eq!(snapshot.stats.invalid_json_lines, 1);
     assert_eq!(snapshot.stats.invalid_record_lines, 1);
@@ -103,12 +105,20 @@ fn notification_phase1_contract_fixture_loads_with_expected_counts() {
         .unwrap();
     assert!(legacy.notes.is_empty());
     assert!(legacy.files.is_empty());
+    assert!(legacy.tags.is_empty());
     assert!(legacy.action_data.is_empty());
     assert!(!legacy.read);
     assert!(!legacy.dismissed);
     assert!(!legacy.silent);
     assert!(!legacy.muted);
     assert_eq!(legacy.snooze_until, None);
+
+    let tagged = all
+        .notifications
+        .iter()
+        .find(|n| n.id == "valid-full")
+        .unwrap();
+    assert_eq!(tagged.tags, vec!["done", "review"]);
 
     assert_eq!(active.counts.priority, 4);
     assert_eq!(active.counts.errors, 2);
@@ -122,15 +132,37 @@ fn notification_append_and_rewrite_round_trip_jsonl() {
     let path = store_path(temp.path());
     let mut n = notification("one");
     n.sender = "crs".to_string();
+    n.tags = vec!["done".to_string(), "alpha".to_string()];
     append_notification(&path, &n.clone()).unwrap();
 
     let mut added = notification("two");
     added.silent = true;
+    added.tags = vec!["beta".to_string()];
     rewrite_notifications(&path, &[added.clone()]).unwrap();
 
     let snapshot = read_notifications_snapshot(&path, true).unwrap();
     assert_eq!(snapshot.notifications, vec![added, n]);
     assert_eq!(snapshot.stats.loaded_rows, 2);
+}
+
+#[test]
+fn notification_tags_round_trip_through_append_load_and_rewrite() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut n = notification("tagged");
+    n.tags = vec!["done".to_string(), "review".to_string()];
+
+    append_notification(&path, &n).unwrap();
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications[0].tags, vec!["done", "review"]);
+
+    let mut rewritten = snapshot.notifications[0].clone();
+    rewritten.read = true;
+    rewrite_notifications(&path, &[rewritten]).unwrap();
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications[0].tags, vec!["done", "review"]);
+    assert!(snapshot.notifications[0].read);
 }
 
 #[test]
@@ -741,6 +773,7 @@ fn notification_json_shape_uses_expected_wire_keys() {
             "sender": "test-sender",
             "notes": [],
             "files": [],
+            "tags": [],
             "action": "JumpToMentorReview",
             "action_data": {"entry_id": "2"},
             "read": false,

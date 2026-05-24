@@ -4,6 +4,10 @@
     "id": "abcdef1234567890",
     "timestamp": "2026-05-06T15:30:00Z",
     "sender": "planner",
+    "tags": [
+      "plan",
+      "review"
+    ],
     "priority": true,
     "actionable": true,
     "read": false,

@@ -44,6 +44,8 @@ pub struct MobileNotificationCardWire {
     pub id: String,
     pub timestamp: String,
     pub sender: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub priority: bool,
     pub actionable: bool,
     pub read: bool,
@@ -341,6 +343,7 @@ pub fn mobile_notification_card_from_wire(
         id: notification.id.clone(),
         timestamp: notification.timestamp.clone(),
         sender: notification.sender.clone(),
+        tags: notification.tags.clone(),
         priority,
         actionable,
         read: notification.read,
@@ -877,6 +880,7 @@ mod tests {
             sender: "planner".to_string(),
             notes: vec!["Plan ready for review".to_string()],
             files: vec!["/tmp/plan.md".to_string()],
+            tags: vec!["plan".to_string(), "review".to_string()],
             action: Some("PlanApproval".to_string()),
             action_data: _action_data(&[
                 ("response_dir", "/tmp/agent"),

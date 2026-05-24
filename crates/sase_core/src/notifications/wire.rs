@@ -14,6 +14,8 @@ pub struct NotificationWire {
     #[serde(default)]
     pub files: Vec<String>,
     #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
     pub action: Option<String>,
     #[serde(default)]
     pub action_data: BTreeMap<String, String>,
