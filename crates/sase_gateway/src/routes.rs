@@ -2813,6 +2813,7 @@ mod tests {
             },
             notes: vec![format!("note {id}")],
             files: Vec::new(),
+            tags: Vec::new(),
             action: action.map(str::to_string),
             action_data: Default::default(),
             read: false,
