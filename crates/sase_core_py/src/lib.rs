@@ -103,6 +103,13 @@ use sase_core::agent_cleanup::{
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
 };
+use sase_core::agent_group_archive::{
+    list_dismissed_agent_groups as core_list_dismissed_agent_groups,
+    load_dismissed_agent_group as core_load_dismissed_agent_group,
+    mark_dismissed_agent_group_revived as core_mark_dismissed_agent_group_revived,
+    save_dismissed_agent_group as core_save_dismissed_agent_group,
+    SavedAgentGroupWire,
+};
 use sase_core::agent_launch::{
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
@@ -701,6 +708,93 @@ fn py_verify_agent_archive_index<'py>(
     let result = py.allow_threads(|| {
         core_verify_agent_archive_index(&PathBuf::from(root))
     });
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Save one saved dismissed-agent group metadata record.
+#[pyfunction]
+#[pyo3(name = "save_dismissed_agent_group")]
+fn py_save_dismissed_agent_group<'py>(
+    py: Python<'py>,
+    root: &str,
+    group: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(group.as_any())?;
+    let group: SavedAgentGroupWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "group is not a valid SavedAgentGroupWire dict: {e}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| {
+            core_save_dismissed_agent_group(&PathBuf::from(root), group)
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// List saved dismissed-agent group summaries in newest-first pages.
+#[pyfunction]
+#[pyo3(name = "list_dismissed_agent_groups", signature = (root, limit = 20, cursor = None))]
+fn py_list_dismissed_agent_groups<'py>(
+    py: Python<'py>,
+    root: &str,
+    limit: i64,
+    cursor: Option<i64>,
+) -> PyResult<PyObject> {
+    let result = py.allow_threads(|| {
+        core_list_dismissed_agent_groups(&PathBuf::from(root), limit, cursor)
+    });
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Load one saved dismissed-agent group, returning None when absent/corrupt.
+#[pyfunction]
+#[pyo3(name = "load_dismissed_agent_group")]
+fn py_load_dismissed_agent_group<'py>(
+    py: Python<'py>,
+    root: &str,
+    group_id: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_load_dismissed_agent_group(&PathBuf::from(root), group_id)
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Mark one saved dismissed-agent group revived without deleting metadata.
+#[pyfunction]
+#[pyo3(name = "mark_dismissed_agent_group_revived")]
+fn py_mark_dismissed_agent_group_revived<'py>(
+    py: Python<'py>,
+    root: &str,
+    group_id: &str,
+    revived_at: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_mark_dismissed_agent_group_revived(
+                &PathBuf::from(root),
+                group_id,
+                revived_at,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
     let value = serde_json::to_value(&result).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -2433,6 +2527,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_verify_agent_archive_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_save_dismissed_agent_group, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_dismissed_agent_groups, m)?)?;
+    m.add_function(wrap_pyfunction!(py_load_dismissed_agent_group, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_mark_dismissed_agent_group_revived,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
