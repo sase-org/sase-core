@@ -359,6 +359,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.times_revived, 1);
         assert_eq!(loaded.agent_refs[0].raw_suffix.as_deref(), Some("ts-1"));
+        assert_eq!(loaded.agent_refs[0].tag.as_deref(), Some("backend"));
     }
 
     fn sample_group(group_id: &str, created_at: &str) -> SavedAgentGroupWire {
@@ -388,6 +389,7 @@ mod tests {
                 start_time: Some("2026-05-27T11:00:00Z".to_string()),
                 model: Some("gpt".to_string()),
                 llm_provider: Some("codex".to_string()),
+                tag: Some("backend".to_string()),
             }],
             revived_at: None,
             times_revived: 0,
