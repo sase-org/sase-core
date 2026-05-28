@@ -15,6 +15,7 @@ const TOP_LEVEL_FIELDS: &[&str] = &[
     "skill",
     "snippet",
     "keywords",
+    "xprompts",
 ];
 
 #[derive(Debug, Clone, Copy)]

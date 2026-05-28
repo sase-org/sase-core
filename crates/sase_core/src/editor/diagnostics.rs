@@ -621,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn accepts_frontmatter_local_xprompts() {
+        let text = "---\ndescription: Example\ninput:\n  topic: text\nxprompts:\n  _helper:\n    content: Helper {{ topic }}\n---\nBody";
+        let diagnostics = diagnostics_for(text);
+
+        assert!(
+            diagnostics.iter().all(|diagnostic| diagnostic.code
+                != "unknown_xprompt_frontmatter_field"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn reports_input_shape_name_duplicate_identifier_and_unknown_fields() {
         for (text, code) in [
             (
