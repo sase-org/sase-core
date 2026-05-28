@@ -158,7 +158,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
             "method": "textDocument/didOpen",
             "params": {
                 "textDocument": {
-                    "uri": "file:///tmp/prompt.md",
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
                     "languageId": "markdown",
                     "version": 1,
                     "text": "#foo"
@@ -197,7 +197,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
             "id": 2,
             "method": "textDocument/completion",
             "params": {
-                "textDocument": {"uri": "file:///tmp/prompt.md"},
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
                 "position": {"line": 0, "character": 3}
             }
         }),
@@ -227,7 +227,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
             "id": 3,
             "method": "textDocument/definition",
             "params": {
-                "textDocument": {"uri": "file:///tmp/prompt.md"},
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
                 "position": {"line": 0, "character": 2}
             }
         }),
@@ -262,6 +262,131 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         .get("id")
         .and_then(Value::as_i64)
         != Some(4)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_unsupported_markdown_has_no_xprompt_behavior() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let unsupported_uri =
+        "file:///tmp/project/sdd/research/202605/memory_system_prior_art.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": unsupported_uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "#foo"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_empty_diagnostics = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+            && message["params"]["uri"] == unsupported_uri
+        {
+            saw_empty_diagnostics = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty());
+            break;
+        }
+    }
+    assert!(saw_empty_diagnostics);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": unsupported_uri},
+                "position": {"line": 0, "character": 3}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_no_completion = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            saw_no_completion = message["result"].is_null();
+            break;
+        }
+    }
+    assert!(saw_no_completion);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
     {}
     write_message(
         &mut client_writer,
@@ -326,7 +451,7 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
             "method": "textDocument/didOpen",
             "params": {
                 "textDocument": {
-                    "uri": "file:///tmp/bad_pick_plan_xprompt.md",
+                    "uri": "file:///tmp/xprompts/bad_pick_plan_xprompt.md",
                     "languageId": "markdown",
                     "version": 1,
                     "text": "---\nowner: me\ninput:\n  target: wordd\nsnippet: bad-trigger!\nkeywords: [topic]\nskill: true\n---\nBody"
@@ -455,7 +580,7 @@ async fn stdio_jsonrpc_bare_snippet_completion() {
             "method": "textDocument/didOpen",
             "params": {
                 "textDocument": {
-                    "uri": "file:///tmp/snippet-prompt.md",
+                    "uri": "file:///tmp/sase_prompt_snippet.md",
                     "languageId": "markdown",
                     "version": 1,
                     "text": "fo"
@@ -471,7 +596,7 @@ async fn stdio_jsonrpc_bare_snippet_completion() {
             "id": 2,
             "method": "textDocument/completion",
             "params": {
-                "textDocument": {"uri": "file:///tmp/snippet-prompt.md"},
+                "textDocument": {"uri": "file:///tmp/sase_prompt_snippet.md"},
                 "position": {"line": 0, "character": 2}
             }
         }),

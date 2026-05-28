@@ -55,6 +55,7 @@ struct ServerConfig {
     project: Option<String>,
     catalog_key: String,
     snippet_support: bool,
+    allow_all_markdown: bool,
 }
 
 impl Default for ServerConfig {
@@ -64,14 +65,22 @@ impl Default for ServerConfig {
             project: None,
             catalog_key: "default".to_string(),
             snippet_support: false,
+            allow_all_markdown: false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct OpenDocument {
+    text: String,
+    language_id: String,
+    eligible: bool,
 }
 
 #[derive(Debug)]
 pub struct XpromptLspServer {
     client: Client,
-    documents: RwLock<HashMap<String, String>>,
+    documents: RwLock<HashMap<String, OpenDocument>>,
     catalog_cache: Arc<CatalogCache>,
     config: RwLock<ServerConfig>,
 }
@@ -314,6 +323,27 @@ impl XpromptLspServer {
             .unwrap_or_default()
     }
 
+    fn open_document(
+        &self,
+        uri: &Uri,
+        language_id: String,
+        text: String,
+    ) -> OpenDocument {
+        let config = self.current_config();
+        OpenDocument {
+            eligible: document_eligible(uri, &language_id, &config),
+            language_id,
+            text,
+        }
+    }
+
+    fn document_for_uri(&self, uri: &Uri) -> Option<OpenDocument> {
+        self.documents
+            .read()
+            .ok()
+            .and_then(|documents| documents.get(&uri.to_string()).cloned())
+    }
+
     async fn entries_for_completion(
         &self,
         config: &ServerConfig,
@@ -501,8 +531,16 @@ impl XpromptLspServer {
         }
     }
 
-    async fn publish_document_diagnostics(&self, uri: Uri, text: String) {
-        let diagnostics = self.diagnostics_for_uri_text(&uri, text).await;
+    async fn publish_document_diagnostics(
+        &self,
+        uri: Uri,
+        document: OpenDocument,
+    ) {
+        let diagnostics = if document.eligible {
+            self.diagnostics_for_uri_text(&uri, document.text).await
+        } else {
+            Vec::new()
+        };
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -597,10 +635,12 @@ impl LanguageServer for XpromptLspServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+        let document =
+            self.open_document(&uri, params.text_document.language_id, text);
         if let Ok(mut documents) = self.documents.write() {
-            documents.insert(uri.to_string(), text.clone());
+            documents.insert(uri.to_string(), document.clone());
         }
-        self.publish_document_diagnostics(uri, text).await;
+        self.publish_document_diagnostics(uri, document).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -609,10 +649,15 @@ impl LanguageServer for XpromptLspServer {
         };
         let uri = params.text_document.uri;
         let text = change.text;
+        let language_id = self
+            .document_for_uri(&uri)
+            .map(|document| document.language_id)
+            .unwrap_or_default();
+        let document = self.open_document(&uri, language_id, text);
         if let Ok(mut documents) = self.documents.write() {
-            documents.insert(uri.to_string(), text.clone());
+            documents.insert(uri.to_string(), document.clone());
         }
-        self.publish_document_diagnostics(uri, text).await;
+        self.publish_document_diagnostics(uri, document).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -627,17 +672,18 @@ impl LanguageServer for XpromptLspServer {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let uri = params.text_document_position.text_document.uri.to_string();
-        let text = self
-            .documents
-            .read()
-            .ok()
-            .and_then(|documents| documents.get(&uri).cloned());
-        let Some(text) = text else {
+        let uri = params.text_document_position.text_document.uri;
+        let Some(document) = self.document_for_uri(&uri) else {
             return Ok(None);
         };
+        if !document.eligible {
+            return Ok(None);
+        }
         Ok(self
-            .completion_for_text(text, params.text_document_position.position)
+            .completion_for_text(
+                document.text,
+                params.text_document_position.position,
+            )
             .await)
     }
 
@@ -650,16 +696,17 @@ impl LanguageServer for XpromptLspServer {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let text = self
-            .documents
-            .read()
-            .ok()
-            .and_then(|documents| documents.get(&uri.to_string()).cloned());
-        let Some(text) = text else {
+        let Some(document) = self.document_for_uri(&uri) else {
             return Ok(None);
         };
+        if !document.eligible {
+            return Ok(None);
+        }
         Ok(self
-            .hover_for_text(text, params.text_document_position_params.position)
+            .hover_for_text(
+                document.text,
+                params.text_document_position_params.position,
+            )
             .await)
     }
 
@@ -668,17 +715,15 @@ impl LanguageServer for XpromptLspServer {
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let text = self
-            .documents
-            .read()
-            .ok()
-            .and_then(|documents| documents.get(&uri.to_string()).cloned());
-        let Some(text) = text else {
+        let Some(document) = self.document_for_uri(&uri) else {
             return Ok(None);
         };
+        if !document.eligible {
+            return Ok(None);
+        }
         Ok(self
             .definition_for_text(
-                text,
+                document.text,
                 params.text_document_position_params.position,
             )
             .await)
@@ -689,16 +734,15 @@ impl LanguageServer for XpromptLspServer {
         params: CodeActionParams,
     ) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
-        let text = self
-            .documents
-            .read()
-            .ok()
-            .and_then(|documents| documents.get(&uri.to_string()).cloned());
-        let Some(text) = text else {
+        let Some(document) = self.document_for_uri(&uri) else {
             return Ok(None);
         };
+        if !document.eligible {
+            return Ok(Some(Vec::new()));
+        }
         Ok(Some(
-            self.code_actions_for_text(uri, text, params.range).await,
+            self.code_actions_for_text(uri, document.text, params.range)
+                .await,
         ))
     }
 
@@ -766,6 +810,12 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         project,
         catalog_key,
         snippet_support: snippet_support(&params.capabilities),
+        allow_all_markdown: params
+            .initialization_options
+            .as_ref()
+            .and_then(|options| options.get("allow_all_markdown"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -1026,6 +1076,48 @@ fn zero_range() -> Range {
     }
 }
 
+fn document_eligible(
+    uri: &Uri,
+    language_id: &str,
+    config: &ServerConfig,
+) -> bool {
+    match language_id {
+        "markdown" => config.allow_all_markdown || markdown_uri_eligible(uri),
+        "gitcommit" | "sase" | "sase_prompt" => true,
+        _ => false,
+    }
+}
+
+fn markdown_uri_eligible(uri: &Uri) -> bool {
+    let Some(path) = uri.to_file_path().map(|path| path.into_owned()) else {
+        return false;
+    };
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return false;
+    }
+    if path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("xprompts" | ".xprompts")
+        )
+    }) {
+        return true;
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    is_prompt_temp_markdown_name(file_name)
+}
+
+fn is_prompt_temp_markdown_name(file_name: &str) -> bool {
+    ["sase_ace_prompt_", "sase_prompt_"].iter().any(|prefix| {
+        file_name.strip_prefix(prefix).is_some_and(|rest| {
+            rest.len() > ".md".len() && rest.ends_with(".md")
+        })
+    })
+}
+
 fn should_invalidate_for_uri(uri: &Uri) -> bool {
     let Some(path) = uri.to_file_path().map(|path| path.into_owned()) else {
         return false;
@@ -1050,13 +1142,17 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
     if !matches!(extension, Some("md" | "yml" | "yaml")) {
         return false;
     }
-    path.components()
-        .any(|component| component.as_os_str() == "xprompts")
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some("xprompts" | ".xprompts")
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
     use lsp_types::{
         CodeActionOrCommand, CompletionClientCapabilities,
@@ -1266,6 +1362,44 @@ mod tests {
                     if code == expected_code
             )
         })
+    }
+
+    fn file_uri(path: impl AsRef<Path>) -> Uri {
+        Uri::from_file_path(path.as_ref()).unwrap()
+    }
+
+    #[test]
+    fn document_eligibility_narrows_plain_markdown() {
+        let temp = std::env::temp_dir();
+        let config = ServerConfig::default();
+        let xprompts_uri =
+            file_uri(temp.join("project").join("xprompts").join("foo.md"));
+        let dot_xprompts_uri =
+            file_uri(temp.join("project").join(".xprompts").join("foo.md"));
+        let ace_prompt_uri = file_uri(temp.join("sase_ace_prompt_abc.md"));
+        let cli_prompt_uri = file_uri(temp.join("sase_prompt_abc.md"));
+        let prose_uri = file_uri(
+            temp.join("project")
+                .join("sdd")
+                .join("research")
+                .join("202605")
+                .join("memory_system_prior_art.md"),
+        );
+
+        assert!(document_eligible(&xprompts_uri, "markdown", &config));
+        assert!(document_eligible(&dot_xprompts_uri, "markdown", &config));
+        assert!(document_eligible(&ace_prompt_uri, "markdown", &config));
+        assert!(document_eligible(&cli_prompt_uri, "markdown", &config));
+        assert!(!document_eligible(&prose_uri, "markdown", &config));
+
+        let all_markdown = ServerConfig {
+            allow_all_markdown: true,
+            ..ServerConfig::default()
+        };
+        assert!(document_eligible(&prose_uri, "markdown", &all_markdown));
+        assert!(document_eligible(&prose_uri, "gitcommit", &config));
+        assert!(document_eligible(&prose_uri, "sase", &config));
+        assert!(document_eligible(&prose_uri, "sase_prompt", &config));
     }
 
     #[tokio::test]

@@ -169,14 +169,14 @@ fn verify_one_source(
         } else {
             "changed"
         }
-    } else if !source.exists {
-        "ok"
-    } else if expected_fingerprint_matches(
-        source.size_bytes,
-        source.sha256.as_deref(),
-        actual_size_bytes,
-        actual_sha256.as_deref(),
-    ) {
+    } else if !source.exists
+        || expected_fingerprint_matches(
+            source.size_bytes,
+            source.sha256.as_deref(),
+            actual_size_bytes,
+            actual_sha256.as_deref(),
+        )
+    {
         "ok"
     } else {
         "changed"
