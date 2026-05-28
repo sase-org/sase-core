@@ -161,11 +161,12 @@ pub use editor::{
 };
 pub use episode::{
     canonical_episode_json, stable_episode_id, stable_source_id,
-    verify_episode_sources, EpisodeBuildReportWire, EpisodeBuildRequestWire,
-    EpisodeEdgeWire, EpisodeEventWire, EpisodeLessonWire, EpisodeNodeWire,
-    EpisodeSourceRefWire, EpisodeSourceVerifyResultWire,
-    EpisodeStorageIndexRowWire, EpisodeVerifyReportWire, EpisodeWire,
-    EPISODE_WIRE_SCHEMA_VERSION,
+    stable_v2_episode_id, verify_episode_sources, EpisodeBuildReportWire,
+    EpisodeBuildRequestWire, EpisodeEdgeWire, EpisodeEventWire,
+    EpisodeImportanceFactorWire, EpisodeLessonWire, EpisodeNodeWire,
+    EpisodeSafetyWire, EpisodeSourceRefWire, EpisodeSourceVerifyResultWire,
+    EpisodeStorageIndexRowWire, EpisodeVerifyReportWire, EpisodeWeakRefsWire,
+    EpisodeWire, EPISODE_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

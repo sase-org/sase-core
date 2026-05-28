@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const EPISODE_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const EPISODE_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpisodeSourceRefWire {
@@ -78,6 +78,54 @@ fn default_source_confidence() -> String {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpisodeImportanceFactorWire {
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub score: u32,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpisodeSafetyWire {
+    #[serde(default)]
+    pub untrusted_transcript_text: bool,
+    #[serde(default)]
+    pub prompt_injection_phrase_hits: Vec<String>,
+    #[serde(default)]
+    pub redaction_hits: Vec<String>,
+    #[serde(default)]
+    pub private_or_missing_source_flags: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpisodeWeakRefsWire {
+    #[serde(default)]
+    pub changespec_names: Vec<String>,
+    #[serde(default)]
+    pub bead_ids: Vec<String>,
+    #[serde(default)]
+    pub agent_families: Vec<String>,
+    #[serde(default)]
+    pub touched_paths: Vec<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Vec<String>>,
+}
+
+fn default_episode_status() -> String {
+    "legacy".to_string()
+}
+
+fn default_importance_band() -> String {
+    "unknown".to_string()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpisodeWire {
     pub schema_version: u32,
     pub episode_id: String,
@@ -85,6 +133,22 @@ pub struct EpisodeWire {
     pub title: String,
     pub summary: String,
     pub root_source_id: String,
+    #[serde(default)]
+    pub component_key: String,
+    #[serde(default)]
+    pub component_root_kind: String,
+    #[serde(default = "default_episode_status")]
+    pub status: String,
+    #[serde(default)]
+    pub importance_score: u32,
+    #[serde(default = "default_importance_band")]
+    pub importance_band: String,
+    #[serde(default)]
+    pub importance_factors: Vec<EpisodeImportanceFactorWire>,
+    #[serde(default)]
+    pub safety: EpisodeSafetyWire,
+    #[serde(default)]
+    pub weak_refs: EpisodeWeakRefsWire,
     #[serde(default)]
     pub sources: Vec<EpisodeSourceRefWire>,
     #[serde(default)]
@@ -143,8 +207,26 @@ pub struct EpisodeStorageIndexRowWire {
     pub episode_id: String,
     pub project: String,
     pub title: String,
+    #[serde(default)]
+    pub component_key: String,
+    #[serde(default = "default_episode_status")]
+    pub status: String,
+    #[serde(default)]
+    pub summary_excerpt: String,
+    #[serde(default)]
     pub source_count: u64,
+    #[serde(default)]
+    pub chat_count: u64,
+    #[serde(default)]
+    pub agent_count: u64,
+    #[serde(default)]
+    pub importance_score: u32,
+    #[serde(default = "default_importance_band")]
+    pub importance_band: String,
+    #[serde(default)]
     pub lesson_path: String,
+    #[serde(default)]
+    pub legacy_lesson_path: Option<String>,
     pub content_sha256: String,
     #[serde(default)]
     pub root_agent_names: Vec<String>,

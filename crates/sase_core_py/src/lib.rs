@@ -22,6 +22,7 @@
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
 //! - `verify_agent_archive_index(root: str) -> dict`
+//! - `episode_v2_id(project: str, component_key: str) -> str`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -159,6 +160,7 @@ use sase_core::episode::{
     canonical_episode_json as core_canonical_episode_json,
     stable_episode_id as core_stable_episode_id,
     stable_source_id as core_stable_source_id,
+    stable_v2_episode_id as core_stable_v2_episode_id,
     verify_episode_sources as core_verify_episode_sources,
     EpisodeSourceRefWire, EpisodeWire,
 };
@@ -603,6 +605,12 @@ fn py_episode_id(
         root_source_id,
         &source_refs,
     ))
+}
+
+#[pyfunction]
+#[pyo3(name = "episode_v2_id")]
+fn py_episode_v2_id(project: &str, component_key: &str) -> PyResult<String> {
+    Ok(core_stable_v2_episode_id(project, component_key))
 }
 
 #[pyfunction]
@@ -2519,6 +2527,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canonical_episode_json, m)?)?;
     m.add_function(wrap_pyfunction!(py_episode_source_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_episode_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_episode_v2_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_verify_episode_sources, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;

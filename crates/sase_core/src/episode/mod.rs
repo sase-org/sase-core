@@ -9,9 +9,11 @@ use sha2::{Digest, Sha256};
 
 pub use wire::{
     EpisodeBuildReportWire, EpisodeBuildRequestWire, EpisodeEdgeWire,
-    EpisodeEventWire, EpisodeLessonWire, EpisodeNodeWire, EpisodeSourceRefWire,
+    EpisodeEventWire, EpisodeImportanceFactorWire, EpisodeLessonWire,
+    EpisodeNodeWire, EpisodeSafetyWire, EpisodeSourceRefWire,
     EpisodeSourceVerifyResultWire, EpisodeStorageIndexRowWire,
-    EpisodeVerifyReportWire, EpisodeWire, EPISODE_WIRE_SCHEMA_VERSION,
+    EpisodeVerifyReportWire, EpisodeWeakRefsWire, EpisodeWire,
+    EPISODE_WIRE_SCHEMA_VERSION,
 };
 
 pub fn canonical_episode_json(
@@ -42,6 +44,14 @@ pub fn stable_episode_id(
         "project": project,
         "root_source_id": root_source_id,
         "sources": source_values,
+    });
+    format!("ep-{}", hash_json_value(&value))
+}
+
+pub fn stable_v2_episode_id(project: &str, component_key: &str) -> String {
+    let value = json!({
+        "component_key": component_key,
+        "project": project,
     });
     format!("ep-{}", hash_json_value(&value))
 }
@@ -88,6 +98,14 @@ fn canonicalize_episode(episode: &EpisodeWire) -> EpisodeWire {
     canonical.edges.sort_by(edge_sort_key);
     canonical.events.sort_by(event_sort_key);
     canonical.lessons.sort_by(|a, b| a.id.cmp(&b.id));
+    canonical.importance_factors.sort_by(|a, b| {
+        (&a.kind, &a.label, a.score, &a.evidence_ids).cmp(&(
+            &b.kind,
+            &b.label,
+            b.score,
+            &b.evidence_ids,
+        ))
+    });
 
     for edge in &mut canonical.edges {
         edge.evidence_ids.sort();
@@ -97,6 +115,20 @@ fn canonicalize_episode(episode: &EpisodeWire) -> EpisodeWire {
     }
     for lesson in &mut canonical.lessons {
         lesson.evidence_ids.sort();
+    }
+    for factor in &mut canonical.importance_factors {
+        factor.evidence_ids.sort();
+    }
+    canonical.safety.prompt_injection_phrase_hits.sort();
+    canonical.safety.redaction_hits.sort();
+    canonical.safety.private_or_missing_source_flags.sort();
+    canonical.safety.warnings.sort();
+    canonical.weak_refs.changespec_names.sort();
+    canonical.weak_refs.bead_ids.sort();
+    canonical.weak_refs.agent_families.sort();
+    canonical.weak_refs.touched_paths.sort();
+    for values in canonical.weak_refs.metadata.values_mut() {
+        values.sort();
     }
 
     canonical
@@ -268,6 +300,14 @@ mod tests {
             title: "Episode".to_string(),
             summary: "Summary".to_string(),
             root_source_id: "src-b".to_string(),
+            component_key: "component/chat/src-b".to_string(),
+            component_root_kind: "chat".to_string(),
+            status: "active".to_string(),
+            importance_score: 0,
+            importance_band: "unknown".to_string(),
+            importance_factors: vec![],
+            safety: EpisodeSafetyWire::default(),
+            weak_refs: EpisodeWeakRefsWire::default(),
             sources: vec![
                 source("src-b", "chat", "b.md", 2, "bbb"),
                 source("src-a", "plan", "a.md", 1, "aaa"),
@@ -342,8 +382,47 @@ mod tests {
             stable_episode_id("sase", "src-root", &[a.clone(), b.clone()]),
             stable_episode_id("sase", "src-root", &[b.clone(), a.clone()])
         );
+        assert_eq!(
+            stable_v2_episode_id("sase", "component/chat/abc"),
+            stable_v2_episode_id("sase", "component/chat/abc")
+        );
+        assert_ne!(
+            stable_v2_episode_id("sase", "component/chat/abc"),
+            stable_v2_episode_id("sase", "component/chat/def")
+        );
         assert_eq!(stable_source_id(&a), stable_source_id(&a));
         assert_ne!(stable_source_id(&a), stable_source_id(&b));
+    }
+
+    #[test]
+    fn v1_episode_json_deserializes_with_compatibility_defaults() {
+        let payload = json!({
+            "schema_version": 1,
+            "episode_id": "ep-legacy",
+            "project": "sase",
+            "title": "Legacy Episode",
+            "summary": "Legacy summary.",
+            "root_source_id": "src-chat",
+            "sources": [],
+            "nodes": [],
+            "edges": [],
+            "events": [],
+            "lessons": [{
+                "id": "lesson-1",
+                "kind": "goal",
+                "text": "Legacy lessons remain parseable.",
+                "evidence_ids": [],
+                "source_confidence": "deterministic"
+            }],
+            "metadata": {}
+        });
+
+        let episode: EpisodeWire = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(episode.schema_version, 1);
+        assert_eq!(episode.status, "legacy");
+        assert_eq!(episode.importance_band, "unknown");
+        assert_eq!(episode.lessons.len(), 1);
     }
 
     #[test]
