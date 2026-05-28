@@ -40,6 +40,8 @@ pub struct SavedAgentGroupWire {
     pub created_at: String,
     pub source: String,
     pub title: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub agent_count: i64,
     pub top_level_agent_count: i64,
     #[serde(default)]
@@ -64,6 +66,8 @@ pub struct SavedAgentGroupSummaryWire {
     pub created_at: String,
     pub source: String,
     pub title: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub agent_count: i64,
     pub top_level_agent_count: i64,
     #[serde(default)]

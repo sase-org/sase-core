@@ -115,6 +115,7 @@ fn normalize_group(
     if group.title.trim().is_empty() {
         return Err("saved agent group title must not be empty".to_string());
     }
+    group.name = normalize_optional_name(group.name);
     if group.agent_count < 0 || group.top_level_agent_count < 0 {
         return Err("saved agent group counts must be non-negative".to_string());
     }
@@ -131,6 +132,7 @@ fn summary_from_group(
         created_at: group.created_at,
         source: group.source,
         title: group.title,
+        name: group.name,
         agent_count: group.agent_count,
         top_level_agent_count: group.top_level_agent_count,
         status_counts: group.status_counts,
@@ -139,6 +141,11 @@ fn summary_from_group(
         revived_at: group.revived_at,
         times_revived: group.times_revived,
     }
+}
+
+fn normalize_optional_name(name: Option<String>) -> Option<String> {
+    name.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn read_group_file(path: &Path) -> Result<Option<SavedAgentGroupWire>, String> {
@@ -362,6 +369,73 @@ mod tests {
         assert_eq!(loaded.agent_refs[0].tag.as_deref(), Some("backend"));
     }
 
+    #[test]
+    fn save_list_and_load_preserve_group_name() {
+        let tmp = TempDir::new().unwrap();
+        let mut group = sample_group("named", "2026-05-27T12:00:00Z");
+        group.name = Some("  Backend batch  ".to_string());
+
+        let saved = save_dismissed_agent_group(tmp.path(), group).unwrap();
+        let page = list_dismissed_agent_groups(tmp.path(), 20, None);
+        let loaded = load_dismissed_agent_group(tmp.path(), "named")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(saved.name.as_deref(), Some("Backend batch"));
+        assert_eq!(page.groups[0].name.as_deref(), Some("Backend batch"));
+        assert_eq!(loaded.name.as_deref(), Some("Backend batch"));
+    }
+
+    #[test]
+    fn missing_group_name_loads_as_none() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("legacy.json"),
+            serde_json::json!({
+                "schema_version": AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+                "group_id": "legacy",
+                "created_at": "2026-05-27T12:00:00Z",
+                "source": "marked_agents",
+                "title": "1 agent in cl",
+                "agent_count": 1,
+                "top_level_agent_count": 1,
+                "status_counts": {"DONE": 1},
+                "project_names": ["proj"],
+                "cl_names": ["cl"],
+                "agent_refs": [],
+                "revived_at": null,
+                "times_revived": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_dismissed_agent_group(tmp.path(), "legacy")
+            .unwrap()
+            .unwrap();
+        let page = list_dismissed_agent_groups(tmp.path(), 20, None);
+
+        assert_eq!(loaded.name, None);
+        assert_eq!(page.groups[0].name, None);
+    }
+
+    #[test]
+    fn whitespace_group_name_normalizes_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let mut group = sample_group("blank-name", "2026-05-27T12:00:00Z");
+        group.name = Some(" \n\t ".to_string());
+
+        let saved = save_dismissed_agent_group(tmp.path(), group).unwrap();
+        let loaded = load_dismissed_agent_group(tmp.path(), "blank-name")
+            .unwrap()
+            .unwrap();
+        let page = list_dismissed_agent_groups(tmp.path(), 20, None);
+
+        assert_eq!(saved.name, None);
+        assert_eq!(loaded.name, None);
+        assert_eq!(page.groups[0].name, None);
+    }
+
     fn sample_group(group_id: &str, created_at: &str) -> SavedAgentGroupWire {
         let mut status_counts = BTreeMap::new();
         status_counts.insert("DONE".to_string(), 1);
@@ -371,6 +445,7 @@ mod tests {
             created_at: created_at.to_string(),
             source: "marked_agents".to_string(),
             title: "1 agent in cl".to_string(),
+            name: None,
             agent_count: 1,
             top_level_agent_count: 1,
             status_counts,
