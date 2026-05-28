@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde_yaml::{Mapping, Value};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -16,6 +17,15 @@ pub fn analyze_document(
     document: &DocumentSnapshot,
     entries: &[XpromptAssistEntry],
 ) -> Vec<EditorDiagnostic> {
+    let local_entries = local_xprompt_entries(document);
+    let combined_entries;
+    let entries = if local_entries.is_empty() {
+        entries
+    } else {
+        combined_entries = merged_entries(local_entries, entries);
+        combined_entries.as_slice()
+    };
+
     let mut diagnostics = Vec::new();
     diagnostics.extend(frontmatter::diagnostics(document));
     diagnostics.extend(xprompt_diagnostics(document, entries));
@@ -23,6 +33,14 @@ pub fn analyze_document(
     diagnostics.extend(directive_diagnostics(document));
     diagnostics.extend(argument_diagnostics(document, entries));
     diagnostics
+}
+
+fn merged_entries(
+    mut local_entries: Vec<XpromptAssistEntry>,
+    entries: &[XpromptAssistEntry],
+) -> Vec<XpromptAssistEntry> {
+    local_entries.extend_from_slice(entries);
+    local_entries
 }
 
 fn xprompt_diagnostics(
@@ -289,6 +307,225 @@ fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
         ),
         _ => true,
     }
+}
+
+fn local_xprompt_entries(
+    document: &DocumentSnapshot,
+) -> Vec<XpromptAssistEntry> {
+    let Some(frontmatter) = frontmatter_mapping(document.text()) else {
+        return Vec::new();
+    };
+    let Some(xprompts) =
+        mapping_get(&frontmatter, "xprompts").and_then(Value::as_mapping)
+    else {
+        return Vec::new();
+    };
+
+    xprompts
+        .iter()
+        .filter_map(|(name, value)| {
+            let name = value_as_string(name)?;
+            local_xprompt_entry_from_config(&name, value)
+        })
+        .collect()
+}
+
+fn local_xprompt_entry_from_config(
+    name: &str,
+    value: &Value,
+) -> Option<XpromptAssistEntry> {
+    if !is_referenceable_xprompt_name(name) {
+        return None;
+    }
+    let inputs = if value.as_str().is_some() {
+        Vec::new()
+    } else {
+        let mapping = value.as_mapping()?;
+        mapping_get(mapping, "content").and_then(value_as_string)?;
+        mapping_get(mapping, "input")
+            .map(parse_local_inputs)
+            .unwrap_or_default()
+    };
+    let insertion = format!("#{name}");
+    Some(XpromptAssistEntry {
+        name: name.to_string(),
+        display_label: name.to_string(),
+        insertion,
+        reference_prefix: "#".to_string(),
+        kind: Some("local_xprompt".to_string()),
+        source_bucket: "current_document".to_string(),
+        project: None,
+        tags: Vec::new(),
+        input_signature: None,
+        inputs,
+        content_preview: None,
+        description: None,
+        source_path_display: None,
+        definition_path: None,
+        definition_range: None,
+        is_skill: false,
+    })
+}
+
+fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
+    if let Some(mapping) = value.as_mapping() {
+        return mapping
+            .iter()
+            .enumerate()
+            .filter_map(|(position, (name, raw))| {
+                let name = value_as_string(name)?;
+                let (type_name, required, default_display) =
+                    parse_short_input_hint(raw);
+                Some(XpromptInputHint {
+                    name,
+                    r#type: type_name,
+                    description: input_description(raw),
+                    required,
+                    default_display,
+                    position: position as u32,
+                })
+            })
+            .collect();
+    }
+    if let Some(sequence) = value.as_sequence() {
+        return sequence
+            .iter()
+            .enumerate()
+            .filter_map(|(position, item)| {
+                let mapping = item.as_mapping()?;
+                let name =
+                    mapping_get(mapping, "name").and_then(value_as_string)?;
+                let type_name = mapping_get(mapping, "type")
+                    .and_then(value_as_string)
+                    .map(|raw| parse_input_type_name(&raw))
+                    .unwrap_or_else(|| "line".to_string());
+                let default = mapping_get(mapping, "default");
+                Some(XpromptInputHint {
+                    name,
+                    r#type: type_name,
+                    description: mapping_get(mapping, "description")
+                        .and_then(value_as_string),
+                    required: default.is_none(),
+                    default_display: default.and_then(default_display),
+                    position: position as u32,
+                })
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+fn parse_short_input_hint(value: &Value) -> (String, bool, Option<String>) {
+    if let Some(mapping) = value.as_mapping() {
+        let type_name = mapping_get(mapping, "type")
+            .and_then(value_as_string)
+            .map(|raw| parse_input_type_name(&raw))
+            .unwrap_or_else(|| "line".to_string());
+        let default = mapping_get(mapping, "default");
+        (
+            type_name,
+            default.is_none(),
+            default.and_then(default_display),
+        )
+    } else {
+        (
+            parse_input_type_name(
+                &value_as_string(value).unwrap_or_else(|| "line".to_string()),
+            ),
+            true,
+            None,
+        )
+    }
+}
+
+fn input_description(value: &Value) -> Option<String> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping_get(mapping, "description"))
+        .and_then(value_as_string)
+}
+
+fn parse_input_type_name(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "word" => "word",
+        "text" => "text",
+        "path" => "path",
+        "int" | "integer" => "int",
+        "bool" | "boolean" => "bool",
+        "float" => "float",
+        _ => "line",
+    }
+    .to_string()
+}
+
+fn default_display(value: &Value) -> Option<String> {
+    if value.is_null() || value.as_str().is_some() {
+        return None;
+    }
+    if let Some(value) = value.as_bool() {
+        return Some(if value { "true" } else { "false" }.to_string());
+    }
+    if let Some(value) = value.as_i64() {
+        return Some(value.to_string());
+    }
+    value.as_f64().map(|value| value.to_string())
+}
+
+fn frontmatter_mapping(text: &str) -> Option<Mapping> {
+    let opening_line_end = text.find('\n')?;
+    if text[..opening_line_end].trim_end_matches('\r') != "---" {
+        return None;
+    }
+
+    let frontmatter_start = opening_line_end + 1;
+    let mut line_start = frontmatter_start;
+    while line_start <= text.len() {
+        let line_end = text[line_start..]
+            .find('\n')
+            .map(|idx| line_start + idx)
+            .unwrap_or(text.len());
+        if text[line_start..line_end].trim_end_matches('\r') == "---" {
+            return serde_yaml::from_str::<Value>(
+                &text[frontmatter_start..line_start],
+            )
+            .ok()
+            .and_then(|value| value.as_mapping().cloned());
+        }
+        if line_end == text.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    None
+}
+
+fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.get(Value::String(key.to_string()))
+}
+
+fn value_as_string(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        Some(value.to_string())
+    } else if let Some(value) = value.as_i64() {
+        Some(value.to_string())
+    } else if let Some(value) = value.as_bool() {
+        Some(value.to_string())
+    } else {
+        value.as_f64().map(|value| value.to_string())
+    }
+}
+
+fn is_referenceable_xprompt_name(name: &str) -> bool {
+    name.split('/').all(is_jinja_identifier)
+}
+
+fn is_jinja_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn push_diagnostic(
@@ -630,6 +867,38 @@ mod tests {
                 != "unknown_xprompt_frontmatter_field"),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn accepts_current_document_local_xprompts_and_validates_args() {
+        let text = "---\nxprompts:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper(docs)\n#_missing\n";
+        let diagnostics = diagnostics_for(text);
+
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                diagnostic.code != "unknown_xprompt"
+                    || !diagnostic.message.contains("_helper")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unknown_xprompt"
+                    && diagnostic.message.contains("_missing")
+            }),
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostic_count(&diagnostics, "missing_required_arg"),
+            0,
+            "{diagnostics:?}"
+        );
+
+        let diagnostics =
+            diagnostics_for("---\nxprompts:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper\n");
+        let diagnostic = diagnostic(&diagnostics, "missing_required_arg");
+        assert!(diagnostic.message.contains("topic"));
+        assert!(diagnostic.message.contains("_helper"));
     }
 
     #[test]

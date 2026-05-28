@@ -1724,6 +1724,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diagnostics_for_uri_text_accepts_markdown_local_xprompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let uri =
+            Uri::from_file_path(temp.path().join("xprompts").join("reads.md"))
+                .unwrap();
+        let text = "---\nxprompts:\n  _article_search_agent:\n    input:\n      topic: word\n    content: Search {{ topic }}\n---\n#_article_search_agent(news)\n"
+            .to_string();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+
+        let diagnostics = server.diagnostics_for_uri_text(&uri, text).await;
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                !matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code))
+                        if code == "unknown_xprompt"
+                ) || !diagnostic.message.contains("_article_search_agent")
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn definition_uses_definition_path_outside_workspace_root() {
         let temp = tempfile::tempdir().unwrap();
         let source_path = temp.path().join("outside-workspace.md");

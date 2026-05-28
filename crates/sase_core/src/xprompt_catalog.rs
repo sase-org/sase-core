@@ -86,6 +86,7 @@ struct CatalogXprompt {
     name: String,
     content: String,
     inputs: Vec<CatalogInput>,
+    local_xprompts: Vec<CatalogXprompt>,
     source_path: Option<String>,
     tags: BTreeSet<String>,
     description: Option<String>,
@@ -1089,6 +1090,7 @@ impl CatalogLoader {
                         name,
                         content: format!("$(cat {cat_path})"),
                         inputs: Vec::new(),
+                        local_xprompts: Vec::new(),
                         source_path: Some(path.to_string_lossy().into_owned()),
                         tags: BTreeSet::from(["memory".to_string()]),
                         description: None,
@@ -1483,11 +1485,17 @@ fn load_xprompt_from_markdown(
         .as_ref()
         .and_then(|data| mapping_get(data, "snippet"))
         .and_then(parse_snippet);
+    let source_path = path.to_string_lossy().into_owned();
+    let local_xprompts = front_matter
+        .as_ref()
+        .map(|data| parse_local_xprompts(data, &source_path))
+        .unwrap_or_default();
     Ok(Some(CatalogXprompt {
         name,
         content: body,
         inputs,
-        source_path: Some(path.to_string_lossy().into_owned()),
+        local_xprompts,
+        source_path: Some(source_path),
         tags,
         description,
         is_skill,
@@ -1555,17 +1563,11 @@ fn load_workflow_from_yaml_file(
     }
 }
 
-fn workflow_from_mapping(
-    name: &str,
+fn parse_local_xprompts(
     data: &serde_yaml::Mapping,
     source_path: &str,
-) -> CatalogWorkflow {
-    let tags = mapping_get(data, "tags")
-        .map(parse_tags)
-        .unwrap_or_default();
-    let description =
-        mapping_get(data, "description").and_then(value_as_string);
-    let local_xprompts = mapping_get(data, "xprompts")
+) -> Vec<CatalogXprompt> {
+    mapping_get(data, "xprompts")
         .and_then(Value::as_mapping)
         .map(|xprompts| {
             xprompts
@@ -1576,7 +1578,20 @@ fn workflow_from_mapping(
                 })
                 .collect::<Vec<_>>()
         })
+        .unwrap_or_default()
+}
+
+fn workflow_from_mapping(
+    name: &str,
+    data: &serde_yaml::Mapping,
+    source_path: &str,
+) -> CatalogWorkflow {
+    let tags = mapping_get(data, "tags")
+        .map(parse_tags)
         .unwrap_or_default();
+    let description =
+        mapping_get(data, "description").and_then(value_as_string);
+    let local_xprompts = parse_local_xprompts(data, source_path);
     let mut inputs = mapping_get(data, "input")
         .map(parse_inputs)
         .unwrap_or_default();
@@ -1660,6 +1675,7 @@ fn xprompt_from_config_entry(
             name: name.to_string(),
             content: content.to_string(),
             inputs: Vec::new(),
+            local_xprompts: Vec::new(),
             source_path: Some(source_path.to_string()),
             tags: BTreeSet::new(),
             description: None,
@@ -1675,6 +1691,7 @@ fn xprompt_from_config_entry(
         inputs: mapping_get(data, "input")
             .map(parse_inputs)
             .unwrap_or_default(),
+        local_xprompts: Vec::new(),
         source_path: Some(source_path.to_string()),
         tags: mapping_get(data, "tags")
             .map(parse_tags)
@@ -1697,7 +1714,7 @@ fn xprompt_to_workflow(xprompt: &CatalogXprompt) -> CatalogWorkflow {
             prompt_part: Some(xprompt.content.clone()),
             has_output: false,
         }],
-        local_xprompts: Vec::new(),
+        local_xprompts: xprompt.local_xprompts.clone(),
         source_path: xprompt.source_path.clone(),
         tags: xprompt.tags.clone(),
         description: xprompt.description.clone(),
@@ -2266,6 +2283,57 @@ mod tests {
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["ship"]
+        );
+    }
+
+    #[test]
+    fn parses_markdown_frontmatter_local_xprompts_without_global_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join("xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("reads.md"),
+            "---\ndescription: Read articles\nxprompts:\n  _article_search_agent:\n    description: Local article helper summary.\n    input:\n      topic:\n        type: word\n        description: Search topic description.\n    content: Search {{ topic }}\n---\n#_article_search_agent(news)\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader::new(Some(root.to_path_buf()));
+        let loaded = loader
+            .load_xprompts_from_dir(&xprompts, None, false)
+            .unwrap();
+        assert!(loaded.contains_key("reads"));
+        assert!(!loaded.contains_key("_article_search_agent"));
+
+        let workflow = xprompt_to_workflow(loaded.get("reads").unwrap());
+        assert_eq!(workflow.local_xprompts.len(), 1);
+        let helper = &workflow.local_xprompts[0];
+        assert_eq!(helper.name, "_article_search_agent");
+        assert_eq!(
+            helper.description.as_deref(),
+            Some("Local article helper summary.")
+        );
+        assert_eq!(helper.inputs[0].name, "topic");
+        assert_eq!(
+            helper.inputs[0].description.as_deref(),
+            Some("Search topic description.")
+        );
+
+        let mut filtered_request = request();
+        filtered_request.query =
+            Some("local article helper summary".to_string());
+        let filtered = load_editor_xprompt_catalog(
+            &filtered_request,
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        assert_eq!(
+            filtered
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reads"]
         );
     }
 
