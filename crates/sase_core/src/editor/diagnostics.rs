@@ -687,6 +687,8 @@ mod tests {
         for valid in [
             "---\ninput:\n  short:\n    type: word\n    description: Short input description\n---\nBody",
             "---\ninput:\n  - name: long\n    type: text\n    description: Long input description\n---\nBody",
+            "---\ninput: {short: {type: word, description: Short input description}}\n---\nBody",
+            "---\ninput: [{name: long, type: text, description: Long input description}]\n---\nBody",
         ] {
             let diagnostics = diagnostics_for(valid);
             assert!(
