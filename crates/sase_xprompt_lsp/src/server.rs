@@ -1598,6 +1598,40 @@ mod tests {
         };
         assert!(markup.value.contains("Foo prompt"));
 
+        let frontmatter_hover = server
+            .hover_for_text(
+                "---\nxprompts:\n  _helper:\n    content: Helper\n---\nBody\n"
+                    .to_string(),
+                Position {
+                    line: 1,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let Hover {
+            contents: lsp_types::HoverContents::Markup(frontmatter_markup),
+            range: Some(frontmatter_range),
+        } = frontmatter_hover
+        else {
+            panic!("expected markdown frontmatter hover with range");
+        };
+        assert_eq!(
+            frontmatter_range,
+            Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 8,
+                },
+            }
+        );
+        assert!(frontmatter_markup.value.contains("local xprompts"));
+        assert!(frontmatter_markup.value.contains("current file"));
+
         let diagnostics = server
             .diagnostics_for_text("#missing %wat".to_string())
             .await;

@@ -2,20 +2,46 @@ use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
 
 use super::token::DocumentSnapshot;
-use super::wire::{DiagnosticSeverity, EditorDiagnostic};
+use super::wire::{
+    DiagnosticSeverity, EditorDiagnostic, EditorPosition, HoverPayload,
+};
 
 const XPROMPT_INPUT_TYPE_EXPECTED: &str =
     "word, line, text, path, int/integer, bool/boolean, float";
 
-const TOP_LEVEL_FIELDS: &[&str] = &[
-    "name",
-    "input",
-    "tags",
-    "description",
-    "skill",
-    "snippet",
-    "keywords",
-    "xprompts",
+const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
+    (
+        "name",
+        "Overrides the xprompt reference name used in catalogs and completions.",
+    ),
+    (
+        "input",
+        "Declares named inputs accepted by this xprompt. Supports shortform mappings and longform sequences.",
+    ),
+    (
+        "tags",
+        "Adds tags for catalog filtering and dynamic-memory matching.",
+    ),
+    (
+        "description",
+        "Provides the single-line summary shown in completions, hovers, and picker previews.",
+    ),
+    (
+        "skill",
+        "Marks this xprompt as a slash skill. Use true, false, or a provider list.",
+    ),
+    (
+        "snippet",
+        "Exposes this xprompt as a completion snippet. Use true, false, or a custom trigger.",
+    ),
+    (
+        "keywords",
+        "Defines dynamic-memory keywords. They are matched when tags include `memory` or the file is under `memory/long`.",
+    ),
+    (
+        "xprompts",
+        "Defines local xprompts available only within the current file. Reference them from the body with `#name`.",
+    ),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +139,33 @@ pub(super) fn diagnostics(
 
     validate_frontmatter_value(&mut builder, &value);
     builder.finish()
+}
+
+pub(super) fn hover(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+) -> Option<HoverPayload> {
+    let frontmatter = extract_frontmatter(document.text())?;
+    let cursor = document.position_to_byte_offset(position)?;
+    if cursor < frontmatter.start {
+        return None;
+    }
+    let cursor = cursor - frontmatter.start;
+    if cursor > frontmatter.text.len() {
+        return None;
+    }
+
+    let index = FrontmatterSourceIndex::new(frontmatter.text);
+    let field = index.fields.iter().find(|field| {
+        field.key_range.0 <= cursor && cursor < field.key_range.1
+    })?;
+    let description = top_level_field_doc(&field.key)?;
+    let start = frontmatter.start + field.key_range.0;
+    let end = frontmatter.start + field.key_range.1;
+    Some(HoverPayload {
+        range: document.byte_range_to_range(start, end)?,
+        markdown: format!("**{}**\n\n{}", field.key, description),
+    })
 }
 
 struct FrontmatterDiagnosticBuilder<'a> {
@@ -231,7 +284,7 @@ fn validate_frontmatter_value(
 fn validate_top_level_fields(builder: &mut FrontmatterDiagnosticBuilder<'_>) {
     let fields = builder.index.fields.clone();
     for field in fields {
-        if TOP_LEVEL_FIELDS.contains(&field.key.as_str()) {
+        if top_level_field_doc(&field.key).is_some() {
             continue;
         }
         builder.push(
@@ -244,6 +297,12 @@ fn validate_top_level_fields(builder: &mut FrontmatterDiagnosticBuilder<'_>) {
             ),
         );
     }
+}
+
+fn top_level_field_doc(field: &str) -> Option<&'static str> {
+    TOP_LEVEL_FIELD_DOCS.iter().find_map(|(name, description)| {
+        (*name == field).then_some(*description)
+    })
 }
 
 fn validate_name(

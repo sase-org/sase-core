@@ -1,5 +1,6 @@
 use super::completion::classify_completion_context;
 use super::directive::directive_metadata;
+use super::frontmatter;
 use super::token::{
     extract_token_at_position, slash_skill_reference_name,
     xprompt_reference_name, DocumentSnapshot,
@@ -46,6 +47,10 @@ pub fn hover_at_position(
                 ),
             });
         }
+    }
+
+    if let Some(hover) = frontmatter::hover(document, position) {
+        return Some(hover);
     }
 
     let token = extract_token_at_position(document, position)?;
@@ -225,5 +230,69 @@ mod tests {
         .unwrap();
         assert!(arg_hover.markdown.contains("path"));
         assert!(arg_hover.markdown.contains("Path to review"));
+    }
+
+    #[test]
+    fn builds_frontmatter_field_hover() {
+        let doc = DocumentSnapshot::new(
+            "---\ndescription: Demo\nxprompts:\n  _helper:\n    content: Helper\n---\n#_helper\n",
+        );
+        let hover = hover_at_position(
+            &doc,
+            EditorPosition {
+                line: 2,
+                character: 2,
+            },
+            &[],
+        )
+        .unwrap();
+
+        let field_start = doc.text().find("xprompts").unwrap();
+        assert_eq!(
+            hover.range,
+            doc.byte_range_to_range(
+                field_start,
+                field_start + "xprompts".len()
+            )
+            .unwrap()
+        );
+        assert!(hover.markdown.contains("**xprompts**"));
+        assert!(hover.markdown.contains("local xprompts"));
+        assert!(hover.markdown.contains("current file"));
+    }
+
+    #[test]
+    fn frontmatter_hover_ignores_body_and_non_field_positions() {
+        let doc = DocumentSnapshot::new(
+            "---\nxprompts:\n  _helper:\n    content: Helper\n---\nBody xprompts\n",
+        );
+
+        assert!(hover_at_position(
+            &doc,
+            EditorPosition {
+                line: 5,
+                character: 7,
+            },
+            &[],
+        )
+        .is_none());
+        assert!(hover_at_position(
+            &doc,
+            EditorPosition {
+                line: 1,
+                character: 8,
+            },
+            &[],
+        )
+        .is_none());
+        assert!(hover_at_position(
+            &DocumentSnapshot::new("xprompts:\nBody\n"),
+            EditorPosition {
+                line: 0,
+                character: 2,
+            },
+            &[],
+        )
+        .is_none());
     }
 }
