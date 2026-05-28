@@ -82,7 +82,7 @@ pub struct EpisodeImportanceFactorWire {
     pub kind: String,
     pub label: String,
     #[serde(default)]
-    pub score: u32,
+    pub score: i32,
     #[serde(default)]
     pub evidence_ids: Vec<String>,
     #[serde(default)]
