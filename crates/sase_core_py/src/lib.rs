@@ -41,6 +41,9 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `read_project_lifecycle_from_content(content: str) -> dict`
+//! - `apply_project_lifecycle_update(content: str, state: str) -> str`
+//! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False) -> list[dict]`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
 //! - `apply_notification_state_update_counts(path: str, update: dict) -> dict`
@@ -180,6 +183,11 @@ use sase_core::notifications::{
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
+};
+use sase_core::project_spec::{
+    apply_project_lifecycle_update as core_apply_project_lifecycle_update,
+    list_project_records as core_list_project_records,
+    read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -1180,6 +1188,55 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
         Some(text) => text.into_py(py),
         None => py.None(),
     }
+}
+
+// --- Project lifecycle bindings ------------------------------------------
+
+/// Read effective project lifecycle metadata from ProjectSpec content.
+#[pyfunction]
+#[pyo3(name = "read_project_lifecycle_from_content")]
+fn py_read_project_lifecycle_from_content<'py>(
+    py: Python<'py>,
+    content: &str,
+) -> PyResult<PyObject> {
+    let lifecycle = core_read_project_lifecycle_from_content(content);
+    let value = serde_json::to_value(&lifecycle).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return ProjectSpec content with PROJECT_STATE updated in the metadata header.
+#[pyfunction]
+#[pyo3(name = "apply_project_lifecycle_update")]
+fn py_apply_project_lifecycle_update(
+    content: &str,
+    state: &str,
+) -> PyResult<String> {
+    core_apply_project_lifecycle_update(content, state)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// List lifecycle records for project directories under *projects_root*.
+#[pyfunction]
+#[pyo3(name = "list_project_records", signature = (projects_root, include_states, include_home = false))]
+fn py_list_project_records<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    include_states: &Bound<'py, PyList>,
+    include_home: bool,
+) -> PyResult<PyObject> {
+    let states = strings_from_py_list(include_states, "include_states")?;
+    let root = PathBuf::from(projects_root);
+    let records = py
+        .allow_threads(|| {
+            core_list_project_records(&root, &states, include_home)
+        })
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let value = serde_json::to_value(&records).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 // --- Bead read bindings ---------------------------------------------------
@@ -2561,6 +2618,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_read_project_lifecycle_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_apply_project_lifecycle_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_project_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;

@@ -231,12 +231,15 @@ pub use notifications::{
 };
 pub use parser::parse_project_bytes;
 pub use project_spec::{
-    active_project_spec_filename, archive_project_spec_filename,
-    is_archive_project_spec, legacy_active_project_spec_filename,
-    legacy_archive_project_spec_filename, preferred_project_spec_path,
-    project_spec_basename, to_active_project_spec_path,
-    to_archive_project_spec_path, LEGACY_PROJECT_SPEC_EXTENSION,
-    PROJECT_SPEC_ARCHIVE_SUFFIX, PROJECT_SPEC_EXTENSION,
+    active_project_spec_filename, apply_project_lifecycle_update,
+    archive_project_spec_filename, is_archive_project_spec,
+    legacy_active_project_spec_filename, legacy_archive_project_spec_filename,
+    list_project_records, preferred_project_spec_path, project_spec_basename,
+    read_project_lifecycle_from_content, to_active_project_spec_path,
+    to_archive_project_spec_path, ProjectLifecycleError, ProjectLifecycleState,
+    ProjectLifecycleWire, ProjectRecordWire, LEGACY_PROJECT_SPEC_EXTENSION,
+    PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION, PROJECT_SPEC_ARCHIVE_SUFFIX,
+    PROJECT_SPEC_EXTENSION,
 };
 pub use query::{
     canonicalize_query, compile_query, evaluate_query_many,
