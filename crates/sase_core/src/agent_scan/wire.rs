@@ -63,6 +63,8 @@ pub struct AgentArtifactScanOptionsWire {
     pub include_waiting: bool,
     #[serde(default)]
     pub only_projects: Vec<String>,
+    #[serde(default)]
+    pub include_project_states: Vec<String>,
 }
 
 impl Default for AgentArtifactScanOptionsWire {
@@ -79,6 +81,7 @@ impl Default for AgentArtifactScanOptionsWire {
             include_workflow_state: true,
             include_waiting: true,
             only_projects: Vec::new(),
+            include_project_states: Vec::new(),
         }
     }
 }

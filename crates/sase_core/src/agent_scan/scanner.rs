@@ -14,7 +14,7 @@
 //! `(project_name, workflow_dir_name, timestamp)` before returning so a
 //! Python parity test can compare snapshots without extra agreement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,10 @@ use super::wire::{
     RunningMarkerWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
-use crate::project_spec::preferred_project_spec_path;
+use crate::project_spec::{
+    list_project_records, preferred_project_spec_path,
+    read_project_lifecycle_from_content, ProjectLifecycleState,
+};
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 
@@ -56,8 +59,13 @@ pub fn scan_agent_artifacts(
     let mut records: Vec<AgentArtifactRecordWire> = Vec::new();
 
     if projects_root.exists() {
-        let candidates =
-            collect_artifact_candidates(projects_root, &options, &mut stats);
+        let project_filter = project_filter_for_scan(projects_root, &options);
+        let candidates = collect_artifact_candidates(
+            projects_root,
+            &options,
+            project_filter.as_ref(),
+            &mut stats,
+        );
         let mut completed_records = 0u32;
         for candidate in candidates {
             stats.artifact_dirs_visited += 1;
@@ -107,6 +115,7 @@ pub fn scan_agent_artifacts(
 fn collect_artifact_candidates(
     projects_root: &Path,
     options: &AgentArtifactScanOptionsWire,
+    project_filter: Option<&BTreeSet<String>>,
     stats: &mut AgentArtifactScanStatsWire,
 ) -> Vec<ArtifactCandidate> {
     let mut candidates = Vec::new();
@@ -119,9 +128,7 @@ fn collect_artifact_candidates(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if !options.only_projects.is_empty()
-            && !options.only_projects.iter().any(|s| s == &project_name)
-        {
+        if !project_allowed_by_filter(&project_name, project_filter) {
             continue;
         }
         stats.projects_visited += 1;
@@ -242,6 +249,13 @@ pub fn scan_agent_artifact_dir(
     {
         return None;
     }
+    if !project_matches_lifecycle_states(
+        &projects_root.join(&parts[0]),
+        &parts[0],
+        &options.include_project_states,
+    ) {
+        return None;
+    }
     if !options.only_workflow_dirs.is_empty()
         && !options.only_workflow_dirs.iter().any(|s| s == &parts[2])
     {
@@ -262,6 +276,88 @@ pub fn scan_agent_artifact_dir(
         options,
         &mut stats,
     ))
+}
+
+pub(crate) fn project_filter_for_scan(
+    projects_root: &Path,
+    options: &AgentArtifactScanOptionsWire,
+) -> Option<BTreeSet<String>> {
+    let mut filter = if options.only_projects.is_empty() {
+        None
+    } else {
+        Some(
+            options
+                .only_projects
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+        )
+    };
+
+    if include_project_states_disabled(&options.include_project_states) {
+        return filter;
+    }
+
+    let state_records = list_project_records(
+        projects_root,
+        &options.include_project_states,
+        true,
+    )
+    .unwrap_or_default();
+    let state_names = state_records
+        .into_iter()
+        .map(|record| record.project_name)
+        .collect::<BTreeSet<_>>();
+    filter = Some(match filter {
+        Some(existing) => existing
+            .intersection(&state_names)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        None => state_names,
+    });
+    filter
+}
+
+pub(crate) fn project_allowed_by_filter(
+    project_name: &str,
+    project_filter: Option<&BTreeSet<String>>,
+) -> bool {
+    match project_filter {
+        Some(allowed) => allowed.contains(project_name),
+        None => true,
+    }
+}
+
+fn include_project_states_disabled(states: &[String]) -> bool {
+    states.is_empty() || states.iter().any(|state| state == "all")
+}
+
+fn project_matches_lifecycle_states(
+    project_dir: &Path,
+    project_name: &str,
+    include_states: &[String],
+) -> bool {
+    if include_project_states_disabled(include_states) {
+        return true;
+    }
+    let Ok(include_filter) = include_states
+        .iter()
+        .map(|state| ProjectLifecycleState::parse_target(state))
+        .collect::<Result<BTreeSet<_>, _>>()
+    else {
+        return false;
+    };
+    let project_file =
+        preferred_project_spec_path(project_dir, project_name, false);
+    let Ok(content) = fs::read_to_string(&project_file) else {
+        return false;
+    };
+    let lifecycle = read_project_lifecycle_from_content(&content);
+    let Ok(state) = ProjectLifecycleState::parse_target(&lifecycle.state)
+    else {
+        return false;
+    };
+    include_filter.contains(&state)
 }
 
 /// List `path` entries sorted by file name. Soft-errors increment the

@@ -1012,6 +1012,7 @@ fn options_round_trip_through_snapshot() {
         include_workflow_state: false,
         include_waiting: false,
         only_projects: vec!["myproj".to_string()],
+        include_project_states: vec!["active".to_string()],
     };
     let snapshot = scan_agent_artifacts(&root, options.clone());
     assert_eq!(snapshot.options, options);

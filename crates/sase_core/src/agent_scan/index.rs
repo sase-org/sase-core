@@ -6,7 +6,7 @@
 //! queries can return loader-equivalent records without walking every
 //! historical timestamp directory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 
-use super::scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
+use super::scanner::{
+    project_allowed_by_filter, project_filter_for_scan,
+    scan_agent_artifact_dir, scan_agent_artifacts,
+};
 use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire,
@@ -213,13 +216,22 @@ pub fn query_agent_artifact_index(
     let conn = open_index(index_path)?;
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
-    repair_stale_rows_for_query(&conn, &query, &options)?;
+    let project_filter = project_filter_for_scan(projects_root, &options);
+    repair_stale_rows_for_query(
+        &conn,
+        &query,
+        &options,
+        project_filter.as_ref(),
+    )?;
 
     if query.include_active {
         select_records(
             &conn,
             SelectRecordsQuery {
-                where_sql: active_where(query.include_hidden),
+                where_sql: active_where(
+                    query.include_hidden,
+                    project_filter.as_ref(),
+                ),
                 limit: query.active_limit,
                 selection: RecordSelection::Active,
                 include_hidden: query.include_hidden,
@@ -227,6 +239,7 @@ pub fn query_agent_artifact_index(
             &mut stats,
             &mut by_dir,
             &options,
+            project_filter.as_ref(),
         )?;
     }
 
@@ -234,7 +247,10 @@ pub fn query_agent_artifact_index(
         select_records(
             &conn,
             SelectRecordsQuery {
-                where_sql: completed_where(query.include_hidden),
+                where_sql: completed_where(
+                    query.include_hidden,
+                    project_filter.as_ref(),
+                ),
                 limit: query.recent_completed_limit,
                 selection: RecordSelection::Completed,
                 include_hidden: query.include_hidden,
@@ -242,6 +258,7 @@ pub fn query_agent_artifact_index(
             &mut stats,
             &mut by_dir,
             &options,
+            project_filter.as_ref(),
         )?;
     }
 
@@ -249,7 +266,10 @@ pub fn query_agent_artifact_index(
         select_records(
             &conn,
             SelectRecordsQuery {
-                where_sql: visible_where(query.include_hidden),
+                where_sql: visible_where(
+                    query.include_hidden,
+                    project_filter.as_ref(),
+                ),
                 limit: None,
                 selection: RecordSelection::Visible,
                 include_hidden: query.include_hidden,
@@ -257,6 +277,7 @@ pub fn query_agent_artifact_index(
             &mut stats,
             &mut by_dir,
             &options,
+            project_filter.as_ref(),
         )?;
     }
 
@@ -620,6 +641,7 @@ fn repair_stale_rows_for_query(
     conn: &Connection,
     query: &AgentArtifactIndexQueryWire,
     options: &AgentArtifactScanOptionsWire,
+    project_filter: Option<&BTreeSet<String>>,
 ) -> Result<(), String> {
     let mut clauses: Vec<&str> = Vec::new();
     if !query.include_hidden {
@@ -635,7 +657,10 @@ fn repair_stale_rows_for_query(
         return Ok(());
     }
 
-    let where_sql = format!("WHERE {}", clauses.join(" OR "));
+    let where_sql = add_project_filter_to_where(
+        format!("WHERE {}", clauses.join(" OR ")),
+        project_filter,
+    );
     refresh_stale_rows(conn, &where_sql, options)
 }
 
@@ -681,6 +706,7 @@ fn select_records(
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
     options: &AgentArtifactScanOptionsWire,
+    project_filter: Option<&BTreeSet<String>>,
 ) -> Result<(), String> {
     let mut sql = format!(
         "SELECT artifact_dir, projects_root, record_json, \
@@ -756,6 +782,9 @@ fn select_records(
                 },
             }
         };
+        if !project_allowed_by_filter(&record.project_name, project_filter) {
+            continue;
+        }
         if record_matches_selection(
             conn,
             &record,
@@ -910,8 +939,11 @@ struct PendingRow {
     stored: MarkerSignatures,
 }
 
-fn active_where(include_hidden: bool) -> String {
-    if include_hidden {
+fn active_where(
+    include_hidden: bool,
+    project_filter: Option<&BTreeSet<String>>,
+) -> String {
+    let where_sql = if include_hidden {
         "WHERE has_done_marker = 0
          OR workflow_status NOT IN ('completed', 'failed', 'cancelled', 'noop')
          ORDER BY timestamp DESC"
@@ -925,11 +957,15 @@ fn active_where(include_hidden: bool) -> String {
          AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY timestamp DESC"
         )
-    }
+    };
+    add_project_filter_to_where(where_sql, project_filter)
 }
 
-fn completed_where(include_hidden: bool) -> String {
-    if include_hidden {
+fn completed_where(
+    include_hidden: bool,
+    project_filter: Option<&BTreeSet<String>>,
+) -> String {
+    let where_sql = if include_hidden {
         "WHERE has_done_marker = 1
          OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
@@ -944,11 +980,15 @@ fn completed_where(include_hidden: bool) -> String {
          AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
         )
-    }
+    };
+    add_project_filter_to_where(where_sql, project_filter)
 }
 
-fn visible_where(include_hidden: bool) -> String {
-    if include_hidden {
+fn visible_where(
+    include_hidden: bool,
+    project_filter: Option<&BTreeSet<String>>,
+) -> String {
+    let where_sql = if include_hidden {
         "ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
             .to_string()
     } else {
@@ -957,6 +997,43 @@ fn visible_where(include_hidden: bool) -> String {
          AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY project_name ASC, workflow_dir_name ASC, timestamp ASC"
         )
+    };
+    add_project_filter_to_where(where_sql, project_filter)
+}
+
+fn add_project_filter_to_where(
+    where_sql: String,
+    project_filter: Option<&BTreeSet<String>>,
+) -> String {
+    let Some(projects) = project_filter else {
+        return where_sql;
+    };
+    let condition = if projects.is_empty() {
+        "0 = 1".to_string()
+    } else {
+        let names = projects
+            .iter()
+            .map(|name| format!("'{}'", name.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("project_name IN ({names})")
+    };
+    let upper = where_sql.to_ascii_uppercase();
+    let order_index = upper.find("ORDER BY");
+    let (prefix, order_by) = match order_index {
+        Some(index) => (&where_sql[..index], &where_sql[index..]),
+        None => (where_sql.as_str(), ""),
+    };
+    let trimmed_prefix = prefix.trim_end();
+    if trimmed_prefix.is_empty() {
+        return format!("WHERE {condition} {order_by}");
+    }
+    let leading_trimmed = trimmed_prefix.trim_start();
+    if leading_trimmed.starts_with("WHERE") {
+        let existing = leading_trimmed.trim_start_matches("WHERE").trim();
+        format!("WHERE ({existing}) AND {condition} {order_by}")
+    } else {
+        format!("{trimmed_prefix} WHERE {condition} {order_by}")
     }
 }
 
