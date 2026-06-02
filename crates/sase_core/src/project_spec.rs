@@ -23,6 +23,7 @@ const NAME_PREFIX: &str = "NAME:";
 pub enum ProjectLifecycleState {
     Active,
     Inactive,
+    Sibling,
 }
 
 impl ProjectLifecycleState {
@@ -30,6 +31,7 @@ impl ProjectLifecycleState {
         match self {
             Self::Active => "active",
             Self::Inactive => "inactive",
+            Self::Sibling => "sibling",
         }
     }
 
@@ -37,6 +39,7 @@ impl ProjectLifecycleState {
         match value.trim() {
             "active" => Ok(Self::Active),
             "inactive" | "archived" | "closed" => Ok(Self::Inactive),
+            "sibling" => Ok(Self::Sibling),
             other => {
                 Err(ProjectLifecycleError::InvalidState(other.to_string()))
             }
@@ -62,7 +65,7 @@ impl fmt::Display for ProjectLifecycleError {
         match self {
             Self::InvalidState(value) => write!(
                 f,
-                "invalid project lifecycle state {value:?}; expected active or inactive"
+                "invalid project lifecycle state {value:?}; expected active, inactive, or sibling"
             ),
         }
     }
@@ -408,9 +411,10 @@ fn build_project_record(
         warnings.push("home is system-managed".to_string());
     }
 
-    if ProjectLifecycleState::parse_target(&state)
-        .unwrap_or(ProjectLifecycleState::Active)
-        .is_inactive()
+    let lifecycle_state = ProjectLifecycleState::parse_target(&state)
+        .unwrap_or(ProjectLifecycleState::Active);
+    if lifecycle_state.is_inactive()
+        || lifecycle_state == ProjectLifecycleState::Sibling
     {
         warnings.push(format!("project is {state}"));
     }
@@ -424,9 +428,7 @@ fn build_project_record(
     }
 
     let launchable = !system_managed
-        && ProjectLifecycleState::parse_target(&state)
-            .unwrap_or(ProjectLifecycleState::Active)
-            .is_active()
+        && lifecycle_state.is_active()
         && project_file_path.is_file()
         && workspace_dir
             .as_deref()
@@ -633,6 +635,16 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_read_accepts_canonical_sibling_state() {
+        let read = read_project_lifecycle_from_content(
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: sibling\nNAME: demo\n",
+        );
+        assert_eq!(read.state, "sibling");
+        assert!(read.explicit);
+        assert!(read.warnings.is_empty());
+    }
+
+    #[test]
     fn lifecycle_read_normalizes_legacy_inactive_states() {
         for legacy in ["archived", "closed"] {
             let read = read_project_lifecycle_from_content(&format!(
@@ -678,6 +690,18 @@ mod tests {
         assert_eq!(
             updated,
             "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
+        );
+    }
+
+    #[test]
+    fn lifecycle_update_accepts_sibling_target_state() {
+        let content =
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
+        let updated =
+            apply_project_lifecycle_update(content, "sibling").unwrap();
+        assert_eq!(
+            updated,
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: sibling\nNAME: demo\n"
         );
     }
 
@@ -755,6 +779,17 @@ mod tests {
         .unwrap();
         fs::write(alpha_dir.join("alpha-archive.sase"), "NAME: old\n").unwrap();
 
+        let gamma_dir = projects.join("gamma");
+        fs::create_dir(&gamma_dir).unwrap();
+        fs::write(
+            gamma_dir.join("gamma.sase"),
+            format!(
+                "PROJECT_STATE: sibling\nWORKSPACE_DIR: {}\nNAME: sibling\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+
         let home_dir = projects.join("home");
         fs::create_dir(&home_dir).unwrap();
         fs::write(
@@ -780,15 +815,21 @@ mod tests {
             .iter()
             .map(|record| record.project_name.as_str())
             .collect();
-        assert_eq!(names, vec!["alpha", "beta", "home"]);
+        assert_eq!(names, vec!["alpha", "beta", "gamma", "home"]);
         assert_eq!(all[0].state, "inactive");
         assert!(all[0]
             .parse_warnings
             .iter()
             .any(|warning| warning.contains("legacy PROJECT_STATE value")));
         assert!(all[0].archive_file.as_deref().unwrap().ends_with(".sase"));
-        assert!(all[2].system_managed);
+        assert_eq!(all[2].state, "sibling");
         assert!(!all[2].launchable);
+        assert!(all[2]
+            .warnings
+            .iter()
+            .any(|warning| warning == "project is sibling"));
+        assert!(all[3].system_managed);
+        assert!(!all[3].launchable);
 
         let inactive =
             list_project_records(&projects, &["inactive".to_string()], false)
@@ -802,5 +843,12 @@ mod tests {
                 .unwrap();
         assert_eq!(legacy_archived.len(), 1);
         assert_eq!(legacy_archived[0].state, "inactive");
+
+        let sibling =
+            list_project_records(&projects, &["sibling".to_string()], false)
+                .unwrap();
+        assert_eq!(sibling.len(), 1);
+        assert_eq!(sibling[0].project_name, "gamma");
+        assert_eq!(sibling[0].state, "sibling");
     }
 }
