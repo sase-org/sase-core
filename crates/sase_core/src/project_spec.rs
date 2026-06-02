@@ -22,28 +22,33 @@ const NAME_PREFIX: &str = "NAME:";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectLifecycleState {
     Active,
-    Archived,
-    Closed,
+    Inactive,
 }
 
 impl ProjectLifecycleState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
-            Self::Archived => "archived",
-            Self::Closed => "closed",
+            Self::Inactive => "inactive",
         }
     }
 
     pub fn parse_target(value: &str) -> Result<Self, ProjectLifecycleError> {
         match value.trim() {
             "active" => Ok(Self::Active),
-            "archived" => Ok(Self::Archived),
-            "closed" => Ok(Self::Closed),
+            "inactive" | "archived" | "closed" => Ok(Self::Inactive),
             other => {
                 Err(ProjectLifecycleError::InvalidState(other.to_string()))
             }
         }
+    }
+
+    pub fn is_active(self) -> bool {
+        self == Self::Active
+    }
+
+    pub fn is_inactive(self) -> bool {
+        self == Self::Inactive
     }
 }
 
@@ -57,7 +62,7 @@ impl fmt::Display for ProjectLifecycleError {
         match self {
             Self::InvalidState(value) => write!(
                 f,
-                "invalid project lifecycle state {value:?}; expected active, archived, or closed"
+                "invalid project lifecycle state {value:?}; expected active or inactive"
             ),
         }
     }
@@ -210,14 +215,22 @@ pub fn read_project_lifecycle_from_content(
         );
     }
 
-    let state = match ProjectLifecycleState::parse_target(first_value) {
-        Ok(state) => state,
-        Err(_) => {
+    let state = match first_value.as_str() {
+        "archived" | "closed" => {
             warnings.push(format!(
-                "invalid PROJECT_STATE value {first_value:?}; using active"
+                "legacy PROJECT_STATE value {first_value:?} treated as inactive"
             ));
-            ProjectLifecycleState::Active
+            ProjectLifecycleState::Inactive
         }
+        _ => match ProjectLifecycleState::parse_target(first_value) {
+            Ok(state) => state,
+            Err(_) => {
+                warnings.push(format!(
+                    "invalid PROJECT_STATE value {first_value:?}; using active"
+                ));
+                ProjectLifecycleState::Active
+            }
+        },
     };
 
     ProjectLifecycleWire {
@@ -395,7 +408,10 @@ fn build_project_record(
         warnings.push("home is system-managed".to_string());
     }
 
-    if state != ProjectLifecycleState::Active.as_str() {
+    if ProjectLifecycleState::parse_target(&state)
+        .unwrap_or(ProjectLifecycleState::Active)
+        .is_inactive()
+    {
         warnings.push(format!("project is {state}"));
     }
 
@@ -408,7 +424,9 @@ fn build_project_record(
     }
 
     let launchable = !system_managed
-        && state == ProjectLifecycleState::Active.as_str()
+        && ProjectLifecycleState::parse_target(&state)
+            .unwrap_or(ProjectLifecycleState::Active)
+            .is_active()
         && project_file_path.is_file()
         && workspace_dir
             .as_deref()
@@ -605,13 +623,27 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_read_accepts_valid_state() {
+    fn lifecycle_read_accepts_canonical_inactive_state() {
         let read = read_project_lifecycle_from_content(
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: archived\nNAME: demo\n",
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n",
         );
-        assert_eq!(read.state, "archived");
+        assert_eq!(read.state, "inactive");
         assert!(read.explicit);
         assert!(read.warnings.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_read_normalizes_legacy_inactive_states() {
+        for legacy in ["archived", "closed"] {
+            let read = read_project_lifecycle_from_content(&format!(
+                "WORKSPACE_DIR: /tmp\nPROJECT_STATE: {legacy}\nNAME: demo\n"
+            ));
+            assert_eq!(read.state, "inactive");
+            assert!(read.explicit);
+            assert_eq!(read.warnings.len(), 1);
+            assert!(read.warnings[0].contains("legacy PROJECT_STATE value"));
+            assert!(read.warnings[0].contains("treated as inactive"));
+        }
     }
 
     #[test]
@@ -630,10 +662,11 @@ mod tests {
         let read = read_project_lifecycle_from_content(
             "PROJECT_STATE: archived\nPROJECT_STATE: closed\nNAME: demo\n",
         );
-        assert_eq!(read.state, "archived");
+        assert_eq!(read.state, "inactive");
         assert!(read.explicit);
-        assert_eq!(read.warnings.len(), 1);
+        assert_eq!(read.warnings.len(), 2);
         assert!(read.warnings[0].contains("multiple PROJECT_STATE"));
+        assert!(read.warnings[1].contains("legacy PROJECT_STATE value"));
     }
 
     #[test]
@@ -641,21 +674,35 @@ mod tests {
         let content =
             "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
         let updated =
-            apply_project_lifecycle_update(content, "closed").unwrap();
+            apply_project_lifecycle_update(content, "inactive").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: closed\nNAME: demo\n"
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
         );
+    }
+
+    #[test]
+    fn lifecycle_update_normalizes_legacy_target_state() {
+        let content =
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
+        for legacy in ["archived", "closed"] {
+            let updated =
+                apply_project_lifecycle_update(content, legacy).unwrap();
+            assert_eq!(
+                updated,
+                "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
+            );
+        }
     }
 
     #[test]
     fn lifecycle_update_inserts_before_running_and_preserves_crlf() {
         let content = "WORKSPACE_DIR: /tmp\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n";
         let updated =
-            apply_project_lifecycle_update(content, "archived").unwrap();
+            apply_project_lifecycle_update(content, "inactive").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\r\nPROJECT_STATE: archived\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n"
+            "WORKSPACE_DIR: /tmp\r\nPROJECT_STATE: inactive\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n"
         );
     }
 
@@ -663,10 +710,10 @@ mod tests {
     fn lifecycle_update_inserts_before_first_name() {
         let content = "WORKSPACE_DIR: /tmp\nNAME: demo\n";
         let updated =
-            apply_project_lifecycle_update(content, "archived").unwrap();
+            apply_project_lifecycle_update(content, "inactive").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: archived\nNAME: demo\n"
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
         );
     }
 
@@ -734,9 +781,26 @@ mod tests {
             .map(|record| record.project_name.as_str())
             .collect();
         assert_eq!(names, vec!["alpha", "beta", "home"]);
-        assert_eq!(all[0].state, "archived");
+        assert_eq!(all[0].state, "inactive");
+        assert!(all[0]
+            .parse_warnings
+            .iter()
+            .any(|warning| warning.contains("legacy PROJECT_STATE value")));
         assert!(all[0].archive_file.as_deref().unwrap().ends_with(".sase"));
         assert!(all[2].system_managed);
         assert!(!all[2].launchable);
+
+        let inactive =
+            list_project_records(&projects, &["inactive".to_string()], false)
+                .unwrap();
+        assert_eq!(inactive.len(), 1);
+        assert_eq!(inactive[0].project_name, "alpha");
+        assert_eq!(inactive[0].state, "inactive");
+
+        let legacy_archived =
+            list_project_records(&projects, &["archived".to_string()], false)
+                .unwrap();
+        assert_eq!(legacy_archived.len(), 1);
+        assert_eq!(legacy_archived[0].state, "inactive");
     }
 }
