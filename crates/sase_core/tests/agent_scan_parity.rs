@@ -522,6 +522,45 @@ fn running_record_carries_agent_meta() {
 }
 
 #[test]
+fn running_record_carries_string_output_variables() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    write_json(
+        &root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(TS_ACE_RUN_RUNNING)
+            .join("agent_meta.json"),
+        &json!({
+            "name": "running_alpha",
+            "output_variables": {
+                "result_path": "/tmp/result.md",
+                "status": "ok",
+                "attempts": 2,
+                "nested": {"ignored": true}
+            },
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    let meta = rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(
+        meta.output_variables.get("result_path").map(String::as_str),
+        Some("/tmp/result.md")
+    );
+    assert_eq!(
+        meta.output_variables.get("status").map(String::as_str),
+        Some("ok")
+    );
+    assert!(!meta.output_variables.contains_key("attempts"));
+    assert!(!meta.output_variables.contains_key("nested"));
+}
+
+#[test]
 fn running_record_carries_wait_completed_at() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
