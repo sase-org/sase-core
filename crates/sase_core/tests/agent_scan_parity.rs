@@ -522,6 +522,65 @@ fn running_record_carries_agent_meta() {
 }
 
 #[test]
+fn running_record_carries_output_variables_through_scan_and_index() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let meta_path = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_ACE_RUN_RUNNING)
+        .join("agent_meta.json");
+    let mut meta_data: Value =
+        serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+    meta_data["output_variables"] = json!({
+        "report_path": "/tmp/report.md",
+        "status": "ok",
+        "attempts": 2,
+    });
+    write_json(&meta_path, &meta_data);
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    let meta = rec.agent_meta.as_ref().unwrap();
+    assert_eq!(
+        meta.output_variables.get("report_path").map(String::as_str),
+        Some("/tmp/report.md")
+    );
+    assert_eq!(
+        meta.output_variables.get("status").map(String::as_str),
+        Some("ok")
+    );
+    assert!(!meta.output_variables.contains_key("attempts"));
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: false,
+            include_full_history: false,
+            active_limit: None,
+            recent_completed_limit: None,
+            include_hidden: true,
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed_rec = record_by_timestamp(&indexed, TS_ACE_RUN_RUNNING);
+    let indexed_meta = indexed_rec.agent_meta.as_ref().unwrap();
+    assert_eq!(indexed_meta.output_variables, meta.output_variables);
+}
+
+#[test]
 fn running_record_carries_wait_completed_at() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));

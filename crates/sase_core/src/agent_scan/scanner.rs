@@ -724,6 +724,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         agent_family_role: coerce_str(data.get("agent_family_role")),
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tag: coerce_str(data.get("tag")),
+        output_variables: coerce_str_str_map(data.get("output_variables"))
+            .unwrap_or_default(),
         pid: coerce_int(data.get("pid")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
