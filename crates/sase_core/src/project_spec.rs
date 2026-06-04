@@ -4,7 +4,7 @@
 //! files are still recognized during migration.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 pub const PROJECT_SPEC_EXTENSION: &str = ".sase";
 pub const LEGACY_PROJECT_SPEC_EXTENSION: &str = ".gp";
 pub const PROJECT_SPEC_ARCHIVE_SUFFIX: &str = "-archive";
-pub const PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION: u32 = 2;
 
+const PROJECT_ALIASES_PREFIX: &str = "PROJECT_ALIASES:";
 const PROJECT_STATE_PREFIX: &str = "PROJECT_STATE:";
 const WORKSPACE_DIR_PREFIX: &str = "WORKSPACE_DIR:";
 const RUNNING_PREFIX: &str = "RUNNING:";
@@ -57,12 +58,14 @@ impl ProjectLifecycleState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectLifecycleError {
+    InvalidProjectAlias(String),
     InvalidState(String),
 }
 
 impl fmt::Display for ProjectLifecycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidProjectAlias(message) => write!(f, "{message}"),
             Self::InvalidState(value) => write!(
                 f,
                 "invalid project lifecycle state {value:?}; expected active, inactive, or sibling"
@@ -97,6 +100,8 @@ pub struct ProjectRecordWire {
     pub system_managed: bool,
     pub active_claim_count: u32,
     pub launchable: bool,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default)]
@@ -287,20 +292,78 @@ pub fn apply_project_lifecycle_update(
     Ok(join_project_spec_lines(&lines))
 }
 
+pub fn apply_project_aliases_update(
+    content: &str,
+    aliases: &[String],
+) -> Result<String, ProjectLifecycleError> {
+    let aliases = normalize_project_aliases_for_update(aliases)?;
+    let mut lines = split_project_spec_lines(content);
+    let header_end = first_header_end(&lines);
+    let alias_indices: Vec<usize> = lines[..header_end]
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            line.body.starts_with(PROJECT_ALIASES_PREFIX).then_some(idx)
+        })
+        .collect();
+
+    if aliases.is_empty() {
+        for idx in alias_indices.iter().rev() {
+            lines.remove(*idx);
+        }
+        return Ok(join_project_spec_lines(&lines));
+    }
+
+    let replacement =
+        format!("{PROJECT_ALIASES_PREFIX} {}", aliases.join(", "));
+    if let Some(first_idx) = alias_indices.first() {
+        lines[*first_idx].body = replacement;
+        for idx in alias_indices.iter().skip(1).rev() {
+            lines.remove(*idx);
+        }
+        return Ok(join_project_spec_lines(&lines));
+    }
+
+    let insert_idx = first_insert_position(&lines, header_end);
+    let newline = preferred_newline(content, &lines);
+    if insert_idx == lines.len()
+        && !lines.is_empty()
+        && lines[insert_idx - 1].ending.is_empty()
+    {
+        lines[insert_idx - 1].ending = newline.clone();
+    }
+    let inserted_ending = if lines.is_empty()
+        || insert_idx < lines.len()
+        || content.ends_with('\n')
+    {
+        newline
+    } else {
+        String::new()
+    };
+    lines.insert(
+        insert_idx,
+        ProjectSpecLine {
+            body: replacement,
+            ending: inserted_ending,
+        },
+    );
+    Ok(join_project_spec_lines(&lines))
+}
+
 pub fn list_project_records(
     projects_root: &Path,
     include_states: &[String],
     include_home: bool,
 ) -> Result<Vec<ProjectRecordWire>, ProjectLifecycleError> {
     let include_filter = include_state_filter(include_states)?;
-    let mut records = Vec::new();
+    let mut all_records = Vec::new();
 
     let read_dir = match fs::read_dir(projects_root) {
         Ok(read_dir) => read_dir,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(records)
+            return Ok(all_records)
         }
-        Err(_) => return Ok(records),
+        Err(_) => return Ok(all_records),
     };
 
     let mut project_dirs = Vec::new();
@@ -330,6 +393,13 @@ pub fn list_project_records(
 
         let record =
             build_project_record(&project_dir, &project_name, include_home);
+        all_records.push(record);
+    }
+
+    add_project_alias_collision_warnings(&mut all_records);
+
+    let mut records = Vec::new();
+    for record in all_records {
         let state = ProjectLifecycleState::parse_target(&record.state)
             .unwrap_or(ProjectLifecycleState::Active);
         if include_filter
@@ -379,6 +449,7 @@ fn build_project_record(
     let mut state = ProjectLifecycleState::Active.as_str().to_string();
     let mut state_explicit = false;
     let mut workspace_dir = None;
+    let mut aliases = Vec::new();
     let mut active_claim_count = 0u32;
 
     if project_file_path.is_file() {
@@ -387,7 +458,10 @@ fn build_project_record(
                 let lifecycle = read_project_lifecycle_from_content(&content);
                 state = lifecycle.state;
                 state_explicit = lifecycle.explicit;
-                parse_warnings = lifecycle.warnings;
+                parse_warnings.extend(lifecycle.warnings);
+                let alias_parse = read_project_aliases_from_content(&content);
+                aliases = alias_parse.aliases;
+                parse_warnings.extend(alias_parse.warnings);
                 workspace_dir = read_workspace_dir_from_content(&content);
                 active_claim_count =
                     crate::agent_launch::list_workspace_claims_from_content(
@@ -446,8 +520,167 @@ fn build_project_record(
         system_managed,
         active_claim_count,
         launchable,
+        aliases,
         warnings,
         parse_warnings,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectAliasesParse {
+    aliases: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn read_project_aliases_from_content(content: &str) -> ProjectAliasesParse {
+    let mut values: Vec<String> = Vec::new();
+
+    for line in content.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(NAME_PREFIX) {
+            break;
+        }
+        if let Some(value) = line.strip_prefix(PROJECT_ALIASES_PREFIX) {
+            values.push(value.trim().to_string());
+        }
+    }
+
+    let mut warnings = Vec::new();
+    let Some(first_value) = values.first() else {
+        return ProjectAliasesParse {
+            aliases: Vec::new(),
+            warnings,
+        };
+    };
+
+    if values.len() > 1 {
+        warnings.push(
+            "multiple PROJECT_ALIASES lines found in metadata header; using first"
+                .to_string(),
+        );
+    }
+
+    let aliases = parse_project_alias_list(first_value, &mut warnings);
+    ProjectAliasesParse { aliases, warnings }
+}
+
+fn parse_project_alias_list(
+    value: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let mut aliases = BTreeSet::new();
+    for raw_alias in value.split(',') {
+        let alias = raw_alias.trim();
+        if alias.is_empty() {
+            warnings.push("empty PROJECT_ALIASES entry ignored".to_string());
+            continue;
+        }
+        if !is_valid_sase_project_name(alias) {
+            warnings.push(format!(
+                "invalid PROJECT_ALIASES value {alias:?} ignored"
+            ));
+            continue;
+        }
+        if !aliases.insert(alias.to_string()) {
+            warnings.push(format!(
+                "duplicate PROJECT_ALIASES value {alias:?} ignored"
+            ));
+        }
+    }
+    aliases.into_iter().collect()
+}
+
+fn normalize_project_aliases_for_update(
+    aliases: &[String],
+) -> Result<Vec<String>, ProjectLifecycleError> {
+    let mut normalized = BTreeSet::new();
+    for raw_alias in aliases {
+        let alias = raw_alias.trim();
+        if !is_valid_sase_project_name(alias) {
+            return Err(ProjectLifecycleError::InvalidProjectAlias(format!(
+                "invalid project alias {alias:?}; expected a valid SASE project name"
+            )));
+        }
+        if !normalized.insert(alias.to_string()) {
+            return Err(ProjectLifecycleError::InvalidProjectAlias(format!(
+                "duplicate project alias {alias:?}"
+            )));
+        }
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn is_valid_sase_project_name(project_name: &str) -> bool {
+    !project_name.is_empty()
+        && project_name != "."
+        && project_name != ".."
+        && !project_name.starts_with('.')
+        && !project_name.contains('\0')
+        && !project_name.contains('/')
+        && !project_name.contains('\\')
+        && !project_name.contains(',')
+}
+
+fn add_project_alias_collision_warnings(records: &mut [ProjectRecordWire]) {
+    let project_names: BTreeSet<String> = records
+        .iter()
+        .map(|record| record.project_name.clone())
+        .collect();
+    let mut alias_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut warnings_by_project: BTreeMap<String, Vec<String>> =
+        BTreeMap::new();
+
+    for record in records.iter().filter(|record| !record.system_managed) {
+        for alias in &record.aliases {
+            if alias == &record.project_name {
+                warnings_by_project
+                    .entry(record.project_name.clone())
+                    .or_default()
+                    .push(format!(
+                        "PROJECT_ALIASES value {alias:?} matches canonical project name"
+                    ));
+            } else if project_names.contains(alias) {
+                warnings_by_project
+                    .entry(record.project_name.clone())
+                    .or_default()
+                    .push(format!(
+                        "PROJECT_ALIASES value {alias:?} collides with project {alias:?}"
+                    ));
+            }
+            alias_owners
+                .entry(alias.clone())
+                .or_default()
+                .push(record.project_name.clone());
+        }
+    }
+
+    for (alias, mut owners) in alias_owners {
+        owners.sort();
+        owners.dedup();
+        if owners.len() <= 1 {
+            continue;
+        }
+        for owner in &owners {
+            let others: Vec<&str> = owners
+                .iter()
+                .filter(|candidate| *candidate != owner)
+                .map(String::as_str)
+                .collect();
+            warnings_by_project
+                .entry(owner.clone())
+                .or_default()
+                .push(format!(
+                    "PROJECT_ALIASES value {alias:?} is also assigned to project(s): {}",
+                    others.join(", ")
+                ));
+        }
+    }
+
+    for record in records {
+        if let Some(warnings) = warnings_by_project.remove(&record.project_name)
+        {
+            record.parse_warnings.extend(warnings);
+        }
     }
 }
 
@@ -568,6 +801,10 @@ fn first_insert_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alias_vec(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
 
     #[test]
     fn project_spec_filenames_are_canonical_sase() {
@@ -746,6 +983,161 @@ mod tests {
         let err = apply_project_lifecycle_update("NAME: demo\n", "paused")
             .unwrap_err();
         assert!(err.to_string().contains("invalid project lifecycle state"));
+    }
+
+    #[test]
+    fn project_aliases_read_defaults_missing_aliases_to_empty() {
+        let read = read_project_aliases_from_content(
+            "WORKSPACE_DIR: /tmp\nNAME: demo\n",
+        );
+
+        assert!(read.aliases.is_empty());
+        assert!(read.warnings.is_empty());
+    }
+
+    #[test]
+    fn project_aliases_read_sorts_dedupes_and_warns() {
+        let read = read_project_aliases_from_content(
+            "PROJECT_ALIASES: docs, bob, docs, .hidden, foo/bar,, alpha\nPROJECT_ALIASES: ignored\nNAME: demo\n",
+        );
+
+        assert_eq!(read.aliases, alias_vec(&["alpha", "bob", "docs"]));
+        assert!(read
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("multiple PROJECT_ALIASES")));
+        assert!(read.warnings.iter().any(|warning| warning
+            .contains("duplicate PROJECT_ALIASES value \"docs\"")));
+        assert!(read.warnings.iter().any(|warning| warning
+            .contains("invalid PROJECT_ALIASES value \".hidden\"")));
+        assert!(read.warnings.iter().any(|warning| warning
+            .contains("invalid PROJECT_ALIASES value \"foo/bar\"")));
+        assert!(read
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("empty PROJECT_ALIASES entry")));
+    }
+
+    #[test]
+    fn project_aliases_update_replaces_existing_aliases_sorted() {
+        let content =
+            "WORKSPACE_DIR: /tmp\nPROJECT_ALIASES: old\nPROJECT_ALIASES: stale\nNAME: demo\n";
+        let updated =
+            apply_project_aliases_update(content, &alias_vec(&["docs", "bob"]))
+                .unwrap();
+
+        assert_eq!(
+            updated,
+            "WORKSPACE_DIR: /tmp\nPROJECT_ALIASES: bob, docs\nNAME: demo\n"
+        );
+    }
+
+    #[test]
+    fn project_aliases_update_inserts_before_running_and_preserves_crlf() {
+        let content = "WORKSPACE_DIR: /tmp\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n";
+        let updated =
+            apply_project_aliases_update(content, &alias_vec(&["docs", "bob"]))
+                .unwrap();
+
+        assert_eq!(
+            updated,
+            "WORKSPACE_DIR: /tmp\r\nPROJECT_ALIASES: bob, docs\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n"
+        );
+    }
+
+    #[test]
+    fn project_aliases_update_inserts_before_first_name() {
+        let content = "WORKSPACE_DIR: /tmp\nNAME: demo\n";
+        let updated =
+            apply_project_aliases_update(content, &alias_vec(&["bob"]))
+                .unwrap();
+
+        assert_eq!(
+            updated,
+            "WORKSPACE_DIR: /tmp\nPROJECT_ALIASES: bob\nNAME: demo\n"
+        );
+    }
+
+    #[test]
+    fn project_aliases_update_removes_existing_aliases() {
+        let content = "WORKSPACE_DIR: /tmp\nPROJECT_ALIASES: bob, docs\nPROJECT_ALIASES: stale\nNAME: demo\n";
+        let updated = apply_project_aliases_update(content, &[]).unwrap();
+
+        assert_eq!(updated, "WORKSPACE_DIR: /tmp\nNAME: demo\n");
+    }
+
+    #[test]
+    fn project_aliases_update_rejects_invalid_or_duplicate_aliases() {
+        let invalid = apply_project_aliases_update(
+            "NAME: demo\n",
+            &alias_vec(&["bob", ".hidden"]),
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().contains("invalid project alias"));
+
+        let duplicate = apply_project_aliases_update(
+            "NAME: demo\n",
+            &alias_vec(&["bob", "bob"]),
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("duplicate project alias"));
+    }
+
+    #[test]
+    fn lifecycle_project_records_include_aliases_and_collision_warnings() {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        let alpha_dir = projects.join("alpha");
+        fs::create_dir(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("alpha.sase"),
+            "PROJECT_ALIASES: shared, beta, alpha\nNAME: alpha\n",
+        )
+        .unwrap();
+
+        let beta_dir = projects.join("beta");
+        fs::create_dir(&beta_dir).unwrap();
+        fs::write(
+            beta_dir.join("beta.sase"),
+            "PROJECT_ALIASES: shared\nNAME: beta\n",
+        )
+        .unwrap();
+
+        let gamma_dir = projects.join("gamma");
+        fs::create_dir(&gamma_dir).unwrap();
+        fs::write(
+            gamma_dir.join("gamma.sase"),
+            "PROJECT_ALIASES: docs\nNAME: gamma\n",
+        )
+        .unwrap();
+
+        let records =
+            list_project_records(&projects, &["all".to_string()], false)
+                .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].aliases, alias_vec(&["alpha", "beta", "shared"]));
+        assert!(records[0]
+            .parse_warnings
+            .iter()
+            .any(|warning| warning.contains("matches canonical project name")));
+        assert!(records[0]
+            .parse_warnings
+            .iter()
+            .any(|warning| warning.contains("collides with project \"beta\"")));
+        assert!(records[0].parse_warnings.iter().any(
+            |warning| warning.contains("also assigned to project(s): beta")
+        ));
+        assert_eq!(records[1].aliases, alias_vec(&["shared"]));
+        assert!(records[1]
+            .parse_warnings
+            .iter()
+            .any(|warning| warning
+                .contains("also assigned to project(s): alpha")));
+        assert_eq!(records[2].aliases, alias_vec(&["docs"]));
+        assert!(records[2].parse_warnings.is_empty());
     }
 
     #[test]

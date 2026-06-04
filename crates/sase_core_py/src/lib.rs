@@ -43,6 +43,7 @@
 //! - `parse_git_local_changes(stdout: str) -> str | None`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
+//! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
 //! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False) -> list[dict]`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
@@ -185,6 +186,7 @@ use sase_core::notifications::{
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::project_spec::{
+    apply_project_aliases_update as core_apply_project_aliases_update,
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
     list_project_records as core_list_project_records,
     read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
@@ -1214,6 +1216,18 @@ fn py_apply_project_lifecycle_update(
     state: &str,
 ) -> PyResult<String> {
     core_apply_project_lifecycle_update(content, state)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Return ProjectSpec content with PROJECT_ALIASES updated in the metadata header.
+#[pyfunction]
+#[pyo3(name = "apply_project_aliases_update")]
+fn py_apply_project_aliases_update<'py>(
+    content: &str,
+    aliases: &Bound<'py, PyList>,
+) -> PyResult<String> {
+    let aliases = strings_from_py_list(aliases, "aliases")?;
+    core_apply_project_aliases_update(content, &aliases)
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
@@ -2623,6 +2637,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_apply_project_lifecycle_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_project_aliases_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_list_project_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
