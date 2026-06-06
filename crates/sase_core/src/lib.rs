@@ -66,8 +66,11 @@ pub use agent_cleanup::{
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 pub use agent_group_archive::{
-    list_dismissed_agent_groups, load_dismissed_agent_group,
-    mark_dismissed_agent_group_revived, save_dismissed_agent_group,
+    list_dismissed_agent_groups, list_recent_dismissed_agent_groups,
+    load_dismissed_agent_group, load_recent_dismissed_agent_group,
+    mark_dismissed_agent_group_revived,
+    mark_recent_dismissed_agent_group_revived,
+    record_recent_dismissed_agent_group, save_dismissed_agent_group,
     SavedAgentGroupPageWire, SavedAgentGroupRefWire,
     SavedAgentGroupSummaryWire, SavedAgentGroupWire,
     AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,

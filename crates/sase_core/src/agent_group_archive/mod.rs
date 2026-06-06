@@ -94,6 +94,40 @@ pub fn mark_dismissed_agent_group_revived(
     save_dismissed_agent_group(root, group).map(Some)
 }
 
+pub fn record_recent_dismissed_agent_group(
+    root: &Path,
+    group: SavedAgentGroupWire,
+    limit: i64,
+) -> Result<SavedAgentGroupWire, String> {
+    let saved = save_dismissed_agent_group(root, group)?;
+    prune_recent_dismissed_agent_groups(root, limit)?;
+    Ok(saved)
+}
+
+pub fn list_recent_dismissed_agent_groups(
+    root: &Path,
+    limit: i64,
+) -> SavedAgentGroupPageWire {
+    let mut page = list_dismissed_agent_groups(root, limit, None);
+    page.next_cursor = None;
+    page
+}
+
+pub fn load_recent_dismissed_agent_group(
+    root: &Path,
+    group_id: &str,
+) -> Result<Option<SavedAgentGroupWire>, String> {
+    load_dismissed_agent_group(root, group_id)
+}
+
+pub fn mark_recent_dismissed_agent_group_revived(
+    root: &Path,
+    group_id: &str,
+    revived_at: &str,
+) -> Result<Option<SavedAgentGroupWire>, String> {
+    mark_dismissed_agent_group_revived(root, group_id, revived_at)
+}
+
 fn normalize_group(
     mut group: SavedAgentGroupWire,
 ) -> Result<SavedAgentGroupWire, String> {
@@ -146,6 +180,31 @@ fn summary_from_group(
 fn normalize_optional_name(name: Option<String>) -> Option<String> {
     name.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn prune_recent_dismissed_agent_groups(
+    root: &Path,
+    limit: i64,
+) -> Result<(), String> {
+    let keep = limit.max(1) as usize;
+    let mut groups: Vec<SavedAgentGroupWire> = iter_group_paths(root)
+        .into_iter()
+        .filter_map(|path| read_group_file(&path).ok().flatten())
+        .collect();
+    groups.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.group_id.cmp(&b.group_id))
+    });
+    for group in groups.into_iter().skip(keep) {
+        let path = group_path(root, &group.group_id)?;
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
 }
 
 fn read_group_file(path: &Path) -> Result<Option<SavedAgentGroupWire>, String> {
@@ -367,6 +426,87 @@ mod tests {
         assert_eq!(loaded.times_revived, 1);
         assert_eq!(loaded.agent_refs[0].raw_suffix.as_deref(), Some("ts-1"));
         assert_eq!(loaded.agent_refs[0].tag.as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn recent_groups_are_capped_and_list_newest_first() {
+        let tmp = TempDir::new().unwrap();
+        for idx in 0..12 {
+            record_recent_dismissed_agent_group(
+                tmp.path(),
+                sample_group(
+                    &format!("recent-{idx:02}"),
+                    &format!("2026-05-27T12:{idx:02}:00Z"),
+                ),
+                10,
+            )
+            .unwrap();
+        }
+
+        let page = list_recent_dismissed_agent_groups(tmp.path(), 10);
+
+        assert_eq!(page.groups.len(), 10);
+        assert_eq!(page.groups[0].group_id, "recent-11");
+        assert_eq!(page.groups[9].group_id, "recent-02");
+        assert_eq!(page.next_cursor, None);
+        assert!(!tmp.path().join("recent-00.json").exists());
+        assert!(!tmp.path().join("recent-01.json").exists());
+    }
+
+    #[test]
+    fn recent_groups_replace_same_group_id() {
+        let tmp = TempDir::new().unwrap();
+        record_recent_dismissed_agent_group(
+            tmp.path(),
+            sample_group("recent-same", "2026-05-27T12:00:00Z"),
+            10,
+        )
+        .unwrap();
+        let updated = record_recent_dismissed_agent_group(
+            tmp.path(),
+            sample_group("recent-same", "2026-05-27T12:30:00Z"),
+            10,
+        )
+        .unwrap();
+
+        let page = list_recent_dismissed_agent_groups(tmp.path(), 10);
+        let loaded =
+            load_recent_dismissed_agent_group(tmp.path(), "recent-same")
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(updated.created_at, "2026-05-27T12:30:00Z");
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(loaded.created_at, "2026-05-27T12:30:00Z");
+    }
+
+    #[test]
+    fn recent_groups_tolerate_corrupt_files_and_mark_revived() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("corrupt.json"), "not json").unwrap();
+        record_recent_dismissed_agent_group(
+            tmp.path(),
+            sample_group("recent-valid", "2026-05-27T12:00:00Z"),
+            10,
+        )
+        .unwrap();
+
+        let page = list_recent_dismissed_agent_groups(tmp.path(), 10);
+        let corrupt =
+            load_recent_dismissed_agent_group(tmp.path(), "corrupt").unwrap();
+        let revived = mark_recent_dismissed_agent_group_revived(
+            tmp.path(),
+            "recent-valid",
+            "2026-05-27T13:00:00Z",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(page.groups[0].group_id, "recent-valid");
+        assert!(corrupt.is_none());
+        assert_eq!(revived.revived_at.as_deref(), Some("2026-05-27T13:00:00Z"));
+        assert_eq!(revived.times_revived, 1);
     }
 
     #[test]

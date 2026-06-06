@@ -110,8 +110,12 @@ use sase_core::agent_cleanup::{
 };
 use sase_core::agent_group_archive::{
     list_dismissed_agent_groups as core_list_dismissed_agent_groups,
+    list_recent_dismissed_agent_groups as core_list_recent_dismissed_agent_groups,
     load_dismissed_agent_group as core_load_dismissed_agent_group,
+    load_recent_dismissed_agent_group as core_load_recent_dismissed_agent_group,
     mark_dismissed_agent_group_revived as core_mark_dismissed_agent_group_revived,
+    mark_recent_dismissed_agent_group_revived as core_mark_recent_dismissed_agent_group_revived,
+    record_recent_dismissed_agent_group as core_record_recent_dismissed_agent_group,
     save_dismissed_agent_group as core_save_dismissed_agent_group,
     SavedAgentGroupWire,
 };
@@ -807,6 +811,100 @@ fn py_mark_dismissed_agent_group_revived<'py>(
     let result = py
         .allow_threads(|| {
             core_mark_dismissed_agent_group_revived(
+                &PathBuf::from(root),
+                group_id,
+                revived_at,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Record one recent dismissed-agent group and prune the capped recent store.
+#[pyfunction]
+#[pyo3(name = "record_recent_dismissed_agent_group", signature = (root, group, limit = 10))]
+fn py_record_recent_dismissed_agent_group<'py>(
+    py: Python<'py>,
+    root: &str,
+    group: &Bound<'py, PyDict>,
+    limit: i64,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(group.as_any())?;
+    let group: SavedAgentGroupWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "group is not a valid SavedAgentGroupWire dict: {e}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| {
+            core_record_recent_dismissed_agent_group(
+                &PathBuf::from(root),
+                group,
+                limit,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// List recent dismissed-agent group summaries from the capped store.
+#[pyfunction]
+#[pyo3(name = "list_recent_dismissed_agent_groups", signature = (root, limit = 10))]
+fn py_list_recent_dismissed_agent_groups<'py>(
+    py: Python<'py>,
+    root: &str,
+    limit: i64,
+) -> PyResult<PyObject> {
+    let result = py.allow_threads(|| {
+        core_list_recent_dismissed_agent_groups(&PathBuf::from(root), limit)
+    });
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Load one recent dismissed-agent group, returning None when absent/corrupt.
+#[pyfunction]
+#[pyo3(name = "load_recent_dismissed_agent_group")]
+fn py_load_recent_dismissed_agent_group<'py>(
+    py: Python<'py>,
+    root: &str,
+    group_id: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_load_recent_dismissed_agent_group(
+                &PathBuf::from(root),
+                group_id,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Mark one recent dismissed-agent group revived.
+#[pyfunction]
+#[pyo3(name = "mark_recent_dismissed_agent_group_revived")]
+fn py_mark_recent_dismissed_agent_group_revived<'py>(
+    py: Python<'py>,
+    root: &str,
+    group_id: &str,
+    revived_at: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_mark_recent_dismissed_agent_group_revived(
                 &PathBuf::from(root),
                 group_id,
                 revived_at,
@@ -2612,6 +2710,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_load_dismissed_agent_group, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_mark_dismissed_agent_group_revived,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_record_recent_dismissed_agent_group,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_list_recent_dismissed_agent_groups,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_load_recent_dismissed_agent_group, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_mark_recent_dismissed_agent_group_revived,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
