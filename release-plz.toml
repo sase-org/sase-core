@@ -1,0 +1,33 @@
+[workspace]
+git_only = true
+release_always = false
+features_always_increment_minor = false
+semver_check = false
+git_tag_enable = false
+git_release_enable = false
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+publish = false
+
+[[package]]
+name = "sase_core"
+version_group = "sase-core"
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "sase_core_py"
+version_group = "sase-core"
+changelog_include = ["sase_core"]
+git_tag_enable = true
+git_release_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "sase_gateway"
+release = false
+
+[[package]]
+name = "sase_xprompt_lsp"
+release = false
