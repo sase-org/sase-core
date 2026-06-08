@@ -112,6 +112,83 @@ pub fn scan_agent_artifacts(
     }
 }
 
+/// Scan an exact set of artifact timestamp directories under
+/// `projects_root`.
+///
+/// Missing directories, paths outside the canonical
+/// `projects_root/<project>/artifacts/<workflow>/<timestamp>` layout, and
+/// paths excluded by the supplied project/workflow filters are skipped. The
+/// returned snapshot has the same scanner-shaped wire contract as
+/// [`scan_agent_artifacts`], but it only visits the caller-supplied artifact
+/// directories.
+pub fn scan_agent_artifact_dirs(
+    projects_root: &Path,
+    artifact_dirs: &[PathBuf],
+    options: AgentArtifactScanOptionsWire,
+) -> AgentArtifactScanWire {
+    let mut stats = AgentArtifactScanStatsWire::default();
+    let mut records: Vec<AgentArtifactRecordWire> = Vec::new();
+    let mut seen_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut seen_projects: BTreeSet<String> = BTreeSet::new();
+    let mut completed_records = 0u32;
+
+    for artifact_dir in artifact_dirs {
+        let dir_key = artifact_dir.to_string_lossy().into_owned();
+        if !seen_dirs.insert(dir_key) {
+            continue;
+        }
+        let Some(candidate) =
+            exact_artifact_candidate(projects_root, artifact_dir, &options)
+        else {
+            continue;
+        };
+
+        if seen_projects.insert(candidate.project_name.clone()) {
+            stats.projects_visited += 1;
+        }
+
+        let has_done_marker = candidate.artifact_dir.join("done.json").exists();
+        if has_done_marker
+            && options.not_before_timestamp.as_deref().is_some_and(
+                |not_before| candidate.timestamp.as_str() < not_before,
+            )
+        {
+            continue;
+        }
+        if has_done_marker
+            && options
+                .max_records
+                .is_some_and(|max| completed_records >= max)
+        {
+            continue;
+        }
+
+        stats.artifact_dirs_visited += 1;
+        let record = scan_artifact_dir(
+            &candidate.project_name,
+            &candidate.project_dir,
+            &candidate.workflow_dir_name,
+            &candidate.artifact_dir,
+            &options,
+            &mut stats,
+        );
+        if record.has_done_marker {
+            completed_records += 1;
+        }
+        records.push(record);
+    }
+
+    sort_records(&mut records, options.newest_first);
+
+    AgentArtifactScanWire {
+        schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
+        projects_root: projects_root.to_string_lossy().into_owned(),
+        options,
+        stats,
+        records,
+    }
+}
+
 fn collect_artifact_candidates(
     projects_root: &Path,
     options: &AgentArtifactScanOptionsWire,
@@ -232,6 +309,24 @@ pub fn scan_agent_artifact_dir(
     artifact_dir: &Path,
     options: &AgentArtifactScanOptionsWire,
 ) -> Option<AgentArtifactRecordWire> {
+    let candidate =
+        exact_artifact_candidate(projects_root, artifact_dir, options)?;
+    let mut stats = AgentArtifactScanStatsWire::default();
+    Some(scan_artifact_dir(
+        &candidate.project_name,
+        &candidate.project_dir,
+        &candidate.workflow_dir_name,
+        &candidate.artifact_dir,
+        options,
+        &mut stats,
+    ))
+}
+
+fn exact_artifact_candidate(
+    projects_root: &Path,
+    artifact_dir: &Path,
+    options: &AgentArtifactScanOptionsWire,
+) -> Option<ArtifactCandidate> {
     if !artifact_dir.is_dir() {
         return None;
     }
@@ -266,16 +361,13 @@ pub fn scan_agent_artifact_dir(
     {
         return None;
     }
-
-    let mut stats = AgentArtifactScanStatsWire::default();
-    Some(scan_artifact_dir(
-        &parts[0],
-        &projects_root.join(&parts[0]),
-        &parts[2],
-        artifact_dir,
-        options,
-        &mut stats,
-    ))
+    Some(ArtifactCandidate {
+        project_name: parts[0].clone(),
+        project_dir: projects_root.join(&parts[0]),
+        workflow_dir_name: parts[2].clone(),
+        artifact_dir: artifact_dir.to_path_buf(),
+        timestamp: parts[3].clone(),
+    })
 }
 
 pub(crate) fn project_filter_for_scan(

@@ -22,7 +22,9 @@ pub use index::{
     upsert_agent_artifact_index_row, AgentArtifactIndexQueryWire,
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
-pub use scanner::{scan_agent_artifact_dir, scan_agent_artifacts};
+pub use scanner::{
+    scan_agent_artifact_dir, scan_agent_artifact_dirs, scan_agent_artifacts,
+};
 pub use wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,

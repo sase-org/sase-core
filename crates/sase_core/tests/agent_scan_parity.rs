@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use sase_core::agent_scan::{
     query_agent_artifact_index, rebuild_agent_artifact_index,
-    scan_agent_artifacts, AgentArtifactIndexQueryWire,
-    AgentArtifactScanOptionsWire,
+    scan_agent_artifact_dirs, scan_agent_artifacts,
+    AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -454,6 +454,96 @@ fn scan_returns_one_record_per_artifact_dir() {
 
     assert_eq!(snapshot.schema_version, AGENT_SCAN_WIRE_SCHEMA_VERSION);
     assert_eq!(snapshot.projects_root, root.to_string_lossy());
+}
+
+#[test]
+fn exact_dir_scan_returns_only_requested_valid_unique_dirs() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let home_dir = root
+        .join("home")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_HOME_RUNNING);
+    let done_dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_ACE_RUN_DONE);
+    let missing_dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20990101000000");
+    let invalid_dir = root
+        .join("myproj")
+        .join("not-artifacts")
+        .join("ace-run")
+        .join(TS_WAITING);
+
+    let snapshot = scan_agent_artifact_dirs(
+        &root,
+        &[
+            done_dir.clone(),
+            home_dir.clone(),
+            done_dir,
+            missing_dir,
+            invalid_dir,
+        ],
+        AgentArtifactScanOptionsWire::default(),
+    );
+
+    let timestamps: Vec<&str> = snapshot
+        .records
+        .iter()
+        .map(|r| r.timestamp.as_str())
+        .collect();
+    assert_eq!(timestamps, vec![TS_HOME_RUNNING, TS_ACE_RUN_DONE]);
+    assert_eq!(snapshot.stats.projects_visited, 2);
+    assert_eq!(snapshot.stats.artifact_dirs_visited, 2);
+}
+
+#[test]
+fn exact_dir_scan_honors_project_and_workflow_filters() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let home_dir = root
+        .join("home")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_HOME_RUNNING);
+    let done_dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_ACE_RUN_DONE);
+    let workflow_dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("workflow-three_phase")
+        .join(TS_WORKFLOW_ROOT);
+
+    let home_only = scan_agent_artifact_dirs(
+        &root,
+        &[home_dir.clone(), done_dir.clone(), workflow_dir.clone()],
+        AgentArtifactScanOptionsWire {
+            only_projects: vec!["home".to_string()],
+            ..AgentArtifactScanOptionsWire::default()
+        },
+    );
+    let workflow_only = scan_agent_artifact_dirs(
+        &root,
+        &[home_dir, done_dir, workflow_dir],
+        AgentArtifactScanOptionsWire {
+            only_workflow_dirs: vec!["workflow-three_phase".to_string()],
+            ..AgentArtifactScanOptionsWire::default()
+        },
+    );
+
+    assert_eq!(home_only.records.len(), 1);
+    assert_eq!(home_only.records[0].timestamp, TS_HOME_RUNNING);
+    assert_eq!(workflow_only.records.len(), 1);
+    assert_eq!(workflow_only.records[0].timestamp, TS_WORKFLOW_ROOT);
 }
 
 #[test]
