@@ -12,6 +12,7 @@ pub mod agent_archive;
 pub mod agent_cleanup;
 pub mod agent_group_archive;
 pub mod agent_launch;
+pub mod agent_name_template;
 pub mod agent_scan;
 pub mod bead;
 pub mod editor;
@@ -84,6 +85,15 @@ pub use agent_launch::{
     TimestampBatchAllocationError, WorkspaceClaimOutcomeWire,
     WorkspaceClaimPlanWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+};
+pub use agent_name_template::{
+    agent_name_template_tokens_after, compare_agent_name_template_tokens,
+    is_agent_name_template, is_valid_agent_name_template_token,
+    match_agent_name_template, next_agent_name_template_token,
+    parse_agent_name_template, render_agent_name_template,
+    validate_agent_name_template_token, AgentNameTemplate,
+    AgentNameTemplateError, AGENT_NAME_TEMPLATE_ALPHABET,
+    AGENT_NAME_TEMPLATE_MARKER,
 };
 pub use agent_scan::{
     delete_agent_artifact_index_row, is_supported_workflow_dir,

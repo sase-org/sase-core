@@ -53,6 +53,12 @@
 //! - `append_notification_counts(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
+//! - `is_agent_name_template(value: str) -> bool`
+//! - `parse_agent_name_template(template: str) -> dict`
+//! - `render_agent_name_template(template: str, token: str) -> str`
+//! - `match_agent_name_template(template: str, concrete: str) -> str | None`
+//! - `compare_agent_name_template_tokens(left: str, right: str) -> int`
+//! - `agent_name_template_tokens_after(after: str | None, count: int) -> list[str]`
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
@@ -80,6 +86,7 @@
 // outside the user-written function body.
 #![allow(clippy::useless_conversion)]
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -129,6 +136,14 @@ use sase_core::agent_launch::{
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
     prepare_agent_launch as core_prepare_agent_launch, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, WorkspaceClaimRequestWire,
+};
+use sase_core::agent_name_template::{
+    agent_name_template_tokens_after as core_agent_name_template_tokens_after,
+    compare_agent_name_template_tokens as core_compare_agent_name_template_tokens,
+    is_agent_name_template as core_is_agent_name_template,
+    match_agent_name_template as core_match_agent_name_template,
+    parse_agent_name_template as core_parse_agent_name_template,
+    render_agent_name_template as core_render_agent_name_template,
 };
 use sase_core::agent_scan::{
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
@@ -230,6 +245,72 @@ impl PyQueryCorpusHandle {
 #[derive(Debug)]
 struct PyQueryProgramHandle {
     program: CoreQueryProgram,
+}
+
+#[pyfunction]
+#[pyo3(name = "is_agent_name_template")]
+fn py_is_agent_name_template(value: &str) -> bool {
+    core_is_agent_name_template(value)
+}
+
+#[pyfunction]
+#[pyo3(name = "parse_agent_name_template")]
+fn py_parse_agent_name_template<'py>(
+    py: Python<'py>,
+    template: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let parsed = core_parse_agent_name_template(template)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let dict = PyDict::new_bound(py);
+    dict.set_item("template", parsed.template)?;
+    dict.set_item("prefix", parsed.prefix)?;
+    dict.set_item("suffix", parsed.suffix)?;
+    Ok(dict)
+}
+
+#[pyfunction]
+#[pyo3(name = "render_agent_name_template")]
+fn py_render_agent_name_template(
+    template: &str,
+    token: &str,
+) -> PyResult<String> {
+    core_render_agent_name_template(template, token)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))
+}
+
+#[pyfunction]
+#[pyo3(name = "match_agent_name_template")]
+fn py_match_agent_name_template(
+    template: &str,
+    concrete: &str,
+) -> PyResult<Option<String>> {
+    core_match_agent_name_template(template, concrete)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))
+}
+
+#[pyfunction]
+#[pyo3(name = "compare_agent_name_template_tokens")]
+fn py_compare_agent_name_template_tokens(
+    left: &str,
+    right: &str,
+) -> PyResult<i8> {
+    let ordering = core_compare_agent_name_template_tokens(left, right)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    Ok(match ordering {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_name_template_tokens_after", signature = (after=None, count=1))]
+fn py_agent_name_template_tokens_after(
+    after: Option<&str>,
+    count: usize,
+) -> PyResult<Vec<String>> {
+    core_agent_name_template_tokens_after(after, count)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))
 }
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
@@ -2707,6 +2788,15 @@ fn env_dict_from_pydict(
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQueryCorpusHandle>()?;
     m.add_class::<PyQueryProgramHandle>()?;
+    m.add_function(wrap_pyfunction!(py_is_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(py_render_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(py_match_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_compare_agent_name_template_tokens,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_agent_name_template_tokens_after, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
