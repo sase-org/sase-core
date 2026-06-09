@@ -13,6 +13,14 @@ on:
         description: Build the wheel matrix even if no release was created.
         type: boolean
         default: false
+      publish_pypi:
+        description: Publish built artifacts to PyPI for guarded manual recovery.
+        type: boolean
+        default: false
+      expected_version:
+        description: Expected package version for guarded manual PyPI publish.
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -279,16 +287,118 @@ jobs:
     name: publish to PyPI
     needs: [release-plz-release, metadata-check]
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels == true && inputs.publish_pypi == true && inputs.dry_run == false)) }}
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
+      - name: Checkout repository for manual guard
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_pypi == true }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Guard manual PyPI publish
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_pypi == true }}
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != "refs/heads/master" ]]; then
+            echo "Manual PyPI publish must run from refs/heads/master; got ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+          if [[ -z "${EXPECTED_VERSION}" ]]; then
+            echo "expected_version is required for manual PyPI publish" >&2
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          head_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "v${EXPECTED_VERSION}^{commit}")"
+          if [[ "${head_commit}" != "${tag_commit}" ]]; then
+            echo "HEAD ${head_commit} does not match v${EXPECTED_VERSION} ${tag_commit}" >&2
+            exit 1
+          fi
+
+          python - <<'PY'
+          import email.parser
+          import os
+          import pathlib
+          import tarfile
+          import urllib.error
+          import urllib.request
+          import zipfile
+
+          expected_version = os.environ["EXPECTED_VERSION"]
+          expected_name = "sase-core-rs"
+          dist = pathlib.Path("dist")
+          files = [path for path in sorted(dist.iterdir()) if path.is_file()]
+          if not files:
+              raise SystemExit("dist/ contains no files")
+
+          def read_metadata(path: pathlib.Path) -> str:
+              if path.suffix == ".whl":
+                  with zipfile.ZipFile(path) as archive:
+                      metadata_names = [
+                          name
+                          for name in archive.namelist()
+                          if name.endswith(".dist-info/METADATA")
+                      ]
+                      if len(metadata_names) != 1:
+                          raise SystemExit(
+                              f"{path}: expected one wheel METADATA file, found {len(metadata_names)}"
+                          )
+                      return archive.read(metadata_names[0]).decode("utf-8")
+
+              if path.name.endswith(".tar.gz"):
+                  with tarfile.open(path, "r:gz") as archive:
+                      metadata_members = [
+                          member
+                          for member in archive.getmembers()
+                          if member.isfile() and member.name.endswith("PKG-INFO")
+                      ]
+                      if len(metadata_members) != 1:
+                          raise SystemExit(
+                              f"{path}: expected one sdist PKG-INFO file, found {len(metadata_members)}"
+                          )
+                      extracted = archive.extractfile(metadata_members[0])
+                      if extracted is None:
+                          raise SystemExit(f"{path}: could not read sdist PKG-INFO")
+                      return extracted.read().decode("utf-8")
+
+              raise SystemExit(f"{path}: unsupported distribution file")
+
+          for path in files:
+              metadata = email.parser.Parser().parsestr(read_metadata(path))
+              name = metadata.get("Name")
+              version = metadata.get("Version")
+              if name != expected_name or version != expected_version:
+                  raise SystemExit(
+                      f"{path}: expected Name={expected_name!r} Version={expected_version!r}, "
+                      f"got Name={name!r} Version={version!r}"
+                  )
+              print(f"verified {path}: {name} {version}")
+
+          url = f"https://pypi.org/pypi/{expected_name}/{expected_version}/json"
+          request = urllib.request.Request(url, headers={"Accept": "application/json"})
+          try:
+              with urllib.request.urlopen(request, timeout=15):
+                  raise SystemExit(f"{expected_name}=={expected_version} already exists on PyPI")
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print(f"verified {expected_name}=={expected_version} is absent from PyPI")
+          PY
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
