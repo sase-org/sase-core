@@ -10,7 +10,7 @@ Python `sase_100` repo remains the product shell; this crate owns deterministic 
 ```
 crates/
   sase_core/      # pure-Rust core: wire types + full-file parser
-  sase_core_py/   # PyO3 binding placeholder (filled in in Phase 1D)
+  sase_core_py/   # PyO3 extension crate for the sase-core-rs Python package
   sase_gateway/   # local host HTTP gateway for SASE mobile clients
 ```
 
