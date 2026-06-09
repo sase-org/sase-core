@@ -426,6 +426,10 @@ mod tests {
         assert_eq!(loaded.times_revived, 1);
         assert_eq!(loaded.agent_refs[0].raw_suffix.as_deref(), Some("ts-1"));
         assert_eq!(loaded.agent_refs[0].tag.as_deref(), Some("backend"));
+        assert_eq!(
+            loaded.agent_refs[0].prompt_preview.as_deref(),
+            Some("Restore this backend worker.")
+        );
     }
 
     #[test]
@@ -560,6 +564,43 @@ mod tests {
     }
 
     #[test]
+    fn missing_ref_prompt_preview_loads_as_none() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("legacy-prompt.json"),
+            serde_json::json!({
+                "schema_version": AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+                "group_id": "legacy-prompt",
+                "created_at": "2026-05-27T12:00:00Z",
+                "source": "marked_agents",
+                "title": "1 agent in cl",
+                "agent_count": 1,
+                "top_level_agent_count": 1,
+                "status_counts": {"DONE": 1},
+                "project_names": ["proj"],
+                "cl_names": ["cl"],
+                "agent_refs": [{
+                    "agent_type": "run",
+                    "cl_name": "cl",
+                    "raw_suffix": "ts-1",
+                    "tag": "backend"
+                }],
+                "revived_at": null,
+                "times_revived": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_dismissed_agent_group(tmp.path(), "legacy-prompt")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.agent_refs.len(), 1);
+        assert_eq!(loaded.agent_refs[0].prompt_preview, None);
+    }
+
+    #[test]
     fn whitespace_group_name_normalizes_to_none() {
         let tmp = TempDir::new().unwrap();
         let mut group = sample_group("blank-name", "2026-05-27T12:00:00Z");
@@ -605,6 +646,9 @@ mod tests {
                 model: Some("gpt".to_string()),
                 llm_provider: Some("codex".to_string()),
                 tag: Some("backend".to_string()),
+                prompt_preview: Some(
+                    "Restore this backend worker.".to_string(),
+                ),
             }],
             revived_at: None,
             times_revived: 0,

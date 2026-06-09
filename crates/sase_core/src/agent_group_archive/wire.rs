@@ -30,6 +30,8 @@ pub struct SavedAgentGroupRefWire {
     pub llm_provider: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    #[serde(default)]
+    pub prompt_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
