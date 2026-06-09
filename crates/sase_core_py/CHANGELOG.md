@@ -1,0 +1,78 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.1](https://github.com/sase-org/sase-core/releases/tag/v0.1.1) - 2026-06-08
+
+### Added
+
+- add agent name template primitives (sase-4g.1)
+- add exact artifact dir scanner (sase-4f.2)
+- add recent dismissed group archive APIs
+- add ProjectSpec alias contract (sase-4c.1)
+- add project lifecycle core contract (sase-49.1)
+- add episode v2 wire contract (sase-48.1)
+- add saved agent group archive backend (sase-47.1)
+- add episode wire schema (sase-45.1)
+- persist dismissed agent visibility in index (sase-3s.1)
+- add visibility-aware index query and dismissed-agent sidecar (sase-3r.2)
+- read bead stores from event logs (sase-3n.2)
+- remove merged bead read exports (sase-3c.3)
+- add Rust agent archive backend (sase-37.9)
+- remove ChangeSpec test targets from core
+- add counts-only notification append and rewrite APIs (sase-35.2)
+- migrate Rust core to canonical .sase project spec extension (sase-33.4)
+- add bead work preclaim mutation
+- remove KICKSTART from core changespec wire
+- remove unified artifact graph core
+- add batched artifact summary contract
+- add SQL-backed artifact search
+- add paged artifact detail contract
+- expose artifact graph export binding
+- add artifact ingestion path framework
+- expose artifact graph bindings (sase-23.1.6)
+- add legend work planner
+- add persistent agent artifact index
+- Add bead tier metadata
+- add Rust bead CLI planner
+- add Rust bead mutation transactions
+- add bead epic work planner
+- add bead read bindings
+- add Rust agent process spawn binding
+- add Rust agent launch fanout planner
+- add launch timestamp batch allocation
+- add Rust launch preparation binding
+- add Rust workspace claim planning
+- add agent launch wire skeletons
+- expose agent compose pyo3 binding
+- add persistent query corpus PyO3 handles
+- expose notification store PyO3 bindings
+- add cleanup execution helpers
+- add Rust agent cleanup planner
+- Phase 5C — pure-Rust Git query parsers and PyO3 bindings (sase-1a.3)
+- Phase 4C — pure-Rust status state machine and PyO3 bindings (sase-19.3)
+- Phase 3C — sase_core_rs.scan_agent_artifacts PyO3 binding (sase-18.3)
+- *(query)* Phase 2D PyO3 query bindings (sase-17.4)
+- Phase 1D PyO3 binding exposing parse_project_bytes
+- Phase 1A — Rust workspace and wire types (sase-16.1)
+
+### Fixed
+
+- add count-only notification state updates
+- enforce artifact binding request parity
+
+### Other
+
+- add release-plz release automation (sase-4e.5)
+- Revert "feat: add visibility-aware index query and dismissed-agent sidecar (sase-3r.2)"
+- Revert "chore: restore Rust check formatting"
+- restore Rust check formatting
+- align rewrite_notifications counts binding test with merge semantics
+- bump sase-core package version
+- remove agent compose rust core
+- Phase 6A — wheel packaging and release matrix (sase-1b.1)
