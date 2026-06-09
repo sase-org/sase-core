@@ -50,7 +50,7 @@ jobs:
         uses: release-plz/action@v0.5
         with:
           command: release
-          dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
