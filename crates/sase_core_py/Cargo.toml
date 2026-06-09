@@ -29,7 +29,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-sase_core = { path = "../sase_core" }
+sase_core = { workspace = true }
 pyo3 = { version = "0.22", features = ["abi3-py312"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
