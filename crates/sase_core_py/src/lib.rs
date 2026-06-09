@@ -56,6 +56,7 @@
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
 //! - `render_agent_name_template(template: str, token: str) -> str`
+//! - `agent_name_template_namespace_template(template: str) -> str`
 //! - `match_agent_name_template(template: str, concrete: str) -> str | None`
 //! - `compare_agent_name_template_tokens(left: str, right: str) -> int`
 //! - `agent_name_template_tokens_after(after: str | None, count: int) -> list[str]`
@@ -138,6 +139,7 @@ use sase_core::agent_launch::{
     AgentLaunchRequestWire, WorkspaceClaimRequestWire,
 };
 use sase_core::agent_name_template::{
+    agent_name_template_namespace_template as core_agent_name_template_namespace_template,
     agent_name_template_tokens_after as core_agent_name_template_tokens_after,
     compare_agent_name_template_tokens as core_compare_agent_name_template_tokens,
     is_agent_name_template as core_is_agent_name_template,
@@ -275,6 +277,15 @@ fn py_render_agent_name_template(
     token: &str,
 ) -> PyResult<String> {
     core_render_agent_name_template(template, token)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_name_template_namespace_template")]
+fn py_agent_name_template_namespace_template(
+    template: &str,
+) -> PyResult<String> {
+    core_agent_name_template_namespace_template(template)
         .map_err(|err| PyValueError::new_err(format!("{err}")))
 }
 
@@ -2791,6 +2802,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_is_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(py_render_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_name_template_namespace_template,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_match_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_compare_agent_name_template_tokens,

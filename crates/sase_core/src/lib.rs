@@ -87,12 +87,12 @@ pub use agent_launch::{
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
 };
 pub use agent_name_template::{
-    agent_name_template_tokens_after, compare_agent_name_template_tokens,
-    is_agent_name_template, is_valid_agent_name_template_token,
-    match_agent_name_template, next_agent_name_template_token,
-    parse_agent_name_template, render_agent_name_template,
-    validate_agent_name_template_token, AgentNameTemplate,
-    AgentNameTemplateError, AGENT_NAME_TEMPLATE_ALPHABET,
+    agent_name_template_namespace_template, agent_name_template_tokens_after,
+    compare_agent_name_template_tokens, is_agent_name_template,
+    is_valid_agent_name_template_token, match_agent_name_template,
+    next_agent_name_template_token, parse_agent_name_template,
+    render_agent_name_template, validate_agent_name_template_token,
+    AgentNameTemplate, AgentNameTemplateError, AGENT_NAME_TEMPLATE_ALPHABET,
     AGENT_NAME_TEMPLATE_MARKER,
 };
 pub use agent_scan::{

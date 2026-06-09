@@ -59,6 +59,18 @@ impl AgentNameTemplate {
         Ok(format!("{}{}{}", self.prefix, token, self.suffix))
     }
 
+    pub fn namespace_template(&self) -> String {
+        match self.suffix.find('.') {
+            Some(dot_idx) => format!(
+                "{}{}{}",
+                self.prefix,
+                AGENT_NAME_TEMPLATE_MARKER,
+                &self.suffix[..dot_idx]
+            ),
+            None => self.template.clone(),
+        }
+    }
+
     pub fn match_token(
         &self,
         concrete: &str,
@@ -96,6 +108,12 @@ pub fn render_agent_name_template(
     token: &str,
 ) -> Result<String, AgentNameTemplateError> {
     parse_agent_name_template(template)?.render(token)
+}
+
+pub fn agent_name_template_namespace_template(
+    template: &str,
+) -> Result<String, AgentNameTemplateError> {
+    Ok(parse_agent_name_template(template)?.namespace_template())
 }
 
 pub fn match_agent_name_template(
@@ -209,6 +227,27 @@ mod tests {
         assert_eq!(
             render_agent_name_template("research.@.final", "00").unwrap(),
             "research.00.final"
+        );
+    }
+
+    #[test]
+    fn derives_namespace_template_shapes() {
+        assert_eq!(agent_name_template_namespace_template("@").unwrap(), "@");
+        assert_eq!(
+            agent_name_template_namespace_template("@.cld").unwrap(),
+            "@"
+        );
+        assert_eq!(
+            agent_name_template_namespace_template("foo-@").unwrap(),
+            "foo-@"
+        );
+        assert_eq!(
+            agent_name_template_namespace_template("foo.@.bar").unwrap(),
+            "foo.@"
+        );
+        assert_eq!(
+            agent_name_template_namespace_template("foo.@x.bar").unwrap(),
+            "foo.@x"
         );
     }
 
