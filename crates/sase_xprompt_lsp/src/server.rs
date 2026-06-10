@@ -1098,7 +1098,7 @@ fn markdown_uri_eligible(uri: &Uri) -> bool {
     if path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts")
+            Some("xprompts" | ".xprompts" | "default_xprompts")
         )
     }) {
         return true;
@@ -1145,7 +1145,7 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
     path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts")
+            Some("xprompts" | ".xprompts" | "default_xprompts")
         )
     })
 }
@@ -1376,6 +1376,13 @@ mod tests {
             file_uri(temp.join("project").join("xprompts").join("foo.md"));
         let dot_xprompts_uri =
             file_uri(temp.join("project").join(".xprompts").join("foo.md"));
+        let default_xprompts_uri = file_uri(
+            temp.join("project")
+                .join("src")
+                .join("sase")
+                .join("default_xprompts")
+                .join("research_swarm.md"),
+        );
         let ace_prompt_uri = file_uri(temp.join("sase_ace_prompt_abc.md"));
         let cli_prompt_uri = file_uri(temp.join("sase_prompt_abc.md"));
         let prose_uri = file_uri(
@@ -1388,6 +1395,11 @@ mod tests {
 
         assert!(document_eligible(&xprompts_uri, "markdown", &config));
         assert!(document_eligible(&dot_xprompts_uri, "markdown", &config));
+        assert!(document_eligible(
+            &default_xprompts_uri,
+            "markdown",
+            &config
+        ));
         assert!(document_eligible(&ace_prompt_uri, "markdown", &config));
         assert!(document_eligible(&cli_prompt_uri, "markdown", &config));
         assert!(!document_eligible(&prose_uri, "markdown", &config));
@@ -1400,6 +1412,34 @@ mod tests {
         assert!(document_eligible(&prose_uri, "gitcommit", &config));
         assert!(document_eligible(&prose_uri, "sase", &config));
         assert!(document_eligible(&prose_uri, "sase_prompt", &config));
+    }
+
+    #[test]
+    fn catalog_invalidation_tracks_xprompt_source_dirs() {
+        let temp = std::env::temp_dir();
+        let xprompts_uri =
+            file_uri(temp.join("project").join("xprompts").join("foo.md"));
+        let dot_xprompts_uri =
+            file_uri(temp.join("project").join(".xprompts").join("foo.md"));
+        let default_xprompts_uri = file_uri(
+            temp.join("project")
+                .join("src")
+                .join("sase")
+                .join("default_xprompts")
+                .join("research_swarm.md"),
+        );
+        let prose_uri = file_uri(
+            temp.join("project")
+                .join("sdd")
+                .join("research")
+                .join("202605")
+                .join("memory_system_prior_art.md"),
+        );
+
+        assert!(should_invalidate_for_uri(&xprompts_uri));
+        assert!(should_invalidate_for_uri(&dot_xprompts_uri));
+        assert!(should_invalidate_for_uri(&default_xprompts_uri));
+        assert!(!should_invalidate_for_uri(&prose_uri));
     }
 
     #[tokio::test]
