@@ -98,7 +98,8 @@ pub use agent_name_template::{
 pub use agent_scan::{
     agent_artifact_index_status, delete_agent_artifact_index_row,
     is_supported_workflow_dir, query_agent_artifact_index,
-    read_agent_artifact_index_meta, rebuild_agent_artifact_index,
+    query_related_agent_artifact_dirs, read_agent_artifact_index_meta,
+    rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents, scan_agent_artifact_dir,
     scan_agent_artifact_dirs, scan_agent_artifacts,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,

@@ -17,8 +17,8 @@ pub mod wire;
 
 pub use index::{
     agent_artifact_index_status, delete_agent_artifact_index_row,
-    query_agent_artifact_index, read_agent_artifact_index_meta,
-    rebuild_agent_artifact_index,
+    query_agent_artifact_index, query_related_agent_artifact_dirs,
+    read_agent_artifact_index_meta, rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,

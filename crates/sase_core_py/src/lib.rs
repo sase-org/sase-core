@@ -22,6 +22,7 @@
 //! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
 //! - `agent_artifact_index_status(index_path: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
+//! - `query_related_agent_artifact_dirs(index_path: str, artifact_dir: str, seed_timestamps: list[str]) -> list[str]`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
@@ -154,6 +155,7 @@ use sase_core::agent_scan::{
     agent_artifact_index_status as core_agent_artifact_index_status,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     query_agent_artifact_index as core_query_agent_artifact_index,
+    query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
@@ -747,6 +749,29 @@ fn py_query_agent_artifact_index<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "query_related_agent_artifact_dirs",
+    signature = (index_path, artifact_dir, seed_timestamps)
+)]
+fn py_query_related_agent_artifact_dirs(
+    py: Python<'_>,
+    index_path: &str,
+    artifact_dir: &str,
+    seed_timestamps: Vec<String>,
+) -> PyResult<Vec<String>> {
+    let index = PathBuf::from(index_path);
+    let artifact = PathBuf::from(artifact_dir);
+    py.allow_threads(|| {
+        core_query_related_agent_artifact_dirs(
+            &index,
+            &artifact,
+            &seed_timestamps,
+        )
+    })
+    .map_err(PyRuntimeError::new_err)
 }
 
 #[pyfunction]
@@ -2885,6 +2910,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_write_agent_artifact_index_meta, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_episode_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_episode_json, m)?)?;
     m.add_function(wrap_pyfunction!(py_episode_source_id, m)?)?;

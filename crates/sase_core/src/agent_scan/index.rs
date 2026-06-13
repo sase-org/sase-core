@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_cleanup::AgentCleanupIdentityWire;
@@ -40,6 +40,8 @@ const MARKER_FILES: &[&str] = &[
 
 const TERMINAL_WORKFLOW_STATUSES: &[&str] =
     &["completed", "failed", "cancelled", "noop"];
+const MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS: usize = 128;
+const MAX_RELATED_ARTIFACT_QUERY_ITERATIONS: usize = 32;
 
 /// Query knobs for the persistent artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +358,71 @@ pub fn query_agent_artifact_index(
     })
 }
 
+/// Return artifact directories related to one logical agent lineage.
+///
+/// The query is scoped to the indexed current artifact's project/workflow
+/// parent, then follows direct timestamp pointers in the materialized index
+/// (`parent_timestamp`, retry back/forward pointers, and retry-chain root).
+/// This keeps tools-panel lookups proportional to the lineage size instead
+/// of the number of historical sibling artifact directories.
+pub fn query_related_agent_artifact_dirs(
+    index_path: &Path,
+    artifact_dir: &Path,
+    seed_timestamps: &[String],
+) -> Result<Vec<String>, String> {
+    let conn = open_index(index_path)?;
+    let current_path = artifact_dir.to_string_lossy().into_owned();
+    let Some(current) =
+        select_lineage_row_by_artifact_dir(&conn, &current_path)?
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut timestamps: BTreeSet<String> = BTreeSet::new();
+    for timestamp in seed_timestamps {
+        insert_lineage_timestamp(&mut timestamps, timestamp);
+    }
+    insert_lineage_timestamp(&mut timestamps, &current.timestamp);
+    current.add_related_timestamps(&mut timestamps);
+
+    let mut by_dir: BTreeMap<String, IndexedLineageRow> = BTreeMap::new();
+    by_dir.insert(current.artifact_dir.clone(), current.clone());
+
+    for _ in 0..MAX_RELATED_ARTIFACT_QUERY_ITERATIONS {
+        let rows = select_lineage_rows(
+            &conn,
+            &current.project_name,
+            &current.workflow_dir_name,
+            &timestamps,
+        )?;
+        let mut changed = false;
+        for row in rows {
+            changed |= row.add_related_timestamps(&mut timestamps);
+            if !by_dir.contains_key(&row.artifact_dir) {
+                changed = true;
+            }
+            by_dir.insert(row.artifact_dir.clone(), row);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut rows: Vec<IndexedLineageRow> = by_dir.into_values().collect();
+    rows.sort_by(|a, b| {
+        (a.timestamp.as_str(), a.artifact_dir.as_str())
+            .cmp(&(b.timestamp.as_str(), b.artifact_dir.as_str()))
+    });
+
+    let mut dirs: Vec<String> =
+        rows.into_iter().map(|row| row.artifact_dir).collect();
+    if let Some(index) = dirs.iter().position(|path| path == &current_path) {
+        let current = dirs.remove(index);
+        dirs.insert(0, current);
+    }
+    Ok(dirs)
+}
+
 fn open_index(index_path: &Path) -> Result<Connection, String> {
     if let Some(parent) = index_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -419,6 +486,14 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             ON agent_artifacts(cl_name);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_project_workflow
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_parent_timestamp
+            ON agent_artifacts(project_name, workflow_dir_name, parent_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retry_of_timestamp
+            ON agent_artifacts(project_name, workflow_dir_name, retry_of_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retried_as_timestamp
+            ON agent_artifacts(project_name, workflow_dir_name, retried_as_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retry_chain_root_timestamp
+            ON agent_artifacts(project_name, workflow_dir_name, retry_chain_root_timestamp);
         CREATE TABLE IF NOT EXISTS dismissed_agents (
             agent_type TEXT NOT NULL,
             cl_name TEXT NOT NULL,
@@ -929,6 +1004,136 @@ struct SelectRecordsQuery {
     limit: Option<u32>,
     selection: RecordSelection,
     include_hidden: bool,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedLineageRow {
+    artifact_dir: String,
+    project_name: String,
+    workflow_dir_name: String,
+    timestamp: String,
+    parent_timestamp: Option<String>,
+    retry_of_timestamp: Option<String>,
+    retried_as_timestamp: Option<String>,
+    retry_chain_root_timestamp: Option<String>,
+}
+
+impl IndexedLineageRow {
+    fn add_related_timestamps(
+        &self,
+        timestamps: &mut BTreeSet<String>,
+    ) -> bool {
+        let mut changed = insert_lineage_timestamp(timestamps, &self.timestamp);
+        for value in [
+            self.parent_timestamp.as_deref(),
+            self.retry_of_timestamp.as_deref(),
+            self.retried_as_timestamp.as_deref(),
+            self.retry_chain_root_timestamp.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            changed |= insert_lineage_timestamp(timestamps, value);
+        }
+        changed
+    }
+}
+
+fn insert_lineage_timestamp(
+    timestamps: &mut BTreeSet<String>,
+    value: &str,
+) -> bool {
+    if value.is_empty()
+        || timestamps.len() >= MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS
+    {
+        return false;
+    }
+    timestamps.insert(value.to_string())
+}
+
+fn select_lineage_row_by_artifact_dir(
+    conn: &Connection,
+    artifact_dir: &str,
+) -> Result<Option<IndexedLineageRow>, String> {
+    conn.query_row(
+        r#"
+        SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
+               parent_timestamp, retry_of_timestamp, retried_as_timestamp,
+               retry_chain_root_timestamp
+        FROM agent_artifacts
+        WHERE artifact_dir = ?1
+        "#,
+        [artifact_dir],
+        lineage_row_from_sql,
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+fn select_lineage_rows(
+    conn: &Connection,
+    project_name: &str,
+    workflow_dir_name: &str,
+    timestamps: &BTreeSet<String>,
+) -> Result<Vec<IndexedLineageRow>, String> {
+    if timestamps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = placeholders(timestamps.len());
+    let sql = format!(
+        r#"
+        SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
+               parent_timestamp, retry_of_timestamp, retried_as_timestamp,
+               retry_chain_root_timestamp
+        FROM agent_artifacts
+        WHERE project_name = ?
+          AND workflow_dir_name = ?
+          AND (
+              timestamp IN ({placeholders})
+              OR parent_timestamp IN ({placeholders})
+              OR retry_of_timestamp IN ({placeholders})
+              OR retried_as_timestamp IN ({placeholders})
+              OR retry_chain_root_timestamp IN ({placeholders})
+          )
+        ORDER BY timestamp ASC, artifact_dir ASC
+        "#
+    );
+    let mut values: Vec<String> = Vec::with_capacity(2 + timestamps.len() * 5);
+    values.push(project_name.to_string());
+    values.push(workflow_dir_name.to_string());
+    for _ in 0..5 {
+        values.extend(timestamps.iter().cloned());
+    }
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params_from_iter(values.iter()))
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push(lineage_row_from_sql(row).map_err(|e| e.to_string())?);
+    }
+    Ok(result)
+}
+
+fn placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
+}
+
+fn lineage_row_from_sql(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<IndexedLineageRow> {
+    Ok(IndexedLineageRow {
+        artifact_dir: row.get(0)?,
+        project_name: row.get(1)?,
+        workflow_dir_name: row.get(2)?,
+        timestamp: row.get(3)?,
+        parent_timestamp: row.get(4)?,
+        retry_of_timestamp: row.get(5)?,
+        retried_as_timestamp: row.get(6)?,
+        retry_chain_root_timestamp: row.get(7)?,
+    })
 }
 
 fn record_matches_selection(
@@ -1559,6 +1764,85 @@ mod tests {
     }
 
     #[test]
+    fn related_artifact_dirs_follow_retry_and_parent_lineage() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let root = artifact(&projects, "20260504120000");
+        let followup = artifact(&projects, "20260504120500");
+        let retry = artifact(&projects, "20260504121000");
+        let retry2 = artifact(&projects, "20260504121500");
+        let unrelated = artifact(&projects, "20260504122000");
+        write_json(
+            &root.join("agent_meta.json"),
+            json!({
+                "name": "root",
+                "retry_chain_root_timestamp": root.file_name().unwrap().to_string_lossy(),
+                "retried_as_timestamp": retry.file_name().unwrap().to_string_lossy(),
+            }),
+        );
+        write_json(
+            &followup.join("agent_meta.json"),
+            json!({
+                "name": "followup",
+                "parent_timestamp": root.file_name().unwrap().to_string_lossy(),
+            }),
+        );
+        write_json(
+            &retry.join("agent_meta.json"),
+            json!({
+                "name": "retry",
+                "retry_of_timestamp": root.file_name().unwrap().to_string_lossy(),
+                "retry_chain_root_timestamp": root.file_name().unwrap().to_string_lossy(),
+                "retried_as_timestamp": retry2.file_name().unwrap().to_string_lossy(),
+            }),
+        );
+        write_json(
+            &retry2.join("agent_meta.json"),
+            json!({
+                "name": "retry2",
+                "retry_of_timestamp": retry.file_name().unwrap().to_string_lossy(),
+                "retry_chain_root_timestamp": root.file_name().unwrap().to_string_lossy(),
+            }),
+        );
+        write_json(
+            &unrelated.join("agent_meta.json"),
+            json!({"name": "unrelated", "parent_timestamp": "other-root"}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let root_related =
+            query_related_agent_artifact_dirs(&index, &root, &[]).unwrap();
+        assert_eq!(
+            timestamps_from_artifact_dirs(&root_related),
+            vec![
+                "20260504120000",
+                "20260504120500",
+                "20260504121000",
+                "20260504121500",
+            ]
+        );
+
+        let retry_related =
+            query_related_agent_artifact_dirs(&index, &retry, &[]).unwrap();
+        assert_eq!(
+            timestamps_from_artifact_dirs(&retry_related),
+            vec![
+                "20260504121000",
+                "20260504120000",
+                "20260504120500",
+                "20260504121500",
+            ]
+        );
+    }
+
+    #[test]
     fn wait_completed_records_are_indexed_as_running() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
@@ -1589,6 +1873,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "running");
+    }
+
+    fn timestamps_from_artifact_dirs(paths: &[String]) -> Vec<&str> {
+        paths
+            .iter()
+            .map(|path| Path::new(path).file_name().unwrap().to_str().unwrap())
+            .collect()
     }
 
     #[test]
