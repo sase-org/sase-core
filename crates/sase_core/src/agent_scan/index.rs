@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -459,23 +459,44 @@ fn is_sqlite_index_corruption_error(error: &str) -> bool {
 }
 
 fn replace_unusable_index_file(index_path: &Path) -> Result<(), String> {
-    for path in [
-        index_path.to_path_buf(),
-        sqlite_sidecar_path(index_path, "-wal"),
-        sqlite_sidecar_path(index_path, "-shm"),
-    ] {
-        match fs::remove_file(&path) {
+    let quarantined = corrupt_index_quarantine_path(index_path);
+    match fs::rename(index_path, &quarantined) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(format!(
+                "failed to quarantine unusable artifact index {}: {err}",
+                index_path.display()
+            ));
+        }
+    }
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(index_path, suffix);
+        let quarantined_sidecar = sqlite_sidecar_path(&quarantined, suffix);
+        match fs::rename(&sidecar, &quarantined_sidecar) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
                 return Err(format!(
-                    "failed to remove unusable artifact index {}: {err}",
-                    path.display()
+                    "failed to quarantine unusable artifact index sidecar {}: {err}",
+                    sidecar.display()
                 ));
             }
         }
     }
     Ok(())
+}
+
+fn corrupt_index_quarantine_path(index_path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let file_name = index_path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "agent_artifact_index.sqlite".into());
+    index_path.with_file_name(format!("{file_name}.corrupt-{nanos}"))
 }
 
 fn sqlite_sidecar_path(index_path: &Path, suffix: &str) -> PathBuf {
@@ -1344,6 +1365,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+        let quarantined: Vec<PathBuf> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("agent_artifact_index.sqlite.corrupt-")
+                    && !name.ends_with("-wal")
+                    && !name.ends_with("-shm")
+            })
+            .collect();
+        assert_eq!(quarantined.len(), 1);
 
         let indexed = query_agent_artifact_index(
             &index,
@@ -1354,6 +1386,44 @@ mod tests {
         .unwrap();
         assert_eq!(indexed.records.len(), 1);
         assert_eq!(indexed.records[0].timestamp, "20260521143000");
+    }
+
+    #[test]
+    fn replace_unusable_index_file_renames_sidecars() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        fs::write(&index, b"this is not a sqlite database").unwrap();
+        fs::write(sqlite_sidecar_path(&index, "-wal"), b"stale wal").unwrap();
+        fs::write(sqlite_sidecar_path(&index, "-shm"), b"stale shm").unwrap();
+
+        replace_unusable_index_file(&index).unwrap();
+
+        let quarantined: Vec<PathBuf> = fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("agent_artifact_index.sqlite.corrupt-")
+                    && !name.ends_with("-wal")
+                    && !name.ends_with("-shm")
+            })
+            .collect();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(
+            fs::read(&quarantined[0]).unwrap(),
+            b"this is not a sqlite database"
+        );
+        assert_eq!(
+            fs::read(sqlite_sidecar_path(&quarantined[0], "-wal")).unwrap(),
+            b"stale wal"
+        );
+        assert_eq!(
+            fs::read(sqlite_sidecar_path(&quarantined[0], "-shm")).unwrap(),
+            b"stale shm"
+        );
+        assert!(!index.exists());
+        assert!(!sqlite_sidecar_path(&index, "-wal").exists());
+        assert!(!sqlite_sidecar_path(&index, "-shm").exists());
     }
 
     #[test]
