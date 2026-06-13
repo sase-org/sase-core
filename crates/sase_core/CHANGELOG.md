@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/sase-org/sase-core/compare/v0.1.2...v0.1.3) - 2026-06-13
+
+### Added
+
+- add sharded agent artifact layout
+
+### Fixed
+
+- *(agent-index)* expose metadata and status helpers
+- quarantine corrupt artifact index sidecars
+
+### Other
+
+- *(agent-scan)* query related artifact dirs from index
+
 ## [0.1.2](https://github.com/sase-org/sase-core/compare/v0.1.1...v0.1.2) - 2026-06-09
 
 ### Added
