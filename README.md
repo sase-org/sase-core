@@ -1,5 +1,7 @@
 # sase-core
 
+[![PyPI](https://img.shields.io/pypi/v/sase-core-rs?logo=pypi&logoColor=white)](https://pypi.org/project/sase-core-rs/)
+
 Rust core for the [sase](https://github.com/sase-org/sase) ChangeSpec backend.
 
 This repo is the eventual home of the Rust ChangeSpec parser, query engine, graph index, and bead data backend. The
