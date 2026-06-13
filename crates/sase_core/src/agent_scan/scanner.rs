@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use super::layout::{
+    collect_workflow_artifact_candidates, parse_agent_artifact_path,
+    resolve_agent_artifact_path,
+};
 use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
@@ -236,20 +240,19 @@ fn collect_artifact_candidates(
                 continue;
             }
 
-            for artifact_dir in sorted_dir_entries(&workflow_dir, stats) {
-                if !artifact_dir.is_dir() {
-                    continue;
-                }
-                let timestamp = artifact_dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+            let collected = collect_workflow_artifact_candidates(
+                &workflow_dir,
+                &workflow_dir_name,
+                options.newest_first,
+            );
+            stats.os_errors += collected.os_errors;
+            for artifact in collected.candidates {
                 candidates.push(ArtifactCandidate {
                     project_name: project_name.clone(),
                     project_dir: project_dir.clone(),
                     workflow_dir_name: workflow_dir_name.clone(),
-                    artifact_dir,
-                    timestamp,
+                    artifact_dir: artifact.artifact_dir,
+                    timestamp: artifact.timestamp,
                 });
             }
         }
@@ -327,46 +330,48 @@ fn exact_artifact_candidate(
     artifact_dir: &Path,
     options: &AgentArtifactScanOptionsWire,
 ) -> Option<ArtifactCandidate> {
-    if !artifact_dir.is_dir() {
+    let resolved_artifact_dir =
+        resolve_agent_artifact_path(projects_root, artifact_dir);
+    if !resolved_artifact_dir.is_dir() {
         return None;
     }
 
-    let rel = artifact_dir.strip_prefix(projects_root).ok()?;
-    let parts: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    if parts.len() != 4 || parts[1] != "artifacts" {
-        return None;
-    }
+    let parsed =
+        parse_agent_artifact_path(projects_root, &resolved_artifact_dir)?;
     if !options.only_projects.is_empty()
-        && !options.only_projects.iter().any(|s| s == &parts[0])
+        && !options
+            .only_projects
+            .iter()
+            .any(|s| s == &parsed.project_name)
     {
         return None;
     }
     if !project_matches_lifecycle_states(
-        &projects_root.join(&parts[0]),
-        &parts[0],
+        &projects_root.join(&parsed.project_name),
+        &parsed.project_name,
         &options.include_project_states,
     ) {
         return None;
     }
     if !options.only_workflow_dirs.is_empty()
-        && !options.only_workflow_dirs.iter().any(|s| s == &parts[2])
+        && !options
+            .only_workflow_dirs
+            .iter()
+            .any(|s| s == &parsed.workflow_dir_name)
     {
         return None;
     }
     if options.only_workflow_dirs.is_empty()
-        && !is_supported_workflow_dir(&parts[2])
+        && !is_supported_workflow_dir(&parsed.workflow_dir_name)
     {
         return None;
     }
     Some(ArtifactCandidate {
-        project_name: parts[0].clone(),
-        project_dir: projects_root.join(&parts[0]),
-        workflow_dir_name: parts[2].clone(),
-        artifact_dir: artifact_dir.to_path_buf(),
-        timestamp: parts[3].clone(),
+        project_name: parsed.project_name.clone(),
+        project_dir: projects_root.join(&parsed.project_name),
+        workflow_dir_name: parsed.workflow_dir_name,
+        artifact_dir: resolved_artifact_dir,
+        timestamp: parsed.timestamp,
     })
 }
 

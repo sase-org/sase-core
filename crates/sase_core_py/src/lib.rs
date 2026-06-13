@@ -153,12 +153,17 @@ use sase_core::agent_name_template::{
 };
 use sase_core::agent_scan::{
     agent_artifact_index_status as core_agent_artifact_index_status,
+    canonical_agent_artifact_path as core_canonical_agent_artifact_path,
+    collect_workflow_artifact_candidates as core_collect_workflow_artifact_candidates,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
+    parse_agent_artifact_path as core_parse_agent_artifact_path,
     query_agent_artifact_index as core_query_agent_artifact_index,
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
+    resolve_agent_artifact_path as core_resolve_agent_artifact_path,
+    resolve_agent_artifact_timestamp_path as core_resolve_agent_artifact_timestamp_path,
     scan_agent_artifact_dirs as core_scan_agent_artifact_dirs,
     scan_agent_artifacts as core_scan_agent_artifacts,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
@@ -545,6 +550,115 @@ fn py_scan_agent_artifact_dirs<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Build the canonical physical path for one agent artifact timestamp.
+#[pyfunction]
+#[pyo3(
+    name = "canonical_agent_artifact_path",
+    signature = (projects_root, project_name, workflow_dir_name, timestamp)
+)]
+fn py_canonical_agent_artifact_path(
+    projects_root: &str,
+    project_name: &str,
+    workflow_dir_name: &str,
+    timestamp: &str,
+) -> String {
+    core_canonical_agent_artifact_path(
+        &PathBuf::from(projects_root),
+        project_name,
+        workflow_dir_name,
+        timestamp,
+    )
+    .to_string_lossy()
+    .into_owned()
+}
+
+/// Resolve a legacy or sharded artifact path to the current physical path.
+#[pyfunction]
+#[pyo3(name = "resolve_agent_artifact_path")]
+fn py_resolve_agent_artifact_path(
+    projects_root: &str,
+    artifact_dir: &str,
+) -> String {
+    core_resolve_agent_artifact_path(
+        &PathBuf::from(projects_root),
+        &PathBuf::from(artifact_dir),
+    )
+    .to_string_lossy()
+    .into_owned()
+}
+
+/// Resolve a project/workflow/timestamp tuple to the current physical path.
+#[pyfunction]
+#[pyo3(
+    name = "resolve_agent_artifact_timestamp_path",
+    signature = (projects_root, project_name, workflow_dir_name, timestamp)
+)]
+fn py_resolve_agent_artifact_timestamp_path(
+    projects_root: &str,
+    project_name: &str,
+    workflow_dir_name: &str,
+    timestamp: &str,
+) -> String {
+    core_resolve_agent_artifact_timestamp_path(
+        &PathBuf::from(projects_root),
+        project_name,
+        workflow_dir_name,
+        timestamp,
+    )
+    .to_string_lossy()
+    .into_owned()
+}
+
+/// Parse a legacy or sharded artifact path into layout metadata.
+#[pyfunction]
+#[pyo3(name = "parse_agent_artifact_path")]
+fn py_parse_agent_artifact_path<'py>(
+    py: Python<'py>,
+    projects_root: &str,
+    artifact_dir: &str,
+) -> PyResult<Option<PyObject>> {
+    let info = core_parse_agent_artifact_path(
+        &PathBuf::from(projects_root),
+        &PathBuf::from(artifact_dir),
+    );
+    match info {
+        Some(info) => {
+            let value = serde_json::to_value(&info).map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+            Ok(Some(json_value_to_py(py, &value)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List artifact directories for one workflow under one project.
+#[pyfunction]
+#[pyo3(
+    name = "iter_agent_artifact_dirs",
+    signature = (projects_root, project_name, workflow_dir_name, newest_first = false)
+)]
+fn py_iter_agent_artifact_dirs(
+    projects_root: &str,
+    project_name: &str,
+    workflow_dir_name: &str,
+    newest_first: bool,
+) -> Vec<String> {
+    let workflow_dir = PathBuf::from(projects_root)
+        .join(project_name)
+        .join("artifacts")
+        .join(workflow_dir_name);
+    core_collect_workflow_artifact_candidates(
+        &workflow_dir,
+        workflow_dir_name,
+        newest_first,
+    )
+    .candidates
+    .into_iter()
+    .map(|candidate| candidate.artifact_dir.to_string_lossy().into_owned())
+    .collect()
 }
 
 /// Rebuild the persistent agent artifact index from source artifacts.
@@ -2899,6 +3013,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dirs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canonical_agent_artifact_path, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_agent_artifact_path, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_resolve_agent_artifact_timestamp_path,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_parse_agent_artifact_path, m)?)?;
+    m.add_function(wrap_pyfunction!(py_iter_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_rebuild_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;

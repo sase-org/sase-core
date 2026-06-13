@@ -26,7 +26,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 4;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -91,6 +91,7 @@ pub struct AgentArtifactIndexStatusWire {
     pub index_path: String,
     pub agent_artifacts_rows: u64,
     pub dismissed_agents_rows: u64,
+    pub agent_artifact_aliases_rows: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -163,12 +164,18 @@ pub fn delete_agent_artifact_index_row(
     artifact_dir: &Path,
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
     let conn = open_index(index_path)?;
+    let artifact_dir =
+        resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
     let deleted = conn
         .execute(
             "DELETE FROM agent_artifacts WHERE artifact_dir = ?1",
-            [artifact_dir.to_string_lossy().as_ref()],
+            [artifact_dir.as_str()],
         )
         .map_err(|e| e.to_string())? as u64;
+    let _ = conn.execute(
+        "DELETE FROM agent_artifact_aliases WHERE artifact_dir = ?1 OR alias_path = ?1",
+        [artifact_dir.as_str()],
+    );
 
     Ok(AgentArtifactIndexUpdateWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
@@ -255,6 +262,10 @@ pub fn agent_artifact_index_status(
         index_path: index_path.to_string_lossy().into_owned(),
         agent_artifacts_rows: count_table_rows(&conn, "agent_artifacts")?,
         dismissed_agents_rows: count_table_rows(&conn, "dismissed_agents")?,
+        agent_artifact_aliases_rows: count_table_rows(
+            &conn,
+            "agent_artifact_aliases",
+        )?,
     })
 }
 
@@ -371,7 +382,8 @@ pub fn query_related_agent_artifact_dirs(
     seed_timestamps: &[String],
 ) -> Result<Vec<String>, String> {
     let conn = open_index(index_path)?;
-    let current_path = artifact_dir.to_string_lossy().into_owned();
+    let current_path =
+        resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
     let Some(current) =
         select_lineage_row_by_artifact_dir(&conn, &current_path)?
     else {
@@ -445,6 +457,8 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             project_dir TEXT NOT NULL,
             project_file TEXT NOT NULL,
             workflow_dir_name TEXT NOT NULL,
+            workflow_name TEXT,
+            agent_family TEXT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
             agent_type TEXT NOT NULL,
@@ -486,6 +500,10 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
             ON agent_artifacts(cl_name);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_project_workflow
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_workflow_name
+            ON agent_artifacts(workflow_name, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_family
+            ON agent_artifacts(agent_family, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_parent_timestamp
             ON agent_artifacts(project_name, workflow_dir_name, parent_timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retry_of_timestamp
@@ -503,6 +521,13 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
         );
         CREATE INDEX IF NOT EXISTS idx_dismissed_agents_suffix
             ON dismissed_agents(raw_suffix, cl_name, agent_type);
+        CREATE TABLE IF NOT EXISTS agent_artifact_aliases (
+            alias_path TEXT PRIMARY KEY,
+            artifact_dir TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_artifact_aliases_artifact_dir
+            ON agent_artifact_aliases(artifact_dir);
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -522,6 +547,10 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if prior_version.map_or(true, |v| v < 3) {
         ensure_agent_artifacts_column(&conn, "pending_question_sig", "TEXT")?;
     }
+    if prior_version.map_or(true, |v| v < 4) {
+        ensure_agent_artifacts_column(&conn, "workflow_name", "TEXT")?;
+        ensure_agent_artifacts_column(&conn, "agent_family", "TEXT")?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -540,6 +569,20 @@ fn read_index_schema_version(conn: &Connection) -> Result<u32, String> {
         )
         .map_err(|e| e.to_string())?;
     raw.parse::<u32>().map_err(|e| e.to_string())
+}
+
+fn resolve_index_artifact_dir(
+    conn: &Connection,
+    artifact_dir: &str,
+) -> Result<String, String> {
+    conn.query_row(
+        "SELECT artifact_dir FROM agent_artifact_aliases WHERE alias_path = ?1",
+        [artifact_dir],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+    .map(|value| value.unwrap_or_else(|| artifact_dir.to_string()))
 }
 
 fn count_table_rows(conn: &Connection, table: &str) -> Result<u64, String> {
@@ -705,7 +748,8 @@ fn upsert_record(
         r#"
         INSERT INTO agent_artifacts (
             artifact_dir, projects_root, project_name, project_dir, project_file,
-            workflow_dir_name, timestamp, status, agent_type, cl_name,
+            workflow_dir_name, workflow_name, agent_family, timestamp,
+            status, agent_type, cl_name,
             agent_name, model, llm_provider, started_at, finished_at,
             has_done_marker, has_running_marker, has_waiting_marker,
             has_workflow_state, workflow_status, hidden, parent_timestamp,
@@ -718,7 +762,7 @@ fn upsert_record(
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, ?33, ?34, ?35, ?36, ?37, CURRENT_TIMESTAMP
+            ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -726,6 +770,8 @@ fn upsert_record(
             project_dir = excluded.project_dir,
             project_file = excluded.project_file,
             workflow_dir_name = excluded.workflow_dir_name,
+            workflow_name = excluded.workflow_name,
+            agent_family = excluded.agent_family,
             timestamp = excluded.timestamp,
             status = excluded.status,
             agent_type = excluded.agent_type,
@@ -766,6 +812,8 @@ fn upsert_record(
             record.project_dir,
             record.project_file,
             record.workflow_dir_name,
+            summary.workflow_name,
+            summary.agent_family,
             record.timestamp,
             summary.status,
             summary.agent_type,
@@ -1118,7 +1166,10 @@ fn select_lineage_rows(
 }
 
 fn placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
+    std::iter::repeat("?")
+        .take(len)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn lineage_row_from_sql(
@@ -1370,6 +1421,8 @@ struct RecordSummary {
     agent_type: String,
     cl_name: Option<String>,
     agent_name: Option<String>,
+    workflow_name: Option<String>,
+    agent_family: Option<String>,
     model: Option<String>,
     llm_provider: Option<String>,
     started_at: Option<String>,
@@ -1428,6 +1481,10 @@ impl RecordSummary {
                 .and_then(|m| m.name.clone())
                 .or_else(|| done.and_then(|d| d.name.clone()))
                 .or_else(|| workflow_state.map(|w| w.workflow_name.clone())),
+            workflow_name: meta
+                .and_then(|m| m.workflow_name.clone())
+                .or_else(|| workflow_state.map(|w| w.workflow_name.clone())),
+            agent_family: meta.and_then(|m| m.agent_family.clone()),
             model: meta
                 .and_then(|m| m.model.clone())
                 .or_else(|| done.and_then(|d| d.model.clone()))

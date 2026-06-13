@@ -1287,6 +1287,65 @@ fn selective_marker_options_skip_payloads_but_keep_done_presence() {
 }
 
 #[test]
+fn scanner_accepts_mixed_legacy_and_day_sharded_ace_run_dirs() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let legacy = root
+        .join("proj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260612101010");
+    let sharded = root
+        .join("proj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("202606")
+        .join("13")
+        .join("20260613101010");
+    write_json(&legacy.join("agent_meta.json"), &json!({"name": "legacy"}));
+    write_json(
+        &sharded.join("agent_meta.json"),
+        &json!({"name": "sharded"}),
+    );
+
+    let snapshot = scan_agent_artifacts(
+        &root,
+        AgentArtifactScanOptionsWire {
+            only_workflow_dirs: vec!["ace-run".to_string()],
+            ..Default::default()
+        },
+    );
+
+    let by_timestamp: Vec<(&str, &str)> = snapshot
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.timestamp.as_str(),
+                record
+                    .agent_meta
+                    .as_ref()
+                    .and_then(|meta| meta.name.as_deref())
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_timestamp,
+        vec![("20260612101010", "legacy"), ("20260613101010", "sharded"),]
+    );
+    assert_eq!(snapshot.records[1].artifact_dir, sharded.to_string_lossy());
+
+    let exact = scan_agent_artifact_dirs(
+        &root,
+        &[sharded],
+        AgentArtifactScanOptionsWire::default(),
+    );
+    assert_eq!(exact.records.len(), 1);
+    assert_eq!(exact.records[0].timestamp, "20260613101010");
+}
+
+#[test]
 fn snapshot_serializes_to_json() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));

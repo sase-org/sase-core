@@ -12,6 +12,7 @@
 //! Phase 3B reproduces here.
 
 pub mod index;
+pub mod layout;
 pub mod scanner;
 pub mod wire;
 
@@ -23,6 +24,14 @@ pub use index::{
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+};
+pub use layout::{
+    canonical_agent_artifact_path, collect_workflow_artifact_candidates,
+    is_artifact_timestamp, is_day_sharded_workflow, legacy_agent_artifact_path,
+    parse_agent_artifact_path, resolve_agent_artifact_path,
+    resolve_agent_artifact_timestamp_path, AgentArtifactPathInfo,
+    WorkflowArtifactCandidate, WorkflowArtifactCandidates,
+    ACE_RUN_WORKFLOW_DIR, DAY_SHARDED_LAYOUT_VERSION, LEGACY_LAYOUT_VERSION,
 };
 pub use scanner::{
     scan_agent_artifact_dir, scan_agent_artifact_dirs, scan_agent_artifacts,
