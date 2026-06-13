@@ -13,10 +13,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sase_core::agent_cleanup::AgentCleanupIdentityWire;
 use sase_core::agent_scan::{
-    query_agent_artifact_index, rebuild_agent_artifact_index,
-    scan_agent_artifact_dirs, scan_agent_artifacts,
+    agent_artifact_index_status, query_agent_artifact_index,
+    read_agent_artifact_index_meta, rebuild_agent_artifact_index,
+    replace_agent_artifact_index_dismissed_agents, scan_agent_artifact_dirs,
+    scan_agent_artifacts, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -970,6 +974,63 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
     )
     .unwrap();
     assert!(all.records.iter().any(|r| r.timestamp == TS_WORKFLOW_ROOT));
+}
+
+#[test]
+fn artifact_index_metadata_helpers_round_trip() {
+    let tmp = tempdir().unwrap();
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+
+    assert_eq!(
+        read_agent_artifact_index_meta(&index, "dismissed_projection").unwrap(),
+        None
+    );
+    write_agent_artifact_index_meta(
+        &index,
+        "dismissed_projection",
+        r#"{"version":1}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_agent_artifact_index_meta(&index, "dismissed_projection").unwrap(),
+        Some(r#"{"version":1}"#.to_string())
+    );
+    let status = agent_artifact_index_status(&index).unwrap();
+    assert_eq!(status.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
+    assert_eq!(status.agent_artifacts_rows, 0);
+    assert_eq!(status.dismissed_agents_rows, 0);
+}
+
+#[test]
+fn artifact_index_status_counts_artifact_and_dismissed_rows() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    replace_agent_artifact_index_dismissed_agents(
+        &index,
+        &[AgentCleanupIdentityWire {
+            agent_type: "run".to_string(),
+            cl_name: "myproj".to_string(),
+            raw_suffix: Some(TS_ACE_RUN_DONE.to_string()),
+        }],
+    )
+    .unwrap();
+
+    let status = agent_artifact_index_status(&index).unwrap();
+
+    assert_eq!(status.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
+    assert_eq!(
+        status.agent_artifacts_rows,
+        EXPECTED_TIMESTAMPS.len() as u64
+    );
+    assert_eq!(status.dismissed_agents_rows, 1);
 }
 
 #[test]

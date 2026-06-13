@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_cleanup::AgentCleanupIdentityWire;
@@ -80,6 +80,15 @@ pub struct AgentArtifactIndexUpdateWire {
     pub rows_indexed: u64,
     pub rows_deleted: u64,
     pub rows_skipped: u64,
+}
+
+/// Lightweight status for the persistent artifact index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexStatusWire {
+    pub schema_version: u32,
+    pub index_path: String,
+    pub agent_artifacts_rows: u64,
+    pub dismissed_agents_rows: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -203,6 +212,47 @@ pub fn replace_agent_artifact_index_dismissed_agents(
         rows_indexed: dismissed.len() as u64,
         rows_deleted: deleted,
         rows_skipped: 0,
+    })
+}
+
+/// Read one artifact-index metadata value.
+pub fn read_agent_artifact_index_meta(
+    index_path: &Path,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let conn = open_index(index_path)?;
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+/// Write one artifact-index metadata value.
+pub fn write_agent_artifact_index_meta(
+    index_path: &Path,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let conn = open_index(index_path)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return lightweight row counts for the artifact index.
+pub fn agent_artifact_index_status(
+    index_path: &Path,
+) -> Result<AgentArtifactIndexStatusWire, String> {
+    let conn = open_index(index_path)?;
+    Ok(AgentArtifactIndexStatusWire {
+        schema_version: read_index_schema_version(&conn)?,
+        index_path: index_path.to_string_lossy().into_owned(),
+        agent_artifacts_rows: count_table_rows(&conn, "agent_artifacts")?,
+        dismissed_agents_rows: count_table_rows(&conn, "dismissed_agents")?,
     })
 }
 
@@ -404,6 +454,26 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+fn read_index_schema_version(conn: &Connection) -> Result<u32, String> {
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    raw.parse::<u32>().map_err(|e| e.to_string())
+}
+
+fn count_table_rows(conn: &Connection, table: &str) -> Result<u64, String> {
+    let count: i64 = conn
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    u64::try_from(count).map_err(|e| e.to_string())
 }
 
 fn ensure_agent_artifacts_column(

@@ -18,6 +18,9 @@
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
 //! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict]) -> dict`
+//! - `read_agent_artifact_index_meta(index_path: str, key: str) -> str | None`
+//! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
+//! - `agent_artifact_index_status(index_path: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
@@ -148,13 +151,16 @@ use sase_core::agent_name_template::{
     render_agent_name_template as core_render_agent_name_template,
 };
 use sase_core::agent_scan::{
+    agent_artifact_index_status as core_agent_artifact_index_status,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     query_agent_artifact_index as core_query_agent_artifact_index,
+    read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
     scan_agent_artifact_dirs as core_scan_agent_artifact_dirs,
     scan_agent_artifacts as core_scan_agent_artifacts,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
+    write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
 };
 use sase_core::bead::{
@@ -650,6 +656,52 @@ fn py_replace_agent_artifact_index_dismissed_agents<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Read one metadata value from the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "read_agent_artifact_index_meta")]
+fn py_read_agent_artifact_index_meta<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    key: &str,
+) -> PyResult<Option<String>> {
+    let index = PathBuf::from(index_path);
+    py.allow_threads(|| core_read_agent_artifact_index_meta(&index, key))
+        .map_err(PyRuntimeError::new_err)
+}
+
+/// Write one metadata value in the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "write_agent_artifact_index_meta")]
+fn py_write_agent_artifact_index_meta<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    key: &str,
+    value: &str,
+) -> PyResult<()> {
+    let index = PathBuf::from(index_path);
+    py.allow_threads(|| {
+        core_write_agent_artifact_index_meta(&index, key, value)
+    })
+    .map_err(PyRuntimeError::new_err)
+}
+
+/// Return lightweight row-count status for the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "agent_artifact_index_status")]
+fn py_agent_artifact_index_status<'py>(
+    py: Python<'py>,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let status = py
+        .allow_threads(|| core_agent_artifact_index_status(&index))
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&status).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -2829,6 +2881,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_replace_agent_artifact_index_dismissed_agents,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_read_agent_artifact_index_meta, m)?)?;
+    m.add_function(wrap_pyfunction!(py_write_agent_artifact_index_meta, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_episode_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_episode_json, m)?)?;

@@ -16,10 +16,12 @@ pub mod scanner;
 pub mod wire;
 
 pub use index::{
-    delete_agent_artifact_index_row, query_agent_artifact_index,
+    agent_artifact_index_status, delete_agent_artifact_index_row,
+    query_agent_artifact_index, read_agent_artifact_index_meta,
     rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents,
-    upsert_agent_artifact_index_row, AgentArtifactIndexQueryWire,
+    upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
+    AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 pub use scanner::{
