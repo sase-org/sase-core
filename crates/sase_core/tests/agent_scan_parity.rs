@@ -29,6 +29,10 @@ use tempfile::tempdir;
 const TS_HOME_RUNNING: &str = "20260427100000";
 const TS_ACE_RUN_RUNNING: &str = "20260427110000";
 const TS_ACE_RUN_DONE: &str = "20260427120000";
+// Repeat-chain STOP slot. Older than the retried parent (`...140000`) so the
+// newest-N completed-row ordering tests stay stable. Mirrors the Python
+// fixture's `TS_ACE_RUN_REPEAT_STOPPED`.
+const TS_ACE_RUN_REPEAT_STOPPED: &str = "20260427125000";
 const TS_ACE_RUN_FAILED: &str = "20260427130000";
 const TS_ACE_RUN_RETRIED_PARENT: &str = "20260427140000";
 const TS_ACE_RUN_RETRIED_CHILD: &str = "20260427140500";
@@ -42,6 +46,7 @@ const EXPECTED_TIMESTAMPS: &[&str] = &[
     TS_HOME_RUNNING,
     TS_ACE_RUN_RUNNING,
     TS_ACE_RUN_DONE,
+    TS_ACE_RUN_REPEAT_STOPPED,
     TS_ACE_RUN_FAILED,
     TS_ACE_RUN_RETRIED_PARENT,
     TS_ACE_RUN_RETRIED_CHILD,
@@ -71,6 +76,7 @@ fn build_fixture_tree(root: &Path) -> PathBuf {
     build_home_running(root);
     build_ace_run_running(root);
     build_ace_run_done(root);
+    build_ace_run_repeat_stopped(root);
     build_ace_run_failed(root);
     build_ace_run_retried(root);
     build_workflow(root);
@@ -174,6 +180,36 @@ fn build_ace_run_done(root: &Path) {
             "image_paths": ["/tmp/images/alpha.png"],
             "response_path": "/tmp/resp_alpha.md",
             "output_path": "/tmp/out_alpha.log",
+        }),
+    );
+}
+
+fn build_ace_run_repeat_stopped(root: &Path) {
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_ACE_RUN_REPEAT_STOPPED);
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "repeat_slot_2",
+            "model": "claude-sonnet-4-6",
+            "llm_provider": "claude",
+            "stopped_at": "2026-04-27T12:55:00Z",
+        }),
+    );
+    // Repeat-chain STOP: keeps `outcome: "completed"` so %wait cascading
+    // resolves it, but records that a predecessor's STOP skipped the slot.
+    write_json(
+        &dir.join("done.json"),
+        &json!({
+            "outcome": "completed",
+            "finished_at": 1745759700.0,
+            "cl_name": "feature_repeat",
+            "name": "repeat_slot_2",
+            "repeat_stopped": true,
+            "stopped_by": "repeat_slot_1",
         }),
     );
 }
@@ -774,6 +810,27 @@ fn done_record_parses_done_marker() {
 
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.stopped_at.as_deref(), Some("2026-04-27T12:05:00Z"));
+}
+
+#[test]
+fn repeat_stopped_record_parses_repeat_stop_fields() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_REPEAT_STOPPED);
+
+    let done = rec.done.as_ref().unwrap();
+    // Outcome stays "completed" so %wait cascading still resolves the slot.
+    assert_eq!(done.outcome.as_deref(), Some("completed"));
+    assert!(done.repeat_stopped);
+    assert_eq!(done.stopped_by.as_deref(), Some("repeat_slot_1"));
+
+    // An ordinary completed marker defaults the repeat-stop fields off.
+    let plain = record_by_timestamp(&snapshot, TS_ACE_RUN_DONE);
+    let plain_done = plain.done.as_ref().unwrap();
+    assert!(!plain_done.repeat_stopped);
+    assert_eq!(plain_done.stopped_by, None);
 }
 
 #[test]

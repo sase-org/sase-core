@@ -158,6 +158,14 @@ pub struct DoneMarkerWire {
     pub approve: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// `true` for a repeat-chain slot a predecessor's `STOP` output variable
+    /// skipped. The marker keeps `outcome: "completed"` so `%wait` cascades,
+    /// while the TUI renders a distinct `STOPPED` status.
+    #[serde(default)]
+    pub repeat_stopped: bool,
+    /// Name of the chain predecessor that set `STOP`, when recorded.
+    #[serde(default)]
+    pub stopped_by: Option<String>,
 }
 
 /// Compact projection of `agent_meta.json`.

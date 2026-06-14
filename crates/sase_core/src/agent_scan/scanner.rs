@@ -894,6 +894,8 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         retry_error_category: coerce_str(data.get("retry_error_category")),
         approve: coerce_bool_truthy(data.get("approve")),
         hidden: coerce_bool_truthy(data.get("hidden")),
+        repeat_stopped: coerce_bool_truthy(data.get("repeat_stopped")),
+        stopped_by: coerce_str(data.get("stopped_by")),
     }
 }
 

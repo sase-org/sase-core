@@ -35,6 +35,10 @@ const DISMISSABLE_STATUSES: &[&str] = &[
     "TALE DONE",
     "PLAN REJECTED",
     "EPIC CREATED",
+    // Repeat-chain STOP: a terminal, non-error slot skipped by a
+    // predecessor's STOP. Dismissable like other finished rows; mirrors the
+    // Python TUI ``DISMISSABLE_STATUSES``.
+    "STOPPED",
 ];
 
 fn is_dismissable_status(status: &str) -> bool {
@@ -827,6 +831,35 @@ mod tests {
         assert!(is_dismissable_status("PLAN DONE"));
         assert!(!is_dismissable_status("TALE APPROVED"));
         assert!(!is_dismissable_status("RUNNING"));
+    }
+
+    #[test]
+    fn dismissable_statuses_include_stopped() {
+        // ``STOPPED`` is the terminal display for a repeat-chain slot skipped
+        // by a predecessor's STOP. It is a non-error finished row, so the
+        // cleanup planner must treat it as dismissable (mirroring the Python
+        // TUI) — never as failed or running.
+        assert!(is_dismissable_status("STOPPED"));
+    }
+
+    #[test]
+    fn stopped_row_is_dismissed_not_killed_or_failed() {
+        // A pidless STOPPED row must dismiss cleanly and never count as
+        // failed or running.
+        let stopped = target("run", "skipped", Some("1"), "STOPPED", None);
+        let plan = plan_agent_cleanup(
+            &[stopped],
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED),
+        )
+        .unwrap();
+
+        assert_eq!(plan.dismiss_items.len(), 1);
+        assert_eq!(plan.dismiss_items[0].identity.cl_name, "skipped");
+        assert!(plan.kill_items.is_empty());
+        assert_eq!(plan.counts.completed, 1);
+        assert_eq!(plan.counts.failed, 0);
+        assert_eq!(plan.counts.running, 0);
+        assert_eq!(plan.confirmation_severity, CONFIRMATION_SEVERITY_DISMISS);
     }
 
     #[test]
