@@ -16,7 +16,6 @@ pub mod agent_name_template;
 pub mod agent_scan;
 pub mod bead;
 pub mod editor;
-pub mod episode;
 pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
@@ -179,15 +178,6 @@ pub use editor::{
     EditorPosition, EditorRange, EditorTextEdit, HoverPayload, TokenInfo,
     XpromptAssistEntry, XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
     EDITOR_WIRE_SCHEMA_VERSION,
-};
-pub use episode::{
-    canonical_episode_json, stable_episode_id, stable_source_id,
-    stable_v2_episode_id, verify_episode_sources, EpisodeBuildReportWire,
-    EpisodeBuildRequestWire, EpisodeEdgeWire, EpisodeEventWire,
-    EpisodeImportanceFactorWire, EpisodeLessonWire, EpisodeNodeWire,
-    EpisodeSafetyWire, EpisodeSourceRefWire, EpisodeSourceVerifyResultWire,
-    EpisodeStorageIndexRowWire, EpisodeVerifyReportWire, EpisodeWeakRefsWire,
-    EpisodeWire, EPISODE_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

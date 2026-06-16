@@ -27,7 +27,6 @@
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
 //! - `verify_agent_archive_index(root: str) -> dict`
-//! - `episode_v2_id(project: str, component_key: str) -> str`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -195,14 +194,6 @@ use sase_core::bead::{
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
-};
-use sase_core::episode::{
-    canonical_episode_json as core_canonical_episode_json,
-    stable_episode_id as core_stable_episode_id,
-    stable_source_id as core_stable_source_id,
-    stable_v2_episode_id as core_stable_v2_episode_id,
-    verify_episode_sources as core_verify_episode_sources,
-    EpisodeSourceRefWire, EpisodeWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -886,77 +877,6 @@ fn py_query_related_agent_artifact_dirs(
         )
     })
     .map_err(PyRuntimeError::new_err)
-}
-
-#[pyfunction]
-#[pyo3(name = "episode_wire_schema_version")]
-fn py_episode_wire_schema_version() -> u32 {
-    sase_core::EPISODE_WIRE_SCHEMA_VERSION
-}
-
-#[pyfunction]
-#[pyo3(name = "canonical_episode_json")]
-fn py_canonical_episode_json(episode: &Bound<'_, PyDict>) -> PyResult<String> {
-    let value = py_to_json_value(episode.as_any())?;
-    let wire: EpisodeWire = serde_json::from_value(value).map_err(|e| {
-        PyValueError::new_err(format!(
-            "episode is not a valid EpisodeWire dict: {e}"
-        ))
-    })?;
-    core_canonical_episode_json(&wire).map_err(|e| {
-        PyValueError::new_err(format!("episode serialize error: {e}"))
-    })
-}
-
-#[pyfunction]
-#[pyo3(name = "episode_source_id")]
-fn py_episode_source_id(source: &Bound<'_, PyDict>) -> PyResult<String> {
-    let value = py_to_json_value(source.as_any())?;
-    let wire: EpisodeSourceRefWire =
-        serde_json::from_value(value).map_err(|e| {
-            PyValueError::new_err(format!(
-                "source is not a valid EpisodeSourceRefWire dict: {e}"
-            ))
-        })?;
-    Ok(core_stable_source_id(&wire))
-}
-
-#[pyfunction]
-#[pyo3(name = "episode_id")]
-fn py_episode_id(
-    project: &str,
-    root_source_id: &str,
-    sources: &Bound<'_, PyList>,
-) -> PyResult<String> {
-    let source_refs = episode_sources_from_py_list(sources)?;
-    Ok(core_stable_episode_id(
-        project,
-        root_source_id,
-        &source_refs,
-    ))
-}
-
-#[pyfunction]
-#[pyo3(name = "episode_v2_id")]
-fn py_episode_v2_id(project: &str, component_key: &str) -> PyResult<String> {
-    Ok(core_stable_v2_episode_id(project, component_key))
-}
-
-#[pyfunction]
-#[pyo3(name = "verify_episode_sources")]
-fn py_verify_episode_sources<'py>(
-    py: Python<'py>,
-    episode_id: &str,
-    sources: &Bound<'_, PyList>,
-) -> PyResult<PyObject> {
-    let source_refs = episode_sources_from_py_list(sources)?;
-    let report = py.allow_threads(|| {
-        core_verify_episode_sources(episode_id, &source_refs)
-    });
-    let value = serde_json::to_value(&report).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
 }
 
 /// Query dismissed-agent archive summary rows from the canonical archive index.
@@ -2387,23 +2307,6 @@ fn changespecs_from_py_list(
     Ok(wire_specs)
 }
 
-fn episode_sources_from_py_list(
-    sources: &Bound<'_, PyList>,
-) -> PyResult<Vec<EpisodeSourceRefWire>> {
-    let mut refs = Vec::with_capacity(sources.len());
-    for (idx, item) in sources.iter().enumerate() {
-        let value = py_to_json_value(&item)?;
-        let source: EpisodeSourceRefWire =
-            serde_json::from_value(value).map_err(|e| {
-                PyValueError::new_err(format!(
-                    "sources[{idx}] is not a valid EpisodeSourceRefWire dict: {e}"
-                ))
-            })?;
-        refs.push(source);
-    }
-    Ok(refs)
-}
-
 /// Convert a `QueryExprWire` into the Python rectangular wire shape.
 ///
 /// Python's `QueryExprWire` always carries the same flat field set
@@ -3033,12 +2936,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;
-    m.add_function(wrap_pyfunction!(py_episode_wire_schema_version, m)?)?;
-    m.add_function(wrap_pyfunction!(py_canonical_episode_json, m)?)?;
-    m.add_function(wrap_pyfunction!(py_episode_source_id, m)?)?;
-    m.add_function(wrap_pyfunction!(py_episode_id, m)?)?;
-    m.add_function(wrap_pyfunction!(py_episode_v2_id, m)?)?;
-    m.add_function(wrap_pyfunction!(py_verify_episode_sources, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
     m.add_function(wrap_pyfunction!(
