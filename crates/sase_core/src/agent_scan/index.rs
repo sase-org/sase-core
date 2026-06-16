@@ -203,10 +203,11 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
     stale_after_seconds: u64,
     max_rows: Option<u32>,
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let conn = open_index(index_path)?;
+    let mut conn = open_index(index_path)?;
+    let repaired = repair_abandoned_agent_artifact_index_rows(&mut conn)?;
     let candidates = select_terminalization_candidates(&conn, max_rows)?;
     let stale_after = Duration::from_secs(stale_after_seconds);
-    let mut rows_indexed = 0u64;
+    let mut rows_indexed = repaired;
     let mut rows_skipped = 0u64;
 
     for row in candidates {
@@ -224,6 +225,91 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
         rows_deleted: 0,
         rows_skipped,
     })
+}
+
+fn repair_abandoned_agent_artifact_index_rows(
+    conn: &mut Connection,
+) -> Result<u64, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let pattern = format!("%\"outcome\":\"{ABANDONED_DONE_OUTCOME}\"%");
+    let updates: Vec<(String, AgentArtifactRecordWire)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT projects_root, hidden, cl_name, record_json \
+                 FROM agent_artifacts \
+                 WHERE has_done_marker = 1 \
+                   AND record_json LIKE ?1 \
+                   AND ( \
+                       hidden = 0 \
+                       OR record_json LIKE '%\"done\":{%\"hidden\":false%' \
+                       OR ( \
+                           (cl_name IS NULL OR cl_name = '' OR cl_name = 'unknown') \
+                           AND record_json LIKE '%\"agent_meta\":{%\"cl_name\":\"%' \
+                       ) \
+                   )",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([pattern]).map_err(|e| e.to_string())?;
+        let mut updates = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let projects_root: String =
+                row.get(0).map_err(|e| e.to_string())?;
+            let row_hidden: i64 = row.get(1).map_err(|e| e.to_string())?;
+            let row_cl_name: Option<String> =
+                row.get(2).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(3).map_err(|e| e.to_string())?;
+            let Ok(mut record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            if !record
+                .done
+                .as_ref()
+                .and_then(|done| done.outcome.as_deref())
+                .is_some_and(|outcome| outcome == ABANDONED_DONE_OUTCOME)
+            {
+                continue;
+            }
+            let meta_cl_name = record
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.cl_name.clone())
+                .filter(|name| !name.is_empty());
+            let mut changed = row_hidden == 0
+                || (meta_cl_name.is_some()
+                    && cl_name_is_unknownish(row_cl_name.as_deref()));
+            if let Some(done) = record.done.as_mut() {
+                if !done.hidden {
+                    done.hidden = true;
+                    changed = true;
+                }
+                if let Some(cl_name) = meta_cl_name {
+                    if cl_name_is_unknownish(done.cl_name.as_deref()) {
+                        done.cl_name = Some(cl_name);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                updates.push((projects_root, record));
+            }
+        }
+        updates
+    };
+
+    let repaired = updates.len() as u64;
+    for (projects_root, record) in updates {
+        upsert_record(&tx, Path::new(&projects_root), &record)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(repaired)
+}
+
+fn cl_name_is_unknownish(cl_name: Option<&str>) -> bool {
+    cl_name
+        .map(|name| name.is_empty() || name == "unknown")
+        .unwrap_or(true)
 }
 
 /// Replace the dismissed identity table used by normal index visibility.
@@ -1108,7 +1194,7 @@ fn terminalized_abandoned_record(
         llm_provider: summary.llm_provider.clone(),
         vcs_provider: meta.and_then(|m| m.vcs_provider.clone()),
         name: summary.agent_name.clone(),
-        hidden: summary.hidden,
+        hidden: true,
         ..DoneMarkerWire::default()
     });
     record
@@ -1732,7 +1818,8 @@ impl RecordSummary {
             cl_name: done
                 .and_then(|d| d.cl_name.clone())
                 .or_else(|| running.and_then(|r| r.cl_name.clone()))
-                .or_else(|| workflow_state.and_then(|w| w.cl_name.clone())),
+                .or_else(|| workflow_state.and_then(|w| w.cl_name.clone()))
+                .or_else(|| meta.and_then(|m| m.cl_name.clone())),
             agent_name: meta
                 .and_then(|m| m.name.clone())
                 .or_else(|| done.and_then(|d| d.name.clone()))
@@ -2821,13 +2908,13 @@ mod tests {
     }
 
     #[test]
-    fn terminalize_stale_active_rows_moves_abandoned_record_to_completed() {
+    fn terminalize_stale_active_rows_hides_abandoned_record() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let artifact_dir = artifact(&projects, "20260521160000");
         write_json(
             &artifact_dir.join("agent_meta.json"),
-            json!({"name": "abandoned"}),
+            json!({"name": "abandoned", "cl_name": "cl_abandoned"}),
         );
 
         let index = tmp.path().join("agent_artifact_index.sqlite");
@@ -2864,7 +2951,7 @@ mod tests {
         .unwrap();
         assert!(active.records.is_empty());
 
-        let completed = query_agent_artifact_index(
+        let recent = query_agent_artifact_index(
             &index,
             &projects,
             AgentArtifactIndexQueryWire {
@@ -2878,15 +2965,165 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        assert_eq!(completed.records.len(), 1);
-        assert!(completed.records[0].has_done_marker);
+        assert!(recent.records.is_empty());
+
+        let full_history = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(full_history.records.is_empty());
+
+        let hidden_completed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: true,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(hidden_completed.records.len(), 1);
+        assert!(hidden_completed.records[0].has_done_marker);
         assert_eq!(
-            completed.records[0]
+            hidden_completed.records[0]
                 .done
                 .as_ref()
                 .and_then(|done| done.outcome.as_deref()),
             Some("abandoned")
         );
+        assert_eq!(
+            hidden_completed.records[0]
+                .done
+                .as_ref()
+                .and_then(|done| done.cl_name.as_deref()),
+            Some("cl_abandoned")
+        );
+        assert!(hidden_completed.records[0]
+            .done
+            .as_ref()
+            .is_some_and(|done| done.hidden));
+    }
+
+    #[test]
+    fn terminalize_repairs_visible_abandoned_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260521160030");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "repair-abandoned", "cl_name": "cl_repaired"}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        terminalize_stale_active_agent_artifact_index_rows(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+            0,
+            None,
+        )
+        .unwrap();
+
+        {
+            let conn = Connection::open(&index).unwrap();
+            let record_json: String = conn
+                .query_row(
+                    "SELECT record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+                    [artifact_dir.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut record: AgentArtifactRecordWire =
+                serde_json::from_str(&record_json).unwrap();
+            let done = record.done.as_mut().unwrap();
+            done.hidden = false;
+            done.cl_name = Some("unknown".to_string());
+            let corrupted = serde_json::to_string(&record).unwrap();
+            conn.execute(
+                "UPDATE agent_artifacts \
+                 SET hidden = 0, cl_name = 'unknown', record_json = ?1 \
+                 WHERE artifact_dir = ?2",
+                params![corrupted, artifact_dir.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        }
+
+        let update = terminalize_stale_active_agent_artifact_index_rows(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(update.rows_indexed, 1);
+
+        let visible_recent = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(visible_recent.records.is_empty());
+
+        let hidden_recent = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: true,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(hidden_recent.records.len(), 1);
+        let done = hidden_recent.records[0].done.as_ref().unwrap();
+        assert_eq!(done.cl_name.as_deref(), Some("cl_repaired"));
+        assert!(done.hidden);
+
+        let conn = Connection::open(&index).unwrap();
+        let (hidden, cl_name): (i64, String) = conn
+            .query_row(
+                "SELECT hidden, cl_name FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hidden, 1);
+        assert_eq!(cl_name, "cl_repaired");
     }
 
     #[test]
