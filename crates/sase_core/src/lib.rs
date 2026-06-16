@@ -21,6 +21,7 @@ pub mod host_bridge;
 pub mod notifications;
 pub mod parser;
 pub mod project_spec;
+pub mod prompt_stash;
 pub mod query;
 pub mod sections;
 pub mod status;
@@ -253,6 +254,12 @@ pub use project_spec::{
     ProjectLifecycleWire, ProjectRecordWire, LEGACY_PROJECT_SPEC_EXTENSION,
     PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION, PROJECT_SPEC_ARCHIVE_SUFFIX,
     PROJECT_SPEC_EXTENSION,
+};
+pub use prompt_stash::{
+    append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
+    rewrite_prompt_stash, PromptStashEntryWire, PromptStashPopOutcomeWire,
+    PromptStashSnapshotWire, PromptStashStoreStatsWire,
+    PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, compile_query, evaluate_query_many,

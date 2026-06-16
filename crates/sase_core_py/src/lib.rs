@@ -57,6 +57,10 @@
 //! - `append_notification_counts(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
+//! - `read_prompt_stash_snapshot(path: str) -> dict`
+//! - `append_prompt_stash(path: str, entry: dict) -> dict`
+//! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
+//! - `rewrite_prompt_stash(path: str, entries: list[dict]) -> dict`
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
 //! - `render_agent_name_template(template: str, token: str) -> str`
@@ -219,6 +223,12 @@ use sase_core::project_spec::{
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
     list_project_records as core_list_project_records,
     read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
+};
+use sase_core::prompt_stash::{
+    append_prompt_stash as core_append_prompt_stash,
+    pop_prompt_stash as core_pop_prompt_stash,
+    read_prompt_stash_snapshot as core_read_prompt_stash_snapshot,
+    rewrite_prompt_stash as core_rewrite_prompt_stash, PromptStashEntryWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -2272,6 +2282,108 @@ fn py_rewrite_notifications_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+// --- Prompt stash store bindings -----------------------------------------
+
+/// Read the prompt-stash JSONL store and return a snapshot dict.
+///
+/// The GIL is released while Rust performs filesystem work.
+#[pyfunction]
+#[pyo3(name = "read_prompt_stash_snapshot")]
+fn py_read_prompt_stash_snapshot(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| core_read_prompt_stash_snapshot(&path));
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Append one prompt-stash entry dict and return the updated snapshot dict.
+#[pyfunction]
+#[pyo3(name = "append_prompt_stash")]
+fn py_append_prompt_stash<'py>(
+    py: Python<'py>,
+    path: &str,
+    entry: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let entry = prompt_stash_entry_from_pydict(entry)?;
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| core_append_prompt_stash(&path, &entry));
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Remove entries whose ids appear in `ids`; return removed rows + snapshot.
+#[pyfunction]
+#[pyo3(name = "pop_prompt_stash")]
+fn py_pop_prompt_stash(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_pop_prompt_stash(&path, &ids));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Rewrite the prompt-stash store from entry dicts (merge semantics).
+#[pyfunction]
+#[pyo3(name = "rewrite_prompt_stash")]
+fn py_rewrite_prompt_stash<'py>(
+    py: Python<'py>,
+    path: &str,
+    entries: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let entries = prompt_stash_entries_from_py_list(entries)?;
+    let path = PathBuf::from(path);
+    let snapshot =
+        py.allow_threads(|| core_rewrite_prompt_stash(&path, &entries));
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+fn prompt_stash_entry_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<PromptStashEntryWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "entry is not a valid PromptStashEntryWire dict: {e}"
+        ))
+    })
+}
+
+fn prompt_stash_entries_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<PromptStashEntryWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let entry: PromptStashEntryWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "entries[{idx}] is not a valid PromptStashEntryWire dict: {e}"
+                ))
+            })?;
+        values.push(entry);
+    }
+    Ok(values)
+}
+
 /// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
 ///
 /// Translates the dict to `serde_json::Value` first so missing fields use
@@ -3080,6 +3192,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_append_notification_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_prompt_stash_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
