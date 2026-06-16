@@ -25,6 +25,12 @@ pub use file::{
     build_file_completion_candidates_with_base,
     build_file_history_completion_candidates,
 };
+pub use frontmatter::{
+    field_schema as frontmatter_field_schema,
+    input_type_schema as frontmatter_input_type_schema,
+    validate as validate_frontmatter,
+    validate_field as validate_frontmatter_field,
+};
 pub use hover::hover_at_position;
 pub use token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
@@ -34,6 +40,7 @@ pub use token::{
 pub use wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, DiagnosticSeverity, DirectiveMetadata, EditorDiagnostic,
-    EditorPosition, EditorRange, EditorTextEdit, HoverPayload, TokenInfo,
+    EditorPosition, EditorRange, EditorTextEdit, FrontmatterFieldKind,
+    FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
     XpromptAssistEntry, XpromptInputHint, EDITOR_WIRE_SCHEMA_VERSION,
 };

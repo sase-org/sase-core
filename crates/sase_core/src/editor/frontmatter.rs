@@ -3,11 +3,64 @@ use std::collections::{HashMap, HashSet};
 
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DiagnosticSeverity, EditorDiagnostic, EditorPosition, HoverPayload,
+    DiagnosticSeverity, EditorDiagnostic, EditorPosition, FrontmatterFieldKind,
+    FrontmatterFieldSchema, FrontmatterInputType, HoverPayload,
 };
 
 const XPROMPT_INPUT_TYPE_EXPECTED: &str =
     "word, line, text, path, int/integer, bool/boolean, float";
+
+/// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
+///
+/// This is the field set the prompt frontmatter panel offers (xprompt `.md`
+/// parity). Descriptions are not duplicated here; they are sourced from
+/// [`TOP_LEVEL_FIELD_DOCS`] via [`top_level_field_doc`] so the panel and the
+/// hover/LSP guidance never drift. `keywords` is a valid xprompt field but is
+/// intentionally outside the ad-hoc prompt panel's parity set.
+const PANEL_FIELD_SCHEMA: &[(
+    &str,
+    FrontmatterFieldKind,
+    Option<&str>,
+    &str,
+)] = &[
+    ("name", FrontmatterFieldKind::Scalar, None, "my_prompt"),
+    (
+        "description",
+        FrontmatterFieldKind::Scalar,
+        None,
+        "Refactor the auth module across services",
+    ),
+    (
+        "tags",
+        FrontmatterFieldKind::List,
+        None,
+        "refactor, backend",
+    ),
+    (
+        "input",
+        FrontmatterFieldKind::Structured,
+        None,
+        "service: word",
+    ),
+    (
+        "xprompts",
+        FrontmatterFieldKind::Structured,
+        None,
+        "_rules: \"Follow the team review checklist\"",
+    ),
+    (
+        "skill",
+        FrontmatterFieldKind::BoolOrList,
+        Some("true, false, or a provider list"),
+        "false",
+    ),
+    (
+        "snippet",
+        FrontmatterFieldKind::BoolOrScalar,
+        Some("true, false, or a trigger string"),
+        "false",
+    ),
+];
 
 const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     (
@@ -166,6 +219,99 @@ pub(super) fn hover(
         range: document.byte_range_to_range(start, end)?,
         markdown: format!("**{}**\n\n{}", field.key, description),
     })
+}
+
+/// Ordered, panel-oriented descriptors for every supported frontmatter field.
+///
+/// Shared source of truth for the prompt frontmatter panel's "add property"
+/// picker and inline guidance. Descriptions come from the same constant that
+/// powers hover and the xprompt LSP, so the panel never drifts from the editor.
+pub fn field_schema() -> Vec<FrontmatterFieldSchema> {
+    PANEL_FIELD_SCHEMA
+        .iter()
+        .map(
+            |(name, kind, allowed_values, example)| FrontmatterFieldSchema {
+                name: (*name).to_string(),
+                kind: *kind,
+                required: false,
+                description: top_level_field_doc(name)
+                    .unwrap_or_default()
+                    .to_string(),
+                allowed_values: allowed_values.map(str::to_string),
+                example: (*example).to_string(),
+            },
+        )
+        .collect()
+}
+
+/// The catalog of supported `input` types, with aliases and per-type guidance.
+///
+/// Powers the input collection modal's per-type rule text. The names and
+/// aliases mirror [`parse_input_type`]'s accepted spellings.
+pub fn input_type_schema() -> Vec<FrontmatterInputType> {
+    InputType::ALL
+        .iter()
+        .map(|input_type| FrontmatterInputType {
+            name: declared_type_name(*input_type).to_string(),
+            aliases: input_type
+                .aliases()
+                .iter()
+                .map(|alias| (*alias).to_string())
+                .collect(),
+            rule: input_type.rule().to_string(),
+        })
+        .collect()
+}
+
+/// Validate a whole frontmatter block, returning diagnostics that match the
+/// xprompt LSP output exactly (it runs the same engine).
+///
+/// `text` may be a complete `---`-delimited frontmatter block (the canonical
+/// form the panel serializes) or a bare YAML body without delimiters; either
+/// is normalized to a complete block before validation.
+pub fn validate(text: &str) -> Vec<EditorDiagnostic> {
+    if extract_frontmatter(text).is_some() {
+        return diagnostics(&DocumentSnapshot::new(text));
+    }
+    let body = strip_delimiter_lines(text);
+    diagnostics(&DocumentSnapshot::new(format!("---\n{body}\n---\n")))
+}
+
+/// Validate a single field's value in isolation, returning diagnostics that
+/// match the LSP output for that field.
+///
+/// `value` is the YAML text that would follow `field:`. A single-line value is
+/// placed inline; a multi-line value is indented as a YAML block so list and
+/// structured values validate as written.
+pub fn validate_field(field: &str, value: &str) -> Vec<EditorDiagnostic> {
+    let body = if value.contains('\n') {
+        let indented = value
+            .lines()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{field}:\n{indented}")
+    } else {
+        format!("{field}: {value}")
+    };
+    validate(&body)
+}
+
+/// Strip leading/trailing `---` delimiter lines so a bare body or a partially
+/// delimited block normalizes to plain YAML before re-wrapping.
+fn strip_delimiter_lines(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.first().map(|line| line.trim_end_matches('\r').trim())
+        == Some("---")
+    {
+        lines.remove(0);
+    }
+    while lines.last().map(|line| line.trim_end_matches('\r').trim())
+        == Some("---")
+    {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 struct FrontmatterDiagnosticBuilder<'a> {
@@ -2002,6 +2148,45 @@ fn yaml_scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
+impl InputType {
+    /// Every input type, in catalog order, for schema enumeration.
+    const ALL: [InputType; 7] = [
+        InputType::Word,
+        InputType::Line,
+        InputType::Text,
+        InputType::Path,
+        InputType::Int,
+        InputType::Float,
+        InputType::Bool,
+    ];
+
+    /// Accepted aliases for this type's canonical name (see
+    /// [`parse_input_type`]).
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            InputType::Int => &["integer"],
+            InputType::Bool => &["boolean"],
+            _ => &[],
+        }
+    }
+
+    /// One-line human rule describing the values this type accepts. Mirrors the
+    /// checks in [`validate_input_default`] so guidance and validation agree.
+    fn rule(self) -> &'static str {
+        match self {
+            InputType::Word => "A single word with no whitespace.",
+            InputType::Line => "A single line of text with no line breaks.",
+            InputType::Text => "Free-form text that may span multiple lines.",
+            InputType::Path => "A filesystem path with no whitespace.",
+            InputType::Int => "A whole number.",
+            InputType::Float => "A number, optionally with a decimal point.",
+            InputType::Bool => {
+                "A boolean: true or false (also yes/no, on/off, 1/0)."
+            }
+        }
+    }
+}
+
 fn parse_input_type(raw: &str) -> Option<InputType> {
     match raw.to_ascii_lowercase().as_str() {
         "word" => Some(InputType::Word),
@@ -2077,4 +2262,124 @@ fn value_is_truthy(value: &Value) -> bool {
             .map(|items| !items.is_empty())
             .unwrap_or(false)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn has_error(diagnostics: &[EditorDiagnostic]) -> bool {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    }
+
+    #[test]
+    fn field_schema_is_ordered_documented_and_parity_scoped() {
+        let schema = field_schema();
+        let names: Vec<&str> =
+            schema.iter().map(|field| field.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "name",
+                "description",
+                "tags",
+                "input",
+                "xprompts",
+                "skill",
+                "snippet"
+            ]
+        );
+        for field in &schema {
+            assert!(!field.required);
+            assert!(
+                !field.description.is_empty(),
+                "{} has no description",
+                field.name
+            );
+            assert!(!field.example.is_empty(), "{} has no example", field.name);
+            // Descriptions must come from the shared hover/LSP source.
+            assert_eq!(
+                field.description.as_str(),
+                top_level_field_doc(&field.name).unwrap(),
+                "{} description drifted from TOP_LEVEL_FIELD_DOCS",
+                field.name
+            );
+        }
+        let skill = schema.iter().find(|field| field.name == "skill").unwrap();
+        assert_eq!(skill.kind, FrontmatterFieldKind::BoolOrList);
+        assert!(skill.allowed_values.is_some());
+        let input = schema.iter().find(|field| field.name == "input").unwrap();
+        assert_eq!(input.kind, FrontmatterFieldKind::Structured);
+    }
+
+    #[test]
+    fn input_type_schema_matches_parser_spellings() {
+        let schema = input_type_schema();
+        let names: Vec<&str> =
+            schema.iter().map(|input| input.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["word", "line", "text", "path", "int", "float", "bool"]
+        );
+        for input in &schema {
+            assert!(!input.rule.is_empty(), "{} has no rule", input.name);
+            // Canonical name and every alias must parse back to a known type.
+            assert!(parse_input_type(&input.name).is_some());
+            for alias in &input.aliases {
+                assert!(
+                    parse_input_type(alias).is_some(),
+                    "alias {alias} does not parse"
+                );
+            }
+        }
+        let int = schema.iter().find(|input| input.name == "int").unwrap();
+        assert_eq!(int.aliases, vec!["integer".to_string()]);
+        let bool_type =
+            schema.iter().find(|input| input.name == "bool").unwrap();
+        assert_eq!(bool_type.aliases, vec!["boolean".to_string()]);
+    }
+
+    #[test]
+    fn validate_accepts_known_good_block() {
+        let text = "---\ndescription: Refactor the auth module\ntags: refactor, backend\ninput:\n  service: word\n---\n";
+        assert!(!has_error(&validate(text)), "{:?}", validate(text));
+    }
+
+    #[test]
+    fn validate_accepts_bare_body_without_delimiters() {
+        let diagnostics = validate("description: Refactor the auth module");
+        assert!(!has_error(&diagnostics), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn validate_flags_known_bad_input_type() {
+        let diagnostics = validate("---\ninput:\n  service: wordd\n---\n");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+        }));
+    }
+
+    #[test]
+    fn validate_field_isolates_a_single_property() {
+        assert!(!has_error(&validate_field(
+            "description",
+            "Refactor the auth module"
+        )));
+        let bad = validate_field("snippet", "bad-trigger!");
+        assert!(bad.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_snippet_trigger"
+        }));
+    }
+
+    #[test]
+    fn validate_field_handles_block_values() {
+        // A multi-line value is indented as a YAML block under the field key.
+        let diagnostics =
+            validate_field("input", "service: wordd\nregion: word");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+        }));
+    }
 }

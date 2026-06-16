@@ -145,3 +145,55 @@ pub struct HoverPayload {
     pub range: EditorRange,
     pub markdown: String,
 }
+
+/// Structural shape of a frontmatter field, used by the prompt frontmatter
+/// panel to pick an appropriate editor for each property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontmatterFieldKind {
+    /// A single scalar value (e.g. `name`, `description`).
+    Scalar,
+    /// A comma-separated string or sequence of scalars (e.g. `tags`).
+    List,
+    /// `true`, `false`, or a sequence of scalars (e.g. `skill`).
+    BoolOrList,
+    /// `true`, `false`, or a single scalar trigger (e.g. `snippet`).
+    BoolOrScalar,
+    /// A nested, structured value with its own item editor (e.g. `input`,
+    /// `xprompts`).
+    Structured,
+}
+
+/// A panel-oriented descriptor for one supported frontmatter field.
+///
+/// This is the single source of truth that the prompt frontmatter panel and
+/// the xprompt LSP share for "what fields exist and what they mean," so the
+/// TUI and editor guidance never drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrontmatterFieldSchema {
+    pub name: String,
+    pub kind: FrontmatterFieldKind,
+    pub required: bool,
+    /// One-line summary, shared with hover documentation.
+    pub description: String,
+    /// Optional human hint describing the allowed values.
+    #[serde(default)]
+    pub allowed_values: Option<String>,
+    /// A short example value for the field.
+    pub example: String,
+}
+
+/// A panel-oriented descriptor for one supported `input` type.
+///
+/// Drives the per-type guidance shown in the input collection modal. The
+/// canonical name and aliases mirror the parser's accepted spellings so
+/// validation and guidance stay in lockstep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrontmatterInputType {
+    /// Canonical type name (e.g. `int`).
+    pub name: String,
+    /// Accepted aliases for the canonical name (e.g. `integer`).
+    pub aliases: Vec<String>,
+    /// One-line human rule describing what values the type accepts.
+    pub rule: String,
+}

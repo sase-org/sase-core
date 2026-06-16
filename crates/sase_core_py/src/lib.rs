@@ -2707,6 +2707,65 @@ fn json_object_to_py<'py>(
     Ok(dict.into())
 }
 
+// --- Prompt frontmatter panel: schema & validation surface ---
+//
+// These four bindings expose the panel-oriented frontmatter API from
+// `sase_core::editor`. They are the single source of truth the TUI prompt
+// frontmatter panel shares with the xprompt LSP, so panel guidance and editor
+// diagnostics never drift. Results are serialized through `serde_json` and
+// rehydrated as plain dicts/lists on the Python side (see
+// `sase.xprompt.frontmatter_schema`).
+
+/// Return the ordered panel frontmatter field schema as a list of dicts.
+#[pyfunction]
+#[pyo3(name = "frontmatter_field_schema")]
+fn py_frontmatter_field_schema(py: Python<'_>) -> PyResult<PyObject> {
+    let schema = sase_core::editor_frontmatter_field_schema();
+    let value = serde_json::to_value(&schema).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the supported `input` type catalog as a list of dicts.
+#[pyfunction]
+#[pyo3(name = "frontmatter_input_type_schema")]
+fn py_frontmatter_input_type_schema(py: Python<'_>) -> PyResult<PyObject> {
+    let schema = sase_core::editor_frontmatter_input_type_schema();
+    let value = serde_json::to_value(&schema).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate a whole frontmatter block. Returns LSP-shape diagnostic dicts.
+#[pyfunction]
+#[pyo3(name = "validate_frontmatter")]
+fn py_validate_frontmatter(py: Python<'_>, text: &str) -> PyResult<PyObject> {
+    let diagnostics = sase_core::editor_validate_frontmatter(text);
+    let value = serde_json::to_value(&diagnostics).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate a single frontmatter field value. Returns LSP-shape diagnostic
+/// dicts. `value` is the YAML text that would follow `field:`.
+#[pyfunction]
+#[pyo3(name = "validate_frontmatter_field")]
+fn py_validate_frontmatter_field(
+    py: Python<'_>,
+    field: &str,
+    value: &str,
+) -> PyResult<PyObject> {
+    let diagnostics =
+        sase_core::editor_validate_frontmatter_field(field, value);
+    let json = serde_json::to_value(&diagnostics).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Return the launch wire schema version pinned by the Rust skeleton structs.
 #[pyfunction]
 #[pyo3(name = "agent_launch_wire_schema_version")]
@@ -3196,6 +3255,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_append_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_frontmatter_field_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
