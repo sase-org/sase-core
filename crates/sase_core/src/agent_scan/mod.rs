@@ -21,6 +21,7 @@ pub use index::{
     query_agent_artifact_index, query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta, rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents,
+    terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,

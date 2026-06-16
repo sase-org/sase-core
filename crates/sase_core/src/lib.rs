@@ -104,6 +104,7 @@ pub use agent_scan::{
     replace_agent_artifact_index_dismissed_agents, resolve_agent_artifact_path,
     resolve_agent_artifact_timestamp_path, scan_agent_artifact_dir,
     scan_agent_artifact_dirs, scan_agent_artifacts,
+    terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
     AgentArtifactIndexUpdateWire, AgentArtifactPathInfo,

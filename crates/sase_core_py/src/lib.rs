@@ -17,6 +17,7 @@
 //! - `rebuild_agent_artifact_index(index_path: str, projects_root: str, options: dict | None = None) -> dict`
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
+//! - `terminalize_stale_active_agent_artifact_index_rows(index_path: str, projects_root: str, stale_after_seconds: int, max_rows: int | None = None, options: dict | None = None) -> dict`
 //! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict]) -> dict`
 //! - `read_agent_artifact_index_meta(index_path: str, key: str) -> str | None`
 //! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
@@ -165,6 +166,7 @@ use sase_core::agent_scan::{
     resolve_agent_artifact_timestamp_path as core_resolve_agent_artifact_timestamp_path,
     scan_agent_artifact_dirs as core_scan_agent_artifact_dirs,
     scan_agent_artifacts as core_scan_agent_artifacts,
+    terminalize_stale_active_agent_artifact_index_rows as core_terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
@@ -725,6 +727,49 @@ fn py_delete_agent_artifact_index_row<'py>(
     let update = py
         .allow_threads(|| {
             core_delete_agent_artifact_index_row(&index, &artifact)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Terminalize stale, unclaimed active rows in the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "terminalize_stale_active_agent_artifact_index_rows",
+    signature = (
+        index_path,
+        projects_root,
+        stale_after_seconds,
+        max_rows = None,
+        options = None
+    )
+)]
+fn py_terminalize_stale_active_agent_artifact_index_rows<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    projects_root: &str,
+    stale_after_seconds: u64,
+    max_rows: Option<u32>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let opts = match options {
+        Some(dict) => agent_scan_options_from_pydict(dict)?,
+        None => AgentArtifactScanOptionsWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let root = PathBuf::from(projects_root);
+    let update = py
+        .allow_threads(|| {
+            core_terminalize_stale_active_agent_artifact_index_rows(
+                &index,
+                &root,
+                opts,
+                stale_after_seconds,
+                max_rows,
+            )
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&update).map_err(|e| {
@@ -2927,6 +2972,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rebuild_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_terminalize_stale_active_agent_artifact_index_rows,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_replace_agent_artifact_index_dismissed_agents,
         m
