@@ -439,13 +439,6 @@ fn workflow_kind_value(kind: WorkflowKind) -> &'static str {
 fn workflow_reference_prefix(workflow: &CatalogWorkflow) -> &'static str {
     match workflow_kind(workflow) {
         WorkflowKind::StandaloneWorkflow => "#!",
-        WorkflowKind::SimpleXprompt
-            if content_has_segment_separators(&workflow_prompt_part(
-                workflow,
-            )) =>
-        {
-            "#!"
-        }
         _ => "#",
     }
 }
@@ -456,33 +449,6 @@ fn workflow_prompt_part(workflow: &CatalogWorkflow) -> String {
         .iter()
         .find_map(|step| step.prompt_part.clone())
         .unwrap_or_default()
-}
-
-fn content_has_segment_separators(content: &str) -> bool {
-    let mut fence: Option<&str> = None;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            fence = if fence == Some("```") {
-                None
-            } else {
-                Some("```")
-            };
-            continue;
-        }
-        if trimmed.starts_with("~~~") {
-            fence = if fence == Some("~~~") {
-                None
-            } else {
-                Some("~~~")
-            };
-            continue;
-        }
-        if fence.is_none() && trimmed == "---" {
-            return true;
-        }
-    }
-    false
 }
 
 fn snippet_entry_from_xprompt(
@@ -2139,8 +2105,8 @@ mod tests {
             .map(|entry| (entry.name.as_str(), entry))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(by_name["swarm"].insertion.as_deref(), Some("#!swarm"));
-        assert_eq!(by_name["swarm"].reference_prefix.as_deref(), Some("#!"));
+        assert_eq!(by_name["swarm"].insertion.as_deref(), Some("#swarm"));
+        assert_eq!(by_name["swarm"].reference_prefix.as_deref(), Some("#"));
         assert_eq!(by_name["swarm"].kind.as_deref(), Some("xprompt"));
         assert!(by_name["swarm"].is_skill);
         assert_eq!(
@@ -2522,7 +2488,7 @@ mod tests {
         );
         assert_eq!(
             wire_by_name["app/swarm"].insertion.as_deref(),
-            Some("#!app/swarm")
+            Some("#app/swarm")
         );
         assert_eq!(
             wire_by_name["cfg"].input_signature.as_deref(),
