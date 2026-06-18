@@ -195,8 +195,10 @@ use sase_core::bead::{
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
     read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
-    remove_issue as core_bead_remove_issue, show_issue as core_bead_show_issue,
-    stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
+    remove_issue as core_bead_remove_issue,
+    search_issues as core_bead_search_issues,
+    show_issue as core_bead_show_issue, stats as core_bead_stats,
+    sync_is_clean as core_bead_sync_is_clean,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
@@ -1721,6 +1723,34 @@ fn py_bead_list<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_search")]
+#[pyo3(signature = (beads_dir, query, statuses=None, issue_types=None, tiers=None, limit=None))]
+fn py_bead_search<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    query: &str,
+    statuses: Option<Vec<String>>,
+    issue_types: Option<Vec<String>>,
+    tiers: Option<Vec<String>>,
+    limit: Option<usize>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_search_issues(
+                &beads_dir,
+                query,
+                statuses.as_deref(),
+                issue_types.as_deref(),
+                tiers.as_deref(),
+                limit,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_ready")]
 fn py_bead_ready<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
@@ -3213,6 +3243,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -3363,6 +3394,18 @@ mod tests {
         dir.join(name)
     }
 
+    fn temp_beads_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("sase-core-py-bead-{}-{nanos}", std::process::id()));
+        let beads_dir = dir.join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        beads_dir
+    }
+
     #[test]
     fn query_handles_evaluate_multiple_queries_against_one_corpus() {
         pyo3::prepare_freethreaded_python();
@@ -3463,6 +3506,48 @@ mod tests {
             let err = py_compile_query("").unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(_py));
             assert!(err.to_string().contains("Empty query"));
+        });
+    }
+
+    #[test]
+    fn bead_search_binding_round_trips_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let beads_dir = temp_beads_dir();
+            fs::write(
+                beads_dir.join("issues.jsonl"),
+                serde_json::to_string(&json!({
+                    "id": "beads-1.1",
+                    "title": "Needle binding",
+                    "status": "open",
+                    "issue_type": "phase",
+                    "parent_id": "beads-1",
+                    "created_at": "2026-01-01T00:01:00Z",
+                    "updated_at": "2026-01-01T00:01:00Z"
+                }))
+                .unwrap()
+                    + "\n",
+            )
+            .unwrap();
+
+            let result = py_bead_search(
+                py,
+                beads_dir.to_str().unwrap(),
+                "needle",
+                None,
+                None,
+                None,
+                Some(1),
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value[0]["issue"]["id"], json!("beads-1.1"));
+            assert_eq!(value[0]["matched_fields"], json!(["title"]));
+
+            let root =
+                beads_dir.parent().unwrap().parent().unwrap().to_path_buf();
+            let _ = fs::remove_dir_all(root);
         });
     }
 

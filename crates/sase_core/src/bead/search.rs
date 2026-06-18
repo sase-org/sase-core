@@ -43,7 +43,7 @@ pub fn search_issues(
     )
 }
 
-fn search_issues_in_issues(
+pub(crate) fn search_issues_in_issues(
     issues: Vec<IssueWire>,
     query: &str,
     statuses: Option<&[String]>,
