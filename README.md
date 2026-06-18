@@ -47,6 +47,18 @@ wire routes, push subscription endpoints, and hint-only push boundary.
 `rust-toolchain.toml` pins the `stable` channel and installs `rustfmt` and `clippy`. `Cargo.lock` is committed so the
 workspace builds reproducibly.
 
+## Releasing / versioning
+
+release-plz owns the workspace and crate release versions. Normal feature and fix PRs must not edit
+`[workspace.package].version`, crate `[package].version`, or local path-dependency version pins in `Cargo.toml`; use
+Conventional Commits metadata instead and let release-plz calculate the next version from the merged commits. For a
+breaking change on the `0.x` line, mark the commit or squash-merge title with `!` (for example, `feat(core)!: remove
+legacy API`) or include a `BREAKING CHANGE:` footer so release-plz computes the minor bump.
+
+The `Cargo version guard` PR check blocks release-owned Cargo version edits outside release-plz branches. The
+`manual-version` PR label is reserved for deliberate release recovery or other explicitly approved version overrides.
+Agents working in this repo should leave Cargo versions alone unless the user specifically asks for that recovery flow.
+
 The companion `sase_100` repo ships matching `just` targets so a contributor can drive both repos from one tree:
 
 ```bash

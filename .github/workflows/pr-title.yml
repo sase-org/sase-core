@@ -3,7 +3,7 @@ name: PR Title
 on:
   pull_request:
     branches: [master]
-    types: [opened, edited, reopened, ready_for_review, synchronize]
+    types: [opened, edited, labeled, reopened, ready_for_review, synchronize, unlabeled]
 
 permissions:
   contents: read
@@ -29,3 +29,15 @@ jobs:
             printf 'Actual title: %s\n' "${PR_TITLE}" >&2
             exit 1
           fi
+
+  cargo-version-guard:
+    name: Cargo version guard
+    runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') && !contains(github.event.pull_request.labels.*.name, 'manual-version') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Block manual release version edits
+        run: python3 .github/scripts/check_cargo_version_edits.py --base HEAD^1 --head HEAD
