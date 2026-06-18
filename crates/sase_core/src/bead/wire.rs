@@ -200,6 +200,12 @@ pub struct IssueWire {
     pub dependencies: Vec<DependencyWire>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadSearchMatchWire {
+    pub issue: IssueWire,
+    pub matched_fields: Vec<String>,
+}
+
 impl IssueWire {
     pub fn validate(&self) -> Result<(), BeadError> {
         if self.issue_type == IssueTypeWire::Phase && self.parent_id.is_none() {

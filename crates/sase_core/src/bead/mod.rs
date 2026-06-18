@@ -11,6 +11,7 @@ pub mod jsonl;
 pub mod mutation;
 pub mod read;
 pub mod schema;
+pub mod search;
 pub mod wire;
 pub mod work;
 
@@ -51,9 +52,10 @@ pub use schema::{
     needs_epic_count_migration, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration, BEAD_SQLITE_SCHEMA,
 };
+pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{
-    validate_model_value, BeadError, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, OperationOutcomeWire, StatusWire,
+    validate_model_value, BeadError, BeadSearchMatchWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, OperationOutcomeWire, StatusWire,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues,

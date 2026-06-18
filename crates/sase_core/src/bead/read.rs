@@ -184,7 +184,7 @@ fn show_issue_in_issues(
         })
 }
 
-fn list_issues_in_issues(
+pub(crate) fn list_issues_in_issues(
     mut issues: Vec<IssueWire>,
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
