@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/sase-org/sase-core/compare/v0.1.3...v0.1.4) - 2026-06-18
+
+### Fixed
+
+- *(bead)* improve search highlight contrast
+
 ## [0.1.3](https://github.com/sase-org/sase-core/compare/v0.1.2...v0.1.3) - 2026-06-18
 
 ### Added
