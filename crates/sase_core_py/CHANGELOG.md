@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/sase-org/sase-core/compare/v0.1.2...v0.1.3) - 2026-06-18
+
+### Added
+
+- *(beads)* add core bead search CLI (sase-4w.2)
+- *(editor)* add frontmatter schema & validation API (sase-4r.1)
+- *(prompt-stash)* add prompt-stash store module and Python bindings (sase-4q.1)
+- *(core)* [**breaking**] remove the episode module and PyO3 bindings
+- add sharded agent artifact layout
+
+### Fixed
+
+- *(agent-index)* expose metadata and status helpers
+
+### Other
+
+- drain stale active artifact rows
+- *(agent-scan)* query related artifact dirs from index
+
 ## [0.1.2](https://github.com/sase-org/sase-core/compare/v0.1.1...v0.1.2) - 2026-06-09
 
 ### Fixed
