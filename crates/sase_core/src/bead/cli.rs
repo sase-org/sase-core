@@ -1126,7 +1126,8 @@ fn byte_to_char_index(value: &str, byte_idx: usize) -> usize {
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_DIM: &str = "\x1b[2m";
 const ANSI_BOLD_BLUE: &str = "\x1b[1;34m";
-const ANSI_HIGHLIGHT: &str = "\x1b[1;43m";
+const ANSI_HIGHLIGHT: &str = "\x1b[30;43m";
+const ANSI_HIGHLIGHT_RESET: &str = "\x1b[39;49m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_CYAN: &str = "\x1b[36m";
@@ -1178,7 +1179,7 @@ fn highlight_matches(text: &str, query: &str, color: bool) -> String {
         highlighted.push_str(&text[cursor..start]);
         highlighted.push_str(ANSI_HIGHLIGHT);
         highlighted.push_str(&text[start..end]);
-        highlighted.push_str(ANSI_RESET);
+        highlighted.push_str(ANSI_HIGHLIGHT_RESET);
         cursor = end;
     }
     highlighted.push_str(&text[cursor..]);
@@ -1561,7 +1562,7 @@ mod tests {
         let store = seed_issues(vec![phase_issue(
             "beads-1.1",
             "Auth token",
-            "description",
+            "Rotate Auth token safely.",
             StatusWire::Closed,
             "2026-01-01T00:01:00Z",
         )]);
@@ -1573,7 +1574,10 @@ mod tests {
 
         assert_eq!(outcome.exit_code, 0);
         assert!(outcome.stdout.contains("\x1b[32m✓\x1b[0m"));
-        assert!(outcome.stdout.contains("\x1b[1;43mAuth\x1b[0m token"));
+        assert!(outcome.stdout.contains("\x1b[30;43mAuth\x1b[39;49m token"));
+        assert!(outcome.stdout.contains(
+            "\x1b[2m  Rotate \x1b[30;43mAuth\x1b[39;49m token safely.\x1b[0m"
+        ));
     }
 
     #[test]
