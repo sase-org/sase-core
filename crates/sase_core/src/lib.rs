@@ -20,6 +20,7 @@ pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
 pub mod parser;
+pub mod plan;
 pub mod project_spec;
 pub mod prompt_stash;
 pub mod query;
@@ -249,6 +250,10 @@ pub use notifications::{
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::parse_project_bytes;
+pub use plan::{
+    read_plans, PlanError, PlanWire, PLAN_READ_WIRE_SCHEMA_VERSION,
+    PLAN_WIRE_SCHEMA_VERSION,
+};
 pub use project_spec::{
     active_project_spec_filename, apply_project_aliases_update,
     apply_project_lifecycle_update, archive_project_spec_filename,
