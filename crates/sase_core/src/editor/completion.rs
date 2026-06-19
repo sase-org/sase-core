@@ -167,6 +167,9 @@ pub fn build_xprompt_completion_candidates(
                 new_text: insertion,
             }),
             additional_edits: Vec::new(),
+            kind: String::new(),
+            project: String::new(),
+            status: String::new(),
         });
     }
     candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
@@ -204,6 +207,9 @@ pub fn build_xprompt_arg_name_candidates(
                 new_text: insertion,
             }),
             additional_edits: Vec::new(),
+            kind: String::new(),
+            project: String::new(),
+            status: String::new(),
         });
     }
     CompletionList {
@@ -235,6 +241,9 @@ pub fn build_snippet_completion_candidates(
                 new_text: entry.template.clone(),
             }),
             additional_edits: Vec::new(),
+            kind: String::new(),
+            project: String::new(),
+            status: String::new(),
         });
     }
     candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
@@ -326,11 +335,11 @@ pub fn build_vcs_project_completion_candidates(
             name: entry.name.clone(),
             replacement: Some(primary),
             additional_edits: additional,
+            kind: entry.kind.clone(),
+            project: entry.project.clone(),
+            status: entry.status.clone(),
         });
     }
-    candidates.sort_by(|left, right| {
-        left.name.to_lowercase().cmp(&right.name.to_lowercase())
-    });
     CompletionList {
         candidates,
         shared_extension: String::new(),
@@ -1246,6 +1255,27 @@ mod tests {
             provider_display: "GitHub".to_string(),
             description: String::new(),
             aliases: Vec::new(),
+            kind: "project".to_string(),
+            project: name.to_string(),
+            status: String::new(),
+        }
+    }
+
+    fn changespec_entry(
+        name: &str,
+        project: &str,
+        status: &str,
+    ) -> VcsProjectEntry {
+        VcsProjectEntry {
+            name: name.to_string(),
+            vcs_prefix: "gh".to_string(),
+            display_tag: format!("#gh:{name}"),
+            provider_display: "GitHub".to_string(),
+            description: String::new(),
+            aliases: Vec::new(),
+            kind: "changespec".to_string(),
+            project: project.to_string(),
+            status: status.to_string(),
         }
     }
 
@@ -1419,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn vcs_project_candidates_filter_and_sort() {
+    fn vcs_project_candidates_filter_preserves_catalog_order() {
         let doc = DocumentSnapshot::new("#+sa");
         let cursor = pos(4);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
@@ -1429,8 +1459,8 @@ mod tests {
             &doc,
             cursor,
             &[
-                project_entry("saseling", "gh"),
                 project_entry("sase", "gh"),
+                project_entry("saseling", "gh"),
                 project_entry("bob", "git"),
             ],
             &vcs_names(),
@@ -1443,6 +1473,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["sase", "saseling"]
         );
+    }
+
+    #[test]
+    fn vcs_project_candidates_include_changespec_context() {
+        let doc = DocumentSnapshot::new("#+ship");
+        let cursor = pos(6);
+        let context = classify_completion_context(&doc, cursor, &[]).unwrap();
+        let token = context.token.as_ref().unwrap();
+        let list = build_vcs_project_completion_candidates(
+            token,
+            &doc,
+            cursor,
+            &[
+                project_entry("sase", "gh"),
+                changespec_entry("ship-completion", "sase", "Ready"),
+            ],
+            &vcs_names(),
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        let candidate = &list.candidates[0];
+        assert_eq!(candidate.name, "ship-completion");
+        assert_eq!(candidate.insertion, "#gh:ship-completion");
+        assert_eq!(candidate.kind, "changespec");
+        assert_eq!(candidate.project, "sase");
+        assert_eq!(candidate.status, "Ready");
     }
 
     #[test]
@@ -1459,8 +1515,8 @@ mod tests {
             &doc,
             cursor,
             &[
-                project_entry("saseling", "gh"),
                 project_entry("sase", "gh"),
+                project_entry("saseling", "gh"),
                 project_entry("bob", "git"),
             ],
             &vcs_names(),

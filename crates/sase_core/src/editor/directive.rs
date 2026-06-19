@@ -133,6 +133,9 @@ pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
                 name: directive.name.to_string(),
                 replacement: None,
                 additional_edits: Vec::new(),
+                kind: String::new(),
+                project: String::new(),
+                status: String::new(),
             });
         }
     }
@@ -170,6 +173,9 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
                 name: (*value).to_string(),
                 replacement: None,
                 additional_edits: Vec::new(),
+                kind: String::new(),
+                project: String::new(),
+                status: String::new(),
             })
             .collect(),
         shared_extension: String::new(),

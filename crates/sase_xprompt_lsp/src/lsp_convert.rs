@@ -41,7 +41,7 @@ pub fn completion_response(
 /// Differs from [`completion_response`] in two ways: the `filter_text` is the
 /// trigger spelling (`#+name` for a hash-plus token, or `+name` for a BOF
 /// bare-plus token, so typing `#+sa`/`+sa` keeps the `sase` item), and the item
-/// kind is `MODULE` to render as a distinct project row. The primary
+/// kind/label details distinguish projects from PRs. The primary
 /// `text_edit` and `additional_text_edits` (the prepend/replace edit) are
 /// carried over from the candidate's `replacement` / `additional_edits`.
 ///
@@ -188,20 +188,44 @@ fn completion_item(
     }
 }
 
-/// Convert one `vcs_project` candidate, overriding the generic item's kind and
-/// `filter_text` so the `#+name`/`+name` trigger spelling (per `trigger_prefix`)
-/// drives client-side filtering.
+/// Convert one `vcs_project` candidate, overriding the generic item's kind,
+/// label details, and `filter_text` so the `#+name`/`+name` trigger spelling
+/// (per `trigger_prefix`) drives client-side filtering.
 fn vcs_project_completion_item(
     candidate: CompletionCandidate,
     replacement_range: EditorRange,
     trigger_prefix: &str,
 ) -> CompletionItem {
     let filter_text = format!("{trigger_prefix}{}", candidate.name);
-    CompletionItem {
-        kind: Some(CompletionItemKind::MODULE),
-        filter_text: Some(filter_text),
-        ..completion_item(candidate, replacement_range)
-    }
+    let is_changespec = candidate.kind == "changespec";
+    let label_details = if is_changespec {
+        Some(CompletionItemLabelDetails {
+            detail: (!candidate.project.is_empty())
+                .then(|| format!(" · {}", candidate.project)),
+            description: Some(if candidate.status.is_empty() {
+                "PR".to_string()
+            } else {
+                format!("PR · {}", candidate.status)
+            }),
+        })
+    } else {
+        Some(CompletionItemLabelDetails {
+            detail: None,
+            description: Some("project".to_string()),
+        })
+    };
+    let detail = Some(candidate.insertion.clone());
+    let kind = if is_changespec {
+        CompletionItemKind::EVENT
+    } else {
+        CompletionItemKind::MODULE
+    };
+    let mut item = completion_item(candidate, replacement_range);
+    item.kind = Some(kind);
+    item.filter_text = Some(filter_text);
+    item.label_details = label_details;
+    item.detail = detail;
+    item
 }
 
 /// Map the candidate's secondary edits (the prepend/replace-at-start tag edit)
@@ -316,6 +340,9 @@ mod tests {
                     new_text: "#foo".to_string(),
                 }),
                 additional_edits: Vec::new(),
+                kind: String::new(),
+                project: String::new(),
+                status: String::new(),
             }],
             shared_extension: String::new(),
         };

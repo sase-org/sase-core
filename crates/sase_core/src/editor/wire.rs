@@ -78,6 +78,17 @@ pub struct CompletionCandidate {
     /// completion kind.
     #[serde(default)]
     pub additional_edits: Vec<EditorTextEdit>,
+    /// Optional entry discriminator for specialized completion surfaces.
+    /// `vcs_project` uses `project` or `changespec`; generic completion kinds
+    /// leave it empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// Optional owning project context for specialized completion surfaces.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+    /// Optional status context for specialized completion surfaces.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,8 +97,8 @@ pub struct CompletionList {
     pub shared_extension: String,
 }
 
-/// One active-project completion candidate for the `+` (`vcs_project`)
-/// completion kind.
+/// One active project or ChangeSpec completion candidate for the `+`
+/// (`vcs_project`) completion kind.
 ///
 /// This mirrors the Python `VcsProjectEntry` produced by
 /// `build_vcs_project_completion_entries`; the LSP receives a JSON catalog of
@@ -95,7 +106,7 @@ pub struct CompletionList {
 /// surfaces stay in sync via the shared golden test-vector table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcsProjectEntry {
-    /// Project name (e.g. `sase`).
+    /// Project name (e.g. `sase`) or ChangeSpec name.
     pub name: String,
     /// VCS workflow prefix (e.g. `gh`, `git`).
     pub vcs_prefix: String,
@@ -111,6 +122,20 @@ pub struct VcsProjectEntry {
     /// Alternate names the project can be matched by.
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// `project` for project rows, `changespec` for PR rows.
+    #[serde(default = "default_vcs_project_entry_kind")]
+    pub kind: String,
+    /// Owning project basename. For project rows, this equals `name` in v2
+    /// catalogs and may be empty for v1 catalogs.
+    #[serde(default)]
+    pub project: String,
+    /// Base ChangeSpec status for PR rows; empty for project rows.
+    #[serde(default)]
+    pub status: String,
+}
+
+fn default_vcs_project_entry_kind() -> String {
+    "project".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

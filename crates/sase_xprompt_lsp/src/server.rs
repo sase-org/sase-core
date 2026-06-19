@@ -1001,6 +1001,9 @@ fn bool_completion_list() -> CompletionList {
                 name: value.to_string(),
                 replacement: None,
                 additional_edits: Vec::new(),
+                kind: String::new(),
+                project: String::new(),
+                status: String::new(),
             })
             .collect(),
         shared_extension: String::new(),
@@ -1038,13 +1041,14 @@ fn file_history() -> Vec<String> {
         .collect()
 }
 
-/// Load the active-project completion catalog from the materialized JSON file
-/// at `path`, returning `(entries, workflow_names)`.
+/// Load the active project/PR completion catalog from the materialized JSON
+/// file at `path`, returning `(entries, workflow_names)`.
 ///
 /// Read fresh on every `#+` completion request. Any failure (no path, unreadable
 /// file, malformed JSON) degrades to empty results so the `#+` menu simply
-/// shows nothing rather than breaking completion. The file shape is
-/// `{ "workflow_names": [..], "entries": [VcsProjectEntry, ..] }`.
+/// shows nothing rather than breaking completion. Schema versions 1 and 2 are
+/// accepted; v1 entries default to project rows. The file shape is
+/// `{ "schema_version": N, "workflow_names": [..], "entries": [VcsProjectEntry, ..] }`.
 fn load_vcs_project_catalog(
     path: Option<&Path>,
 ) -> (Vec<VcsProjectEntry>, Vec<String>) {
@@ -1058,6 +1062,16 @@ fn load_vcs_project_catalog(
         warn!("failed to parse vcs project catalog at {path:?}");
         return (Vec::new(), Vec::new());
     };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if !matches!(schema_version, 1 | 2) {
+        warn!(
+            "unsupported vcs project catalog schema_version {schema_version} at {path:?}"
+        );
+        return (Vec::new(), Vec::new());
+    }
     let entries = value
         .get("entries")
         .cloned()
@@ -2131,7 +2145,7 @@ mod tests {
         fs::write(
             path,
             r##"{
-                "schema_version": 1,
+                "schema_version": 2,
                 "workflow_names": ["gh", "git", "hg"],
                 "entries": [
                     {
@@ -2140,7 +2154,45 @@ mod tests {
                         "display_tag": "#gh:sase",
                         "provider_display": "GitHub",
                         "description": "SASE repo",
-                        "aliases": []
+                        "aliases": [],
+                        "kind": "project",
+                        "project": "sase",
+                        "status": ""
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+    }
+
+    fn write_vcs_project_catalog_with_pr(path: &Path) {
+        fs::write(
+            path,
+            r##"{
+                "schema_version": 2,
+                "workflow_names": ["gh", "git", "hg"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub",
+                        "description": "SASE repo",
+                        "aliases": [],
+                        "kind": "project",
+                        "project": "sase",
+                        "status": ""
+                    },
+                    {
+                        "name": "ship-completion",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:ship-completion",
+                        "provider_display": "GitHub",
+                        "description": "",
+                        "aliases": [],
+                        "kind": "changespec",
+                        "project": "sase",
+                        "status": "Ready"
                     }
                 ]
             }"##,
@@ -2169,6 +2221,56 @@ mod tests {
             .unwrap_or_default();
 
         assert!(triggers.contains(&"+".to_string()), "{triggers:?}");
+    }
+
+    #[test]
+    fn loads_v1_vcs_project_catalog_with_project_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 1,
+                "workflow_names": ["gh"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub",
+                        "description": "",
+                        "aliases": []
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let (entries, workflow_names) =
+            load_vcs_project_catalog(Some(&catalog_path));
+
+        assert_eq!(workflow_names, vec!["gh"]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, "project");
+        assert_eq!(entries[0].project, "");
+        assert_eq!(entries[0].status, "");
+    }
+
+    #[test]
+    fn load_vcs_project_catalog_rejects_unknown_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r#"{"schema_version": 99, "workflow_names": ["gh"], "entries": []}"#,
+        )
+        .unwrap();
+
+        let (entries, workflow_names) =
+            load_vcs_project_catalog(Some(&catalog_path));
+
+        assert!(entries.is_empty());
+        assert!(workflow_names.is_empty());
     }
 
     #[tokio::test]
@@ -2206,12 +2308,12 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.label, "sase");
         assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
+        let label_details = item.label_details.as_ref().unwrap();
+        assert_eq!(label_details.description.as_deref(), Some("project"));
         // `filter_text` is the `#+name` trigger spelling so typing `#+sa` keeps
         // the item under client-side filtering.
         assert_eq!(item.filter_text.as_deref(), Some("#+sase"));
-        let detail = item.detail.as_deref().unwrap_or_default();
-        assert!(detail.contains("GitHub"), "{detail:?}");
-        assert!(detail.contains("#gh:sase"), "{detail:?}");
+        assert_eq!(item.detail.as_deref(), Some("#gh:sase"));
         let Some(Documentation::MarkupContent(documentation)) =
             item.documentation.as_ref()
         else {
@@ -2230,6 +2332,48 @@ mod tests {
         assert_eq!(additional.len(), 1);
         assert_eq!(additional[0].new_text, "#gh:sase ");
         assert_eq!(additional[0].range.start, additional[0].range.end);
+    }
+
+    #[tokio::test]
+    async fn completes_vcs_changespec_with_pr_label_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog_with_pr(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "#+ship".to_string(),
+                Position {
+                    line: 0,
+                    character: 6,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "ship-completion");
+        assert_eq!(item.kind, Some(CompletionItemKind::EVENT));
+        assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion"));
+        assert_eq!(item.filter_text.as_deref(), Some("#+ship-completion"));
+        let label_details = item.label_details.as_ref().unwrap();
+        assert_eq!(label_details.detail.as_deref(), Some(" · sase"));
+        assert_eq!(label_details.description.as_deref(), Some("PR · Ready"));
     }
 
     #[tokio::test]
@@ -2311,6 +2455,8 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.label, "sase");
         assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
+        let label_details = item.label_details.as_ref().unwrap();
+        assert_eq!(label_details.description.as_deref(), Some("project"));
         // `filter_text` uses the bare-plus trigger spelling so typing `+sa`
         // keeps the item under client-side filtering.
         assert_eq!(item.filter_text.as_deref(), Some("+sase"));

@@ -52,6 +52,9 @@ pub fn build_file_completion_candidates_with_base(
             name,
             replacement: None,
             additional_edits: Vec::new(),
+            kind: String::new(),
+            project: String::new(),
+            status: String::new(),
         });
     }
 
@@ -91,6 +94,9 @@ where
                     name: path,
                     replacement: None,
                     additional_edits: Vec::new(),
+                    kind: String::new(),
+                    project: String::new(),
+                    status: String::new(),
                 }
             })
             .collect(),
