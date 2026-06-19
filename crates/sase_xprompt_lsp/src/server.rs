@@ -25,6 +25,7 @@ use sase_core::{
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
     editor_build_snippet_completion_candidates,
+    editor_build_vcs_project_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context, editor_definition_at_position,
@@ -32,7 +33,7 @@ use sase_core::{
     editor_extract_token_at_position, editor_hover_at_position,
     CompletionCandidate, CompletionContextKind, CompletionList,
     DocumentSnapshot, EditorRange, EditorSnippetEntryWire, HelperHostBridge,
-    XpromptAssistEntry,
+    VcsProjectEntry, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -42,12 +43,18 @@ use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
     hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
-    to_editor_position, to_lsp_range,
+    to_editor_position, to_lsp_range, vcs_project_completion_response,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
+
+/// Env var carrying the path to the JSON `vcs_project` completion catalog
+/// (active-project entries + known VCS workflow names). Materialized by the
+/// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
+/// fresh on every `+` completion request so external rewrites are picked up.
+const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -56,6 +63,10 @@ struct ServerConfig {
     catalog_key: String,
     snippet_support: bool,
     allow_all_markdown: bool,
+    /// Path to the materialized `vcs_project` completion catalog, captured from
+    /// [`VCS_PROJECT_CATALOG_ENV`] at startup. The file itself is re-read fresh
+    /// on each `+` completion request (see [`load_vcs_project_catalog`]).
+    vcs_project_catalog: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -66,6 +77,7 @@ impl Default for ServerConfig {
             catalog_key: "default".to_string(),
             snippet_support: false,
             allow_all_markdown: false,
+            vcs_project_catalog: vcs_project_catalog_path(),
         }
     }
 }
@@ -120,6 +132,11 @@ impl XpromptLspServer {
             to_editor_position(position),
             entries.as_slice(),
         )?;
+        if context.kind == CompletionContextKind::VcsProject {
+            return Some(self.vcs_project_completion(
+                &context, &document, position, &config,
+            ));
+        }
         let list =
             self.completion_list_for_context(&context, &entries, &config);
         if context.kind == CompletionContextKind::SnippetTrigger {
@@ -163,6 +180,35 @@ impl XpromptLspServer {
             }
         }
         Some(response)
+    }
+
+    /// Build the `+` (`vcs_project`) completion response.
+    ///
+    /// The project catalog (active-project entries + known VCS workflow names)
+    /// is read fresh from the materialized JSON file on every request so
+    /// external rewrites are picked up without restarting the server. The
+    /// canonical expansion is produced by the shared core builder, keeping the
+    /// LSP byte-for-byte aligned with the TUI and the Python golden vectors.
+    fn vcs_project_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        document: &DocumentSnapshot,
+        position: Position,
+        config: &ServerConfig,
+    ) -> CompletionResponse {
+        let Some(token) = context.token.as_ref() else {
+            return CompletionResponse::Array(Vec::new());
+        };
+        let (entries, workflow_names) =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let list = editor_build_vcs_project_completion_candidates(
+            token,
+            document,
+            to_editor_position(position),
+            &entries,
+            &workflow_names,
+        );
+        vcs_project_completion_response(list, context.replacement_range)
     }
 
     pub async fn hover_for_text(
@@ -470,8 +516,9 @@ impl XpromptLspServer {
                 empty_completion_list()
             }
             CompletionContextKind::SnippetTrigger => empty_completion_list(),
-            // Wired to the project catalog + builder in Phase 4 (LSP server
-            // wiring). Phase 3 only adds the context kind and core builder.
+            // Handled out-of-band in `completion_for_text` /
+            // `vcs_project_completion`, which loads the materialized project
+            // catalog and known workflow names the core builder needs.
             CompletionContextKind::VcsProject => empty_completion_list(),
         };
         apply_replacement(list, context.replacement_range)
@@ -590,6 +637,7 @@ impl LanguageServer for XpromptLspServer {
                         ":".to_string(),
                         "(".to_string(),
                         ",".to_string(),
+                        "+".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -819,7 +867,12 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
             .and_then(|options| options.get("allow_all_markdown"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
+        vcs_project_catalog: vcs_project_catalog_path(),
     }
+}
+
+fn vcs_project_catalog_path() -> Option<PathBuf> {
+    std::env::var_os(VCS_PROJECT_CATALOG_ENV).map(PathBuf::from)
 }
 
 fn snippet_support(capabilities: &ClientCapabilities) -> bool {
@@ -972,6 +1025,46 @@ fn file_history() -> Vec<String> {
         .filter(|path| !path.starts_with(".sase/"))
         .map(str::to_string)
         .collect()
+}
+
+/// Load the active-project completion catalog from the materialized JSON file
+/// at `path`, returning `(entries, workflow_names)`.
+///
+/// Read fresh on every `+` completion request. Any failure (no path, unreadable
+/// file, malformed JSON) degrades to empty results so the `+` menu simply shows
+/// nothing rather than breaking completion. The file shape is
+/// `{ "workflow_names": [..], "entries": [VcsProjectEntry, ..] }`.
+fn load_vcs_project_catalog(
+    path: Option<&Path>,
+) -> (Vec<VcsProjectEntry>, Vec<String>) {
+    let Some(path) = path else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        warn!("failed to parse vcs project catalog at {path:?}");
+        return (Vec::new(), Vec::new());
+    };
+    let entries = value
+        .get("entries")
+        .cloned()
+        .and_then(|entries| {
+            serde_json::from_value::<Vec<VcsProjectEntry>>(entries).ok()
+        })
+        .unwrap_or_default();
+    let workflow_names = value
+        .get("workflow_names")
+        .and_then(serde_json::Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (entries, workflow_names)
 }
 
 fn entry_for_token<'a>(
@@ -1161,8 +1254,8 @@ mod tests {
     use lsp_types::{
         CodeActionOrCommand, CompletionClientCapabilities,
         CompletionItemCapability, CompletionItemKind, CompletionResponse,
-        CompletionTextEdit, GotoDefinitionResponse, Hover, InsertTextFormat,
-        Position, Range, TextDocumentClientCapabilities, Uri,
+        CompletionTextEdit, Documentation, GotoDefinitionResponse, Hover,
+        InsertTextFormat, Position, Range, TextDocumentClientCapabilities, Uri,
     };
     use sase_core::{
         EditorPosition as CorePosition, EditorRange as CoreRange,
@@ -2019,5 +2112,185 @@ mod tests {
             panic!("expected text edit for {label}");
         };
         assert_eq!(edit.new_text.as_str(), new_text);
+    }
+
+    // --- vcs_project (`+`) completion --------------------------------------
+
+    fn write_vcs_project_catalog(path: &Path) {
+        fs::write(
+            path,
+            r##"{
+                "schema_version": 1,
+                "workflow_names": ["gh", "git", "hg"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub",
+                        "description": "SASE repo",
+                        "aliases": []
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn advertises_plus_completion_trigger_character() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&"+".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn completes_vcs_project_with_primary_and_additional_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "Describe this repo. +".to_string(),
+                Position {
+                    line: 0,
+                    character: 21,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "sase");
+        assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
+        // `filter_text` is the `+name` trigger spelling so typing `+sa` keeps
+        // the item under client-side filtering.
+        assert_eq!(item.filter_text.as_deref(), Some("+sase"));
+        let detail = item.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("GitHub"), "{detail:?}");
+        assert!(detail.contains("#gh:sase"), "{detail:?}");
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.value, "SASE repo");
+
+        // Primary edit consumes the `+` trigger token...
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected primary text edit");
+        };
+        assert_eq!(edit.new_text, "");
+        // ...and the additional edit prepends the tag at the document start.
+        let additional = item.additional_text_edits.as_ref().unwrap();
+        assert_eq!(additional.len(), 1);
+        assert_eq!(additional[0].new_text, "#gh:sase ");
+        assert_eq!(additional[0].range.start, additional[0].range.end);
+    }
+
+    #[tokio::test]
+    async fn bare_plus_trigger_merges_into_single_primary_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "+".to_string(),
+                Position {
+                    line: 0,
+                    character: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected primary text edit");
+        };
+        // BOF `+`: prepend point coincides with the trigger deletion, so the
+        // edits merge into one primary edit with no additional edits.
+        assert_eq!(edit.new_text, "#gh:sase ");
+        assert!(item.additional_text_edits.is_none());
+    }
+
+    #[tokio::test]
+    async fn vcs_project_completion_without_catalog_is_empty() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = None;
+        }
+
+        let response = server
+            .completion_for_text(
+                "+".to_string(),
+                Position {
+                    line: 0,
+                    character: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert!(items.is_empty());
     }
 }

@@ -35,6 +35,27 @@ pub fn completion_response(
     )
 }
 
+/// Build the completion response for the `+` (`vcs_project`) completion kind.
+///
+/// Differs from [`completion_response`] in two ways: the `filter_text` is the
+/// `+name` trigger spelling (so typing `+sa` keeps the `sase` item), and the
+/// item kind is `MODULE` to render as a distinct project row. The primary
+/// `text_edit` and `additional_text_edits` (the prepend/replace edit) are
+/// carried over from the candidate's `replacement` / `additional_edits`.
+pub fn vcs_project_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .map(|candidate| {
+                vcs_project_completion_item(candidate, replacement_range)
+            })
+            .collect(),
+    )
+}
+
 pub fn snippet_completion_item(
     label: String,
     new_text: String,
@@ -148,9 +169,43 @@ fn completion_item(
             range: to_lsp_range(range),
             new_text,
         })),
+        additional_text_edits: additional_text_edits(
+            candidate.additional_edits,
+        ),
         tags: None::<Vec<CompletionItemTag>>,
         ..Default::default()
     }
+}
+
+/// Convert one `vcs_project` candidate, overriding the generic item's kind and
+/// `filter_text` so the `+name` trigger spelling drives client-side filtering.
+fn vcs_project_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let filter_text = format!("+{}", candidate.name);
+    CompletionItem {
+        kind: Some(CompletionItemKind::MODULE),
+        filter_text: Some(filter_text),
+        ..completion_item(candidate, replacement_range)
+    }
+}
+
+/// Map the candidate's secondary edits (the prepend/replace-at-start tag edit)
+/// to LSP `additionalTextEdits`, returning `None` when there are none.
+fn additional_text_edits(edits: Vec<EditorTextEdit>) -> Option<Vec<TextEdit>> {
+    if edits.is_empty() {
+        return None;
+    }
+    Some(
+        edits
+            .into_iter()
+            .map(|edit| TextEdit {
+                range: to_lsp_range(edit.range),
+                new_text: edit.new_text,
+            })
+            .collect(),
+    )
 }
 
 pub fn apply_replacement(
