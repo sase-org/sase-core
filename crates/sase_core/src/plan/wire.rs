@@ -65,3 +65,18 @@ pub struct PlanWire {
     #[serde(default)]
     pub frontmatter: BTreeMap<String, String>,
 }
+
+/// A single ranked plan-search result.
+///
+/// Mirrors the bead search match (`bead/wire.rs::BeadSearchMatchWire`) and
+/// extends it with a numeric relevance `score`: plan search ranks results
+/// (field-weighted relevance + repo boost) where bead search returns storage
+/// order. `matched_fields` lists the searchable field names hit by the query
+/// (empty in browse mode, when no query is supplied). The struct intentionally
+/// does not derive `Eq` because `score` is an `f64`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanSearchMatchWire {
+    pub plan: PlanWire,
+    pub matched_fields: Vec<String>,
+    pub score: f64,
+}

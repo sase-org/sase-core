@@ -3,11 +3,17 @@
 //! Mirrors the bead-search architecture (`bead/`): owned wire records plus a
 //! read layer that scans and parses markdown plan artifacts, with no PyO3
 //! types so binding/TUI/web frontends can reuse the same logic. This phase
-//! covers the wire model and discovery (read layer); search, filtering, and
-//! ranking land in a later phase.
+//! covers the wire model, discovery (read layer), and the search/filter/rank
+//! engine built on top of it.
 
 pub mod read;
+pub mod search;
 pub mod wire;
 
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
-pub use wire::{PlanError, PlanWire, PLAN_WIRE_SCHEMA_VERSION};
+pub use search::{
+    search_plans, PLAN_SEARCH_FIELD_NAMES, PLAN_SEARCH_WIRE_SCHEMA_VERSION,
+};
+pub use wire::{
+    PlanError, PlanSearchMatchWire, PlanWire, PLAN_WIRE_SCHEMA_VERSION,
+};
