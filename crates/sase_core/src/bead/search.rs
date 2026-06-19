@@ -59,7 +59,10 @@ pub(crate) fn search_issues_in_issues(
     let filtered = list_issues_in_issues(issues, statuses, issue_types, tiers)?;
     let max = limit.unwrap_or(0);
     let mut matches = Vec::new();
-    for issue in filtered {
+    // `list_issues_in_issues` returns candidates sorted by `created_at`
+    // ascending; iterate in reverse so newer matches come before older ones,
+    // and so `--limit` keeps the newest matches.
+    for issue in filtered.into_iter().rev() {
         let matched_fields = matched_field_names(&issue, &needle);
         if matched_fields.is_empty() {
             continue;
@@ -347,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_limit_after_filtering_and_matching() {
+    fn limit_keeps_newest_matches() {
         let issues = (1..=3)
             .map(|idx| {
                 phase_issue_with(|issue| {
@@ -368,7 +371,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ids(&results), vec!["beads-1.1", "beads-1.2"]);
+        assert_eq!(ids(&results), vec!["beads-1.3", "beads-1.2"]);
     }
 
     #[test]
@@ -393,7 +396,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ids(&results), vec!["beads-1.1", "beads-1.2"]);
+        assert_eq!(ids(&results), vec!["beads-1.2", "beads-1.1"]);
     }
 
     #[test]
@@ -414,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_list_ordering() {
+    fn returns_newest_matches_before_older_matches() {
         let later = phase_issue_with(|issue| {
             issue.id = "beads-1.2".to_string();
             issue.title = "Needle later".to_string();
@@ -426,8 +429,10 @@ mod tests {
             issue.created_at = "2026-01-01T00:01:00Z".to_string();
         });
 
+        // Pass earlier-then-later input to prove the order comes from
+        // `created_at`, not from input position.
         let results = search_issues_in_issues(
-            vec![later, earlier],
+            vec![earlier, later],
             "needle",
             None,
             None,
@@ -436,7 +441,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(ids(&results), vec!["beads-1.1", "beads-1.2"]);
+        assert_eq!(ids(&results), vec!["beads-1.2", "beads-1.1"]);
     }
 
     #[test]

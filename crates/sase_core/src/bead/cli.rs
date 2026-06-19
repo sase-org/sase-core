@@ -1503,6 +1503,40 @@ mod tests {
     }
 
     #[test]
+    fn search_compact_orders_matches_newest_first() {
+        // Seed oldest-first to prove ordering follows `created_at`, not the
+        // stored/input order.
+        let store = seed_issues(vec![
+            phase_issue(
+                "beads-1.1",
+                "Auth older",
+                "Older item.",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+            phase_issue(
+                "beads-1.2",
+                "Auth newer",
+                "Newer item.",
+                StatusWire::Open,
+                "2026-01-01T00:02:00Z",
+            ),
+        ]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["search", "auth", "--format", "compact", "--color", "never"],
+        );
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(
+            outcome.stdout,
+            "○ beads-1.2 · Auth newer\n  Newer item.\n\
+             ○ beads-1.1 · Auth older\n  Older item.\n"
+        );
+    }
+
+    #[test]
     fn search_json_renders_stable_uncolored_envelope() {
         let store = seed_issues(vec![phase_issue(
             "beads-1.1",
