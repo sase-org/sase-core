@@ -132,6 +132,7 @@ pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
                 is_dir: false,
                 name: directive.name.to_string(),
                 replacement: None,
+                additional_edits: Vec::new(),
             });
         }
     }
@@ -168,6 +169,7 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
                 is_dir: false,
                 name: (*value).to_string(),
                 replacement: None,
+                additional_edits: Vec::new(),
             })
             .collect(),
         shared_extension: String::new(),

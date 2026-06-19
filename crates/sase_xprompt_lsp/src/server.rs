@@ -470,6 +470,9 @@ impl XpromptLspServer {
                 empty_completion_list()
             }
             CompletionContextKind::SnippetTrigger => empty_completion_list(),
+            // Wired to the project catalog + builder in Phase 4 (LSP server
+            // wiring). Phase 3 only adds the context kind and core builder.
+            CompletionContextKind::VcsProject => empty_completion_list(),
         };
         apply_replacement(list, context.replacement_range)
     }
@@ -933,6 +936,7 @@ fn bool_completion_list() -> CompletionList {
                 is_dir: false,
                 name: value.to_string(),
                 replacement: None,
+                additional_edits: Vec::new(),
             })
             .collect(),
         shared_extension: String::new(),

@@ -42,6 +42,7 @@ pub enum CompletionContextKind {
     DirectiveName,
     DirectiveArgument,
     SnippetTrigger,
+    VcsProject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,12 +71,46 @@ pub struct CompletionCandidate {
     pub name: String,
     #[serde(default)]
     pub replacement: Option<EditorTextEdit>,
+    /// Secondary edits applied alongside `replacement` (the LSP
+    /// `additionalTextEdits`). Used by `vcs_project` completion to prepend or
+    /// replace the VCS workflow tag at the start of the document while the
+    /// primary edit consumes the `+query` trigger token. Empty for every other
+    /// completion kind.
+    #[serde(default)]
+    pub additional_edits: Vec<EditorTextEdit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionList {
     pub candidates: Vec<CompletionCandidate>,
     pub shared_extension: String,
+}
+
+/// One active-project completion candidate for the `+` (`vcs_project`)
+/// completion kind.
+///
+/// This mirrors the Python `VcsProjectEntry` produced by
+/// `build_vcs_project_completion_entries`; the LSP receives a JSON catalog of
+/// these (materialized in Phase 4) and the TUI builds them in-process. The two
+/// surfaces stay in sync via the shared golden test-vector table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsProjectEntry {
+    /// Project name (e.g. `sase`).
+    pub name: String,
+    /// VCS workflow prefix (e.g. `gh`, `git`).
+    pub vcs_prefix: String,
+    /// The resulting VCS workflow tag, without a trailing space (e.g.
+    /// `#gh:sase`).
+    pub display_tag: String,
+    /// Human-readable provider name (e.g. `GitHub`), falling back to
+    /// `vcs_prefix` when no display name is registered.
+    pub provider_display: String,
+    /// Project description, when available (empty otherwise).
+    #[serde(default)]
+    pub description: String,
+    /// Alternate names the project can be matched by.
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

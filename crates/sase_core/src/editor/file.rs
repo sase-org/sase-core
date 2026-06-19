@@ -51,6 +51,7 @@ pub fn build_file_completion_candidates_with_base(
             is_dir,
             name,
             replacement: None,
+            additional_edits: Vec::new(),
         });
     }
 
@@ -89,6 +90,7 @@ where
                     is_dir: false,
                     name: path,
                     replacement: None,
+                    additional_edits: Vec::new(),
                 }
             })
             .collect(),

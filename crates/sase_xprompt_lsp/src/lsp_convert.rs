@@ -247,6 +247,7 @@ mod tests {
                     range,
                     new_text: "#foo".to_string(),
                 }),
+                additional_edits: Vec::new(),
             }],
             shared_extension: String::new(),
         };

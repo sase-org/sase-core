@@ -239,6 +239,59 @@ pub fn is_snippet_trigger_token(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+pub fn is_vcs_project_trigger_token(token: &str) -> bool {
+    token.starts_with('+')
+}
+
+/// Detect a `+query` VCS-project completion trigger token at `position`.
+///
+/// Mirrors the Python `find_vcs_project_trigger`: the trigger fires when the
+/// run of non-whitespace characters ending at the cursor begins with `+` and
+/// that `+` sits at the beginning of the document, at a line start, or directly
+/// after whitespace. A `+` embedded in a word (e.g. `c++`) is ordinary text and
+/// does not trigger.
+///
+/// Unlike [`extract_token_at_position`], token boundaries here are whitespace
+/// only (matching the Python contract), so `+a:b` is a single trigger token and
+/// the `+` can sit anywhere a space/newline precedes it -- not just at a line
+/// start. The returned [`TokenInfo`] spans the whole `+query` token; the filter
+/// query (text after `+` up to the cursor) is derived by the caller.
+pub fn vcs_project_trigger_token(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+) -> Option<TokenInfo> {
+    let text = document.text();
+    let cursor = document.position_to_byte_offset(position)?;
+
+    // Walk back through the run of non-whitespace characters before the cursor
+    // to find the token start. By construction the character before `start` is
+    // whitespace or the start of the document -- i.e. the position rule.
+    let mut start = cursor;
+    while start > 0 {
+        let prev = previous_char_boundary(text, start)?;
+        if text[prev..].chars().next()?.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    if !text[start..].starts_with('+') {
+        return None;
+    }
+
+    // Extend forward to the end of the token (next whitespace or end of text).
+    let mut end = start;
+    while end < text.len() {
+        let ch = text[end..].chars().next()?;
+        if ch.is_whitespace() {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+
+    token_info(document, start, end)
+}
+
 pub fn xprompt_reference_name(token: &str) -> Option<String> {
     token
         .strip_prefix("#!")
@@ -384,6 +437,44 @@ mod tests {
         assert_eq!(token.text, "#foobar");
         assert_eq!(token.byte_start, 4);
         assert_eq!(token.byte_end, 11);
+    }
+
+    #[test]
+    fn detects_vcs_project_trigger_tokens() {
+        // (text, cursor_col, expected (byte_start, byte_end, query))
+        let positive = [
+            ("+", 1, (0usize, 1usize, "")),
+            ("+sa", 3, (0, 3, "sa")),
+            ("Fix +bug", 8, (4, 8, "bug")),
+            ("+abc", 2, (0, 4, "a")),
+            ("2 + 2", 3, (2, 3, "")),
+        ];
+        for (text, col, (start, end, query)) in positive {
+            let doc = DocumentSnapshot::new(text);
+            let token = vcs_project_trigger_token(&doc, pos(0, col))
+                .unwrap_or_else(|| panic!("expected trigger for {text:?}"));
+            assert_eq!(token.byte_start, start, "{text:?} start");
+            assert_eq!(token.byte_end, end, "{text:?} end");
+            assert!(is_vcs_project_trigger_token(&token.text), "{text:?}");
+            assert_eq!(&text[token.byte_start + 1..col as usize], query);
+        }
+
+        for (text, col) in [("c++", 3), ("a+b", 3), ("hello", 5), ("", 0)] {
+            let doc = DocumentSnapshot::new(text);
+            assert!(
+                vcs_project_trigger_token(&doc, pos(0, col)).is_none(),
+                "{text:?} should not trigger"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_vcs_project_trigger_after_newline() {
+        let doc = DocumentSnapshot::new("line\n+x");
+        let token = vcs_project_trigger_token(&doc, pos(1, 2)).unwrap();
+        assert_eq!(token.byte_start, 5);
+        assert_eq!(token.byte_end, 7);
+        assert_eq!(token.text, "+x");
     }
 
     #[test]
