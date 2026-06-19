@@ -145,6 +145,26 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         initialize_response.get("id").and_then(Value::as_i64),
         Some(1)
     );
+    assert_eq!(
+        initialize_response["result"]["capabilities"]["semanticTokensProvider"]
+            ["legend"]["tokenTypes"],
+        json!(["xpromptSeparator"])
+    );
+    assert_eq!(
+        initialize_response["result"]["capabilities"]["semanticTokensProvider"]
+            ["legend"]["tokenModifiers"],
+        json!([])
+    );
+    assert_eq!(
+        initialize_response["result"]["capabilities"]["semanticTokensProvider"]
+            ["full"],
+        json!(true)
+    );
+    assert_eq!(
+        initialize_response["result"]["capabilities"]["semanticTokensProvider"]
+            ["range"],
+        json!(false)
+    );
 
     write_message(
         &mut client_writer,
@@ -161,7 +181,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
                     "uri": "file:///tmp/sase_prompt_rpc.md",
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "#foo"
+                    "text": "#foo\n---\nbar\n  ---  \nqux"
                 }
             }
         }),
@@ -254,14 +274,38 @@ async fn stdio_jsonrpc_initialize_and_completion() {
     assert!(saw_definition);
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_semantic_tokens = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            saw_semantic_tokens = message["result"]["data"]
+                == json!([1, 0, 3, 0, 0, 2, 2, 3, 0, 0]);
+            break;
+        }
+    }
+
+    assert!(saw_semantic_tokens);
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(4)
+        != Some(5)
     {}
     write_message(
         &mut client_writer,
@@ -379,14 +423,37 @@ async fn stdio_jsonrpc_unsupported_markdown_has_no_xprompt_behavior() {
 
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/semanticTokens/full",
+            "params": {
+                "textDocument": {"uri": unsupported_uri}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_no_semantic_tokens = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            saw_no_semantic_tokens = message["result"].is_null();
+            break;
+        }
+    }
+    assert!(saw_no_semantic_tokens);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(3)
+        != Some(4)
     {}
     write_message(
         &mut client_writer,

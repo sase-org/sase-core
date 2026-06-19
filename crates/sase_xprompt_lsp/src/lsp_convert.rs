@@ -2,7 +2,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
     CompletionItemTag, CompletionResponse, CompletionTextEdit, Documentation,
     InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
-    Range, TextEdit,
+    Range, SemanticToken, SemanticTokens, TextEdit,
 };
 use sase_core::{
     CompletionCandidate, CompletionList, DiagnosticSeverity, EditorDiagnostic,
@@ -107,6 +107,50 @@ pub fn hover(payload: HoverPayload) -> lsp_types::Hover {
             value: payload.markdown,
         }),
         range: Some(to_lsp_range(payload.range)),
+    }
+}
+
+pub fn semantic_tokens(mut ranges: Vec<EditorRange>) -> SemanticTokens {
+    ranges.sort_by_key(|range| (range.start.line, range.start.character));
+
+    let mut data = Vec::with_capacity(ranges.len());
+    let mut previous_line = 0;
+    let mut previous_start = 0;
+    let mut first = true;
+
+    for range in ranges {
+        if range.start.line != range.end.line
+            || range.end.character <= range.start.character
+        {
+            continue;
+        }
+
+        let delta_line = if first {
+            range.start.line
+        } else {
+            range.start.line - previous_line
+        };
+        let delta_start = if first || delta_line != 0 {
+            range.start.character
+        } else {
+            range.start.character - previous_start
+        };
+
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: range.end.character - range.start.character,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        });
+        previous_line = range.start.line;
+        previous_start = range.start.character;
+        first = false;
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
     }
 }
 
@@ -221,6 +265,69 @@ mod tests {
 
         assert_eq!(to_lsp_range(range).start.character, 2);
         assert_eq!(to_lsp_range(range).end.character, 5);
+    }
+
+    #[test]
+    fn semantic_tokens_delta_encode_sorted_ranges() {
+        let tokens = semantic_tokens(vec![
+            EditorRange {
+                start: EditorPosition {
+                    line: 3,
+                    character: 10,
+                },
+                end: EditorPosition {
+                    line: 3,
+                    character: 13,
+                },
+            },
+            EditorRange {
+                start: EditorPosition {
+                    line: 1,
+                    character: 4,
+                },
+                end: EditorPosition {
+                    line: 1,
+                    character: 7,
+                },
+            },
+            EditorRange {
+                start: EditorPosition {
+                    line: 3,
+                    character: 2,
+                },
+                end: EditorPosition {
+                    line: 3,
+                    character: 5,
+                },
+            },
+        ]);
+
+        assert_eq!(
+            tokens.data,
+            vec![
+                SemanticToken {
+                    delta_line: 1,
+                    delta_start: 4,
+                    length: 3,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 2,
+                    delta_start: 2,
+                    length: 3,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 3,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                },
+            ]
+        );
     }
 
     #[test]

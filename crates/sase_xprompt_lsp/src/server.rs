@@ -16,9 +16,11 @@ use lsp_types::{
     HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, LSPAny, Location, MessageType, OneOf,
     OptionalVersionedTextDocumentIdentifier, Position, Range,
-    ServerCapabilities, ServerInfo, TextDocumentEdit,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
-    WorkDoneProgressOptions, WorkspaceEdit,
+    SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentEdit, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, Uri, WorkDoneProgressOptions, WorkspaceEdit,
 };
 use sase_core::{
     editor_analyze_document, editor_build_directive_completion_candidates,
@@ -30,9 +32,9 @@ use sase_core::{
     editor_classify_completion_context, editor_definition_at_position,
     editor_directive_argument_candidates, editor_directive_metadata,
     editor_extract_token_at_position, editor_hover_at_position,
-    CompletionCandidate, CompletionContextKind, CompletionList,
-    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, HelperHostBridge,
-    XpromptAssistEntry,
+    editor_multi_prompt_separator_ranges, CompletionCandidate,
+    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
+    EditorSnippetEntryWire, HelperHostBridge, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -41,13 +43,22 @@ use tracing::{info, warn};
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
-    hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
+    hover as lsp_hover, sase_snippet_completion_item,
+    semantic_tokens as lsp_semantic_tokens, snippet_completion_item,
     to_editor_position, to_lsp_range,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
+const XPROMPT_SEPARATOR_TOKEN_TYPE: &str = "xpromptSeparator";
+
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![SemanticTokenType::new(XPROMPT_SEPARATOR_TOKEN_TYPE)],
+        token_modifiers: Vec::new(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -618,6 +629,19 @@ impl LanguageServer for XpromptLspServer {
                         resolve_provider: Some(false),
                     }),
                 ),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options:
+                                WorkDoneProgressOptions {
+                                    work_done_progress: Some(false),
+                                },
+                            legend: semantic_tokens_legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -744,6 +768,25 @@ impl LanguageServer for XpromptLspServer {
             self.code_actions_for_text(uri, document.text, params.range)
                 .await,
         ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.document_for_uri(&uri) else {
+            return Ok(None);
+        };
+        if !document.eligible {
+            return Ok(None);
+        }
+
+        let snapshot = DocumentSnapshot::new(document.text);
+        let ranges = editor_multi_prompt_separator_ranges(&snapshot);
+        Ok(Some(SemanticTokensResult::Tokens(lsp_semantic_tokens(
+            ranges,
+        ))))
     }
 
     async fn execute_command(

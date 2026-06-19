@@ -340,29 +340,15 @@ pub fn plan_agent_launch_fanout(
 
 fn split_multi_prompt_segments(prompt: &str) -> Vec<String> {
     let body = prompt_body_after_frontmatter(prompt);
-    let fenced_ranges = fenced_block_ranges(body);
     let mut segments = Vec::new();
     let mut segment_start = 0;
-    let mut line_start = 0;
 
-    for piece in body.split_inclusive('\n') {
-        let line_end = line_start + piece.len();
-        let content_end = if piece.ends_with('\n') {
-            line_end - 1
-        } else {
-            line_end
-        };
-        let line = &body[line_start..content_end];
-        if line.trim() == "---"
-            && !position_in_ranges(line_start, &fenced_ranges)
-        {
-            push_nonempty_segment(
-                &mut segments,
-                &body[segment_start..line_start],
-            );
-            segment_start = line_end;
-        }
-        line_start = line_end;
+    for separator in multi_prompt_separator_lines(body) {
+        push_nonempty_segment(
+            &mut segments,
+            &body[segment_start..separator.line_start],
+        );
+        segment_start = separator.line_end;
     }
     if segment_start <= body.len() {
         push_nonempty_segment(&mut segments, &body[segment_start..]);
@@ -370,12 +356,32 @@ fn split_multi_prompt_segments(prompt: &str) -> Vec<String> {
     segments
 }
 
+pub(crate) fn multi_prompt_separator_spans(
+    prompt: &str,
+) -> Vec<(usize, usize)> {
+    let body_offset = prompt_body_offset_after_frontmatter(prompt);
+    let body = &prompt[body_offset..];
+    multi_prompt_separator_lines(body)
+        .into_iter()
+        .map(|separator| {
+            (
+                body_offset + separator.dash_start,
+                body_offset + separator.dash_end,
+            )
+        })
+        .collect()
+}
+
 fn prompt_body_after_frontmatter(prompt: &str) -> &str {
+    &prompt[prompt_body_offset_after_frontmatter(prompt)..]
+}
+
+fn prompt_body_offset_after_frontmatter(prompt: &str) -> usize {
     let Some(first_line_end) = prompt.find('\n') else {
-        return prompt;
+        return 0;
     };
     if prompt[..first_line_end].trim() != "---" {
-        return prompt;
+        return 0;
     }
 
     let mut yaml_like = false;
@@ -389,18 +395,68 @@ fn prompt_body_after_frontmatter(prompt: &str) -> &str {
         };
         let content = &prompt[offset..content_end];
         if content.trim() == "---" {
-            return if yaml_like {
-                &prompt[line_end..]
-            } else {
-                prompt
-            };
+            return if yaml_like { line_end } else { 0 };
         }
         if content.contains(':') {
             yaml_like = true;
         }
         offset = line_end;
     }
-    prompt
+    0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MultiPromptSeparatorLine {
+    line_start: usize,
+    line_end: usize,
+    dash_start: usize,
+    dash_end: usize,
+}
+
+fn multi_prompt_separator_lines(body: &str) -> Vec<MultiPromptSeparatorLine> {
+    let fenced_ranges = fenced_block_ranges(body);
+    let mut separators = Vec::new();
+    let mut line_start = 0;
+
+    for piece in body.split_inclusive('\n') {
+        let line_end = line_start + piece.len();
+        let content_end = if piece.ends_with('\n') {
+            line_end - 1
+        } else {
+            line_end
+        };
+        if let Some((dash_start, dash_end)) = multi_prompt_separator_dash_span(
+            body,
+            line_start,
+            content_end,
+            &fenced_ranges,
+        ) {
+            separators.push(MultiPromptSeparatorLine {
+                line_start,
+                line_end,
+                dash_start,
+                dash_end,
+            });
+        }
+        line_start = line_end;
+    }
+
+    separators
+}
+
+fn multi_prompt_separator_dash_span(
+    body: &str,
+    line_start: usize,
+    content_end: usize,
+    fenced_ranges: &[(usize, usize)],
+) -> Option<(usize, usize)> {
+    let line = &body[line_start..content_end];
+    if line.trim() != "---" || position_in_ranges(line_start, fenced_ranges) {
+        return None;
+    }
+
+    let dash_start = line_start + line.len() - line.trim_start().len();
+    Some((dash_start, dash_start + 3))
 }
 
 fn push_nonempty_segment(out: &mut Vec<String>, segment: &str) {
@@ -1946,6 +2002,60 @@ mod tests {
         assert!(plan.slots[0].prompt.contains("---"));
         assert_eq!(plan.slots[1].prompt, "%wait\ntwo");
         assert!(plan.slots[1].wait_for_previous);
+    }
+
+    #[test]
+    fn multi_prompt_separator_spans_match_splitter_rules() {
+        let prompt = concat!(
+            "---\n",
+            "title: Demo\n",
+            "---\n",
+            "one\n",
+            "---\n",
+            "```\n",
+            "---\n",
+            "```\n",
+            "  ---  \n",
+            "three\n",
+            "---",
+        );
+
+        let whitespace_separator = prompt.find("  ---  ").unwrap() + 2;
+        let trailing_separator = prompt.rfind("---").unwrap();
+        let first_separator = prompt.find("one\n").unwrap() + "one\n".len();
+        let spans = multi_prompt_separator_spans(prompt);
+
+        assert_eq!(
+            spans,
+            vec![
+                (first_separator, first_separator + 3),
+                (whitespace_separator, whitespace_separator + 3),
+                (trailing_separator, trailing_separator + 3),
+            ]
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(start, end)| &prompt[*start..*end])
+                .collect::<Vec<_>>(),
+            vec!["---", "---", "---"]
+        );
+    }
+
+    #[test]
+    fn multi_prompt_separator_spans_handle_crlf_and_multibyte_offsets() {
+        let prompt = "é one\r\n  ---\r\ntwo";
+        let dash_start = prompt.find("---").unwrap();
+
+        assert_eq!(
+            multi_prompt_separator_spans(prompt),
+            vec![(dash_start, dash_start + 3)]
+        );
+    }
+
+    #[test]
+    fn multi_prompt_separator_spans_return_empty_without_separators() {
+        assert!(multi_prompt_separator_spans("one\n--\ntwo").is_empty());
     }
 
     #[test]
