@@ -220,6 +220,7 @@ use sase_core::notifications::{
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
 };
+use sase_core::plan::{search_plans as core_plan_search, PlanError};
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
@@ -1750,6 +1751,53 @@ fn py_bead_search<'py>(
     )
 }
 
+/// Search and rank markdown plan artifacts under a repo `sdd/` tree and/or the
+/// machine-local archive.
+///
+/// `repo_sdd_root`/`local_plans_dir` are passed through as `Option`s so callers
+/// scope by `--source` (pass `None` to skip a corpus). The remaining arguments
+/// mirror [`core_plan_search`]: optional `query` (browse when omitted), repo
+/// `kinds`, frontmatter `statuses`, a `sources` filter, a `[since, until]` date
+/// range, `sort` mode, and `limit` (`0`/`None` = unlimited). Returns a list of
+/// `{plan, matched_fields, score}` dicts, following `bead_search`'s JSON shape.
+#[pyfunction]
+#[pyo3(name = "plan_search")]
+#[pyo3(signature = (repo_sdd_root=None, local_plans_dir=None, query=None, kinds=None, statuses=None, sources=None, since=None, until=None, sort=None, limit=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_plan_search<'py>(
+    py: Python<'py>,
+    repo_sdd_root: Option<String>,
+    local_plans_dir: Option<String>,
+    query: Option<String>,
+    kinds: Option<Vec<String>>,
+    statuses: Option<Vec<String>>,
+    sources: Option<Vec<String>>,
+    since: Option<String>,
+    until: Option<String>,
+    sort: Option<String>,
+    limit: Option<usize>,
+) -> PyResult<PyObject> {
+    let repo_sdd_root = repo_sdd_root.map(PathBuf::from);
+    let local_plans_dir = local_plans_dir.map(PathBuf::from);
+    plan_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_plan_search(
+                repo_sdd_root.as_deref(),
+                local_plans_dir.as_deref(),
+                query.as_deref(),
+                kinds.as_deref(),
+                statuses.as_deref(),
+                sources.as_deref(),
+                since.as_deref(),
+                until.as_deref(),
+                sort.as_deref(),
+                limit,
+            )
+        }),
+    )
+}
+
 #[pyfunction]
 #[pyo3(name = "bead_ready")]
 fn py_bead_ready<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
@@ -2107,6 +2155,24 @@ where
             PyValueError::new_err(format!("internal serialize error: {e}"))
         })?;
     json_value_to_py(py, &value)
+}
+
+fn plan_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, PlanError>,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result.map_err(plan_error_to_pyerr)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+fn plan_error_to_pyerr(err: PlanError) -> PyErr {
+    PyValueError::new_err(format!("{err}"))
 }
 
 fn bead_create_request_from_pydict(
@@ -3244,6 +3310,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
