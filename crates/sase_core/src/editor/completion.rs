@@ -543,12 +543,16 @@ fn strip_trigger_region(text: &str, t0: usize, t1: usize) -> (usize, usize) {
 }
 
 /// Where a leading VCS workflow tag should be inserted: after any leading YAML
-/// frontmatter block, leading whitespace, and leading `%directive` tokens.
+/// frontmatter block, leading horizontal whitespace, and leading `%directive`
+/// tokens.
 /// Mirrors the Python `find_vcs_workflow_tag_prepend_offset`.
 fn vcs_prepend_offset(text: &str) -> usize {
     let frontmatter_len = frontmatter_block_len(text);
     let body = &text[frontmatter_len..];
-    let leading_ws = body.len() - body.trim_start().len();
+    let leading_ws = body
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace() || matches!(ch, '\n' | '\r'))
+        .map_or(body.len(), |(idx, _)| idx);
     let after_ws = &body[leading_ws..];
     let directive_len = directive_prefix_regex()
         .find(after_ws)
@@ -1288,6 +1292,8 @@ mod tests {
             ("Describe this repo. +‸", "#gh:sase Describe this repo."),
             ("+‸", "#gh:sase "),
             ("+sa‸", "#gh:sase "),
+            ("+s‸\n", "#gh:sase \n"),
+            ("+s‸\nmore text", "#gh:sase \nmore text"),
             ("#git:foo Fix bug +‸", "#gh:sase Fix bug"),
             ("#gh!!:foo do X +‸", "#gh:sase do X"),
             ("Fix +bug‸ here", "#gh:sase Fix here"),
@@ -1303,6 +1309,14 @@ mod tests {
             assert_eq!(canonical, expected, "canonical: {marked:?}");
             assert_eq!(via_edits, expected, "via edits: {marked:?}");
         }
+    }
+
+    #[test]
+    fn vcs_prepend_offset_skips_horizontal_whitespace_only() {
+        assert_eq!(vcs_prepend_offset("\n"), 0);
+        assert_eq!(vcs_prepend_offset("\nmore"), 0);
+        assert_eq!(vcs_prepend_offset("  Body"), 2);
+        assert_eq!(vcs_prepend_offset("\tBody"), 1);
     }
 
     #[test]
