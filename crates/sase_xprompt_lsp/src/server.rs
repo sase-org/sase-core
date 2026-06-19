@@ -208,7 +208,18 @@ impl XpromptLspServer {
             &entries,
             &workflow_names,
         );
-        vcs_project_completion_response(list, context.replacement_range)
+        // The trigger spelling the user typed (`#+` for a hash-plus token, `+`
+        // for a BOF bare-plus token) drives the items' client-side `filter_text`.
+        let trigger_prefix = if token.text.starts_with("#+") {
+            "#+"
+        } else {
+            "+"
+        };
+        vcs_project_completion_response(
+            list,
+            context.replacement_range,
+            trigger_prefix,
+        )
     }
 
     pub async fn hover_for_text(
@@ -2265,7 +2276,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bare_plus_does_not_complete_vcs_project() {
+    async fn bare_plus_at_bof_completes_vcs_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        // `+sa` at byte offset 0 completes, filtering by the bare-plus query.
+        let response = server
+            .completion_for_text(
+                "+sa".to_string(),
+                Position {
+                    line: 0,
+                    character: 3,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "sase");
+        assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
+        // `filter_text` uses the bare-plus trigger spelling so typing `+sa`
+        // keeps the item under client-side filtering.
+        assert_eq!(item.filter_text.as_deref(), Some("+sase"));
+        // BOF bare-plus: the prepend point coincides with the trigger deletion,
+        // so the edits merge into one primary edit with no additional edits.
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected primary text edit");
+        };
+        assert_eq!(edit.new_text, "#gh:sase ");
+        assert!(item.additional_text_edits.is_none());
+    }
+
+    #[tokio::test]
+    async fn bare_plus_outside_bof_does_not_complete_vcs_project() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
         write_vcs_project_catalog(&catalog_path);
@@ -2283,10 +2343,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "+".to_string(),
+                "Fix +".to_string(),
                 Position {
                     line: 0,
-                    character: 1,
+                    character: 5,
                 },
             )
             .await;

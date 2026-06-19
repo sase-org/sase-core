@@ -239,23 +239,35 @@ pub fn is_snippet_trigger_token(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+/// Whether `token` has a VCS-project trigger spelling: `#+query` anywhere, or a
+/// bare `+query`.
+///
+/// Position gating -- a bare `+` is a trigger only at the very beginning of the
+/// document -- is enforced by [`vcs_project_trigger_token`], not here; this only
+/// classifies the token's spelling.
 pub fn is_vcs_project_trigger_token(token: &str) -> bool {
-    token.starts_with("#+")
+    token.starts_with("#+") || token.starts_with('+')
 }
 
-/// Detect a `#+query` VCS-project completion trigger token at `position`.
+/// Detect a `#+query` or BOF `+query` VCS-project completion trigger token at
+/// `position`.
 ///
-/// Mirrors the Python `find_vcs_project_trigger`: the trigger fires when the
-/// run of non-whitespace characters ending at the cursor begins with `#+` and
-/// that `#` sits at the beginning of the document, at a line start, or directly
-/// after whitespace. A bare `+` or a `#+` embedded in a word is ordinary text
-/// and does not trigger.
+/// Mirrors the Python `find_vcs_project_trigger`. Two spellings trigger:
+///
+/// * `#+query` -- when the run of non-whitespace characters ending at the cursor
+///   begins with `#+` and that `#` sits at the beginning of the document, at a
+///   line start, or directly after whitespace.
+/// * `+query` -- only when the token starts at byte offset `0` (the very
+///   beginning of the document). A bare `+` anywhere else is ordinary text.
+///
+/// A `#+` embedded in a word is likewise ordinary text and does not trigger.
 ///
 /// Unlike [`extract_token_at_position`], token boundaries here are whitespace
 /// only (matching the Python contract), so `#+a:b` is a single trigger token
 /// and the `#` can sit anywhere a space/newline precedes it -- not just at a
-/// line start. The returned [`TokenInfo`] spans the whole `#+query` token; the
-/// filter query (text after `#+` up to the cursor) is derived by the caller.
+/// line start. The returned [`TokenInfo`] spans the whole trigger token; the
+/// filter query (text after the `#+`/`+` prefix up to the cursor) is derived by
+/// the caller.
 pub fn vcs_project_trigger_token(
     document: &DocumentSnapshot,
     position: EditorPosition,
@@ -275,7 +287,18 @@ pub fn vcs_project_trigger_token(
         start = prev;
     }
 
-    if cursor < start + 2 || !text[start..].starts_with("#+") {
+    // Determine the trigger prefix length: `#+` anywhere a token may start, or a
+    // bare `+` only at the very beginning of the document (byte offset 0).
+    let prefix_len = if text[start..].starts_with("#+") {
+        2
+    } else if start == 0 && text[start..].starts_with('+') {
+        1
+    } else {
+        return None;
+    };
+
+    // The cursor must sit past the prefix for the trigger to be live.
+    if cursor < start + prefix_len {
         return None;
     }
 
@@ -441,31 +464,41 @@ mod tests {
 
     #[test]
     fn detects_vcs_project_trigger_tokens() {
-        // (text, cursor_col, expected (byte_start, byte_end, query))
+        // (text, cursor_col, expected (byte_start, byte_end, prefix_len, query))
         let positive = [
-            ("#+", 2, (0usize, 2usize, "")),
-            ("#+sa", 4, (0, 4, "sa")),
-            ("Fix #+bug", 9, (4, 9, "bug")),
-            ("#+abc", 3, (0, 5, "a")),
-            ("2 #+ 2", 4, (2, 4, "")),
+            ("#+", 2, (0usize, 2usize, 2usize, "")),
+            ("#+sa", 4, (0, 4, 2, "sa")),
+            ("Fix #+bug", 9, (4, 9, 2, "bug")),
+            ("#+abc", 3, (0, 5, 2, "a")),
+            ("2 #+ 2", 4, (2, 4, 2, "")),
+            // Bare `+` is a trigger only at the very beginning of the document.
+            ("+", 1, (0, 1, 1, "")),
+            ("+sa", 3, (0, 3, 1, "sa")),
+            ("+abc", 2, (0, 4, 1, "a")),
         ];
-        for (text, col, (start, end, query)) in positive {
+        for (text, col, (start, end, prefix_len, query)) in positive {
             let doc = DocumentSnapshot::new(text);
             let token = vcs_project_trigger_token(&doc, pos(0, col))
                 .unwrap_or_else(|| panic!("expected trigger for {text:?}"));
             assert_eq!(token.byte_start, start, "{text:?} start");
             assert_eq!(token.byte_end, end, "{text:?} end");
             assert!(is_vcs_project_trigger_token(&token.text), "{text:?}");
-            assert_eq!(&text[token.byte_start + 2..col as usize], query);
+            assert_eq!(
+                &text[token.byte_start + prefix_len..col as usize],
+                query
+            );
         }
 
         for (text, col) in [
-            ("+", 1),
-            ("+sa", 3),
+            // Bare `+` outside byte offset 0 stays ordinary text.
+            ("Fix +", 5),
+            (" +", 2),
+            ("c+", 2),
             ("# +", 3),
             ("#", 1),
             ("#+", 0),
             ("#+", 1),
+            ("+", 0),
             ("c#+x", 4),
             ("hello", 5),
             ("", 0),
@@ -476,9 +509,17 @@ mod tests {
                 "{text:?} should not trigger"
             );
         }
-        assert!(!is_vcs_project_trigger_token("+"));
-        assert!(!is_vcs_project_trigger_token("+sa"));
+        assert!(is_vcs_project_trigger_token("+"));
+        assert!(is_vcs_project_trigger_token("+sa"));
         assert!(!is_vcs_project_trigger_token("#"));
+        assert!(!is_vcs_project_trigger_token("a+"));
+    }
+
+    #[test]
+    fn does_not_detect_bare_plus_after_newline() {
+        // A `+` at a line start that is not document offset 0 is ordinary text.
+        let doc = DocumentSnapshot::new("line\n+");
+        assert!(vcs_project_trigger_token(&doc, pos(1, 1)).is_none());
     }
 
     #[test]
