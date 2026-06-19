@@ -240,22 +240,22 @@ pub fn is_snippet_trigger_token(token: &str) -> bool {
 }
 
 pub fn is_vcs_project_trigger_token(token: &str) -> bool {
-    token.starts_with('+')
+    token.starts_with("#+")
 }
 
-/// Detect a `+query` VCS-project completion trigger token at `position`.
+/// Detect a `#+query` VCS-project completion trigger token at `position`.
 ///
 /// Mirrors the Python `find_vcs_project_trigger`: the trigger fires when the
-/// run of non-whitespace characters ending at the cursor begins with `+` and
-/// that `+` sits at the beginning of the document, at a line start, or directly
-/// after whitespace. A `+` embedded in a word (e.g. `c++`) is ordinary text and
-/// does not trigger.
+/// run of non-whitespace characters ending at the cursor begins with `#+` and
+/// that `#` sits at the beginning of the document, at a line start, or directly
+/// after whitespace. A bare `+` or a `#+` embedded in a word is ordinary text
+/// and does not trigger.
 ///
 /// Unlike [`extract_token_at_position`], token boundaries here are whitespace
-/// only (matching the Python contract), so `+a:b` is a single trigger token and
-/// the `+` can sit anywhere a space/newline precedes it -- not just at a line
-/// start. The returned [`TokenInfo`] spans the whole `+query` token; the filter
-/// query (text after `+` up to the cursor) is derived by the caller.
+/// only (matching the Python contract), so `#+a:b` is a single trigger token
+/// and the `#` can sit anywhere a space/newline precedes it -- not just at a
+/// line start. The returned [`TokenInfo`] spans the whole `#+query` token; the
+/// filter query (text after `#+` up to the cursor) is derived by the caller.
 pub fn vcs_project_trigger_token(
     document: &DocumentSnapshot,
     position: EditorPosition,
@@ -275,7 +275,7 @@ pub fn vcs_project_trigger_token(
         start = prev;
     }
 
-    if !text[start..].starts_with('+') {
+    if cursor < start + 2 || !text[start..].starts_with("#+") {
         return None;
     }
 
@@ -443,11 +443,11 @@ mod tests {
     fn detects_vcs_project_trigger_tokens() {
         // (text, cursor_col, expected (byte_start, byte_end, query))
         let positive = [
-            ("+", 1, (0usize, 1usize, "")),
-            ("+sa", 3, (0, 3, "sa")),
-            ("Fix +bug", 8, (4, 8, "bug")),
-            ("+abc", 2, (0, 4, "a")),
-            ("2 + 2", 3, (2, 3, "")),
+            ("#+", 2, (0usize, 2usize, "")),
+            ("#+sa", 4, (0, 4, "sa")),
+            ("Fix #+bug", 9, (4, 9, "bug")),
+            ("#+abc", 3, (0, 5, "a")),
+            ("2 #+ 2", 4, (2, 4, "")),
         ];
         for (text, col, (start, end, query)) in positive {
             let doc = DocumentSnapshot::new(text);
@@ -456,25 +456,38 @@ mod tests {
             assert_eq!(token.byte_start, start, "{text:?} start");
             assert_eq!(token.byte_end, end, "{text:?} end");
             assert!(is_vcs_project_trigger_token(&token.text), "{text:?}");
-            assert_eq!(&text[token.byte_start + 1..col as usize], query);
+            assert_eq!(&text[token.byte_start + 2..col as usize], query);
         }
 
-        for (text, col) in [("c++", 3), ("a+b", 3), ("hello", 5), ("", 0)] {
+        for (text, col) in [
+            ("+", 1),
+            ("+sa", 3),
+            ("# +", 3),
+            ("#", 1),
+            ("#+", 0),
+            ("#+", 1),
+            ("c#+x", 4),
+            ("hello", 5),
+            ("", 0),
+        ] {
             let doc = DocumentSnapshot::new(text);
             assert!(
                 vcs_project_trigger_token(&doc, pos(0, col)).is_none(),
                 "{text:?} should not trigger"
             );
         }
+        assert!(!is_vcs_project_trigger_token("+"));
+        assert!(!is_vcs_project_trigger_token("+sa"));
+        assert!(!is_vcs_project_trigger_token("#"));
     }
 
     #[test]
     fn detects_vcs_project_trigger_after_newline() {
-        let doc = DocumentSnapshot::new("line\n+x");
-        let token = vcs_project_trigger_token(&doc, pos(1, 2)).unwrap();
+        let doc = DocumentSnapshot::new("line\n#+x");
+        let token = vcs_project_trigger_token(&doc, pos(1, 3)).unwrap();
         assert_eq!(token.byte_start, 5);
-        assert_eq!(token.byte_end, 7);
-        assert_eq!(token.text, "+x");
+        assert_eq!(token.byte_end, 8);
+        assert_eq!(token.text, "#+x");
     }
 
     #[test]

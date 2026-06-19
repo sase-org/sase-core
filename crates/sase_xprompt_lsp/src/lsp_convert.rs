@@ -35,10 +35,10 @@ pub fn completion_response(
     )
 }
 
-/// Build the completion response for the `+` (`vcs_project`) completion kind.
+/// Build the completion response for the `#+` (`vcs_project`) completion kind.
 ///
 /// Differs from [`completion_response`] in two ways: the `filter_text` is the
-/// `+name` trigger spelling (so typing `+sa` keeps the `sase` item), and the
+/// `#+name` trigger spelling (so typing `#+sa` keeps the `sase` item), and the
 /// item kind is `MODULE` to render as a distinct project row. The primary
 /// `text_edit` and `additional_text_edits` (the prepend/replace edit) are
 /// carried over from the candidate's `replacement` / `additional_edits`.
@@ -178,12 +178,12 @@ fn completion_item(
 }
 
 /// Convert one `vcs_project` candidate, overriding the generic item's kind and
-/// `filter_text` so the `+name` trigger spelling drives client-side filtering.
+/// `filter_text` so the `#+name` trigger spelling drives client-side filtering.
 fn vcs_project_completion_item(
     candidate: CompletionCandidate,
     replacement_range: EditorRange,
 ) -> CompletionItem {
-    let filter_text = format!("+{}", candidate.name);
+    let filter_text = format!("#+{}", candidate.name);
     CompletionItem {
         kind: Some(CompletionItemKind::MODULE),
         filter_text: Some(filter_text),

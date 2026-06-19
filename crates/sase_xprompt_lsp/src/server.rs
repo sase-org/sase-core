@@ -53,7 +53,7 @@ const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 /// Env var carrying the path to the JSON `vcs_project` completion catalog
 /// (active-project entries + known VCS workflow names). Materialized by the
 /// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
-/// fresh on every `+` completion request so external rewrites are picked up.
+/// fresh on every `#+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +65,7 @@ struct ServerConfig {
     allow_all_markdown: bool,
     /// Path to the materialized `vcs_project` completion catalog, captured from
     /// [`VCS_PROJECT_CATALOG_ENV`] at startup. The file itself is re-read fresh
-    /// on each `+` completion request (see [`load_vcs_project_catalog`]).
+    /// on each `#+` completion request (see [`load_vcs_project_catalog`]).
     vcs_project_catalog: Option<PathBuf>,
 }
 
@@ -182,7 +182,7 @@ impl XpromptLspServer {
         Some(response)
     }
 
-    /// Build the `+` (`vcs_project`) completion response.
+    /// Build the `#+` (`vcs_project`) completion response.
     ///
     /// The project catalog (active-project entries + known VCS workflow names)
     /// is read fresh from the materialized JSON file on every request so
@@ -1030,9 +1030,9 @@ fn file_history() -> Vec<String> {
 /// Load the active-project completion catalog from the materialized JSON file
 /// at `path`, returning `(entries, workflow_names)`.
 ///
-/// Read fresh on every `+` completion request. Any failure (no path, unreadable
-/// file, malformed JSON) degrades to empty results so the `+` menu simply shows
-/// nothing rather than breaking completion. The file shape is
+/// Read fresh on every `#+` completion request. Any failure (no path, unreadable
+/// file, malformed JSON) degrades to empty results so the `#+` menu simply
+/// shows nothing rather than breaking completion. The file shape is
 /// `{ "workflow_names": [..], "entries": [VcsProjectEntry, ..] }`.
 fn load_vcs_project_catalog(
     path: Option<&Path>,
@@ -2114,7 +2114,7 @@ mod tests {
         assert_eq!(edit.new_text.as_str(), new_text);
     }
 
-    // --- vcs_project (`+`) completion --------------------------------------
+    // --- vcs_project (`#+`) completion -------------------------------------
 
     fn write_vcs_project_catalog(path: &Path) {
         fs::write(
@@ -2179,10 +2179,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "Describe this repo. +".to_string(),
+                "Describe this repo. #+".to_string(),
                 Position {
                     line: 0,
-                    character: 21,
+                    character: 22,
                 },
             )
             .await
@@ -2195,9 +2195,9 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.label, "sase");
         assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
-        // `filter_text` is the `+name` trigger spelling so typing `+sa` keeps
+        // `filter_text` is the `#+name` trigger spelling so typing `#+sa` keeps
         // the item under client-side filtering.
-        assert_eq!(item.filter_text.as_deref(), Some("+sase"));
+        assert_eq!(item.filter_text.as_deref(), Some("#+sase"));
         let detail = item.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("GitHub"), "{detail:?}");
         assert!(detail.contains("#gh:sase"), "{detail:?}");
@@ -2208,7 +2208,7 @@ mod tests {
         };
         assert_eq!(documentation.value, "SASE repo");
 
-        // Primary edit consumes the `+` trigger token...
+        // Primary edit consumes the `#+` trigger token...
         let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
         else {
             panic!("expected primary text edit");
@@ -2222,7 +2222,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bare_plus_trigger_merges_into_single_primary_edit() {
+    async fn hash_plus_trigger_merges_into_single_primary_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "#+".to_string(),
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected primary text edit");
+        };
+        // BOF `#+`: prepend point coincides with the trigger deletion, so the
+        // edits merge into one primary edit with no additional edits.
+        assert_eq!(edit.new_text, "#gh:sase ");
+        assert!(item.additional_text_edits.is_none());
+    }
+
+    #[tokio::test]
+    async fn bare_plus_does_not_complete_vcs_project() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
         write_vcs_project_catalog(&catalog_path);
@@ -2246,22 +2289,9 @@ mod tests {
                     character: 1,
                 },
             )
-            .await
-            .unwrap();
-        let CompletionResponse::Array(items) = response else {
-            panic!("expected completion array");
-        };
+            .await;
 
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
-        else {
-            panic!("expected primary text edit");
-        };
-        // BOF `+`: prepend point coincides with the trigger deletion, so the
-        // edits merge into one primary edit with no additional edits.
-        assert_eq!(edit.new_text, "#gh:sase ");
-        assert!(item.additional_text_edits.is_none());
+        assert!(response.is_none());
     }
 
     #[tokio::test]
@@ -2280,10 +2310,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "+".to_string(),
+                "#+".to_string(),
                 Position {
                     line: 0,
-                    character: 1,
+                    character: 2,
                 },
             )
             .await
