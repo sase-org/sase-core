@@ -5,7 +5,6 @@ pub mod directive;
 pub mod file;
 mod frontmatter;
 pub mod hover;
-pub mod multi_prompt;
 pub mod token;
 pub mod wire;
 mod xprompt_args;
@@ -33,7 +32,6 @@ pub use frontmatter::{
     validate_field as validate_frontmatter_field,
 };
 pub use hover::hover_at_position;
-pub use multi_prompt::multi_prompt_separator_ranges;
 pub use token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
     is_snippet_trigger_token, is_xprompt_like_token,

@@ -177,7 +177,6 @@ pub use editor::{
     is_slash_skill_like_token as editor_is_slash_skill_like_token,
     is_snippet_trigger_token as editor_is_snippet_trigger_token,
     is_xprompt_like_token as editor_is_xprompt_like_token,
-    multi_prompt_separator_ranges as editor_multi_prompt_separator_ranges,
     named_args_skeleton as editor_named_args_skeleton,
     validate_frontmatter as editor_validate_frontmatter,
     validate_frontmatter_field as editor_validate_frontmatter_field,

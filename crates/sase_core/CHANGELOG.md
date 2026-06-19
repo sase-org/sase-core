@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- *(xprompt-lsp)* highlight multi-agent prompt `---` separators with semantic tokens
-
 ## [0.1.4](https://github.com/sase-org/sase-core/compare/v0.1.3...v0.1.4) - 2026-06-18
 
 ### Fixed
