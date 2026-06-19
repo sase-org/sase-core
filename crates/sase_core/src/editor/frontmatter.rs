@@ -88,6 +88,10 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
         "Exposes this xprompt as a completion snippet. Use true, false, or a custom trigger.",
     ),
     (
+        "log_skill_use",
+        "Controls whether generated skill files include the `sase skill use ...` audit directive. Use true or false; defaults to true and only applies to skill xprompts.",
+    ),
+    (
         "keywords",
         "Defines dynamic-memory keywords. They are matched when tags include `memory` or the file is under `memory/long`.",
     ),
@@ -424,6 +428,7 @@ fn validate_frontmatter_value(
     validate_description(builder, mapping);
     validate_skill(builder, mapping);
     validate_snippet(builder, mapping);
+    validate_log_skill_use(builder, mapping);
     validate_keywords(builder, mapping);
 }
 
@@ -1090,6 +1095,24 @@ fn validate_snippet(
             "Xprompt snippet trigger must use only ASCII letters, digits, or underscores",
         );
     }
+}
+
+fn validate_log_skill_use(
+    builder: &mut FrontmatterDiagnosticBuilder<'_>,
+    mapping: &Mapping,
+) {
+    let Some(value) = yaml_mapping_get(mapping, "log_skill_use") else {
+        return;
+    };
+    if value.as_bool().is_some() {
+        return;
+    }
+    builder.push(
+        builder.field_value_range("log_skill_use"),
+        DiagnosticSeverity::Warning,
+        "invalid_xprompt_frontmatter_log_skill_use",
+        "Xprompt log_skill_use must be true or false",
+    );
 }
 
 fn validate_keywords(
@@ -2359,6 +2382,63 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_xprompt_frontmatter_input_type"
         }));
+    }
+
+    #[test]
+    fn validate_accepts_log_skill_use_boolean() {
+        let text = "---\nskill: true\ndescription: Plan helper\nlog_skill_use: false\n---\n";
+        let diagnostics = validate(text);
+        assert!(!has_error(&diagnostics), "{diagnostics:?}");
+        assert!(
+            !diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unknown_xprompt_frontmatter_field"
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validate_flags_non_boolean_log_skill_use() {
+        for text in [
+            "---\nlog_skill_use: \"false\"\n---\n",
+            "---\nlog_skill_use: no thanks\n---\n",
+        ] {
+            let diagnostics = validate(text);
+            assert!(
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code
+                        == "invalid_xprompt_frontmatter_log_skill_use"
+                }),
+                "{text:?} -> {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_documents_log_skill_use_field() {
+        let doc = DocumentSnapshot::new(
+            "---\nskill: true\ndescription: Plan helper\nlog_skill_use: false\n---\n",
+        );
+        let field_start = doc.text().find("log_skill_use").unwrap();
+        let payload = hover(
+            &doc,
+            EditorPosition {
+                line: 3,
+                character: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload.range,
+            doc.byte_range_to_range(
+                field_start,
+                field_start + "log_skill_use".len()
+            )
+            .unwrap()
+        );
+        assert!(payload.markdown.contains("**log_skill_use**"));
+        assert!(payload.markdown.contains("audit directive"));
     }
 
     #[test]
