@@ -285,7 +285,25 @@ struct AlternativeBranch {
 struct AlternativeDirective {
     start: usize,
     end: usize,
-    branches: Vec<AlternativeBranch>,
+    args: Vec<DirectiveArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeAxis {
+    start: usize,
+    variants: Vec<AlternativeVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeVariant {
+    id: String,
+    replacements: Vec<AlternativeReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AlternativeReplacement {
+    directive_index: usize,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,22 +567,15 @@ fn split_prompt_for_alternatives_with_ids(
             });
         };
         let inner = &prompt[open_start + 1..close_end];
-        let mut args =
+        let args =
             parse_directive_args_with_names(inner, delimiter.separator());
         if args.is_empty() {
             continue;
         }
-        if args.len() == 1 {
-            args.push(DirectiveArg {
-                name: None,
-                value: String::new(),
-            });
-        }
-        let branches = allocate_alternative_branch_ids(args);
         directives.push(AlternativeDirective {
             start,
             end: close_end + 1,
-            branches,
+            args,
         });
     }
 
@@ -572,31 +583,249 @@ fn split_prompt_for_alternatives_with_ids(
         return Ok(None);
     }
 
-    let arg_lists: Vec<Vec<AlternativeBranch>> = directives
-        .iter()
-        .map(|directive| directive.branches.clone())
-        .collect();
+    let mut axes = alternative_axes_for_directives(&directives);
+    axes.sort_by_key(|axis| axis.start);
+    let arg_lists: Vec<Vec<AlternativeVariant>> =
+        axes.into_iter().map(|axis| axis.variants).collect();
     let mut combinations = Vec::new();
     cartesian_product(&arg_lists, 0, &mut Vec::new(), &mut combinations);
 
     let mut result = Vec::with_capacity(combinations.len());
     for combination in combinations {
-        let mut replaced = prompt.to_string();
         let alt_id = combination
             .iter()
-            .map(|branch| branch.id.as_str())
+            .map(|variant| variant.id.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        for (directive, branch) in directives.iter().zip(combination).rev() {
-            replaced
-                .replace_range(directive.start..directive.end, &branch.value);
-        }
+        let replaced =
+            render_alternative_prompt(prompt, &directives, &combination);
         result.push(AlternativeSlot {
             prompt: replaced,
             alt_id,
         });
     }
     Ok(Some(result))
+}
+
+/// Split `%alt(...)`, `%(...)`, and `%{...}` directives into launch slots.
+///
+/// Explicit branch names that appear in multiple directives are correlated:
+/// the matching named branches render into the same slot instead of producing
+/// a Cartesian product. Directives without shared explicit names keep the
+/// historical Cartesian behavior, including the implicit empty branch for a
+/// single-branch directive.
+fn alternative_axes_for_directives(
+    directives: &[AlternativeDirective],
+) -> Vec<AlternativeAxis> {
+    alternative_correlation_groups(directives)
+        .into_iter()
+        .map(|group| {
+            if group.len() == 1 {
+                alternative_singleton_axis(directives, group[0])
+            } else {
+                alternative_correlated_axis(directives, &group)
+            }
+        })
+        .collect()
+}
+
+fn alternative_correlation_groups(
+    directives: &[AlternativeDirective],
+) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..directives.len()).collect();
+    let mut first_directive_by_name: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (directive_index, directive) in directives.iter().enumerate() {
+        for arg in &directive.args {
+            let Some(name) = &arg.name else {
+                continue;
+            };
+            if let Some(first_directive) =
+                first_directive_by_name.get(name).copied()
+            {
+                union_alternative_group(
+                    &mut parent,
+                    first_directive,
+                    directive_index,
+                );
+            } else {
+                first_directive_by_name.insert(name.clone(), directive_index);
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for directive_index in 0..directives.len() {
+        let root = find_alternative_group(&mut parent, directive_index);
+        groups.entry(root).or_default().push(directive_index);
+    }
+    groups.into_values().collect()
+}
+
+fn find_alternative_group(parent: &mut [usize], index: usize) -> usize {
+    if parent[index] != index {
+        let root = find_alternative_group(parent, parent[index]);
+        parent[index] = root;
+    }
+    parent[index]
+}
+
+fn union_alternative_group(parent: &mut [usize], left: usize, right: usize) {
+    let left_root = find_alternative_group(parent, left);
+    let right_root = find_alternative_group(parent, right);
+    if left_root == right_root {
+        return;
+    }
+    if left_root < right_root {
+        parent[right_root] = left_root;
+    } else {
+        parent[left_root] = right_root;
+    }
+}
+
+fn alternative_singleton_axis(
+    directives: &[AlternativeDirective],
+    directive_index: usize,
+) -> AlternativeAxis {
+    let directive = &directives[directive_index];
+    let mut args = directive.args.clone();
+    if args.len() == 1 {
+        args.push(DirectiveArg {
+            name: None,
+            value: String::new(),
+        });
+    }
+    let variants = allocate_alternative_branch_ids(args)
+        .into_iter()
+        .map(|branch| AlternativeVariant {
+            id: branch.id,
+            replacements: vec![AlternativeReplacement {
+                directive_index,
+                value: branch.value,
+            }],
+        })
+        .collect();
+    AlternativeAxis {
+        start: directive.start,
+        variants,
+    }
+}
+
+fn alternative_correlated_axis(
+    directives: &[AlternativeDirective],
+    group: &[usize],
+) -> AlternativeAxis {
+    let allocated =
+        allocate_correlated_alternative_branch_ids(directives, group);
+    let mut variant_keys = Vec::new();
+    let mut seen_keys = BTreeSet::new();
+    let mut values_by_directive: BTreeMap<usize, BTreeMap<String, String>> =
+        BTreeMap::new();
+
+    for (directive_index, branches) in allocated {
+        let mut values_by_id = BTreeMap::new();
+        for branch in branches {
+            if seen_keys.insert(branch.id.clone()) {
+                variant_keys.push(branch.id.clone());
+            }
+            values_by_id.entry(branch.id).or_insert(branch.value);
+        }
+        values_by_directive.insert(directive_index, values_by_id);
+    }
+
+    let variants = variant_keys
+        .into_iter()
+        .map(|key| {
+            let replacements = group
+                .iter()
+                .map(|directive_index| AlternativeReplacement {
+                    directive_index: *directive_index,
+                    value: values_by_directive
+                        .get(directive_index)
+                        .and_then(|values_by_id| values_by_id.get(&key))
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+                .collect();
+            AlternativeVariant {
+                id: key,
+                replacements,
+            }
+        })
+        .collect();
+
+    AlternativeAxis {
+        start: group
+            .iter()
+            .map(|directive_index| directives[*directive_index].start)
+            .min()
+            .unwrap_or(0),
+        variants,
+    }
+}
+
+fn allocate_correlated_alternative_branch_ids(
+    directives: &[AlternativeDirective],
+    group: &[usize],
+) -> Vec<(usize, Vec<AlternativeBranch>)> {
+    let named_ids: BTreeSet<String> = group
+        .iter()
+        .flat_map(|directive_index| directives[*directive_index].args.iter())
+        .filter_map(|arg| arg.name.clone())
+        .collect();
+    let mut next_numeric = 1_u32;
+
+    group
+        .iter()
+        .map(|directive_index| {
+            let branches = directives[*directive_index]
+                .args
+                .iter()
+                .map(|arg| {
+                    let id = match &arg.name {
+                        Some(name) => name.clone(),
+                        None => {
+                            while named_ids.contains(&next_numeric.to_string())
+                            {
+                                next_numeric += 1;
+                            }
+                            let id = next_numeric.to_string();
+                            next_numeric += 1;
+                            id
+                        }
+                    };
+                    AlternativeBranch {
+                        value: arg.value.clone(),
+                        id,
+                    }
+                })
+                .collect();
+            (*directive_index, branches)
+        })
+        .collect()
+}
+
+fn render_alternative_prompt(
+    prompt: &str,
+    directives: &[AlternativeDirective],
+    combination: &[AlternativeVariant],
+) -> String {
+    let mut replacements: Vec<(usize, usize, String)> = combination
+        .iter()
+        .flat_map(|variant| {
+            variant.replacements.iter().map(|replacement| {
+                let directive = &directives[replacement.directive_index];
+                (directive.start, directive.end, replacement.value.clone())
+            })
+        })
+        .collect();
+    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let mut replaced = prompt.to_string();
+    for (start, end, value) in replacements {
+        replaced.replace_range(start..end, &value);
+    }
+    replaced
 }
 
 fn extract_repeat_and_name_rust(
@@ -2098,6 +2327,114 @@ mod tests {
                 .map(|slot| slot.prompt.as_str())
                 .collect::<Vec<_>>(),
             vec!["a x", "a y", "b x", "b y"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_correlates_shared_named_alt_keys() {
+        let prompt =
+            "#gh:sase %{a=Describe | b=Explain} how this repo works %{a=in detail}.";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a"), Some("b")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "#gh:sase Describe how this repo works in detail.",
+                "#gh:sase Explain how this repo works ."
+            ]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_correlates_transitive_alt_keys() {
+        let prompt = "%{a=1|b=2} x %{a=3} y %{a=4|b=5}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a"), Some("b")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1 x 3 y 4", "2 x  y 5"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_single_shared_key_collapses_to_one_slot() {
+        let prompt = "%{a=X} %{a=Y}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.slots.len(), 1);
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("a"));
+        assert_eq!(plan.slots[0].prompt, "X Y");
+    }
+
+    #[test]
+    fn fanout_planner_cartesian_products_independent_correlated_groups() {
+        let prompt = "%{a=A | b=B} %{x=X | y=Y} %{a=C} %{x=Z}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a.x"), Some("a.y"), Some("b.x"), Some("b.y")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A X C Z", "A Y C ", "B X  Z", "B Y  "]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_correlated_group_mixes_named_and_unnamed_ids() {
+        let prompt = "%{a=X | Y} %{a=Z}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("a"), Some("1")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["X Z", "Y "]
         );
     }
 
