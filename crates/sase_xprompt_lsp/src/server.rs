@@ -946,12 +946,12 @@ fn directive_snippet_items(
             directive.name.starts_with(partial)
                 || directive
                     .alias
-                    .filter(|alias| *alias != "(")
                     .is_some_and(|alias| alias.starts_with(partial))
         })
         .map(|directive| {
             let syntax = if directive.name == "alt" {
-                "%(${1:variant})$0".to_string()
+                // The advertised alt spelling is the `%{A | B}` brace shorthand.
+                "%{${1:A} | ${2:B}\\}$0".to_string()
             } else {
                 format!("%{}:${{1:value}}$0", directive.name)
             };
@@ -1725,6 +1725,45 @@ mod tests {
         };
 
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn directive_snippet_for_alt_uses_brace_shorthand() {
+        let range = CoreRange {
+            start: CorePosition {
+                line: 0,
+                character: 0,
+            },
+            end: CorePosition {
+                line: 0,
+                character: 4,
+            },
+        };
+        let items = directive_snippet_items(Some("%alt"), range);
+        let alt = items
+            .iter()
+            .find(|item| item.label == "%alt:...")
+            .expect("alt directive snippet item");
+        assert_eq!(alt.kind, Some(CompletionItemKind::SNIPPET));
+        assert_eq!(alt.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        let Some(CompletionTextEdit::Edit(edit)) = alt.text_edit.as_ref()
+        else {
+            panic!("expected text edit for alt snippet");
+        };
+        assert_eq!(edit.new_text.as_str(), "%{${1:A} | ${2:B}\\}$0");
+
+        // No directive snippet should still emit the legacy `%(...)` spelling.
+        for item in &items {
+            if let Some(CompletionTextEdit::Edit(edit)) =
+                item.text_edit.as_ref()
+            {
+                assert!(
+                    !edit.new_text.contains("%("),
+                    "directive snippet still advertises %(: {}",
+                    edit.new_text
+                );
+            }
+        }
     }
 
     #[tokio::test]

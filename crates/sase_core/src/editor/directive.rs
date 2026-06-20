@@ -79,9 +79,14 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
+        // The `%{A | B}` brace shorthand is the advertised alt spelling. The
+        // legacy `%(...)` alias is kept parse-compatible via
+        // `canonical_directive_name`, but is no longer surfaced here so editor
+        // completion/hover stop advertising it.
         name: "alt",
-        alias: Some("("),
-        description: "Split prompt into variants with different text",
+        alias: None,
+        description:
+            "Split prompt into variants with different text; shorthand %{A | B}",
         takes_argument: true,
         allows_multiple: true,
     },
@@ -121,7 +126,6 @@ pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
         if directive.name.starts_with(&partial)
             || directive
                 .alias
-                .filter(|alias| *alias != "(")
                 .is_some_and(|alias| alias.starts_with(&partial))
         {
             candidates.push(CompletionCandidate {
@@ -206,6 +210,29 @@ mod tests {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
         }
         assert!(directive_metadata("xprompts_enabled").is_some());
+    }
+
+    #[test]
+    fn alt_metadata_advertises_brace_shorthand() {
+        let alt = directive_metadata("alt").expect("alt metadata");
+        // The legacy `(` alias is no longer advertised, but stays
+        // parse-compatible through `canonical_directive_name`.
+        assert_eq!(alt.alias, None);
+        assert_eq!(canonical_directive_name("("), Some("alt"));
+        assert!(
+            alt.description.contains("%{"),
+            "alt description should describe the brace shorthand: {}",
+            alt.description
+        );
+
+        // Completing `%alt` surfaces the directive without an `alias %(` detail.
+        let completions = build_directive_completion_candidates("%alt");
+        let alt_candidate = completions
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "alt")
+            .expect("alt completion candidate");
+        assert_eq!(alt_candidate.detail, None);
     }
 
     #[test]
