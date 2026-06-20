@@ -10,6 +10,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
+const EMPTY_ALT_SENTINEL: char = '\u{E000}';
+const EMPTY_ALT_SENTINEL_STR: &str = "\u{E000}";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceClaimWire {
@@ -820,12 +822,154 @@ fn render_alternative_prompt(
         })
         .collect();
     replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    let has_empty_replacement =
+        replacements.iter().any(|(_, _, value)| value.is_empty());
 
     let mut replaced = prompt.to_string();
     for (start, end, value) in replacements {
-        replaced.replace_range(start..end, &value);
+        if value.is_empty() {
+            replaced.replace_range(start..end, EMPTY_ALT_SENTINEL_STR);
+        } else {
+            replaced.replace_range(start..end, &value);
+        }
     }
-    replaced
+    if has_empty_replacement {
+        collapse_empty_alternative_whitespace(&replaced)
+    } else {
+        replaced
+    }
+}
+
+/// Collapse the horizontal whitespace left by empty alt renders.
+///
+/// Empty branches remove adjacent spaces/tabs when they would leave doubled
+/// spaces, leading/trailing spaces, or a space stranded against punctuation.
+/// A single word-separating space is kept only between two alphanumeric
+/// neighbors that already had horizontal whitespace at the empty site.
+/// Newlines are hard boundaries and line-leading indentation is preserved;
+/// spaces that keep a following `%directive` parseable are preserved; non-empty
+/// branches never enter this pass.
+fn collapse_empty_alternative_whitespace(rendered: &str) -> String {
+    if !rendered.contains(EMPTY_ALT_SENTINEL) {
+        return rendered.to_string();
+    }
+
+    let mut collapsed = String::with_capacity(rendered.len());
+    let mut cursor = 0;
+    while cursor < rendered.len() {
+        let Some(ch) = rendered[cursor..].chars().next() else {
+            break;
+        };
+        if !is_empty_alt_run_char(ch) {
+            collapsed.push(ch);
+            cursor += ch.len_utf8();
+            continue;
+        }
+
+        let run_start = cursor;
+        let mut run_end = cursor;
+        let mut contains_sentinel = false;
+        while run_end < rendered.len() {
+            let ch = rendered[run_end..].chars().next().unwrap();
+            if !is_empty_alt_run_char(ch) {
+                break;
+            }
+            contains_sentinel |= ch == EMPTY_ALT_SENTINEL;
+            run_end += ch.len_utf8();
+        }
+
+        if contains_sentinel {
+            push_collapsed_empty_alt_run(
+                rendered,
+                run_start,
+                run_end,
+                &mut collapsed,
+            );
+        } else {
+            collapsed.push_str(&rendered[run_start..run_end]);
+        }
+        cursor = run_end;
+    }
+    collapsed
+}
+
+fn push_collapsed_empty_alt_run(
+    rendered: &str,
+    run_start: usize,
+    run_end: usize,
+    collapsed: &mut String,
+) {
+    let line_leading = is_line_start(rendered, run_start);
+    let mut collapse_start = run_start;
+    if line_leading {
+        while collapse_start < run_end {
+            let ch = rendered[collapse_start..].chars().next().unwrap();
+            if !is_horizontal_ws(ch) {
+                break;
+            }
+            collapse_start += ch.len_utf8();
+        }
+        collapsed.push_str(&rendered[run_start..collapse_start]);
+    }
+
+    let had_horizontal_ws = rendered[collapse_start..run_end]
+        .chars()
+        .any(is_horizontal_ws);
+    let left = if line_leading {
+        None
+    } else {
+        rendered[..run_start].chars().next_back()
+    };
+    let right = rendered[run_end..].chars().next();
+
+    if (had_horizontal_ws
+        && should_preserve_directive_separator(rendered, run_end, left))
+        || (had_horizontal_ws
+            && left.is_some_and(char::is_alphanumeric)
+            && right.is_some_and(char::is_alphanumeric))
+    {
+        collapsed.push(' ');
+    }
+}
+
+fn should_preserve_directive_separator(
+    rendered: &str,
+    run_end: usize,
+    left: Option<char>,
+) -> bool {
+    let Some(left) = left else {
+        return false;
+    };
+    starts_with_directive_marker(&rendered[run_end..])
+        && !is_directive_left_boundary(left)
+}
+
+fn starts_with_directive_marker(text: &str) -> bool {
+    let mut chars = text.chars();
+    if chars.next() != Some('%') {
+        return false;
+    }
+    matches!(chars.next(), Some('{') | Some('(') | Some('a'..='z' | 'A'..='Z' | '_'))
+}
+
+fn is_directive_left_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'')
+}
+
+fn is_empty_alt_run_char(ch: char) -> bool {
+    ch == EMPTY_ALT_SENTINEL || is_horizontal_ws(ch)
+}
+
+fn is_horizontal_ws(ch: char) -> bool {
+    ch == ' ' || ch == '\t'
+}
+
+fn is_line_start(rendered: &str, index: usize) -> bool {
+    index == 0
+        || rendered[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch == '\n' || ch == '\r')
 }
 
 fn extract_repeat_and_name_rust(
@@ -2352,7 +2496,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "#gh:sase Describe how this repo works in detail.",
-                "#gh:sase Explain how this repo works ."
+                "#gh:sase Explain how this repo works."
             ]
         );
     }
@@ -2376,7 +2520,7 @@ mod tests {
                 .iter()
                 .map(|slot| slot.prompt.as_str())
                 .collect::<Vec<_>>(),
-            vec!["1 x 3 y 4", "2 x  y 5"]
+            vec!["1 x 3 y 4", "2 x y 5"]
         );
     }
 
@@ -2411,7 +2555,7 @@ mod tests {
                 .iter()
                 .map(|slot| slot.prompt.as_str())
                 .collect::<Vec<_>>(),
-            vec!["A X C Z", "A Y C ", "B X  Z", "B Y  "]
+            vec!["A X C Z", "A Y C", "B X Z", "B Y"]
         );
     }
 
@@ -2434,7 +2578,7 @@ mod tests {
                 .iter()
                 .map(|slot| slot.prompt.as_str())
                 .collect::<Vec<_>>(),
-            vec!["X Z", "Y "]
+            vec!["X Z", "Y"]
         );
     }
 
@@ -2565,8 +2709,153 @@ mod tests {
         assert_eq!(plan.slots.len(), 2);
         assert_eq!(plan.slots[0].prompt, "before a after");
         assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1"));
-        assert_eq!(plan.slots[1].prompt, "before  after");
+        assert_eq!(plan.slots[1].prompt, "before after");
         assert_eq!(plan.slots[1].alt_id.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_removes_space_before_punctuation() {
+        let prompt = "works %{extra}.";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["works extra.", "works."]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_collapses_between_words() {
+        let prompt = "A %{extra} B";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A extra B", "A B"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_removes_leading_space() {
+        let prompt = "%{extra} Review";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["extra Review", "Review"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_removes_trailing_space() {
+        let prompt = "Review %{extra}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Review extra", "Review"]
+        );
+    }
+
+    #[test]
+    fn render_alternative_prompt_empty_branch_does_not_invent_space() {
+        let prompt = "A%B";
+        let directives = vec![AlternativeDirective {
+            start: 1,
+            end: 2,
+            args: Vec::new(),
+        }];
+        let combination = vec![AlternativeVariant {
+            id: "empty".to_string(),
+            replacements: vec![AlternativeReplacement {
+                directive_index: 0,
+                value: String::new(),
+            }],
+        }];
+
+        assert_eq!(
+            render_alternative_prompt(prompt, &directives, &combination),
+            "AB"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_collapses_multiple_spaces() {
+        let prompt = "A  %{extra}  B";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A  extra  B", "A B"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_preserves_newlines_and_indentation() {
+        let prompt = "Header\n  %{extra}\n  Footer";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Header\n  extra\n  Footer", "Header\n  \n  Footer"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_empty_branch_preserves_following_directive_separator() {
+        let prompt = "Do work. %{extra} %model(opus,gpt-5.5)";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("gpt-5.5"), Some("opus"), Some("gpt-5.5")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Do work. extra %model:opus",
+                "Do work. extra %model:gpt-5.5",
+                "Do work. %model:opus",
+                "Do work. %model:gpt-5.5",
+            ]
+        );
     }
 
     #[test]
