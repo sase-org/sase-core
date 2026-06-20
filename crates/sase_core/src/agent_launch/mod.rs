@@ -199,7 +199,7 @@ impl std::error::Error for TimestampBatchAllocationError {}
 #[derive(Debug)]
 pub enum AgentLaunchFanoutPlanError {
     UnsupportedKind(String),
-    UnclosedDirective(String),
+    UnclosedDirective { name: String, close: char },
 }
 
 impl fmt::Display for AgentLaunchFanoutPlanError {
@@ -208,8 +208,11 @@ impl fmt::Display for AgentLaunchFanoutPlanError {
             Self::UnsupportedKind(kind) => {
                 write!(f, "unsupported launch fan-out kind {kind:?}")
             }
-            Self::UnclosedDirective(name) => {
-                write!(f, "unclosed {name} directive: missing closing ')'")
+            Self::UnclosedDirective { name, close } => {
+                write!(
+                    f,
+                    "unclosed {name} directive: missing closing '{close}'"
+                )
             }
         }
     }
@@ -289,6 +292,47 @@ struct AlternativeDirective {
 struct AlternativeSlot {
     prompt: String,
     alt_id: String,
+}
+
+/// Which surface form opened an alternative directive. The legacy `%alt(...)`
+/// and `%(...)` shorthand use parens with comma-separated branches; the new
+/// `%{...}` shorthand uses braces with top-level `|`-separated branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AltDelimiter {
+    Paren,
+    Brace,
+}
+
+impl AltDelimiter {
+    fn open(self) -> char {
+        match self {
+            Self::Paren => '(',
+            Self::Brace => '{',
+        }
+    }
+
+    fn close(self) -> char {
+        match self {
+            Self::Paren => ')',
+            Self::Brace => '}',
+        }
+    }
+
+    /// Branch separator inside the directive body.
+    fn separator(self) -> char {
+        match self {
+            Self::Paren => ',',
+            Self::Brace => '|',
+        }
+    }
+
+    /// Human-readable directive name used in unclosed-directive errors.
+    fn directive_label(self) -> &'static str {
+        match self {
+            Self::Paren => "%alt",
+            Self::Brace => "%{",
+        }
+    }
 }
 
 pub fn plan_agent_launch_fanout(
@@ -492,14 +536,21 @@ fn split_prompt_for_alternatives_with_ids(
     prompt: &str,
 ) -> Result<Option<Vec<AlternativeSlot>>, AgentLaunchFanoutPlanError> {
     let mut directives: Vec<AlternativeDirective> = Vec::new();
-    for (start, paren_start) in alt_directive_starts(prompt) {
-        let Some(paren_end) = find_matching_paren(prompt, paren_start) else {
-            return Err(AgentLaunchFanoutPlanError::UnclosedDirective(
-                "%alt".to_string(),
-            ));
+    for (start, open_start, delimiter) in alt_directive_starts(prompt) {
+        let Some(close_end) = find_matching_delimiter(
+            prompt,
+            open_start,
+            delimiter.open(),
+            delimiter.close(),
+        ) else {
+            return Err(AgentLaunchFanoutPlanError::UnclosedDirective {
+                name: delimiter.directive_label().to_string(),
+                close: delimiter.close(),
+            });
         };
-        let inner = &prompt[paren_start + 1..paren_end];
-        let mut args = parse_directive_args_with_names(inner);
+        let inner = &prompt[open_start + 1..close_end];
+        let mut args =
+            parse_directive_args_with_names(inner, delimiter.separator());
         if args.is_empty() {
             continue;
         }
@@ -512,7 +563,7 @@ fn split_prompt_for_alternatives_with_ids(
         let branches = allocate_alternative_branch_ids(args);
         directives.push(AlternativeDirective {
             start,
-            end: paren_end + 1,
+            end: close_end + 1,
             branches,
         });
     }
@@ -662,12 +713,18 @@ fn directive_occurrences(
     Ok(out)
 }
 
-fn alt_directive_starts(prompt: &str) -> Vec<(usize, usize)> {
+fn alt_directive_starts(prompt: &str) -> Vec<(usize, usize, AltDelimiter)> {
     alt_directive_re()
         .captures_iter(prompt)
         .filter_map(|caps| {
             let marker = caps.get(2)?;
-            Some((marker.start(), marker.end() - 1))
+            let open = marker.end() - 1;
+            let delimiter = if prompt.as_bytes()[open] == b'{' {
+                AltDelimiter::Brace
+            } else {
+                AltDelimiter::Paren
+            };
+            Some((marker.start(), open, delimiter))
         })
         .collect()
 }
@@ -676,9 +733,14 @@ fn alt_inner_ranges(
     prompt: &str,
 ) -> Result<Vec<(usize, usize)>, AgentLaunchFanoutPlanError> {
     let mut ranges = Vec::new();
-    for (_, paren_start) in alt_directive_starts(prompt) {
-        if let Some(paren_end) = find_matching_paren(prompt, paren_start) {
-            ranges.push((paren_start + 1, paren_end));
+    for (_, open_start, delimiter) in alt_directive_starts(prompt) {
+        if let Some(close_end) = find_matching_delimiter(
+            prompt,
+            open_start,
+            delimiter.open(),
+            delimiter.close(),
+        ) {
+            ranges.push((open_start + 1, close_end));
         }
     }
     Ok(ranges)
@@ -711,7 +773,10 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
     args.into_iter().filter(|arg| !arg.is_empty()).collect()
 }
 
-fn parse_directive_args_with_names(inner: &str) -> Vec<DirectiveArg> {
+fn parse_directive_args_with_names(
+    inner: &str,
+    separator: char,
+) -> Vec<DirectiveArg> {
     let mut args = Vec::new();
     let mut start = 0;
     let mut depth = 0_i32;
@@ -727,7 +792,7 @@ fn parse_directive_args_with_names(inner: &str) -> Vec<DirectiveArg> {
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
-            ',' if depth == 0 => {
+            _ if ch == separator && depth == 0 => {
                 push_directive_arg(&mut args, &inner[start..idx]);
                 start = idx + ch.len_utf8();
             }
@@ -828,10 +893,22 @@ fn unquote_backticks(value: &str) -> String {
 }
 
 fn find_matching_paren(text: &str, paren_start: usize) -> Option<usize> {
+    find_matching_delimiter(text, paren_start, '(', ')')
+}
+
+/// Find the index of the delimiter that closes the `open` character at
+/// `open_start`, counting only that delimiter pair and ignoring matches inside
+/// backtick-quoted spans.
+fn find_matching_delimiter(
+    text: &str,
+    open_start: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
     let mut depth = 0_i32;
     let mut in_backticks = false;
-    for (rel_idx, ch) in text[paren_start..].char_indices() {
-        let idx = paren_start + rel_idx;
+    for (rel_idx, ch) in text[open_start..].char_indices() {
+        let idx = open_start + rel_idx;
         if ch == '`' {
             in_backticks = !in_backticks;
             continue;
@@ -839,15 +916,13 @@ fn find_matching_paren(text: &str, paren_start: usize) -> Option<usize> {
         if in_backticks {
             continue;
         }
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(idx);
             }
-            _ => {}
         }
     }
     None
@@ -946,7 +1021,7 @@ fn directive_re() -> &'static Regex {
 fn alt_directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?m)(^|[\s\(\[\{"'])(%(?:alt)?\()"#).unwrap()
+        Regex::new(r#"(?m)(^|[\s\(\[\{"'])(%(?:alt)?\(|%\{)"#).unwrap()
     })
 }
 
@@ -2068,5 +2143,171 @@ mod tests {
         assert_eq!(plan.slots[0].prompt, "  %model:opus do work");
         assert!(!plan.slots[0].wait_for_previous);
         assert!(plan.slots[1].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_brace_shorthand_splits_pipe_branches() {
+        let prompt = "%{a | b | c}\nReview";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.launch_kind, "alternatives");
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a\nReview", "b\nReview", "c\nReview"]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1"), Some("2"), Some("3")]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_brace_branch_text_keeps_commas() {
+        let prompt = "%{foo, bar | baz}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].prompt, "foo, bar");
+        assert_eq!(plan.slots[1].prompt, "baz");
+    }
+
+    #[test]
+    fn fanout_planner_brace_named_and_numeric_branch_ids() {
+        let prompt = "%{fast=a | b | 2=c | d}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("fast"), Some("1"), Some("2"), Some("3")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_brace_named_text_blocks() {
+        let prompt = "%{sec=[[security]] | perf=[[performance]]}\nReview";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("sec"));
+        assert_eq!(plan.slots[0].prompt, "security\nReview");
+        assert_eq!(plan.slots[1].alt_id.as_deref(), Some("perf"));
+        assert_eq!(plan.slots[1].prompt, "performance\nReview");
+    }
+
+    #[test]
+    fn fanout_planner_brace_single_branch_has_implicit_empty_variant() {
+        let prompt = "before %{a} after";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].prompt, "before a after");
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1"));
+        assert_eq!(plan.slots[1].prompt, "before  after");
+        assert_eq!(plan.slots[1].alt_id.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn fanout_planner_brace_nested_pipes_do_not_split() {
+        let prompt = "%{a (x | y) | b [c | d] | `e | f`}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a (x | y)", "b [c | d]", "e | f"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_brace_composes_cartesian_with_paren_alt() {
+        let prompt = "%{a | b} %alt(x,y)";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a x", "a y", "b x", "b y"]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1.1"), Some("1.2"), Some("2.1"), Some("2.2")]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_brace_model_branches_match_paren_parity() {
+        let prompt = "%{opus=%model:opus | sonnet=%model:sonnet}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[1].model.as_deref(), Some("sonnet"));
+        assert_eq!(plan.slots[1].alt_id.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn fanout_planner_brace_does_not_double_collect_nested_models() {
+        let prompt = "%model:opus\n%model:sonnet %{x | y}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 4);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1.1"));
+        assert!(plan.slots[0].prompt.contains("%model:opus\n x\nReview"));
+        assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
+        assert_eq!(plan.slots[3].alt_id.as_deref(), Some("2.2"));
+        assert!(plan.slots[3].prompt.contains("%model:sonnet\n y\nReview"));
+    }
+
+    #[test]
+    fn fanout_planner_unclosed_brace_reports_missing_close() {
+        let err = plan_agent_launch_fanout("%{a | b", Some("alternatives"))
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("%{"), "message was {message:?}");
+        assert!(message.contains('}'), "message was {message:?}");
     }
 }
