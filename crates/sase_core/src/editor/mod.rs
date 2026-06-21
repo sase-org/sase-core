@@ -48,3 +48,6 @@ pub use wire::{
     VcsProjectEntry, XpromptAssistEntry, XpromptInputHint,
     EDITOR_WIRE_SCHEMA_VERSION,
 };
+pub(crate) use xprompt_args::{
+    find_matching_bracket_for_args, parse_xprompt_reference_body,
+};

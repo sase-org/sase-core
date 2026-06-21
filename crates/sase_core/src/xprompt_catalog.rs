@@ -9,6 +9,7 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
+    editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     DocumentSnapshot, EditorRange, EditorSnippetCatalogRequestWire,
     EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
     EditorSnippetEntryWire, EditorXpromptCatalogRequestWire,
@@ -229,6 +230,16 @@ pub fn load_editor_snippet_catalog(
                 source_path_display: Some("ace.snippets".to_string()),
             },
         );
+    }
+
+    let raw_templates = entries_by_trigger
+        .iter()
+        .map(|(trigger, entry)| (trigger.clone(), entry.template.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (trigger, template) in resolve_snippet_references(&raw_templates) {
+        if let Some(entry) = entries_by_trigger.get_mut(&trigger) {
+            entry.template = template;
+        }
     }
 
     let entries = entries_by_trigger.into_values().collect::<Vec<_>>();
@@ -563,6 +574,247 @@ fn legacy_placeholder_replacement(placeholder: &str) -> Option<String> {
             .map(str::to_string)
             .unwrap_or_else(|| format!("${number}")),
     )
+}
+
+fn resolve_snippet_references(
+    catalog: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut resolver = SnippetReferenceResolver::new(catalog);
+    catalog
+        .keys()
+        .map(|trigger| (trigger.clone(), resolver.resolve(trigger)))
+        .collect()
+}
+
+struct SnippetReferenceResolver<'a> {
+    catalog: &'a BTreeMap<String, String>,
+    memo: BTreeMap<String, String>,
+}
+
+impl<'a> SnippetReferenceResolver<'a> {
+    fn new(catalog: &'a BTreeMap<String, String>) -> Self {
+        Self {
+            catalog,
+            memo: BTreeMap::new(),
+        }
+    }
+
+    fn resolve(&mut self, trigger: &str) -> String {
+        if let Some(resolved) = self.memo.get(trigger) {
+            return resolved.clone();
+        }
+        let Some(template) = self.catalog.get(trigger) else {
+            return String::new();
+        };
+        let mut visiting = BTreeSet::new();
+        visiting.insert(trigger.to_string());
+        let resolved = self.resolve_template(template, &mut visiting);
+        self.memo.insert(trigger.to_string(), resolved.clone());
+        resolved
+    }
+
+    fn resolve_template(
+        &mut self,
+        template: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> String {
+        let mut segments = Vec::<(usize, String)>::new();
+        let mut next_source_id = 1usize;
+        let mut used_reference = false;
+        let mut cursor = 0usize;
+        let mut literal_start = 0usize;
+
+        while cursor < template.len() {
+            if !starts_snippet_reference(template, cursor) {
+                cursor += 1;
+                continue;
+            }
+
+            let Some(close) =
+                find_matching_bracket_for_args(template, cursor + 1)
+            else {
+                cursor += 1;
+                continue;
+            };
+            let body = &template[cursor + 2..close];
+            let Some(reference) = parse_xprompt_reference_body(body) else {
+                cursor = close + 1;
+                continue;
+            };
+            if !self.catalog.contains_key(&reference.name)
+                || visiting.contains(&reference.name)
+            {
+                cursor = close + 1;
+                continue;
+            }
+
+            if literal_start < cursor {
+                segments.push((0, template[literal_start..cursor].to_string()));
+            }
+            let target = self.resolve_reference(
+                &reference.name,
+                &reference.positional_args,
+                visiting,
+            );
+            segments.push((next_source_id, target));
+            next_source_id += 1;
+            used_reference = true;
+            cursor = close + 1;
+            literal_start = cursor;
+        }
+
+        if !used_reference {
+            return template.to_string();
+        }
+        if literal_start < template.len() {
+            segments.push((0, template[literal_start..].to_string()));
+        }
+        renumber_snippet_segments(&segments)
+    }
+
+    fn resolve_reference(
+        &mut self,
+        trigger: &str,
+        positional_args: &[String],
+        visiting: &mut BTreeSet<String>,
+    ) -> String {
+        let template = if let Some(resolved) = self.memo.get(trigger) {
+            resolved.clone()
+        } else {
+            visiting.insert(trigger.to_string());
+            let resolved = self.resolve_template(
+                self.catalog
+                    .get(trigger)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                visiting,
+            );
+            visiting.remove(trigger);
+            self.memo.insert(trigger.to_string(), resolved.clone());
+            resolved
+        };
+        let fragment = remove_zero_tabstops(&template);
+        apply_positional_args(&fragment, positional_args)
+    }
+}
+
+fn starts_snippet_reference(text: &str, index: usize) -> bool {
+    if text.as_bytes().get(index..index + 2) != Some(b"#[") {
+        return false;
+    }
+    if index == 0 {
+        return true;
+    }
+    text[..index].chars().next_back().is_some_and(|ch| {
+        ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'')
+    })
+}
+
+fn apply_positional_args(fragment: &str, positional_args: &[String]) -> String {
+    if positional_args.is_empty() {
+        return fragment.to_string();
+    }
+
+    let replacements = positional_args
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (index + 1, escape_snippet_arg(value)))
+        .collect::<BTreeMap<_, _>>();
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+    for (start, end, number) in iter_unescaped_tabstops(fragment) {
+        rendered.push_str(&fragment[cursor..start]);
+        if let Some(replacement) = replacements.get(&number) {
+            rendered.push_str(replacement);
+        } else {
+            rendered.push_str(&fragment[start..end]);
+        }
+        cursor = end;
+    }
+    rendered.push_str(&fragment[cursor..]);
+    rendered
+}
+
+fn escape_snippet_arg(value: &str) -> String {
+    value.replace('$', "\\$")
+}
+
+fn remove_zero_tabstops(template: &str) -> String {
+    let mut rendered = String::new();
+    let mut cursor = 0usize;
+    for (start, end, number) in iter_unescaped_tabstops(template) {
+        rendered.push_str(&template[cursor..start]);
+        if number != 0 {
+            rendered.push_str(&template[start..end]);
+        }
+        cursor = end;
+    }
+    rendered.push_str(&template[cursor..]);
+    rendered
+}
+
+fn renumber_snippet_segments(segments: &[(usize, String)]) -> String {
+    let mut assignments = BTreeMap::<(usize, usize), usize>::new();
+    let mut next_tabstop = 1usize;
+    let mut rendered = String::new();
+
+    for (source_id, text) in segments {
+        let mut cursor = 0usize;
+        for (start, end, number) in iter_unescaped_tabstops(text) {
+            rendered.push_str(&text[cursor..start]);
+            if number != 0 {
+                let key = (*source_id, number);
+                let assigned = assignments.entry(key).or_insert_with(|| {
+                    let value = next_tabstop;
+                    next_tabstop += 1;
+                    value
+                });
+                rendered.push_str(&format!("${assigned}"));
+            }
+            cursor = end;
+        }
+        rendered.push_str(&text[cursor..]);
+    }
+
+    rendered.push_str("$0");
+    rendered
+}
+
+fn iter_unescaped_tabstops(text: &str) -> Vec<(usize, usize, usize)> {
+    let mut tabstops = Vec::new();
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'$' || is_escaped(text, cursor) {
+            cursor += 1;
+            continue;
+        }
+        let digit_start = cursor + 1;
+        let mut digit_end = digit_start;
+        while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
+            digit_end += 1;
+        }
+        if digit_end == digit_start {
+            cursor += 1;
+            continue;
+        }
+        if let Ok(number) = text[digit_start..digit_end].parse::<usize>() {
+            tabstops.push((cursor, digit_end, number));
+        }
+        cursor = digit_end;
+    }
+    tabstops
+}
+
+fn is_escaped(text: &str, index: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut cursor = index;
+    let bytes = text.as_bytes();
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
 }
 
 #[derive(Debug, Clone)]
@@ -2383,6 +2635,149 @@ mod tests {
         );
         assert_eq!(by_trigger["fixit"].xprompt_name.as_deref(), Some("fix"));
         assert!(!by_trigger.contains_key("complex"));
+    }
+
+    #[test]
+    fn snippet_reference_golden_vectors() {
+        // Cross-language parity contract: identical to the Python
+        // `_SNIPPET_REFERENCE_GOLDEN_VECTORS` table.
+        let cases: Vec<(Vec<(&str, &str)>, &str, &str)> = vec![
+            (
+                vec![
+                    ("greet", "Hello $1!$0"),
+                    ("welcome", "#[greet] Welcome to $1.$0"),
+                ],
+                "welcome",
+                "Hello $1! Welcome to $2.$0",
+            ),
+            (
+                vec![
+                    ("pair", "$1 and $2$0"),
+                    ("outer", "#[pair(a, b)] done$0"),
+                ],
+                "outer",
+                "a and b done$0",
+            ),
+            (
+                vec![("pair", "$1 and $2$0"), ("outer", "#[pair(a)] $1$0")],
+                "outer",
+                "a and $1 $2$0",
+            ),
+            (
+                vec![("say", "$1 says hi, $1$0"), ("outer", "#[say] $1$0")],
+                "outer",
+                "$1 says hi, $1 $2$0",
+            ),
+            (
+                vec![
+                    ("a", "A $1$0"),
+                    ("b", "B $1$0"),
+                    ("outer", "#[a] #[b] $1$0"),
+                ],
+                "outer",
+                "A $1 B $2 $3$0",
+            ),
+            (
+                vec![
+                    ("leaf", "Leaf $1$0"),
+                    ("mid", "M #[leaf] $1$0"),
+                    ("outer", "O #[mid] $1$0"),
+                ],
+                "outer",
+                "O M Leaf $1 $2 $3$0",
+            ),
+            (
+                vec![("outer", "#[missing] $1$0")],
+                "outer",
+                "#[missing] $1$0",
+            ),
+            (vec![("outer", "#[outer] $1$0")], "outer", "#[outer] $1$0"),
+            (vec![("a", "#[b]$0"), ("b", "#[a]$0")], "a", "#[a]$0"),
+            (
+                vec![("greet", "Hello $1$0"), ("outer", "#[greet:World]$0")],
+                "outer",
+                "Hello World$0",
+            ),
+            (
+                vec![
+                    ("wrap", "<$1>$0"),
+                    ("outer", "#[wrap([[multi, line]])] $1$0"),
+                ],
+                "outer",
+                "<multi, line> $1$0",
+            ),
+            (
+                vec![("user", "User $1$0"), ("xp", "#[user] xp $1$0")],
+                "xp",
+                "User $1 xp $2$0",
+            ),
+            (
+                vec![("xp", "XP $1$0"), ("user", "User #[xp] $1$0")],
+                "user",
+                "User XP $1 $2$0",
+            ),
+            (
+                vec![("bar", "BAR$0"), ("outer", "foo#[bar] #[bar]$0")],
+                "outer",
+                "foo#[bar] BAR$0",
+            ),
+            (
+                vec![("price", "Cost $1$0"), ("outer", "#[price($5)] $1$0")],
+                "outer",
+                r"Cost \$5 $1$0",
+            ),
+        ];
+
+        for (catalog_entries, trigger, expected) in cases {
+            let catalog = catalog_entries
+                .into_iter()
+                .map(|(trigger, template)| {
+                    (trigger.to_string(), template.to_string())
+                })
+                .collect::<BTreeMap<_, _>>();
+            let resolved = resolve_snippet_references(&catalog);
+            assert_eq!(resolved[trigger], expected, "{trigger}");
+        }
+    }
+
+    #[test]
+    fn native_snippet_catalog_resolves_references_after_user_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join("xprompts");
+        fs::create_dir(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("helper.md"),
+            "---\nsnippet: true\ninput:\n  topic: word\n---\nHelp {{ topic }}",
+        )
+        .unwrap();
+        fs::write(
+            xprompts.join("outer.md"),
+            "---\nsnippet: true\ninput:\n  topic: word\n---\n#[user_snip] {{ topic }}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase.yml"),
+            "ace:\n  snippets:\n    user_snip: User $1$0\n    wrap: \"#[helper(World)] $1$0\"\n",
+        )
+        .unwrap();
+
+        let response = load_editor_snippet_catalog(
+            &EditorSnippetCatalogRequestWire {
+                schema_version: 1,
+                project: None,
+            },
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let by_trigger = response
+            .entries
+            .iter()
+            .map(|entry| (entry.trigger.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_trigger["outer"].template, "User $1 $2$0");
+        assert_eq!(by_trigger["wrap"].template, "Help World $1$0");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XpromptArgSyntax {
@@ -32,6 +32,35 @@ pub(crate) struct ParsedXpromptArg {
 pub(crate) struct ParsedXpromptArgName {
     pub(crate) value: String,
     pub(crate) span: (usize, usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedXpromptReference {
+    pub(crate) name: String,
+    pub(crate) positional_args: Vec<String>,
+    pub(crate) named_args: BTreeMap<String, String>,
+}
+
+pub(crate) fn parse_xprompt_reference_body(
+    body: &str,
+) -> Option<ParsedXpromptReference> {
+    let text = format!("#{body}");
+    let call = parse_xprompt_calls(&text).into_iter().next()?;
+    let mut positional_args = Vec::new();
+    let mut named_args = BTreeMap::new();
+    for arg in call.args {
+        let value = decode_xprompt_arg_value(&arg.value);
+        if let Some(name) = arg.name {
+            named_args.insert(name.value, value);
+        } else {
+            positional_args.push(value);
+        }
+    }
+    Some(ParsedXpromptReference {
+        name: call.name,
+        positional_args,
+        named_args,
+    })
 }
 
 pub(crate) fn parse_xprompt_calls(text: &str) -> Vec<ParsedXpromptCall> {
@@ -294,8 +323,24 @@ fn find_top_level_equal(text: &str, start: usize, end: usize) -> Option<usize> {
     None
 }
 
+pub(crate) fn find_matching_bracket_for_args(
+    text: &str,
+    open_idx: usize,
+) -> Option<usize> {
+    find_matching_delimiter_for_args(text, open_idx, b'[', b']')
+}
+
 fn find_matching_paren_for_args(text: &str, open_idx: usize) -> Option<usize> {
-    if text.as_bytes().get(open_idx) != Some(&b'(') {
+    find_matching_delimiter_for_args(text, open_idx, b'(', b')')
+}
+
+fn find_matching_delimiter_for_args(
+    text: &str,
+    open_idx: usize,
+    open: u8,
+    close: u8,
+) -> Option<usize> {
+    if text.as_bytes().get(open_idx) != Some(&open) {
         return None;
     }
     let mut scan = ArgScanner::default();
@@ -308,8 +353,8 @@ fn find_matching_paren_for_args(text: &str, open_idx: usize) -> Option<usize> {
         }
         if scan.is_top_level() {
             match text.as_bytes()[i] {
-                b'(' => depth += 1,
-                b')' => {
+                ch if ch == open => depth += 1,
+                ch if ch == close => {
                     depth -= 1;
                     if depth == 0 {
                         return Some(i);
@@ -321,6 +366,10 @@ fn find_matching_paren_for_args(text: &str, open_idx: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+fn decode_xprompt_arg_value(value: &str) -> String {
+    value.replace('+', " ")
 }
 
 #[derive(Default)]
