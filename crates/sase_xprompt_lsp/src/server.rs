@@ -2374,6 +2374,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completes_vcs_project_replacing_existing_tag_at_eof() {
+        // `#git:foo #+` -- an existing leading VCS tag immediately followed by
+        // the `#+` trigger at end-of-input. Selecting a project must replace the
+        // existing tag, not double it. The primary edit deletes the trailing
+        // ` #+` trigger span; the additional edit replaces the `#git:foo` range
+        // with the selected `#gh:sase ` tag.
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "#git:foo #+".to_string(),
+                Position {
+                    line: 0,
+                    character: 11,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "sase");
+
+        // Primary edit deletes the trailing ` #+` trigger span (bytes 8..11).
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected primary text edit");
+        };
+        assert_eq!(edit.new_text, "");
+        assert_eq!(edit.range.start, Position::new(0, 8));
+        assert_eq!(edit.range.end, Position::new(0, 11));
+
+        // Additional edit replaces the existing `#git:foo` (bytes 0..8) tag.
+        let additional = item.additional_text_edits.as_ref().unwrap();
+        assert_eq!(additional.len(), 1);
+        assert_eq!(additional[0].new_text, "#gh:sase ");
+        assert_eq!(additional[0].range.start, Position::new(0, 0));
+        assert_eq!(additional[0].range.end, Position::new(0, 8));
+    }
+
+    #[tokio::test]
     async fn completes_vcs_changespec_with_pr_label_details() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");

@@ -618,8 +618,13 @@ fn vcs_replace_regex(known_workflow_names: &[String]) -> Regex {
         .map(|name| regex::escape(name))
         .collect::<Vec<_>>()
         .join("|");
+    // The boundary after a tag is whitespace OR end-of-input. `\s` is tried
+    // first, so any actual whitespace (including a newline) is consumed and
+    // replaced exactly as before; `$` only wins at true EOF, letting a
+    // line-start tag with no trailing whitespace (e.g. `#gh:sase` alone) still
+    // be replaced rather than treated as absent.
     let pattern = format!(
-        r"(?m)^((?:%\S+[\s]+)*)#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)\s"
+        r"(?m)^((?:%\S+[\s]+)*)#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)(?:\s|$)"
     );
     Regex::new(&pattern).expect("valid vcs replace pattern")
 }
@@ -1338,6 +1343,12 @@ mod tests {
             ("#+s‸\nmore text", "#gh:sase \nmore text"),
             ("#git:foo Fix bug #+‸", "#gh:sase Fix bug"),
             ("#gh!!:foo do X #+‸", "#gh:sase do X"),
+            // Existing leading VCS tag at end-of-input (no trailing text): the
+            // trigger strip leaves the bare tag at EOF, which must still be
+            // replaced -- not doubled. Covers the `#gh:sase #+` regression.
+            ("#gh:sase #+‸", "#gh:sase "),
+            ("#gh:sase #+foo‸", "#gh:sase "),
+            ("#git:foo #+‸", "#gh:sase "),
             ("Fix #+bug‸ here", "#gh:sase Fix here"),
             ("Line one\n#+‸", "#gh:sase Line one\n"),
             (
@@ -1589,6 +1600,10 @@ mod tests {
             "#+‸",
             "#+sa‸",
             "#git:foo Fix bug #+‸",
+            // Existing tag at EOF: the replace edit (tag span) and the primary
+            // trigger-deletion edit are adjacent and must not overlap.
+            "#git:foo #+‸",
+            "#gh:sase #+‸",
             "%model:opus Body #+‸",
             "+‸",
             "+sa‸",
