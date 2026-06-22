@@ -162,10 +162,13 @@ impl XpromptLspServer {
         if config.snippet_support
             && context.kind == CompletionContextKind::Xprompt
         {
+            let append_text_arg_space =
+                replacement_ends_line(&document, context.replacement_range);
             return Some(CompletionResponse::Array(xprompt_snippet_items(
                 list,
                 entries.as_slice(),
                 context.replacement_range,
+                append_text_arg_space,
             )));
         }
         let mut response = completion_response(list, context.replacement_range);
@@ -900,6 +903,7 @@ fn xprompt_snippet_items(
     list: CompletionList,
     entries: &[XpromptAssistEntry],
     replacement_range: sase_core::EditorRange,
+    append_text_arg_space: bool,
 ) -> Vec<CompletionItem> {
     list.candidates
         .into_iter()
@@ -908,7 +912,7 @@ fn xprompt_snippet_items(
                 entries.iter().find(|entry| entry.name == candidate.name)?;
             Some(snippet_completion_item(
                 candidate.display,
-                xprompt_completion_skeleton(entry),
+                xprompt_completion_skeleton(entry, append_text_arg_space),
                 candidate.detail,
                 candidate.documentation,
                 replacement_range,
@@ -917,7 +921,10 @@ fn xprompt_snippet_items(
         .collect()
 }
 
-fn xprompt_completion_skeleton(entry: &XpromptAssistEntry) -> String {
+fn xprompt_completion_skeleton(
+    entry: &XpromptAssistEntry,
+    append_text_arg_space: bool,
+) -> String {
     let required = entry
         .inputs
         .iter()
@@ -925,10 +932,36 @@ fn xprompt_completion_skeleton(entry: &XpromptAssistEntry) -> String {
         .collect::<Vec<_>>();
     match required.as_slice() {
         [] => format!("{} ", entry.insertion),
-        [input] if input.r#type == "text" => format!("{}::", entry.insertion),
+        // The free-form double-colon shorthand is `:: ` followed by text. An
+        // end-of-line completion appends that space so the user lands one
+        // keystroke from typing the body; an inline completion keeps `::` so the
+        // following text supplies the single delimiter.
+        [input] if input.r#type == "text" => {
+            if append_text_arg_space {
+                format!("{}:: ", entry.insertion)
+            } else {
+                format!("{}::", entry.insertion)
+            }
+        }
         [_] => format!("{}:", entry.insertion),
         _ => format!("{}($0)", entry.insertion),
     }
+}
+
+/// Whether `range`'s end sits at the end of its line (no trailing text), so the
+/// required-text `::` skeleton may be widened to `:: `. Compared in UTF-16 units
+/// to match [`EditorPosition::character`].
+fn replacement_ends_line(
+    document: &DocumentSnapshot,
+    range: EditorRange,
+) -> bool {
+    document
+        .line_text(range.end.line)
+        .map(|line| {
+            line.chars().map(char::len_utf16).sum::<usize>()
+                == range.end.character as usize
+        })
+        .unwrap_or(false)
 }
 
 fn directive_snippet_items(
@@ -1633,6 +1666,26 @@ mod tests {
         assert_snippet_item(&items, "#none", "#none ");
         assert_snippet_item(&items, "#optional", "#optional ");
         assert_snippet_item(&items, "#path", "#path:");
+        // End-of-line required-text completion appends the free-form delimiter
+        // space (`#text:: `).
+        assert_snippet_item(&items, "#text", "#text:: ");
+    }
+
+    #[tokio::test]
+    async fn required_text_skeleton_keeps_double_colon_before_existing_text() {
+        let entries = vec![catalog_entry(
+            "text",
+            "#text",
+            Some("(body: text)".to_string()),
+            vec![input_hint("body", "text", true, 0)],
+            None,
+        )];
+        // `#text` token followed by more text on the line: the completion ends
+        // mid-line, so the skeleton stays `#text::` and the following ` x`
+        // supplies the single delimiter rather than doubling the space.
+        let items = snippet_completion_items(entries, "#text x", 5).await;
+
+        assert_eq!(items.len(), 1);
         assert_snippet_item(&items, "#text", "#text::");
     }
 
