@@ -33,18 +33,13 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: true,
     },
     DirectiveMetadata {
+        // No `%t` alias — that now means `%tale`. `%time` keeps its long
+        // spelling only, mirroring the Python xprompt parser.
         name: "time",
-        alias: Some("t"),
+        alias: None,
         description: "Wait for a duration or absolute wall-clock time",
         takes_argument: true,
         allows_multiple: true,
-    },
-    DirectiveMetadata {
-        name: "approve",
-        alias: Some("a"),
-        description: "Run the agent fully autonomously",
-        takes_argument: false,
-        allows_multiple: false,
     },
     DirectiveMetadata {
         name: "edit",
@@ -56,7 +51,14 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "plan",
         alias: Some("p"),
-        description: "Enable plan mode",
+        description: "Auto-approve the submitted plan as a normal plan",
+        takes_argument: false,
+        allows_multiple: false,
+    },
+    DirectiveMetadata {
+        name: "tale",
+        alias: Some("t"),
+        description: "Auto-approve the submitted plan as a tale",
         takes_argument: false,
         allows_multiple: false,
     },
@@ -109,9 +111,21 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
 ];
 
+/// Deprecated directive aliases that still resolve to a canonical directive but
+/// are intentionally hidden from advertised editor completion/hover. `%approve`
+/// and `%a` are the legacy spelling of `%plan`; they keep parsing for
+/// back-compat while the advertised family is `%plan` / `%tale` / `%epic`.
+pub const DEPRECATED_ALIASES: &[(&str, &str)] =
+    &[("approve", "plan"), ("a", "plan")];
+
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
     if raw == "(" {
         return Some("alt");
+    }
+    for &(alias, canonical) in DEPRECATED_ALIASES {
+        if alias == raw {
+            return Some(canonical);
+        }
     }
     DIRECTIVES.iter().find_map(|directive| {
         if directive.name == raw || directive.alias == Some(raw) {
@@ -180,7 +194,9 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("false", "Disable xprompt expansion"),
             ("true", "Enable xprompt expansion"),
         ],
-        "approve" | "edit" | "plan" | "epic" | "hide" => &[],
+        // `approve`/`a` resolve to `plan` via `DEPRECATED_ALIASES`, so they
+        // land on this arm too.
+        "plan" | "tale" | "edit" | "epic" | "hide" => &[],
         "time" => {
             &[("5m", "Wait for five minutes"), ("1h", "Wait for one hour")]
         }
@@ -227,12 +243,14 @@ mod tests {
             ("m", "model"),
             ("n", "name"),
             ("w", "wait"),
-            ("a", "approve"),
             ("e", "edit"),
             ("p", "plan"),
-            ("t", "time"),
+            ("t", "tale"),
             ("g", "group"),
             ("(", "alt"),
+            // Deprecated spellings of `%plan` still resolve for back-compat.
+            ("a", "plan"),
+            ("approve", "plan"),
         ] {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
         }
@@ -266,15 +284,71 @@ mod tests {
     }
 
     #[test]
-    fn directive_completion_includes_time_alias() {
-        let completions = build_directive_completion_candidates("%t");
-
-        assert_eq!(completions.candidates.len(), 1);
-        assert_eq!(completions.candidates[0].insertion, "%time");
-        assert_eq!(
-            completions.candidates[0].documentation.as_deref(),
-            Some("Wait for a duration or absolute wall-clock time")
+    fn plan_and_tale_are_the_advertised_auto_approve_directives() {
+        let plan = directive_metadata("plan").expect("plan metadata");
+        assert_eq!(plan.alias, Some("p"));
+        assert!(!plan.takes_argument);
+        assert!(
+            plan.description.contains("normal plan"),
+            "plan description should describe normal-plan auto-approval: {}",
+            plan.description
         );
+
+        let tale = directive_metadata("tale").expect("tale metadata");
+        assert_eq!(tale.alias, Some("t"));
+        assert!(!tale.takes_argument);
+        assert!(
+            tale.description.contains("tale"),
+            "tale description should mention tales: {}",
+            tale.description
+        );
+
+        // `%time` gave up its `%t` alias to `%tale`.
+        let time = directive_metadata("time").expect("time metadata");
+        assert_eq!(time.alias, None);
+    }
+
+    #[test]
+    fn directive_completion_t_prefix_yields_tale_and_time() {
+        // Both `%tale` and `%time` start with `t`; `%ta`/`%ti` disambiguate.
+        let t_completions = build_directive_completion_candidates("%t");
+        let t_names: Vec<&str> = t_completions
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(t_names, ["tale", "time"]);
+
+        let tale = build_directive_completion_candidates("%ta");
+        assert_eq!(tale.candidates.len(), 1);
+        assert_eq!(tale.candidates[0].insertion, "%tale");
+        assert_eq!(
+            tale.candidates[0].documentation.as_deref(),
+            Some("Auto-approve the submitted plan as a tale")
+        );
+    }
+
+    #[test]
+    fn approve_is_a_hidden_deprecated_alias_of_plan() {
+        // `%approve` and `%a` still resolve to `plan` for back-compat ...
+        assert_eq!(canonical_directive_name("approve"), Some("plan"));
+        assert_eq!(canonical_directive_name("a"), Some("plan"));
+
+        // ... but neither is advertised in completion. `%approve` matches no
+        // advertised directive; `%a` only surfaces `%alt` (the lone directive
+        // whose name starts with `a`), never `%approve`/`%plan`.
+        assert!(
+            build_directive_completion_candidates("%approve")
+                .candidates
+                .is_empty()
+        );
+        let a_completions = build_directive_completion_candidates("%a");
+        let a_names: Vec<&str> = a_completions
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(a_names, ["alt"]);
     }
 
     #[test]
