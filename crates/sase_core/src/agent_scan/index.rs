@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 5;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 6;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -679,6 +679,9 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if prior_version.map_or(true, |v| v < 5) {
         migrate_record_json_refresh_v5(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 6) {
+        migrate_record_json_refresh_v6(&mut conn)?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -868,6 +871,16 @@ fn migrate_recompute_hidden_v2(conn: &mut Connection) -> Result<(), String> {
 /// There is no DDL to apply; callers that need existing rows refreshed run a
 /// full rebuild so each row is reserialized from source marker files.
 fn migrate_record_json_refresh_v5(conn: &mut Connection) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v6 adds `agent_meta.reasoning_effort` and
+/// `prompt_steps[*].reasoning_effort` inside `record_json` so the ACE TUI can
+/// render the resolved effort uniformly across providers.
+///
+/// There is no DDL to apply; callers that need existing rows refreshed run a
+/// full rebuild so each row is reserialized from source marker files.
+fn migrate_record_json_refresh_v6(conn: &mut Connection) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
