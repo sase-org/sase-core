@@ -28,6 +28,7 @@
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
 //! - `verify_agent_archive_index(root: str) -> dict`
+//! - `delete_dismissed_agent_group(root: str, group_id: str) -> bool`
 //! - `plan_agent_cleanup(targets: list[dict], request: dict) -> dict`
 //! - `save_dismissed_agents_index(path: str, identities: list[dict]) -> None`
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
@@ -126,6 +127,7 @@ use sase_core::agent_cleanup::{
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
 };
 use sase_core::agent_group_archive::{
+    delete_dismissed_agent_group as core_delete_dismissed_agent_group,
     list_dismissed_agent_groups as core_list_dismissed_agent_groups,
     list_recent_dismissed_agent_groups as core_list_recent_dismissed_agent_groups,
     load_dismissed_agent_group as core_load_dismissed_agent_group,
@@ -1114,6 +1116,20 @@ fn py_mark_dismissed_agent_group_revived<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Delete one saved dismissed-agent group metadata record.
+#[pyfunction]
+#[pyo3(name = "delete_dismissed_agent_group")]
+fn py_delete_dismissed_agent_group(
+    py: Python<'_>,
+    root: &str,
+    group_id: &str,
+) -> PyResult<bool> {
+    py.allow_threads(|| {
+        core_delete_dismissed_agent_group(&PathBuf::from(root), group_id)
+    })
+    .map_err(PyValueError::new_err)
 }
 
 /// Record one recent dismissed-agent group and prune the capped recent store.
@@ -3266,6 +3282,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_mark_dismissed_agent_group_revived,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_delete_dismissed_agent_group, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_record_recent_dismissed_agent_group,
         m

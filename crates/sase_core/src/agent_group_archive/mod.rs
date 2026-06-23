@@ -94,6 +94,18 @@ pub fn mark_dismissed_agent_group_revived(
     save_dismissed_agent_group(root, group).map(Some)
 }
 
+pub fn delete_dismissed_agent_group(
+    root: &Path,
+    group_id: &str,
+) -> Result<bool, String> {
+    let path = group_path(root, group_id)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub fn record_recent_dismissed_agent_group(
     root: &Path,
     group: SavedAgentGroupWire,
@@ -430,6 +442,35 @@ mod tests {
             loaded.agent_refs[0].prompt_preview.as_deref(),
             Some("Restore this backend worker.")
         );
+    }
+
+    #[test]
+    fn delete_group_removes_only_requested_metadata_record() {
+        let tmp = TempDir::new().unwrap();
+        save_dismissed_agent_group(
+            tmp.path(),
+            sample_group("delete-me", "2026-05-27T12:00:00Z"),
+        )
+        .unwrap();
+        save_dismissed_agent_group(
+            tmp.path(),
+            sample_group("keep-me", "2026-05-27T12:01:00Z"),
+        )
+        .unwrap();
+
+        let deleted =
+            delete_dismissed_agent_group(tmp.path(), "delete-me").unwrap();
+        let missing =
+            delete_dismissed_agent_group(tmp.path(), "delete-me").unwrap();
+        let page = list_dismissed_agent_groups(tmp.path(), 20, None);
+
+        assert!(deleted);
+        assert!(!missing);
+        assert!(!tmp.path().join("delete-me.json").exists());
+        assert!(tmp.path().join("keep-me.json").exists());
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(page.groups[0].group_id, "keep-me");
+        assert!(delete_dismissed_agent_group(tmp.path(), "bad/id").is_err());
     }
 
     #[test]
