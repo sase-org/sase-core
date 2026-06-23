@@ -111,6 +111,7 @@ fn build_home_running(root: &Path) {
             "pid": 11111,
             "model": "claude-opus-4-7",
             "llm_provider": "claude",
+            "reasoning_effort": "xhigh",
             "vcs_provider": "github",
             "workspace_dir": "/tmp/home-target",
             "approve": true,
@@ -353,6 +354,7 @@ fn build_workflow(root: &Path) {
             "status": "completed",
             "model": "claude-opus-4-7",
             "llm_provider": "claude",
+            "reasoning_effort": "high",
             "output": {"meta_workspace": "5", "plan_path": "/tmp/plan.md"},
             "output_types": {"plan_path": "path"},
             "artifacts_dir": dir.to_string_lossy(),
@@ -973,6 +975,8 @@ fn home_running_record_has_running_marker() {
     assert_eq!(running.pid, Some(11111));
     assert_eq!(running.cl_name.as_deref(), Some("~"));
     assert_eq!(running.workspace_dir.as_deref(), Some("/tmp/home-target"));
+    let meta = rec.agent_meta.as_ref().unwrap();
+    assert_eq!(meta.reasoning_effort.as_deref(), Some("xhigh"));
     assert_eq!(
         rec.raw_prompt_snippet.as_deref(),
         Some("Investigate the failing job")
@@ -1037,6 +1041,7 @@ fn workflow_root_record_has_state_and_steps() {
     let code = &rec.prompt_steps[2];
     assert!(pre.is_pre_prompt_step);
     assert_eq!(pre.embedded_workflow_name.as_deref(), Some("three_phase"));
+    assert_eq!(plan.reasoning_effort.as_deref(), Some("high"));
     let plan_output = plan.output.as_ref().unwrap();
     assert_eq!(
         plan_output.get("meta_workspace").and_then(Value::as_str),
