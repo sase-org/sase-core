@@ -2641,7 +2641,9 @@ mod tests {
     fn snippet_reference_golden_vectors() {
         // Cross-language parity contract: identical to the Python
         // `_SNIPPET_REFERENCE_GOLDEN_VECTORS` table.
-        let cases: Vec<(Vec<(&str, &str)>, &str, &str)> = vec![
+        type SnippetEntry<'a> = (&'a str, &'a str);
+        type SnippetGoldenCase<'a> = (Vec<SnippetEntry<'a>>, &'a str, &'a str);
+        let cases: Vec<SnippetGoldenCase> = vec![
             (
                 vec![
                     ("greet", "Hello $1!$0"),

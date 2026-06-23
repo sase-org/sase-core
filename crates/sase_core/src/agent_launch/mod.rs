@@ -821,7 +821,7 @@ fn render_alternative_prompt(
             })
         })
         .collect();
-    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
     let has_empty_replacement =
         replacements.iter().any(|(_, _, value)| value.is_empty());
 

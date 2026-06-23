@@ -87,9 +87,7 @@ pub fn classify_completion_context(
     match token {
         None => {
             let byte = document.position_to_byte_offset(position)?;
-            if byte > 0
-                && document.text()[..byte].chars().next_back() == Some('+')
-            {
+            if byte > 0 && document.text()[..byte].ends_with('+') {
                 return None;
             }
             Some(CompletionContext {
