@@ -17,6 +17,7 @@ pub mod agent_scan;
 pub mod bead;
 pub mod config;
 pub mod editor;
+pub mod effort;
 pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
@@ -203,6 +204,7 @@ pub use editor::{
     XpromptAssistEntry, XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
     EDITOR_WIRE_SCHEMA_VERSION,
 };
+pub use effort::{is_valid_effort, split_model_effort, EFFORT_LEVELS_ORDERED};
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,
     parse_git_conflicted_files, parse_git_local_changes,

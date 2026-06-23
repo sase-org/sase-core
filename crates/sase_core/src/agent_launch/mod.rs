@@ -1,5 +1,6 @@
 //! Wire records and deterministic helpers for agent launch.
 
+use crate::effort::split_model_effort;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -271,6 +272,10 @@ struct DirectiveOccurrence {
     end: usize,
     args: Vec<String>,
     has_plus_suffix: bool,
+    // True when a single colon argument came from a backtick literal
+    // (`` %model:`literal@id` ``). Such values bypass the `@effort` split so any
+    // `@` in the model id is preserved, mirroring the Python parser.
+    from_backtick_literal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1035,7 +1040,15 @@ fn extract_first_model_value(prompt: &str) -> Option<String> {
         if directive.canonical_name == "model"
             && !position_in_ranges(directive.start, &ignored_ranges)
         {
-            return directive.args.first().cloned();
+            let value = directive.args.first()?;
+            // Backtick-literal model values keep any `@` verbatim; every other
+            // value has its trailing `@<effort>` peeled off so the slot is
+            // named by the clean model, matching the Python fan-out namer.
+            if directive.from_backtick_literal {
+                return Some(value.clone());
+            }
+            let (clean_model, _) = split_model_effort(value);
+            return Some(clean_model.to_string());
         }
     }
     None
@@ -1052,6 +1065,7 @@ fn directive_occurrences(
         let mut end = marker.end();
         let mut args = Vec::new();
         let mut has_plus_suffix = false;
+        let mut from_backtick_literal = false;
 
         if caps.get(4).is_some() {
             let paren_start = marker.end() - 1;
@@ -1061,6 +1075,7 @@ fn directive_occurrences(
                 end = paren_end + 1;
             }
         } else if let Some(colon_arg) = caps.get(5) {
+            from_backtick_literal = colon_arg.as_str().starts_with('`');
             args = vec![unquote_backticks(colon_arg.as_str())];
         } else if caps.get(6).is_some() {
             has_plus_suffix = true;
@@ -1075,6 +1090,7 @@ fn directive_occurrences(
             end,
             args,
             has_plus_suffix,
+            from_backtick_literal,
         });
     }
     Ok(out)
@@ -1378,8 +1394,12 @@ fn canonical_directive_name(name: &str) -> &str {
 fn directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // The colon-arg class includes `@` so a `%model:<model>@<effort>`
+        // suffix is captured as one directive value (matching the Python
+        // `_DIRECTIVE_PATTERN`); the `@effort` token is split off in
+        // `extract_first_model_value` via `split_model_effort`.
         Regex::new(
-            r#"(?m)(^|[\s\(\[\{"'])(%([A-Za-z_][A-Za-z0-9_]*)(?:(\()|:(`[^`]*`|[A-Za-z0-9_#/.,()-]*[A-Za-z0-9_#/,()-])|(\+))?)"#,
+            r#"(?m)(^|[\s\(\[\{"'])(%([A-Za-z_][A-Za-z0-9_]*)(?:(\()|:(`[^`]*`|[A-Za-z0-9_#/.,()@-]*[A-Za-z0-9_#/,()@-])|(\+))?)"#,
         )
         .unwrap()
     })
@@ -2607,6 +2627,52 @@ mod tests {
         assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
         assert_eq!(plan.slots[3].alt_id.as_deref(), Some("2.2"));
         assert!(plan.slots[3].prompt.contains("%m:sonnet y\nReview"));
+    }
+
+    #[test]
+    fn extract_first_model_value_strips_known_effort_suffix() {
+        // A trailing `@<known-effort>` is peeled off so the slot is named by
+        // the clean model, mirroring the Python `split_model_effort` rule.
+        assert_eq!(
+            extract_first_model_value("%model:opus@xhigh do work"),
+            Some("opus".to_string())
+        );
+        assert_eq!(
+            extract_first_model_value("%m:codex/gpt-5.5@low do work"),
+            Some("codex/gpt-5.5".to_string())
+        );
+        // No suffix → unchanged.
+        assert_eq!(
+            extract_first_model_value("%model:opus do work"),
+            Some("opus".to_string())
+        );
+        // Unknown trailing token is not an effort level → left intact.
+        assert_eq!(
+            extract_first_model_value("%model:agy/flash@v2 do work"),
+            Some("agy/flash@v2".to_string())
+        );
+        // Backtick-literal model values keep any `@` verbatim.
+        assert_eq!(
+            extract_first_model_value("%model:`agy/flash@xhigh` do work"),
+            Some("agy/flash@xhigh".to_string())
+        );
+    }
+
+    #[test]
+    fn fanout_planner_strips_branch_effort_for_slot_naming() {
+        // Per-branch `@effort` fan-out: slots are named by the clean model
+        // while each branch body retains its `@effort` token for the launched
+        // agent's own directive parsing.
+        let prompt = "%{%m:opus@xhigh | %m:sonnet@low} %alt(x,y)\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 4);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert!(plan.slots[0].prompt.contains("%m:opus@xhigh"));
+        assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
+        assert!(plan.slots[3].prompt.contains("%m:sonnet@low"));
     }
 
     #[test]

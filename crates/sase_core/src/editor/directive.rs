@@ -1,10 +1,20 @@
 use super::wire::{CompletionCandidate, CompletionList, DirectiveMetadata};
+use crate::effort::EFFORT_LEVELS_ORDERED;
 
 pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "model",
         alias: Some("m"),
         description: "Override the LLM model for this prompt",
+        takes_argument: true,
+        allows_multiple: false,
+    },
+    DirectiveMetadata {
+        // No `%e` alias — that already means `%edit`. `%effort` is the only
+        // spelling, mirroring the Python xprompt parser.
+        name: "effort",
+        alias: None,
+        description: "Set the reasoning-effort level for this prompt",
         takes_argument: true,
         allows_multiple: false,
     },
@@ -152,6 +162,19 @@ pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
 
 pub fn directive_argument_candidates(name: &str) -> CompletionList {
     let canonical = canonical_directive_name(name).unwrap_or(name);
+    // `%effort` candidates come from the shared effort vocabulary so the editor
+    // stays in parity with the Python xprompt parser.
+    if canonical == "effort" {
+        return CompletionList {
+            candidates: EFFORT_LEVELS_ORDERED
+                .iter()
+                .map(|level| {
+                    argument_candidate(level, "Reasoning-effort level")
+                })
+                .collect(),
+            shared_extension: String::new(),
+        };
+    }
     let values: &[(&str, &str)] = match canonical {
         "xprompts_enabled" => &[
             ("false", "Disable xprompt expansion"),
@@ -168,21 +191,25 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
     CompletionList {
         candidates: values
             .iter()
-            .map(|(value, doc)| CompletionCandidate {
-                display: (*value).to_string(),
-                insertion: (*value).to_string(),
-                detail: None,
-                documentation: Some((*doc).to_string()),
-                is_dir: false,
-                name: (*value).to_string(),
-                replacement: None,
-                additional_edits: Vec::new(),
-                kind: String::new(),
-                project: String::new(),
-                status: String::new(),
-            })
+            .map(|(value, doc)| argument_candidate(value, doc))
             .collect(),
         shared_extension: String::new(),
+    }
+}
+
+fn argument_candidate(value: &str, doc: &str) -> CompletionCandidate {
+    CompletionCandidate {
+        display: value.to_string(),
+        insertion: value.to_string(),
+        detail: None,
+        documentation: Some(doc.to_string()),
+        is_dir: false,
+        name: value.to_string(),
+        replacement: None,
+        additional_edits: Vec::new(),
+        kind: String::new(),
+        project: String::new(),
+        status: String::new(),
     }
 }
 
@@ -248,5 +275,28 @@ mod tests {
             completions.candidates[0].documentation.as_deref(),
             Some("Wait for a duration or absolute wall-clock time")
         );
+    }
+
+    #[test]
+    fn effort_is_a_recognized_directive_without_alias() {
+        let effort = directive_metadata("effort").expect("effort metadata");
+        assert_eq!(effort.name, "effort");
+        assert_eq!(effort.alias, None);
+        assert!(effort.takes_argument);
+        assert!(!effort.allows_multiple);
+        // No `%e` alias — `e` still resolves to `edit`.
+        assert_eq!(canonical_directive_name("e"), Some("edit"));
+
+        let completions = build_directive_completion_candidates("%eff");
+        assert_eq!(completions.candidates.len(), 1);
+        assert_eq!(completions.candidates[0].insertion, "%effort");
+    }
+
+    #[test]
+    fn effort_argument_candidates_are_the_canonical_vocabulary() {
+        let candidates = directive_argument_candidates("effort").candidates;
+        let levels: Vec<&str> =
+            candidates.iter().map(|c| c.insertion.as_str()).collect();
+        assert_eq!(levels, EFFORT_LEVELS_ORDERED);
     }
 }

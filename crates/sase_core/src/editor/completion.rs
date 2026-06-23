@@ -834,6 +834,16 @@ fn detect_directive_context_at_position(
     }
 
     if let Some((name, arg_start)) = directive_arg_token(before) {
+        // A `@<effort>` suffix on a `%model` value completes from the effort
+        // vocabulary, mirroring the Python `%model:<model>@<effort>` split. The
+        // replacement range covers only the token after the `@`.
+        let (directive_name, arg_start) = match name {
+            "model" => match before[arg_start..].rfind('@') {
+                Some(rel_at) => ("effort", arg_start + rel_at + 1),
+                None => (name, arg_start),
+            },
+            _ => (name, arg_start),
+        };
         let byte_start = line_start + arg_start;
         let range = document.byte_range_to_range(byte_start, cursor)?;
         return Some(CompletionContext {
@@ -846,7 +856,7 @@ fn detect_directive_context_at_position(
             }),
             active_xprompt: None,
             active_input: None,
-            directive_name: Some(name.to_string()),
+            directive_name: Some(directive_name.to_string()),
             replacement_range: range,
         });
     }
@@ -1226,6 +1236,33 @@ mod tests {
         assert!(
             classify_completion_context(&doc, pos(13), &[ns_entry]).is_some()
         );
+    }
+
+    #[test]
+    fn model_at_suffix_completes_effort_vocabulary() {
+        let catalog = entries();
+
+        // Right after the `@`, the context targets the effort vocabulary.
+        let doc = DocumentSnapshot::new("%model:opus@");
+        let context =
+            classify_completion_context(&doc, pos(12), &catalog).unwrap();
+        assert_eq!(context.kind, CompletionContextKind::DirectiveArgument);
+        assert_eq!(context.directive_name.as_deref(), Some("effort"));
+        assert_eq!(context.token.as_ref().unwrap().text, "");
+
+        // A partially-typed level keeps the effort context; the token after the
+        // `@` is what the editor filters the effort vocabulary against.
+        let doc = DocumentSnapshot::new("%model:opus@xh");
+        let context =
+            classify_completion_context(&doc, pos(14), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("effort"));
+        assert_eq!(context.token.as_ref().unwrap().text, "xh");
+
+        // Before the `@`, it is still the model argument.
+        let doc = DocumentSnapshot::new("%model:opus");
+        let context =
+            classify_completion_context(&doc, pos(11), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("model"));
     }
 
     #[test]
