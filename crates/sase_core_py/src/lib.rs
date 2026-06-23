@@ -78,6 +78,10 @@
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
 //! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
 //! - `allocate_and_claim_workspace_from_content(content: str, min_workspace: int, max_workspace: int, request: dict) -> dict`
+//! - `config_field_model(schema: dict) -> dict`
+//! - `config_inventory(request: dict) -> dict`
+//! - `config_plan_edit(request: dict) -> dict`
+//! - `config_validate(request: dict) -> list[dict]`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -204,6 +208,14 @@ use sase_core::bead::{
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
+};
+use sase_core::config::{
+    config_field_model as core_config_field_model,
+    config_inventory as core_config_inventory,
+    config_plan_edit as core_config_plan_edit,
+    config_validate as core_config_validate, ConfigEditRequestWire,
+    ConfigError as ConfigDomainError, ConfigInventoryRequestWire,
+    ConfigValidateRequestWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -2878,6 +2890,106 @@ fn py_validate_frontmatter_field(
     json_value_to_py(py, &json)
 }
 
+// --- Config Center backend bindings ---------------------------------------
+//
+// JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
+// already-discovered layer stack and JSON Schema; these return plain
+// dicts/lists the Python adapter rehydrates into its dataclass mirrors. Domain
+// errors (e.g. an unknown target layer) surface as `ValueError`.
+
+fn config_error_to_pyerr(err: ConfigDomainError) -> PyErr {
+    PyValueError::new_err(format!("{err}"))
+}
+
+/// Flatten a JSON Schema dict into the ordered config field model dict.
+#[pyfunction]
+#[pyo3(name = "config_field_model")]
+fn py_config_field_model<'py>(
+    py: Python<'py>,
+    schema: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let schema_value = py_to_json_value(schema.as_any())?;
+    let model = core_config_field_model(&schema_value)
+        .map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&model).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Build the config inventory (sources + per-field provenance + diagnostics).
+///
+/// *request* is a `ConfigInventoryRequestWire`-shape dict: `schema`, ordered
+/// `layers`, and the optional `deprecations`/`unsupported` policy.
+#[pyfunction]
+#[pyo3(name = "config_inventory")]
+fn py_config_inventory<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ConfigInventoryRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid config inventory request: {e}"
+            ))
+        })?;
+    let inventory =
+        core_config_inventory(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&inventory).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Plan a single set/unset edit, returning the write-plan dict.
+///
+/// *request* is a `ConfigEditRequestWire`-shape dict: `schema`, `layers`,
+/// `target_layer`, `path`, and `op` (`{"kind": "set", "value": ...}` or
+/// `{"kind": "unset"}`).
+#[pyfunction]
+#[pyo3(name = "config_plan_edit")]
+fn py_config_plan_edit<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ConfigEditRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid config edit request: {e}"
+            ))
+        })?;
+    let plan = core_config_plan_edit(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Schema-validate a candidate merged config, returning diagnostic dicts.
+///
+/// *request* is a `ConfigValidateRequestWire`-shape dict: `schema` + `config`.
+#[pyfunction]
+#[pyo3(name = "config_validate")]
+fn py_config_validate<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ConfigValidateRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid config validate request: {e}"
+            ))
+        })?;
+    let diagnostics = core_config_validate(&req);
+    let json = serde_json::to_value(&diagnostics).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Return the launch wire schema version pinned by the Rust skeleton structs.
 #[pyfunction]
 #[pyo3(name = "agent_launch_wire_schema_version")]
@@ -3374,6 +3486,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
+    m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
+    m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
+    m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
+    m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;

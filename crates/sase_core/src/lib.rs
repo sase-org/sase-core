@@ -15,6 +15,7 @@ pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_scan;
 pub mod bead;
+pub mod config;
 pub mod editor;
 pub mod git_query;
 pub mod host_bridge;
@@ -152,6 +153,16 @@ pub use bead::{
     IssueWire, JsonlLoadOutcome, OperationOutcomeWire, StatusWire,
     BEAD_EVENT_SCHEMA_VERSION, BEAD_READ_WIRE_SCHEMA_VERSION,
     BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
+};
+pub use config::{
+    config_field_model, config_inventory, config_plan_edit, config_validate,
+    ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,
+    ConfigEditOpWire, ConfigEditPlanWire, ConfigEditRequestWire,
+    ConfigEffectivePreviewWire, ConfigError, ConfigFieldModelWire,
+    ConfigFieldStateWire, ConfigFieldWire, ConfigInventoryRequestWire,
+    ConfigInventoryWire, ConfigLayerInputWire, ConfigSourceWire,
+    ConfigValidateRequestWire, ConfigWritePlanWire,
+    ListStrategy as ConfigListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
 };
 pub use editor::{
     analyze_document as editor_analyze_document,
