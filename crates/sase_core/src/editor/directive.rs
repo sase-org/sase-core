@@ -6,7 +6,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         alias: Some("m"),
         description: "Override the LLM model for this prompt",
         takes_argument: true,
-        allows_multiple: true,
+        allows_multiple: false,
     },
     DirectiveMetadata {
         name: "name",
@@ -210,6 +210,9 @@ mod tests {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
         }
         assert!(directive_metadata("xprompts_enabled").is_some());
+
+        let model = directive_metadata("model").expect("model metadata");
+        assert!(!model.allows_multiple);
     }
 
     #[test]

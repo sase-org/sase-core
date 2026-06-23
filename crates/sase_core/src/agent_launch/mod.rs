@@ -201,6 +201,7 @@ impl std::error::Error for TimestampBatchAllocationError {}
 #[derive(Debug)]
 pub enum AgentLaunchFanoutPlanError {
     UnsupportedKind(String),
+    MultiModelUnsupported(String),
     UnclosedDirective { name: String, close: char },
 }
 
@@ -210,6 +211,7 @@ impl fmt::Display for AgentLaunchFanoutPlanError {
             Self::UnsupportedKind(kind) => {
                 write!(f, "unsupported launch fan-out kind {kind:?}")
             }
+            Self::MultiModelUnsupported(message) => write!(f, "{message}"),
             Self::UnclosedDirective { name, close } => {
                 write!(
                     f,
@@ -485,7 +487,7 @@ fn split_prompt_for_models_with_ids(
     ignored_ranges.extend(disabled_region_ranges(prompt));
     ignored_ranges.extend(alt_inner_ranges(prompt)?);
 
-    let mut directive_spans: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut valued_directive_spans: Vec<(usize, usize, String)> = Vec::new();
     for directive in directive_occurrences(prompt)? {
         if directive.canonical_name != "model" {
             continue;
@@ -496,60 +498,52 @@ fn split_prompt_for_models_with_ids(
         if directive.has_plus_suffix {
             continue;
         }
-        directive_spans.push((directive.start, directive.end, directive.args));
-    }
-
-    if directive_spans.is_empty() {
-        return Ok(
-            split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default()
-        );
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut unique_models = Vec::new();
-    for (_, _, args) in &directive_spans {
-        for arg in args {
-            if !arg.is_empty() && seen.insert(arg.clone()) {
-                unique_models.push(arg.clone());
-            }
-        }
-    }
-
-    if unique_models.len() <= 1 {
-        return Ok(
-            split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default()
-        );
-    }
-
-    let replacement = format!(
-        "%alt({})",
-        unique_models
+        let values: Vec<String> = directive
+            .args
             .iter()
-            .map(|model| format!("%model:{model}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let mut adjusted = Vec::new();
-    for (idx, (start, mut end, _)) in directive_spans.into_iter().enumerate() {
-        if idx > 0
-            && end < prompt.len()
-            && prompt.as_bytes()[end] == b'\n'
-            && (start == 0 || prompt.as_bytes()[start - 1] == b'\n')
-        {
-            end += 1;
+            .filter(|arg| !arg.is_empty())
+            .cloned()
+            .collect();
+        if values.len() > 1 {
+            let source = prompt[directive.start..directive.end].to_string();
+            return Err(AgentLaunchFanoutPlanError::MultiModelUnsupported(
+                multi_model_unsupported_message(&source, &values),
+            ));
         }
-        adjusted.push((start, end, idx == 0));
+        if let Some(value) = values.first() {
+            valued_directive_spans.push((
+                directive.start,
+                directive.end,
+                value.clone(),
+            ));
+        }
     }
 
-    let mut rewritten = prompt.to_string();
-    for (start, end, is_first) in adjusted.into_iter().rev() {
-        if is_first {
-            rewritten.replace_range(start..end, &replacement);
-        } else {
-            rewritten.replace_range(start..end, "");
-        }
+    if valued_directive_spans.len() > 1 {
+        let source = valued_directive_spans
+            .iter()
+            .map(|(start, end, _)| prompt[*start..*end].to_string())
+            .collect::<Vec<_>>()
+            .join(" ... ");
+        let models = valued_directive_spans
+            .iter()
+            .map(|(_, _, value)| value.clone())
+            .collect::<Vec<_>>();
+        return Err(AgentLaunchFanoutPlanError::MultiModelUnsupported(
+            multi_model_unsupported_message(&source, &models),
+        ));
     }
-    Ok(split_prompt_for_alternatives_with_ids(&rewritten)?.unwrap_or_default())
+
+    Ok(split_prompt_for_alternatives_with_ids(prompt)?.unwrap_or_default())
+}
+
+fn multi_model_unsupported_message(source: &str, models: &[String]) -> String {
+    let replacement = models
+        .iter()
+        .map(|model| format!("%m:{model}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("{source} is no longer supported; use %{{{replacement}}} instead")
 }
 
 fn split_prompt_for_alternatives_with_ids(
@@ -2583,8 +2577,25 @@ mod tests {
     }
 
     #[test]
-    fn fanout_planner_splits_models_and_alternatives() {
+    fn fanout_planner_rejects_repeated_top_level_models_with_alternatives() {
         let prompt = "%name:foo\n%model:opus\n%model:sonnet %alt(x,y)\nReview";
+
+        let err = plan_agent_launch_fanout(prompt, Some("model")).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("%model:opus ... %model:sonnet"),
+            "message was {message:?}"
+        );
+        assert!(
+            message.contains("use %{%m:opus | %m:sonnet} instead"),
+            "message was {message:?}"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_splits_model_branches_and_alternatives() {
+        let prompt = "%name:foo\n%{%m:opus | %m:sonnet} %alt(x,y)\nReview";
 
         let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
 
@@ -2592,10 +2603,10 @@ mod tests {
         assert_eq!(plan.slots.len(), 4);
         assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
         assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1.1"));
-        assert!(plan.slots[0].prompt.contains("%model:opus\n x\nReview"));
+        assert!(plan.slots[0].prompt.contains("%m:opus x\nReview"));
         assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
         assert_eq!(plan.slots[3].alt_id.as_deref(), Some("2.2"));
-        assert!(plan.slots[3].prompt.contains("%model:sonnet\n y\nReview"));
+        assert!(plan.slots[3].prompt.contains("%m:sonnet y\nReview"));
     }
 
     #[test]
@@ -2833,7 +2844,7 @@ mod tests {
 
     #[test]
     fn fanout_planner_empty_branch_preserves_following_directive_separator() {
-        let prompt = "Do work. %{extra} %model(opus,gpt-5.5)";
+        let prompt = "Do work. %{extra} %{%m:opus | %m:gpt-5.5}";
 
         let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
 
@@ -2850,10 +2861,10 @@ mod tests {
                 .map(|slot| slot.prompt.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "Do work. extra %model:opus",
-                "Do work. extra %model:gpt-5.5",
-                "Do work. %model:opus",
-                "Do work. %model:gpt-5.5",
+                "Do work. extra %m:opus",
+                "Do work. extra %m:gpt-5.5",
+                "Do work. %m:opus",
+                "Do work. %m:gpt-5.5",
             ]
         );
     }
@@ -2912,19 +2923,115 @@ mod tests {
     }
 
     #[test]
-    fn fanout_planner_brace_does_not_double_collect_nested_models() {
+    fn fanout_planner_rejects_repeated_models_with_brace_alternatives() {
         let prompt = "%model:opus\n%model:sonnet %{x | y}\nReview";
+
+        let err = plan_agent_launch_fanout(prompt, Some("model")).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("%model:opus ... %model:sonnet"),
+            "message was {message:?}"
+        );
+        assert!(
+            message.contains("use %{%m:opus | %m:sonnet} instead"),
+            "message was {message:?}"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_rejects_paren_multi_model_directive() {
+        let err =
+            plan_agent_launch_fanout("%m(opus,sonnet) review", Some("model"))
+                .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("%m(opus,sonnet) is no longer supported"),
+            "message was {message:?}"
+        );
+        assert!(
+            message.contains("use %{%m:opus | %m:sonnet} instead"),
+            "message was {message:?}"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_rejects_repeated_top_level_model_directives() {
+        let err = plan_agent_launch_fanout(
+            "%model:opus\n%model:sonnet\nreview",
+            Some("model"),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("%model:opus ... %model:sonnet"),
+            "message was {message:?}"
+        );
+        assert!(
+            message.contains("use %{%m:opus | %m:sonnet} instead"),
+            "message was {message:?}"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_rejects_same_value_repeated_model_directives() {
+        let err = plan_agent_launch_fanout(
+            "%model:opus\n%model:opus\nreview",
+            Some("model"),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("use %{%m:opus | %m:opus} instead"),
+            "message was {message:?}"
+        );
+    }
+
+    #[test]
+    fn fanout_planner_single_top_level_model_is_single_launch() {
+        for prompt in ["%m:opus review", "%model(opus) review"] {
+            let plan = plan_agent_launch_fanout(prompt, Some("auto")).unwrap();
+
+            assert_eq!(plan.launch_kind, "single");
+            assert_eq!(plan.slots.len(), 1);
+            assert_eq!(plan.slots[0].prompt, prompt);
+        }
+    }
+
+    #[test]
+    fn fanout_planner_brace_model_branches_report_model_slots() {
+        let prompt = "%{%m:opus | %m:sonnet}\nReview";
 
         let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
 
         assert_eq!(plan.launch_kind, "model");
-        assert_eq!(plan.slots.len(), 4);
-        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
-        assert_eq!(plan.slots[0].alt_id.as_deref(), Some("1.1"));
-        assert!(plan.slots[0].prompt.contains("%model:opus\n x\nReview"));
-        assert_eq!(plan.slots[3].model.as_deref(), Some("sonnet"));
-        assert_eq!(plan.slots[3].alt_id.as_deref(), Some("2.2"));
-        assert!(plan.slots[3].prompt.contains("%model:sonnet\n y\nReview"));
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("sonnet")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1"), Some("2")]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_unvalued_model_markers_do_not_count_as_repeated() {
+        let prompt = "%model\n%model()\n%model+ %{x | y}";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(plan.slots.len(), 2);
     }
 
     #[test]
