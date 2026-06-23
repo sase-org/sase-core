@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 4;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 5;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -676,6 +676,9 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
         ensure_agent_artifacts_column(&conn, "workflow_name", "TEXT")?;
         ensure_agent_artifacts_column(&conn, "agent_family", "TEXT")?;
     }
+    if prior_version.map_or(true, |v| v < 5) {
+        migrate_record_json_refresh_v5(&mut conn)?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -858,6 +861,14 @@ fn migrate_recompute_hidden_v2(conn: &mut Connection) -> Result<(), String> {
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// v5 adds `agent_meta.linked_repos` inside `record_json`.
+///
+/// There is no DDL to apply; callers that need existing rows refreshed run a
+/// full rebuild so each row is reserialized from source marker files.
+fn migrate_record_json_refresh_v5(conn: &mut Connection) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
 }
 
 fn upsert_record(

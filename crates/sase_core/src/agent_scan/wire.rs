@@ -242,6 +242,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub workspace_dir: Option<String>,
     #[serde(default)]
+    pub linked_repos: Vec<Map<String, Value>>,
+    #[serde(default)]
     pub approve: bool,
     #[serde(default)]
     pub auto_approve_plan_action: Option<String>,

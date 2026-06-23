@@ -739,6 +739,19 @@ fn coerce_object(value: Option<&Value>) -> Option<Map<String, Value>> {
     }
 }
 
+fn coerce_object_list(value: Option<&Value>) -> Vec<Map<String, Value>> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Value::Object(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn coerce_str_str_map(
     value: Option<&Value>,
 ) -> Option<BTreeMap<String, String>> {
@@ -831,6 +844,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         parent_timestamp: coerce_str(data.get("parent_timestamp")),
         workspace_num: coerce_int(data.get("workspace_num")),
         workspace_dir: coerce_str(data.get("workspace_dir")),
+        linked_repos: coerce_object_list(data.get("linked_repos")),
         approve: coerce_bool_truthy(data.get("approve")),
         auto_approve_plan_action: coerce_str(
             data.get("auto_approve_plan_action"),

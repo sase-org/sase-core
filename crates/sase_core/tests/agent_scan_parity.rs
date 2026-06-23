@@ -691,6 +691,80 @@ fn running_record_carries_string_output_variables() {
 }
 
 #[test]
+fn running_record_carries_linked_repos_through_scan_and_index() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    write_json(
+        &root
+            .join("myproj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(TS_ACE_RUN_RUNNING)
+            .join("agent_meta.json"),
+        &json!({
+            "name": "running_alpha",
+            "workspace_dir": "/tmp/workspaces/alpha",
+            "linked_repos": [
+                {
+                    "name": "sase-core",
+                    "workspace_dir": "/tmp/workspaces/sase-core_14",
+                    "workspace_strategy": "suffix"
+                },
+                "ignored",
+                {
+                    "name": "sase-github",
+                    "workspace_dir": "/tmp/workspaces/sase-github_14",
+                    "workspace_strategy": "suffix"
+                }
+            ],
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
+    let meta = rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(meta.linked_repos.len(), 2);
+    assert_eq!(
+        meta.linked_repos[0].get("name").and_then(Value::as_str),
+        Some("sase-core")
+    );
+    assert_eq!(
+        meta.linked_repos[1]
+            .get("workspace_dir")
+            .and_then(Value::as_str),
+        Some("/tmp/workspaces/sase-github_14")
+    );
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: false,
+            include_full_history: false,
+            active_limit: None,
+            recent_completed_limit: None,
+            include_hidden: true,
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed_rec = record_by_timestamp(&indexed, TS_ACE_RUN_RUNNING);
+    let indexed_meta = indexed_rec.agent_meta.as_ref().unwrap();
+
+    assert_eq!(indexed_meta.linked_repos, meta.linked_repos);
+}
+
+#[test]
 fn running_record_carries_wait_completed_at() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
