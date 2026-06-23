@@ -1408,7 +1408,7 @@ fn directive_re() -> &'static Regex {
 fn alt_directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?m)(^|[\s\(\[\{"'])(%(?:alt)?\(|%\{)"#).unwrap()
+        Regex::new(r#"(?m)(^|[\s\(\[\{"':])(%(?:alt)?\(|%\{)"#).unwrap()
     })
 }
 
@@ -2986,6 +2986,98 @@ mod tests {
         assert_eq!(plan.slots[0].alt_id.as_deref(), Some("opus"));
         assert_eq!(plan.slots[1].model.as_deref(), Some("sonnet"));
         assert_eq!(plan.slots[1].alt_id.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn fanout_planner_brace_value_fanout_after_directive_colon() {
+        let prompt = "%m:opus %effort:%{medium | high | xhigh}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("opus"), Some("opus")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1"), Some("2"), Some("3")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "%m:opus %effort:medium\nReview",
+                "%m:opus %effort:high\nReview",
+                "%m:opus %effort:xhigh\nReview",
+            ]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_model_value_fanout_after_directive_colon() {
+        let prompt = "%m:%{opus | sonnet}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("sonnet")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec!["%m:opus\nReview", "%m:sonnet\nReview"]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_value_fanouts_compose_cartesian() {
+        let prompt = "%m:%{opus | sonnet} %effort:%{medium | high}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("opus"), Some("sonnet"), Some("sonnet")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1.1"), Some("1.2"), Some("2.1"), Some("2.2")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "%m:opus %effort:medium\nReview",
+                "%m:opus %effort:high\nReview",
+                "%m:sonnet %effort:medium\nReview",
+                "%m:sonnet %effort:high\nReview",
+            ]
+        );
     }
 
     #[test]
