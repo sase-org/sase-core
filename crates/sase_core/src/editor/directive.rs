@@ -28,16 +28,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "wait",
         alias: Some("w"),
-        description: "Wait for another agent or workflow",
-        takes_argument: true,
-        allows_multiple: true,
-    },
-    DirectiveMetadata {
-        // No `%t` alias. `%time` keeps its long
-        // spelling only, mirroring the Python xprompt parser.
-        name: "time",
-        alias: None,
-        description: "Wait for a duration or absolute wall-clock time",
+        description: "Wait for another agent/workflow and/or a time floor",
         takes_argument: true,
         allows_multiple: true,
     },
@@ -175,10 +166,11 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("epic", "Auto-approve and commit as an SDD epic"),
         ],
         "edit" | "hide" => &[],
-        "time" => {
-            &[("5m", "Wait for five minutes"), ("1h", "Wait for one hour")]
-        }
-        "wait" => &[("agent", "Wait for an agent or workflow")],
+        "wait" => &[
+            ("agent", "Wait for an agent or workflow"),
+            ("time=5m", "Wait for five minutes"),
+            ("time=1h", "Wait for one hour"),
+        ],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
         _ => &[],
     };
@@ -231,6 +223,7 @@ mod tests {
         assert!(directive_metadata("xprompts_enabled").is_some());
         assert_eq!(canonical_directive_name("p"), None);
         assert_eq!(canonical_directive_name("t"), None);
+        assert_eq!(canonical_directive_name("time"), None);
         assert_eq!(canonical_directive_name("approve"), None);
 
         let model = directive_metadata("model").expect("model metadata");
@@ -277,23 +270,26 @@ mod tests {
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
         assert_eq!(values, ["plan", "tale", "epic"]);
-
-        let time = directive_metadata("time").expect("time metadata");
-        assert_eq!(time.alias, None);
     }
 
     #[test]
-    fn directive_completion_t_prefix_yields_only_time() {
+    fn directive_completion_t_prefix_yields_no_directives() {
         let t_completions = build_directive_completion_candidates("%t");
         let t_names: Vec<&str> = t_completions
             .candidates
             .iter()
             .map(|candidate| candidate.name.as_str())
             .collect();
-        assert_eq!(t_names, ["time"]);
+        assert!(t_names.is_empty());
 
-        let tale = build_directive_completion_candidates("%ta");
-        assert!(tale.candidates.is_empty());
+        for token in ["%ta", "%ti", "%time"] {
+            assert!(
+                build_directive_completion_candidates(token)
+                    .candidates
+                    .is_empty(),
+                "{token} should not complete"
+            );
+        }
     }
 
     #[test]
@@ -301,6 +297,7 @@ mod tests {
         assert_eq!(canonical_directive_name("approve"), None);
         assert_eq!(canonical_directive_name("p"), None);
         assert_eq!(canonical_directive_name("t"), None);
+        assert_eq!(canonical_directive_name("time"), None);
 
         assert!(build_directive_completion_candidates("%approve")
             .candidates
@@ -341,5 +338,14 @@ mod tests {
         let levels: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
         assert_eq!(levels, EFFORT_LEVELS_ORDERED);
+    }
+
+    #[test]
+    fn wait_argument_candidates_include_time_keyword() {
+        let candidates = directive_argument_candidates("wait").candidates;
+        let values: Vec<&str> =
+            candidates.iter().map(|c| c.insertion.as_str()).collect();
+        assert_eq!(values, ["agent", "time=5m", "time=1h"]);
+        assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 }

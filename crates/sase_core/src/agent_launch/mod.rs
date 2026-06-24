@@ -1024,10 +1024,10 @@ fn extract_repeat_and_name_rust(
 }
 
 fn has_wait_directive(prompt: &str) -> bool {
-    if !prompt.contains('%') {
-        return false;
+    if prompt.contains('%') && wait_directive_re().is_match(prompt) {
+        return true;
     }
-    wait_directive_re().is_match(prompt)
+    prompt.contains("#t") && t_time_xprompt_re().is_match(prompt)
 }
 
 fn extract_first_model_value(prompt: &str) -> Option<String> {
@@ -1409,6 +1409,11 @@ fn wait_directive_re() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(r"(?m)(^|\s)%(?:wait|w)(?:[:+(]|\s|$)").unwrap()
     })
+}
+
+fn t_time_xprompt_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?m)(^|[\s\(\[\{"'])#t[:(]"#).unwrap())
 }
 
 fn disabled_region_re() -> &'static Regex {
@@ -2403,16 +2408,39 @@ mod tests {
     }
 
     #[test]
-    fn fanout_planner_time_directive_is_not_previous_wait() {
+    fn fanout_planner_time_waits_defer_workspace() {
+        let prompt = "%wait(time=5m)\ntwo";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+
+        // `%time` is no longer an advertised directive. The time floor now
+        // travels through `%wait(time=...)`, which still marks the slot as
+        // deferred for workspace allocation.
+        assert_eq!(canonical_directive_name("t"), "t");
+        assert_eq!(canonical_directive_name("time"), "time");
+        assert_eq!(plan.slots.len(), 1);
+        assert!(plan.slots[0].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_t_xprompt_defer_workspace() {
+        let prompt = "#t:5m\ntwo";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+
+        assert_eq!(plan.slots.len(), 1);
+        assert!(plan.slots[0].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_deprecated_time_directive_is_not_special() {
         let prompt = "%time:5m\ntwo";
 
         let plan =
             plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
 
-        // `%t` no longer aliases `%time` and no longer resolves as an
-        // auto-approval directive; the long `%time` spelling keeps its meaning.
-        assert_eq!(canonical_directive_name("t"), "t");
-        assert_eq!(canonical_directive_name("time"), "time");
         assert_eq!(plan.slots.len(), 1);
         assert!(!plan.slots[0].wait_for_previous);
     }
