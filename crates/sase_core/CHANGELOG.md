@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/sase-org/sase-core/compare/v0.1.4...v0.2.0) - 2026-06-24
+
+### Added
+
+- *(editor)* [**breaking**] add %tale directive and repurpose %plan for plan auto-approval (sase-56.1)
+- support directive value fanout
+- *(agent-scan)* project reasoning_effort through the scan wire (sase-55.4)
+- *(editor)* mirror reasoning-effort vocabulary in directive grammar (sase-55.5)
+- [**breaking**] remove legacy multi-model directives
+- *(config)* add Rust core config backend (sase-54.1)
+- delete dismissed agent groups
+- support snippet reference syntax
+- *(lsp)* advertise %{A | B} alt shorthand in directive surfaces (sase-52.5)
+- *(agent_launch)* support %{...} alt fan-out shorthand (sase-52.1)
+- *(xprompt-lsp)* carry PR context through VCS completions
+- *(editor)* open VCS project completion on bare `+` at prompt start
+- [**breaking**] require #+ for VCS project completions
+- *(editor)* support log_skill_use xprompt frontmatter field
+- *(editor)* add vcs_project completion context, builder, and transform (sase-4z.3)
+- *(bead-search)* return matches newest-first
+- *(xprompt-lsp)* highlight prompt separators with semantic tokens
+- *(plan)* add core plan search engine (sase-4x.2)
+- *(plan)* add core plan model + discovery read layer (sase-4x.1)
+- *(plan)* expose plan search via PyO3 binding (sase-4x.3)
+
+### Fixed
+
+- *(agent_launch)* align directive aliases with the shared registry (sase-56)
+- *(agent_scan)* bump artifact-index schema to v6 for reasoning_effort
+- *(agent-scan)* preserve linked repo metadata
+- *(editor)* replace VCS tag at EOF during `#+` completion
+- collapse empty alt whitespace
+- correlate repeated alt branch names
+- preserve blank lines in VCS completion edits
+
+### Other
+
+- format directive completion assertion
+- satisfy Clippy 1.96 lints in core crate
+- Revert "feat(xprompt-lsp): highlight prompt separators with semantic tokens"
+
 ## [0.1.4](https://github.com/sase-org/sase-core/compare/v0.1.3...v0.1.4) - 2026-06-18
 
 ### Fixed
