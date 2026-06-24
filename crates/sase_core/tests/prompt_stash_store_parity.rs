@@ -4,7 +4,7 @@ use std::thread;
 
 use sase_core::prompt_stash::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
-    rewrite_prompt_stash, PromptStashEntryWire,
+    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -22,6 +22,7 @@ fn entry(id: &str) -> PromptStashEntryWire {
         project: None,
         source: "current".to_string(),
         pane_index: 0,
+        pinned: false,
     }
 }
 
@@ -43,6 +44,7 @@ fn prompt_stash_append_and_read_round_trip() {
     first.project = Some("proj-a".to_string());
     first.frontmatter = "model: claude\n".to_string();
     first.pane_index = 0;
+    first.pinned = true;
     let snapshot = append_prompt_stash(&path, &first).unwrap();
     assert_eq!(snapshot.entries.len(), 1);
 
@@ -53,6 +55,10 @@ fn prompt_stash_append_and_read_round_trip() {
 
     assert_eq!(snapshot.entries, vec![first, second]);
     assert_eq!(snapshot.stats.loaded_rows, 2);
+    let content = fs::read_to_string(&path).unwrap();
+    let first_line: serde_json::Value =
+        serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    assert_eq!(first_line.get("pinned"), Some(&json!(true)));
 }
 
 #[test]
@@ -81,6 +87,7 @@ fn prompt_stash_skips_blank_and_malformed_rows() {
     assert_eq!(loaded.frontmatter, "");
     assert_eq!(loaded.project, None);
     assert_eq!(loaded.pane_index, 0);
+    assert!(!loaded.pinned);
     assert_eq!(snapshot.stats.blank_lines, 1);
     assert_eq!(snapshot.stats.invalid_json_lines, 1);
     assert_eq!(snapshot.stats.invalid_record_lines, 2);
@@ -125,6 +132,75 @@ fn prompt_stash_pop_unknown_ids_is_a_no_op() {
 }
 
 #[test]
+fn prompt_stash_set_pinned_sets_and_clears_matching_ids() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    append_prompt_stash(&path, &entry("a")).unwrap();
+    append_prompt_stash(&path, &entry("b")).unwrap();
+    append_prompt_stash(&path, &entry("c")).unwrap();
+
+    let snapshot = set_prompt_stash_pinned(
+        &path,
+        &["a".to_string(), "c".to_string()],
+        true,
+    )
+    .unwrap();
+    let pinned_ids: Vec<&str> = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.pinned)
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(pinned_ids, vec!["a", "c"]);
+
+    let snapshot =
+        set_prompt_stash_pinned(&path, &["a".to_string()], false).unwrap();
+    let pinned_ids: Vec<&str> = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.pinned)
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(pinned_ids, vec!["c"]);
+
+    let snapshot =
+        set_prompt_stash_pinned(&path, &["missing".to_string()], true).unwrap();
+    let pinned_ids: Vec<&str> = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.pinned)
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(pinned_ids, vec!["c"]);
+
+    let snapshot = read_prompt_stash_snapshot(&path).unwrap();
+    assert!(
+        !snapshot
+            .entries
+            .iter()
+            .find(|e| e.id == "a")
+            .unwrap()
+            .pinned
+    );
+    assert!(
+        !snapshot
+            .entries
+            .iter()
+            .find(|e| e.id == "b")
+            .unwrap()
+            .pinned
+    );
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .find(|e| e.id == "c")
+            .unwrap()
+            .pinned
+    );
+}
+
+#[test]
 fn prompt_stash_rewrite_merges_and_preserves_unseen_rows() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
@@ -149,6 +225,7 @@ fn prompt_stash_json_shape_uses_expected_wire_keys() {
     e.frontmatter = "x: 1\n".to_string();
     e.source = "all".to_string();
     e.pane_index = 2;
+    e.pinned = true;
     let value = serde_json::to_value(&e).unwrap();
     assert_eq!(
         value,
@@ -159,7 +236,8 @@ fn prompt_stash_json_shape_uses_expected_wire_keys() {
             "frontmatter": "x: 1\n",
             "project": "proj",
             "source": "all",
-            "pane_index": 2
+            "pane_index": 2,
+            "pinned": true
         })
     );
 }

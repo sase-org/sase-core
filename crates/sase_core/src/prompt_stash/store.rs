@@ -79,6 +79,35 @@ pub fn pop_prompt_stash(
     result
 }
 
+/// Set the persisted pin flag for entries whose ids appear in `ids`, returning
+/// a fresh snapshot of the store. Unknown ids are ignored.
+pub fn set_prompt_stash_pinned(
+    path: &Path,
+    ids: &[String],
+    pinned: bool,
+) -> Result<PromptStashSnapshotWire, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+    let result = (|| {
+        let (mut rows, _) = read_rows_unlocked(path)?;
+        let wanted: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut changed = false;
+        for row in &mut rows {
+            if wanted.contains(row.id.as_str()) && row.pinned != pinned {
+                row.pinned = pinned;
+                changed = true;
+            }
+        }
+        if changed {
+            write_entries_atomic(path, &rows)?;
+        }
+        let (entries, stats) = read_rows_unlocked(path)?;
+        Ok(snapshot_from_rows(entries, stats))
+    })();
+    unlock(lock)?;
+    result
+}
+
 pub fn rewrite_prompt_stash(
     path: &Path,
     entries: &[PromptStashEntryWire],

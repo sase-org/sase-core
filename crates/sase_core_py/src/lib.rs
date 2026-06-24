@@ -61,6 +61,7 @@
 //! - `read_prompt_stash_snapshot(path: str) -> dict`
 //! - `append_prompt_stash(path: str, entry: dict) -> dict`
 //! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
+//! - `set_prompt_stash_pinned(path: str, ids: list[str], pinned: bool) -> dict`
 //! - `rewrite_prompt_stash(path: str, entries: list[dict]) -> dict`
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
@@ -245,7 +246,9 @@ use sase_core::prompt_stash::{
     append_prompt_stash as core_append_prompt_stash,
     pop_prompt_stash as core_pop_prompt_stash,
     read_prompt_stash_snapshot as core_read_prompt_stash_snapshot,
-    rewrite_prompt_stash as core_rewrite_prompt_stash, PromptStashEntryWire,
+    rewrite_prompt_stash as core_rewrite_prompt_stash,
+    set_prompt_stash_pinned as core_set_prompt_stash_pinned,
+    PromptStashEntryWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -2461,6 +2464,25 @@ fn py_pop_prompt_stash(
     json_value_to_py(py, &value)
 }
 
+/// Set the persisted pin flag for entries whose ids appear in `ids`.
+#[pyfunction]
+#[pyo3(name = "set_prompt_stash_pinned")]
+fn py_set_prompt_stash_pinned(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+    pinned: bool,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot =
+        py.allow_threads(|| core_set_prompt_stash_pinned(&path, &ids, pinned));
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
 /// Rewrite the prompt-stash store from entry dicts (merge semantics).
 #[pyfunction]
 #[pyo3(name = "rewrite_prompt_stash")]
@@ -3481,6 +3503,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_read_prompt_stash_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_set_prompt_stash_pinned, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_frontmatter_field_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;

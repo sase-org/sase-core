@@ -20,6 +20,8 @@ pub struct PromptStashEntryWire {
     pub source: String,
     #[serde(default)]
     pub pane_index: u32,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
