@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/sase-org/sase-core/compare/v0.1.4...v0.2.0) - 2026-06-24
+
+### Added
+
+- *(config)* add Rust core config backend (sase-54.1)
+- delete dismissed agent groups
+- *(plan)* expose plan search via PyO3 binding (sase-4x.3)
+
 ## [0.1.3](https://github.com/sase-org/sase-core/compare/v0.1.2...v0.1.3) - 2026-06-18
 
 ### Added
