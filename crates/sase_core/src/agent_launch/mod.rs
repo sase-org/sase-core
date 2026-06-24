@@ -1375,20 +1375,13 @@ fn position_in_ranges(pos: usize, ranges: &[(usize, usize)]) -> bool {
         .any(|(start, end)| *start <= pos && pos < *end)
 }
 
+/// Canonicalize a directive name for fan-out planning by deferring to the
+/// shared editor directive registry. This keeps the planner in lock-step with
+/// the advertised directive set — `%p`→`plan`, `%t`→`tale`, and the deprecated
+/// `%a`/`%approve`→`plan` — instead of maintaining a second alias table that
+/// can drift. Unknown names pass through unchanged.
 fn canonical_directive_name(name: &str) -> &str {
-    match name {
-        "a" => "approve",
-        "e" => "edit",
-        "h" => "hide",
-        "m" => "model",
-        "n" => "name",
-        "r" => "repeat",
-        "p" => "plan",
-        "t" => "time",
-        "g" => "group",
-        "w" => "wait",
-        other => other,
-    }
+    crate::editor::directive::canonical_directive_name(name).unwrap_or(name)
 }
 
 fn directive_re() -> &'static Regex {
@@ -2417,7 +2410,10 @@ mod tests {
         let plan =
             plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
 
-        assert_eq!(canonical_directive_name("t"), "time");
+        // `%t` no longer aliases `%time`; it now resolves to `%tale`, while the
+        // long `%time` spelling keeps its meaning.
+        assert_eq!(canonical_directive_name("t"), "tale");
+        assert_eq!(canonical_directive_name("time"), "time");
         assert_eq!(plan.slots.len(), 1);
         assert!(!plan.slots[0].wait_for_previous);
     }
