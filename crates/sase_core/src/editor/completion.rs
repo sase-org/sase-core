@@ -1016,6 +1016,8 @@ fn xprompt_ref_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::directive::directive_argument_candidates;
+    use crate::effort::EFFORT_LEVELS_ORDERED;
     use crate::{EditorXpromptCatalogEntryWire, MobileXpromptInputWire};
 
     fn pos(character: u32) -> EditorPosition {
@@ -1097,6 +1099,38 @@ mod tests {
             let context =
                 classify_completion_context(&doc, pos(col), &catalog).unwrap();
             assert_eq!(context.kind, kind, "{text}");
+        }
+    }
+
+    #[test]
+    fn effort_and_auto_directive_arguments_classify_with_candidates() {
+        let catalog = entries();
+        let cases: Vec<(&str, u32, &str, &str, Vec<&str>)> = vec![
+            ("%effort:", 8, "effort", "", EFFORT_LEVELS_ORDERED.to_vec()),
+            (
+                "%effort:xh",
+                10,
+                "effort",
+                "xh",
+                EFFORT_LEVELS_ORDERED.to_vec(),
+            ),
+            ("%auto:", 6, "auto", "", vec!["plan", "tale", "epic"]),
+            ("%auto:t", 7, "auto", "t", vec!["plan", "tale", "epic"]),
+        ];
+
+        for (text, col, directive_name, token, expected_values) in cases {
+            let doc = DocumentSnapshot::new(text);
+            let context =
+                classify_completion_context(&doc, pos(col), &catalog).unwrap();
+            assert_eq!(context.kind, CompletionContextKind::DirectiveArgument);
+            assert_eq!(context.directive_name.as_deref(), Some(directive_name));
+            assert_eq!(context.token.as_ref().unwrap().text, token);
+
+            let candidates =
+                directive_argument_candidates(directive_name).candidates;
+            let values: Vec<&str> =
+                candidates.iter().map(|c| c.insertion.as_str()).collect();
+            assert_eq!(values, expected_values, "{text}");
         }
     }
 

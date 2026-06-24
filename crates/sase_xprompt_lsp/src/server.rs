@@ -1624,6 +1624,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completes_directive_argument_values() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let response = server
+            .completion_for_text(
+                "%effort:".to_string(),
+                Position {
+                    line: 0,
+                    character: 8,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        let labels: Vec<&str> =
+            items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_text_completion_item(&items, "high", 8, 8, "high");
+
+        let response = server
+            .completion_for_text(
+                "%auto:t".to_string(),
+                Position {
+                    line: 0,
+                    character: 7,
+                },
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        let labels: Vec<&str> =
+            items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["plan", "tale", "epic"]);
+        assert_text_completion_item(&items, "tale", 6, 7, "tale");
+    }
+
+    #[tokio::test]
     async fn xprompt_snippet_completions_use_single_row_skeletons() {
         let entries = vec![
             catalog_entry(
@@ -2228,6 +2278,40 @@ mod tests {
         else {
             panic!("expected text edit for {label}");
         };
+        assert_eq!(edit.new_text.as_str(), new_text);
+    }
+
+    fn assert_text_completion_item(
+        items: &[CompletionItem],
+        label: &str,
+        start_character: u32,
+        end_character: u32,
+        new_text: &str,
+    ) {
+        let item = items
+            .iter()
+            .find(|item| item.label == label)
+            .unwrap_or_else(|| panic!("missing completion item {label}"));
+        assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
+        assert_eq!(item.filter_text.as_deref(), Some(label));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit for {label}");
+        };
+        assert_eq!(
+            edit.range.start,
+            Position {
+                line: 0,
+                character: start_character,
+            }
+        );
+        assert_eq!(
+            edit.range.end,
+            Position {
+                line: 0,
+                character: end_character,
+            }
+        );
         assert_eq!(edit.new_text.as_str(), new_text);
     }
 
