@@ -55,6 +55,7 @@ const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 /// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
 /// fresh on every `#+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
+const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -67,6 +68,10 @@ struct ServerConfig {
     /// [`VCS_PROJECT_CATALOG_ENV`] at startup. The file itself is re-read fresh
     /// on each `#+` completion request (see [`load_vcs_project_catalog`]).
     vcs_project_catalog: Option<PathBuf>,
+    /// Path to the materialized `%model` completion catalog, captured from
+    /// [`MODEL_CATALOG_ENV`] at startup. The file itself is re-read fresh on
+    /// each `%model` argument completion request.
+    model_catalog: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -78,8 +83,19 @@ impl Default for ServerConfig {
             snippet_support: false,
             allow_all_markdown: false,
             vcs_project_catalog: vcs_project_catalog_path(),
+            model_catalog: model_catalog_path(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelCompletionEntry {
+    value: String,
+    display: String,
+    description: String,
+    kind: String,
+    provider: String,
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -506,7 +522,16 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveArgument => context
                 .directive_name
                 .as_deref()
-                .map(editor_directive_argument_candidates)
+                .map(|name| {
+                    if name == "model" {
+                        model_completion_list(
+                            token,
+                            config.model_catalog.as_deref(),
+                        )
+                    } else {
+                        editor_directive_argument_candidates(name)
+                    }
+                })
                 .unwrap_or_else(empty_completion_list),
             CompletionContextKind::XpromptArgumentName => context
                 .active_xprompt
@@ -882,11 +907,16 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         vcs_project_catalog: vcs_project_catalog_path(),
+        model_catalog: model_catalog_path(),
     }
 }
 
 fn vcs_project_catalog_path() -> Option<PathBuf> {
     std::env::var_os(VCS_PROJECT_CATALOG_ENV).map(PathBuf::from)
+}
+
+fn model_catalog_path() -> Option<PathBuf> {
+    std::env::var_os(MODEL_CATALOG_ENV).map(PathBuf::from)
 }
 
 fn snippet_support(capabilities: &ClientCapabilities) -> bool {
@@ -1050,6 +1080,59 @@ fn empty_completion_list() -> CompletionList {
     }
 }
 
+fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
+    let entries = load_model_catalog(path);
+    let needle = partial.to_lowercase();
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let value_lower = entry.value.to_lowercase();
+        let matched_alias = entry
+            .aliases
+            .iter()
+            .find(|alias| alias.to_lowercase().starts_with(&needle));
+        let filter_text =
+            if needle.is_empty() || value_lower.starts_with(&needle) {
+                entry.value.clone()
+            } else if let Some(alias) = matched_alias {
+                alias.clone()
+            } else {
+                continue;
+            };
+        let display = if entry.display.is_empty() {
+            entry.value.clone()
+        } else {
+            entry.display.clone()
+        };
+        let detail_parts: Vec<&str> = [
+            (!entry.provider.is_empty()).then_some(entry.provider.as_str()),
+            (!entry.description.is_empty())
+                .then_some(entry.description.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let detail =
+            (!detail_parts.is_empty()).then(|| detail_parts.join("  "));
+        candidates.push(CompletionCandidate {
+            display,
+            insertion: entry.value.clone(),
+            detail,
+            documentation: None,
+            is_dir: false,
+            name: filter_text,
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: entry.kind,
+            project: String::new(),
+            status: String::new(),
+        });
+    }
+    CompletionList {
+        candidates,
+        shared_extension: String::new(),
+    }
+}
+
 fn file_history() -> Vec<String> {
     let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
@@ -1123,6 +1206,75 @@ fn load_vcs_project_catalog(
         })
         .unwrap_or_default();
     (entries, workflow_names)
+}
+
+/// Load the `%model` completion catalog from the materialized JSON file.
+///
+/// Read fresh on every `%model` completion request. Any failure (no path,
+/// unreadable file, malformed JSON) degrades to empty results.
+fn load_model_catalog(path: Option<&Path>) -> Vec<ModelCompletionEntry> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        warn!("failed to parse model catalog at {path:?}");
+        return Vec::new();
+    };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if schema_version != 1 {
+        warn!(
+            "unsupported model catalog schema_version {schema_version} at {path:?}"
+        );
+        return Vec::new();
+    }
+    value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| entries.iter().filter_map(model_entry).collect())
+        .unwrap_or_default()
+}
+
+fn model_entry(value: &serde_json::Value) -> Option<ModelCompletionEntry> {
+    let object = value.as_object()?;
+    let model_value = object.get("value")?.as_str()?.to_string();
+    if model_value.is_empty() {
+        return None;
+    }
+    let aliases = object
+        .get("aliases")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ModelCompletionEntry {
+        value: model_value,
+        display: json_string(object, "display"),
+        description: json_string(object, "description"),
+        kind: json_string(object, "kind"),
+        provider: json_string(object, "provider"),
+        aliases,
+    })
+}
+
+fn json_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> String {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn entry_for_token<'a>(
@@ -2313,6 +2465,188 @@ mod tests {
             }
         );
         assert_eq!(edit.new_text.as_str(), new_text);
+    }
+
+    // --- model directive completion ----------------------------------------
+
+    fn write_model_catalog(path: &Path) {
+        fs::write(
+            path,
+            r#"{
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "value": "claude-fable-5",
+                        "display": "claude-fable-5",
+                        "description": "Claude (fable)",
+                        "kind": "model",
+                        "provider": "claude",
+                        "aliases": ["fable"]
+                    },
+                    {
+                        "value": "gpt-5.5",
+                        "display": "gpt-5.5",
+                        "description": "Codex (gpt55)",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": ["gpt55"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn load_model_catalog_rejects_unknown_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        fs::write(&catalog_path, r#"{"schema_version": 99, "entries": []}"#)
+            .unwrap();
+
+        let entries = load_model_catalog(Some(&catalog_path));
+
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completes_model_directive_values_from_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("%model:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 2);
+        let item = &items[0];
+        assert_eq!(item.label, "claude-fable-5");
+        assert_eq!(item.filter_text.as_deref(), Some("claude-fable-5"));
+        assert_eq!(item.detail.as_deref(), Some("claude  Claude (fable)"));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 7));
+        assert_eq!(edit.range.end, Position::new(0, 7));
+        assert_eq!(edit.new_text, "claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn model_directive_completion_filters_by_alias_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("%model:fa".to_string(), Position::new(0, 9))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "claude-fable-5");
+        assert_eq!(item.filter_text.as_deref(), Some("fable"));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 7));
+        assert_eq!(edit.range.end, Position::new(0, 9));
+        assert_eq!(edit.new_text, "claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn model_directive_completion_without_catalog_is_empty() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = None;
+        }
+
+        let response = server
+            .completion_for_text("%model:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_at_suffix_still_completes_effort_vocabulary() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "%model:opus@".to_string(),
+                Position::new(0, 12),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert!(items.iter().any(|item| item.label == "xhigh"));
+        let xhigh = items.iter().find(|item| item.label == "xhigh").unwrap();
+        let Some(CompletionTextEdit::Edit(edit)) = xhigh.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 12));
+        assert_eq!(edit.range.end, Position::new(0, 12));
+        assert_eq!(edit.new_text, "xhigh");
     }
 
     // --- vcs_project (`#+`) completion -------------------------------------
