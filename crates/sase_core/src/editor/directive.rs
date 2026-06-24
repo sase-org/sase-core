@@ -33,7 +33,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: true,
     },
     DirectiveMetadata {
-        // No `%t` alias — that now means `%tale`. `%time` keeps its long
+        // No `%t` alias. `%time` keeps its long
         // spelling only, mirroring the Python xprompt parser.
         name: "time",
         alias: None,
@@ -49,24 +49,11 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
-        name: "plan",
-        alias: Some("p"),
-        description: "Auto-approve the submitted plan as a normal plan",
-        takes_argument: false,
-        allows_multiple: false,
-    },
-    DirectiveMetadata {
-        name: "tale",
-        alias: Some("t"),
-        description: "Auto-approve the submitted plan as a tale",
-        takes_argument: false,
-        allows_multiple: false,
-    },
-    DirectiveMetadata {
-        name: "epic",
-        alias: None,
-        description: "Enable plan mode and approve the plan as an epic",
-        takes_argument: false,
+        name: "auto",
+        alias: Some("a"),
+        description:
+            "Auto-approve the submitted plan as plan (default), tale, or epic",
+        takes_argument: true,
         allows_multiple: false,
     },
     DirectiveMetadata {
@@ -111,21 +98,9 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
 ];
 
-/// Deprecated directive aliases that still resolve to a canonical directive but
-/// are intentionally hidden from advertised editor completion/hover. `%approve`
-/// and `%a` are the legacy spelling of `%plan`; they keep parsing for
-/// back-compat while the advertised family is `%plan` / `%tale` / `%epic`.
-pub const DEPRECATED_ALIASES: &[(&str, &str)] =
-    &[("approve", "plan"), ("a", "plan")];
-
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
     if raw == "(" {
         return Some("alt");
-    }
-    for &(alias, canonical) in DEPRECATED_ALIASES {
-        if alias == raw {
-            return Some(canonical);
-        }
     }
     DIRECTIVES.iter().find_map(|directive| {
         if directive.name == raw || directive.alias == Some(raw) {
@@ -194,9 +169,12 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("false", "Disable xprompt expansion"),
             ("true", "Enable xprompt expansion"),
         ],
-        // `approve`/`a` resolve to `plan` via `DEPRECATED_ALIASES`, so they
-        // land on this arm too.
-        "plan" | "tale" | "edit" | "epic" | "hide" => &[],
+        "auto" => &[
+            ("plan", "Auto-approve as a normal plan"),
+            ("tale", "Auto-approve and commit as an SDD tale"),
+            ("epic", "Auto-approve and commit as an SDD epic"),
+        ],
+        "edit" | "hide" => &[],
         "time" => {
             &[("5m", "Wait for five minutes"), ("1h", "Wait for one hour")]
         }
@@ -244,17 +222,16 @@ mod tests {
             ("n", "name"),
             ("w", "wait"),
             ("e", "edit"),
-            ("p", "plan"),
-            ("t", "tale"),
+            ("a", "auto"),
             ("g", "group"),
             ("(", "alt"),
-            // Deprecated spellings of `%plan` still resolve for back-compat.
-            ("a", "plan"),
-            ("approve", "plan"),
         ] {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
         }
         assert!(directive_metadata("xprompts_enabled").is_some());
+        assert_eq!(canonical_directive_name("p"), None);
+        assert_eq!(canonical_directive_name("t"), None);
+        assert_eq!(canonical_directive_name("approve"), None);
 
         let model = directive_metadata("model").expect("model metadata");
         assert!(!model.allows_multiple);
@@ -284,60 +261,54 @@ mod tests {
     }
 
     #[test]
-    fn plan_and_tale_are_the_advertised_auto_approve_directives() {
-        let plan = directive_metadata("plan").expect("plan metadata");
-        assert_eq!(plan.alias, Some("p"));
-        assert!(!plan.takes_argument);
+    fn auto_is_the_advertised_auto_approve_directive() {
+        let auto = directive_metadata("auto").expect("auto metadata");
+        assert_eq!(auto.alias, Some("a"));
+        assert!(auto.takes_argument);
         assert!(
-            plan.description.contains("normal plan"),
-            "plan description should describe normal-plan auto-approval: {}",
-            plan.description
+            auto.description.contains("plan")
+                && auto.description.contains("tale")
+                && auto.description.contains("epic"),
+            "auto description should describe plan/tale/epic modes: {}",
+            auto.description
         );
 
-        let tale = directive_metadata("tale").expect("tale metadata");
-        assert_eq!(tale.alias, Some("t"));
-        assert!(!tale.takes_argument);
-        assert!(
-            tale.description.contains("tale"),
-            "tale description should mention tales: {}",
-            tale.description
-        );
+        let candidates = directive_argument_candidates("auto").candidates;
+        let values: Vec<&str> =
+            candidates.iter().map(|c| c.insertion.as_str()).collect();
+        assert_eq!(values, ["plan", "tale", "epic"]);
 
-        // `%time` gave up its `%t` alias to `%tale`.
         let time = directive_metadata("time").expect("time metadata");
         assert_eq!(time.alias, None);
     }
 
     #[test]
-    fn directive_completion_t_prefix_yields_tale_and_time() {
-        // Both `%tale` and `%time` start with `t`; `%ta`/`%ti` disambiguate.
+    fn directive_completion_t_prefix_yields_only_time() {
         let t_completions = build_directive_completion_candidates("%t");
         let t_names: Vec<&str> = t_completions
             .candidates
             .iter()
             .map(|candidate| candidate.name.as_str())
             .collect();
-        assert_eq!(t_names, ["tale", "time"]);
+        assert_eq!(t_names, ["time"]);
 
         let tale = build_directive_completion_candidates("%ta");
-        assert_eq!(tale.candidates.len(), 1);
-        assert_eq!(tale.candidates[0].insertion, "%tale");
-        assert_eq!(
-            tale.candidates[0].documentation.as_deref(),
-            Some("Auto-approve the submitted plan as a tale")
-        );
+        assert!(tale.candidates.is_empty());
     }
 
     #[test]
-    fn approve_is_a_hidden_deprecated_alias_of_plan() {
-        // `%approve` and `%a` still resolve to `plan` for back-compat ...
-        assert_eq!(canonical_directive_name("approve"), Some("plan"));
-        assert_eq!(canonical_directive_name("a"), Some("plan"));
+    fn removed_auto_approve_aliases_do_not_resolve_or_complete() {
+        assert_eq!(canonical_directive_name("approve"), None);
+        assert_eq!(canonical_directive_name("p"), None);
+        assert_eq!(canonical_directive_name("t"), None);
 
-        // ... but neither is advertised in completion. `%approve` matches no
-        // advertised directive; `%a` only surfaces `%alt` (the lone directive
-        // whose name starts with `a`), never `%approve`/`%plan`.
         assert!(build_directive_completion_candidates("%approve")
+            .candidates
+            .is_empty());
+        assert!(build_directive_completion_candidates("%p")
+            .candidates
+            .is_empty());
+        assert!(build_directive_completion_candidates("%ta")
             .candidates
             .is_empty());
         let a_completions = build_directive_completion_candidates("%a");
@@ -346,7 +317,7 @@ mod tests {
             .iter()
             .map(|candidate| candidate.name.as_str())
             .collect();
-        assert_eq!(a_names, ["alt"]);
+        assert_eq!(a_names, ["alt", "auto"]);
     }
 
     #[test]

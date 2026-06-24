@@ -1377,9 +1377,8 @@ fn position_in_ranges(pos: usize, ranges: &[(usize, usize)]) -> bool {
 
 /// Canonicalize a directive name for fan-out planning by deferring to the
 /// shared editor directive registry. This keeps the planner in lock-step with
-/// the advertised directive set — `%p`→`plan`, `%t`→`tale`, and the deprecated
-/// `%a`/`%approve`→`plan` — instead of maintaining a second alias table that
-/// can drift. Unknown names pass through unchanged.
+/// the advertised directive set, including `%a`→`auto`, instead of maintaining
+/// a second alias table that can drift. Unknown names pass through unchanged.
 fn canonical_directive_name(name: &str) -> &str {
     crate::editor::directive::canonical_directive_name(name).unwrap_or(name)
 }
@@ -2410,9 +2409,9 @@ mod tests {
         let plan =
             plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
 
-        // `%t` no longer aliases `%time`; it now resolves to `%tale`, while the
-        // long `%time` spelling keeps its meaning.
-        assert_eq!(canonical_directive_name("t"), "tale");
+        // `%t` no longer aliases `%time` and no longer resolves as an
+        // auto-approval directive; the long `%time` spelling keeps its meaning.
+        assert_eq!(canonical_directive_name("t"), "t");
         assert_eq!(canonical_directive_name("time"), "time");
         assert_eq!(plan.slots.len(), 1);
         assert!(!plan.slots[0].wait_for_previous);
