@@ -337,11 +337,9 @@ mod tests {
         // ... but neither is advertised in completion. `%approve` matches no
         // advertised directive; `%a` only surfaces `%alt` (the lone directive
         // whose name starts with `a`), never `%approve`/`%plan`.
-        assert!(
-            build_directive_completion_candidates("%approve")
-                .candidates
-                .is_empty()
-        );
+        assert!(build_directive_completion_candidates("%approve")
+            .candidates
+            .is_empty());
         let a_completions = build_directive_completion_candidates("%a");
         let a_names: Vec<&str> = a_completions
             .candidates
