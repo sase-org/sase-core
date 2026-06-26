@@ -2419,6 +2419,10 @@ mod tests {
         // deferred for workspace allocation.
         assert_eq!(canonical_directive_name("t"), "t");
         assert_eq!(canonical_directive_name("time"), "time");
+        // `%edit`/`%e` were removed too; the launch planner treats them as
+        // non-special (raw) names rather than canonicalizing `e` -> `edit`.
+        assert_eq!(canonical_directive_name("edit"), "edit");
+        assert_eq!(canonical_directive_name("e"), "e");
         assert_eq!(plan.slots.len(), 1);
         assert!(plan.slots[0].wait_for_previous);
     }

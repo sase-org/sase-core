@@ -10,8 +10,8 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
-        // No `%e` alias — that already means `%edit`. `%effort` is the only
-        // spelling, mirroring the Python xprompt parser.
+        // No `%e` alias — `%effort` is the only `%e...` spelling, so a leading
+        // `%e` narrows to it. Mirrors the Python xprompt parser.
         name: "effort",
         alias: None,
         description: "Set the reasoning-effort level for this prompt",
@@ -31,13 +31,6 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         description: "Wait for another agent/workflow and/or a time floor",
         takes_argument: true,
         allows_multiple: true,
-    },
-    DirectiveMetadata {
-        name: "edit",
-        alias: Some("e"),
-        description: "Return editor text to the prompt bar for review",
-        takes_argument: false,
-        allows_multiple: false,
     },
     DirectiveMetadata {
         name: "auto",
@@ -165,7 +158,7 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("tale", "Auto-approve and commit as an SDD tale"),
             ("epic", "Auto-approve and commit as an SDD epic"),
         ],
-        "edit" | "hide" => &[],
+        "hide" => &[],
         "wait" => &[
             ("agent", "Wait for an agent or workflow"),
             ("time=5m", "Wait for five minutes"),
@@ -213,7 +206,6 @@ mod tests {
             ("m", "model"),
             ("n", "name"),
             ("w", "wait"),
-            ("e", "edit"),
             ("a", "auto"),
             ("g", "group"),
             ("(", "alt"),
@@ -225,6 +217,9 @@ mod tests {
         assert_eq!(canonical_directive_name("t"), None);
         assert_eq!(canonical_directive_name("time"), None);
         assert_eq!(canonical_directive_name("approve"), None);
+        // `%edit` and its `%e` alias were removed; `%e` no longer resolves.
+        assert_eq!(canonical_directive_name("edit"), None);
+        assert_eq!(canonical_directive_name("e"), None);
 
         let model = directive_metadata("model").expect("model metadata");
         assert!(!model.allows_multiple);
@@ -324,12 +319,15 @@ mod tests {
         assert_eq!(effort.alias, None);
         assert!(effort.takes_argument);
         assert!(!effort.allows_multiple);
-        // No `%e` alias — `e` still resolves to `edit`.
-        assert_eq!(canonical_directive_name("e"), Some("edit"));
+        // `%edit`/`%e` were removed, so `effort` is the only `%e...` directive
+        // and a leading `%e` narrows straight to it.
+        assert_eq!(canonical_directive_name("e"), None);
 
-        let completions = build_directive_completion_candidates("%eff");
-        assert_eq!(completions.candidates.len(), 1);
-        assert_eq!(completions.candidates[0].insertion, "%effort");
+        for token in ["%e", "%eff"] {
+            let completions = build_directive_completion_candidates(token);
+            assert_eq!(completions.candidates.len(), 1, "{token} completion");
+            assert_eq!(completions.candidates[0].insertion, "%effort");
+        }
     }
 
     #[test]
