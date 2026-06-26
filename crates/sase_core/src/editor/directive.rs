@@ -10,10 +10,11 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
-        // No `%e` alias — `%effort` is the only `%e...` spelling, so a leading
-        // `%e` narrows to it. Mirrors the Python xprompt parser.
+        // `%e` is the advertised `%effort` alias. It canonicalizes to `effort`
+        // for completion, hover, diagnostics, and fan-out parsing. Mirrors the
+        // Python xprompt parser's `_DIRECTIVE_ALIASES["e"] = "effort"`.
         name: "effort",
-        alias: None,
+        alias: Some("e"),
         description: "Set the reasoning-effort level for this prompt",
         takes_argument: true,
         allows_multiple: false,
@@ -204,6 +205,7 @@ mod tests {
     fn resolves_documented_aliases() {
         for (alias, canonical) in [
             ("m", "model"),
+            ("e", "effort"),
             ("n", "name"),
             ("w", "wait"),
             ("a", "auto"),
@@ -217,9 +219,9 @@ mod tests {
         assert_eq!(canonical_directive_name("t"), None);
         assert_eq!(canonical_directive_name("time"), None);
         assert_eq!(canonical_directive_name("approve"), None);
-        // `%edit` and its `%e` alias were removed; `%e` no longer resolves.
+        // `%edit` was removed and is not an alias; `%e` now resolves to `effort`.
         assert_eq!(canonical_directive_name("edit"), None);
-        assert_eq!(canonical_directive_name("e"), None);
+        assert_eq!(canonical_directive_name("e"), Some("effort"));
 
         let model = directive_metadata("model").expect("model metadata");
         assert!(!model.allows_multiple);
@@ -313,20 +315,26 @@ mod tests {
     }
 
     #[test]
-    fn effort_is_a_recognized_directive_without_alias() {
+    fn effort_is_a_recognized_directive_with_e_alias() {
         let effort = directive_metadata("effort").expect("effort metadata");
         assert_eq!(effort.name, "effort");
-        assert_eq!(effort.alias, None);
+        assert_eq!(effort.alias, Some("e"));
         assert!(effort.takes_argument);
         assert!(!effort.allows_multiple);
-        // `%edit`/`%e` were removed, so `effort` is the only `%e...` directive
-        // and a leading `%e` narrows straight to it.
-        assert_eq!(canonical_directive_name("e"), None);
+        // `%e` is the advertised `%effort` alias and canonicalizes to `effort`.
+        assert_eq!(canonical_directive_name("e"), Some("effort"));
+        assert_eq!(directive_metadata("e").map(|d| d.name), Some("effort"));
 
         for token in ["%e", "%eff"] {
             let completions = build_directive_completion_candidates(token);
             assert_eq!(completions.candidates.len(), 1, "{token} completion");
             assert_eq!(completions.candidates[0].insertion, "%effort");
+            // The `%effort` candidate advertises its `%e` alias detail.
+            assert_eq!(
+                completions.candidates[0].detail.as_deref(),
+                Some("alias %e"),
+                "{token} alias detail"
+            );
         }
     }
 

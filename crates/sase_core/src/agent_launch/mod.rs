@@ -2419,10 +2419,10 @@ mod tests {
         // deferred for workspace allocation.
         assert_eq!(canonical_directive_name("t"), "t");
         assert_eq!(canonical_directive_name("time"), "time");
-        // `%edit`/`%e` were removed too; the launch planner treats them as
-        // non-special (raw) names rather than canonicalizing `e` -> `edit`.
+        // `%edit` was removed and stays a non-special raw name, but `%e` is now
+        // the `%effort` alias, so the launch planner canonicalizes it.
         assert_eq!(canonical_directive_name("edit"), "edit");
-        assert_eq!(canonical_directive_name("e"), "e");
+        assert_eq!(canonical_directive_name("e"), "effort");
         assert_eq!(plan.slots.len(), 1);
         assert!(plan.slots[0].wait_for_previous);
     }
@@ -3045,6 +3045,42 @@ mod tests {
                 "%m:opus %effort:medium\nReview",
                 "%m:opus %effort:high\nReview",
                 "%m:opus %effort:xhigh\nReview",
+            ]
+        );
+    }
+
+    #[test]
+    fn fanout_planner_brace_value_fanout_after_effort_e_alias() {
+        // `%e:%{...}` fans out exactly like `%effort:%{...}`; the alias prefix
+        // is preserved verbatim in each slot body.
+        let prompt = "%m:opus %e:%{medium | high | xhigh}\nReview";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.launch_kind, "model");
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("opus"), Some("opus"), Some("opus")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.alt_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("1"), Some("2"), Some("3")]
+        );
+        assert_eq!(
+            plan.slots
+                .iter()
+                .map(|slot| slot.prompt.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "%m:opus %e:medium\nReview",
+                "%m:opus %e:high\nReview",
+                "%m:opus %e:xhigh\nReview",
             ]
         );
     }

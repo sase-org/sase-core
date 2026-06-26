@@ -876,18 +876,21 @@ fn directive_name_token(before: &str) -> Option<(usize, &str)> {
     None
 }
 
-fn directive_arg_token(before: &str) -> Option<(&str, usize)> {
+fn directive_arg_token(before: &str) -> Option<(&'static str, usize)> {
     let percent = before.rfind('%')?;
     let directive = &before[percent + 1..];
     let split = directive.find([':', '('])?;
     let name = &directive[..split];
-    canonical_directive_name(name)?;
+    // Return the canonical directive name so aliases (e.g. `%e` -> `effort`,
+    // `%m` -> `model`) classify under the same argument context as their full
+    // spelling, matching the Python `extract_directive_arg_token_around_cursor`.
+    let canonical = canonical_directive_name(name)?;
     let sep_idx = percent + 1 + split;
     if directive.as_bytes().get(split) == Some(&b'(') && directive.contains(')')
     {
         return None;
     }
-    Some((name, sep_idx + 1))
+    Some((canonical, sep_idx + 1))
 }
 
 fn context_for_token(
@@ -1114,6 +1117,9 @@ mod tests {
                 "xh",
                 EFFORT_LEVELS_ORDERED.to_vec(),
             ),
+            // The `%e` alias classifies under the canonical `effort` context.
+            ("%e:", 3, "effort", "", EFFORT_LEVELS_ORDERED.to_vec()),
+            ("%e:xh", 5, "effort", "xh", EFFORT_LEVELS_ORDERED.to_vec()),
             ("%auto:", 6, "auto", "", vec!["plan", "tale", "epic"]),
             ("%auto:t", 7, "auto", "t", vec!["plan", "tale", "epic"]),
         ];
