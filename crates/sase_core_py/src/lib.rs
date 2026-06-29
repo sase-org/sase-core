@@ -50,6 +50,7 @@
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
+//! - `apply_project_name_update(content: str, name: str | None) -> str`
 //! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False) -> list[dict]`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
@@ -239,6 +240,7 @@ use sase_core::plan::{search_plans as core_plan_search, PlanError};
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
+    apply_project_name_update as core_apply_project_name_update,
     list_project_records as core_list_project_records,
     read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
 };
@@ -1650,6 +1652,18 @@ fn py_apply_project_aliases_update<'py>(
 ) -> PyResult<String> {
     let aliases = strings_from_py_list(aliases, "aliases")?;
     core_apply_project_aliases_update(content, &aliases)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
+}
+
+/// Return ProjectSpec content with PROJECT_NAME updated in the metadata header.
+#[pyfunction]
+#[pyo3(name = "apply_project_name_update")]
+#[pyo3(signature = (content, name=None))]
+fn py_apply_project_name_update(
+    content: &str,
+    name: Option<String>,
+) -> PyResult<String> {
+    core_apply_project_name_update(content, name.as_deref())
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
@@ -3454,6 +3468,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_apply_project_lifecycle_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_project_aliases_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_project_name_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_list_project_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
