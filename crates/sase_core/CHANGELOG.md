@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/sase-org/sase-core/compare/v0.2.0...v0.3.0) - 2026-06-29
+
+### Added
+
+- add project display names to specs
+- *(editor)* make %e an alias for %effort
+- *(editor)* [**breaking**] remove %edit directive metadata and alias
+- [**breaking**] move time waits under the wait directive
+- [**breaking**] unify auto approval directive
+- add prompt stash pin persistence
+
+### Other
+
+- cover directive argument completions
+
 ## [0.2.0](https://github.com/sase-org/sase-core/compare/v0.1.4...v0.2.0) - 2026-06-24
 
 ### Added
