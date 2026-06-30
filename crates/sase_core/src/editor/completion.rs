@@ -834,13 +834,18 @@ fn detect_directive_context_at_position(
     }
 
     if let Some((name, arg_start)) = directive_arg_token(before) {
-        // A `@<effort>` suffix on a `%model` value completes from the effort
-        // vocabulary, mirroring the Python `%model:<model>@<effort>` split. The
-        // replacement range covers only the token after the `@`.
+        // A non-leading `@<effort>` suffix on a `%model` value completes from
+        // the effort vocabulary, mirroring the Python `%model:<model>@<effort>`
+        // split. A leading `@` is the model-alias marker and stays in model
+        // completion context. The replacement range covers only the token after
+        // a suffix `@`.
         let (directive_name, arg_start) = match name {
             "model" => match before[arg_start..].rfind('@') {
-                Some(rel_at) => ("effort", arg_start + rel_at + 1),
+                Some(rel_at) if rel_at > 0 => {
+                    ("effort", arg_start + rel_at + 1)
+                }
                 None => (name, arg_start),
+                _ => (name, arg_start),
             },
             _ => (name, arg_start),
         };
@@ -1303,6 +1308,13 @@ mod tests {
         let context =
             classify_completion_context(&doc, pos(11), &catalog).unwrap();
         assert_eq!(context.directive_name.as_deref(), Some("model"));
+
+        // A leading `@` is the alias marker, not an effort suffix.
+        let doc = DocumentSnapshot::new("%model:@oth");
+        let context =
+            classify_completion_context(&doc, pos(11), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("model"));
+        assert_eq!(context.token.as_ref().unwrap().text, "@oth");
     }
 
     #[test]
