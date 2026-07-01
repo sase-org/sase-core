@@ -237,6 +237,11 @@ Both harnesses accept `--num-specs` and `--runs` flags so they can be tuned for 
 
 ## Packaging decision (Phase 1E)
 
+> **Current status:** this Phase 1E decision has since been superseded. `sase` now declares `sase-core-rs` as a hard
+> runtime dependency with no pure-Python fallback for ported operations, and the recommended install is
+> `uv tool install sase`, which pulls a prebuilt wheel on supported platforms. The notes below are kept as the
+> historical record of the original opportunistic-detection rollout.
+
 `sase` does **not** depend on a built `sase_core_rs` wheel. The extension is detected opportunistically at import time:
 
 - Pure-Python install: `pip install sase` (or `just install`) succeeds with no Rust toolchain. `is_rust_available()`
