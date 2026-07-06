@@ -3974,7 +3974,7 @@ exit 4
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             value["schema_version"],
-            MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
+            GATEWAY_WIRE_SCHEMA_VERSION
         );
         assert!(value["pairing_id"].as_str().unwrap().starts_with("pair_"));
         assert_eq!(value["code"].as_str().unwrap().len(), 6);
@@ -4077,7 +4077,10 @@ exit 4
                 .await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["schema_version"],
+            GATEWAY_WIRE_SCHEMA_VERSION
+        );
         assert_eq!(value["device"]["device_id"], device_id);
         assert_eq!(
             value["capabilities"],
@@ -4980,7 +4983,10 @@ exit 4
         .await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["schema_version"],
+            MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
+        );
         assert_eq!(value["total_count"], 2);
         assert_eq!(value["next_high_water"], "2026-05-06T17:00:00Z");
         assert_eq!(value["notifications"][0]["id"], "newest-row");
