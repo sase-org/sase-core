@@ -139,6 +139,8 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub image_paths: Vec<String>,
     #[serde(default)]
+    pub video_paths: Vec<String>,
+    #[serde(default)]
     pub response_path: Option<String>,
     #[serde(default)]
     pub output_path: Option<String>,

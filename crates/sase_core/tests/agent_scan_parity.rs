@@ -179,6 +179,7 @@ fn build_ace_run_done(root: &Path) {
             "diff_path": "/tmp/diff_alpha.diff",
             "markdown_pdf_paths": ["/tmp/markdown_pdfs/notes.pdf"],
             "image_paths": ["/tmp/images/alpha.png"],
+            "video_paths": ["/tmp/videos/demo.mp4"],
             "response_path": "/tmp/resp_alpha.md",
             "output_path": "/tmp/out_alpha.log",
         }),
@@ -953,6 +954,7 @@ fn done_record_parses_done_marker() {
         vec!["/tmp/markdown_pdfs/notes.pdf"]
     );
     assert_eq!(done.image_paths, vec!["/tmp/images/alpha.png"]);
+    assert_eq!(done.video_paths, vec!["/tmp/videos/demo.mp4"]);
     assert_eq!(done.response_path.as_deref(), Some("/tmp/resp_alpha.md"));
     assert_eq!(done.output_path.as_deref(), Some("/tmp/out_alpha.log"));
 
