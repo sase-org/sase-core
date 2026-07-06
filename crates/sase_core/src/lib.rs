@@ -10,6 +10,7 @@
 
 pub mod agent_archive;
 pub mod agent_cleanup;
+pub mod agent_family;
 pub mod agent_group_archive;
 pub mod agent_launch;
 pub mod agent_name_template;
@@ -68,6 +69,12 @@ pub use agent_cleanup::{
     SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
     SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
+};
+pub use agent_family::{
+    resolve_agent_family_parent, AgentFamilyDismissedIdentityWire,
+    AgentFamilyParentCandidateWire, AgentFamilyParentResolutionRequestWire,
+    AgentFamilyParentResolutionWire,
+    AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 pub use agent_group_archive::{
     list_dismissed_agent_groups, list_recent_dismissed_agent_groups,

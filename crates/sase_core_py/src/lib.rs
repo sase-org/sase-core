@@ -76,6 +76,7 @@
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
+//! - `resolve_agent_family_parent(request: dict) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
 //! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
@@ -131,6 +132,10 @@ use sase_core::agent_cleanup::{
     save_dismissed_agents_index as core_save_dismissed_agents_index,
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
+};
+use sase_core::agent_family::{
+    resolve_agent_family_parent as core_resolve_agent_family_parent,
+    AgentFamilyParentResolutionRequestWire,
 };
 use sase_core::agent_group_archive::{
     delete_dismissed_agent_group as core_delete_dismissed_agent_group,
@@ -2188,6 +2193,28 @@ fn strings_to_paths(paths: Vec<String>) -> Vec<PathBuf> {
     paths.into_iter().map(PathBuf::from).collect()
 }
 
+#[pyfunction]
+#[pyo3(name = "resolve_agent_family_parent")]
+fn py_resolve_agent_family_parent<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentFamilyParentResolutionRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentFamilyParentResolutionRequestWire dict: {e}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| core_resolve_agent_family_parent(request))
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 fn bead_result_to_py<'py, T>(
     py: Python<'py>,
     result: Result<T, BeadError>,
@@ -3533,6 +3560,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_list_workspace_claims_from_content,
         m
