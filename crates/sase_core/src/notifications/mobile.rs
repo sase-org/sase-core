@@ -5,7 +5,7 @@ use serde_json::{json, Value as JsonValue};
 
 use super::wire::NotificationWire;
 
-pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileNotificationListRequestWire {
@@ -88,6 +88,7 @@ pub enum MobileActionKindWire {
     PlanApproval,
     Hitl,
     UserQuestion,
+    LaunchApproval,
     NonAction,
     Unsupported,
 }
@@ -126,6 +127,15 @@ pub enum MobileActionDetailWire {
         response_dir: Option<String>,
         question_count: u32,
         choices: Vec<QuestionActionChoiceWire>,
+    },
+    LaunchApproval {
+        identity: PendingActionIdentityWire,
+        state: MobileActionStateWire,
+        response_dir: Option<String>,
+        request_id: Option<String>,
+        source_surface: Option<String>,
+        slot_count: u32,
+        choices: Vec<LaunchActionChoiceWire>,
     },
     NonAction {
         state: MobileActionStateWire,
@@ -236,6 +246,23 @@ pub struct QuestionActionRequestWire {
     pub global_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchActionChoiceWire {
+    Approve,
+    Reject,
+    Feedback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchActionRequestWire {
+    pub schema_version: u32,
+    pub prefix: String,
+    pub choice: LaunchActionChoiceWire,
+    #[serde(default)]
+    pub feedback: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionResultWire {
     pub schema_version: u32,
@@ -338,6 +365,7 @@ pub fn mobile_notification_card_from_wire(
         MobileActionKindWire::PlanApproval
             | MobileActionKindWire::Hitl
             | MobileActionKindWire::UserQuestion
+            | MobileActionKindWire::LaunchApproval
     ) && state == MobileActionStateWire::Available;
     MobileNotificationCardWire {
         id: notification.id.clone(),
@@ -379,6 +407,7 @@ pub fn mobile_notification_priority_from_wire(
     matches!(
         notification.action.as_deref(),
         Some("PlanApproval" | "UserQuestion" | "JumpToMentorReview")
+            | Some("LaunchApproval")
     ) || matches!(notification.sender.as_str(), "axe" | "crs")
 }
 
@@ -431,6 +460,26 @@ pub fn mobile_action_detail_from_notification(
             choices: vec![
                 QuestionActionChoiceWire::Answer,
                 QuestionActionChoiceWire::Custom,
+            ],
+        },
+        Some("LaunchApproval") => MobileActionDetailWire::LaunchApproval {
+            identity,
+            state,
+            response_dir: notification.action_data.get("response_dir").cloned(),
+            request_id: notification.action_data.get("request_id").cloned(),
+            source_surface: notification
+                .action_data
+                .get("source_surface")
+                .cloned(),
+            slot_count: notification
+                .action_data
+                .get("slot_count")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+            choices: vec![
+                LaunchActionChoiceWire::Approve,
+                LaunchActionChoiceWire::Reject,
+                LaunchActionChoiceWire::Feedback,
             ],
         },
         None => MobileActionDetailWire::NonAction {
@@ -635,11 +684,55 @@ pub fn plan_question_action_response(
     })
 }
 
+pub fn plan_launch_action_response(
+    request: &LaunchActionRequestWire,
+) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
+    validate_schema(request.schema_version)?;
+    let (response_json, message) = match request.choice {
+        LaunchActionChoiceWire::Approve => {
+            (json!({"action": "approve"}), "Launch approved")
+        }
+        LaunchActionChoiceWire::Reject => {
+            let mut response = serde_json::Map::new();
+            response.insert("action".to_string(), json!("reject"));
+            if let Some(feedback) = &request.feedback {
+                response.insert("feedback".to_string(), json!(feedback));
+            }
+            (JsonValue::Object(response), "Launch rejected")
+        }
+        LaunchActionChoiceWire::Feedback => {
+            let feedback = request.feedback.as_deref().ok_or_else(|| {
+                plan_error(
+                    MobileActionPlanErrorCodeWire::InvalidRequest,
+                    "launch feedback requires feedback text",
+                    Some("feedback"),
+                )
+            })?;
+            (
+                json!({"action": "reject", "feedback": feedback}),
+                "Launch feedback received",
+            )
+        }
+    };
+
+    Ok(ActionResultWire {
+        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+        action_kind: MobileActionKindWire::LaunchApproval,
+        prefix: request.prefix.clone(),
+        notification_id: None,
+        state: MobileActionStateWire::Available,
+        response_file: "launch_response.json".to_string(),
+        response_json,
+        message: Some(message.to_string()),
+    })
+}
+
 fn mobile_action_kind(action: Option<&str>) -> MobileActionKindWire {
     match action {
         Some("PlanApproval") => MobileActionKindWire::PlanApproval,
         Some("HITL") => MobileActionKindWire::Hitl,
         Some("UserQuestion") => MobileActionKindWire::UserQuestion,
+        Some("LaunchApproval") => MobileActionKindWire::LaunchApproval,
         None => MobileActionKindWire::NonAction,
         Some(_) => MobileActionKindWire::Unsupported,
     }
@@ -650,6 +743,7 @@ fn action_label(kind: MobileActionKindWire) -> &'static str {
         MobileActionKindWire::PlanApproval => "Plan approval",
         MobileActionKindWire::Hitl => "HITL",
         MobileActionKindWire::UserQuestion => "Question",
+        MobileActionKindWire::LaunchApproval => "Launch approval",
         MobileActionKindWire::NonAction => "Notification",
         MobileActionKindWire::Unsupported => "Unsupported action",
     }
@@ -837,7 +931,7 @@ fn option_label(option: &serde_json::Map<String, JsonValue>) -> Option<String> {
 fn validate_schema(
     schema_version: u32,
 ) -> Result<(), MobileActionPlanErrorWire> {
-    if schema_version == MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION {
+    if (1..=MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION).contains(&schema_version) {
         return Ok(());
     }
     Err(plan_error(
@@ -926,6 +1020,57 @@ mod tests {
     }
 
     #[test]
+    fn launch_approval_detail_exposes_preview_identity() {
+        let notification = NotificationWire {
+            id: "launch1234567890".to_string(),
+            timestamp: "2026-05-06T15:30:00Z".to_string(),
+            sender: "launch".to_string(),
+            notes: vec!["Launch request ready".to_string()],
+            files: vec![
+                "/tmp/launch_preview.md".to_string(),
+                "/tmp/launch_request.json".to_string(),
+            ],
+            tags: vec!["launch".to_string()],
+            action: Some("LaunchApproval".to_string()),
+            action_data: _action_data(&[
+                ("response_dir", "/tmp/launch"),
+                ("request_id", "req-123"),
+                ("source_surface", "agent"),
+                ("slot_count", "3"),
+            ]),
+            read: false,
+            dismissed: false,
+            silent: false,
+            muted: false,
+            snooze_until: None,
+        };
+
+        let detail = mobile_action_detail_from_notification(
+            &notification,
+            MobileActionStateWire::Available,
+        );
+
+        assert_eq!(
+            serde_json::to_value(detail).unwrap(),
+            json!({
+                "kind": "launch_approval",
+                "identity": {
+                    "notification_id": "launch1234567890",
+                    "prefix": "launch12",
+                    "prefix_len": 8,
+                    "resolution": "unique_prefix"
+                },
+                "state": "available",
+                "response_dir": "/tmp/launch",
+                "request_id": "req-123",
+                "source_surface": "agent",
+                "slot_count": 3,
+                "choices": ["approve", "reject", "feedback"],
+            })
+        );
+    }
+
+    #[test]
     fn action_result_contract_snapshot_is_stable() {
         let plan = plan_plan_action_response(&PlanActionRequestWire {
             schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
@@ -973,11 +1118,19 @@ mod tests {
             "../../tests/fixtures/mobile/mobile_action_result_contract.json"
         ))
         .unwrap();
+        let launch = plan_launch_action_response(&LaunchActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "laun0001".to_string(),
+            choice: LaunchActionChoiceWire::Feedback,
+            feedback: Some("Needs less fanout".to_string()),
+        })
+        .unwrap();
         assert_eq!(
             json!({
                 "plan": plan,
                 "hitl": hitl,
                 "question": question,
+                "launch": launch,
             }),
             expected
         );
@@ -1129,6 +1282,40 @@ mod tests {
                 "global_note": "Answered via mobile",
             })
         );
+    }
+
+    #[test]
+    fn launch_response_planner_covers_all_choices() {
+        let approve = plan_launch_action_response(&LaunchActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "launch01".to_string(),
+            choice: LaunchActionChoiceWire::Approve,
+            feedback: None,
+        })
+        .unwrap();
+        assert_eq!(approve.response_json, json!({"action": "approve"}));
+
+        let reject = plan_launch_action_response(&LaunchActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "launch01".to_string(),
+            choice: LaunchActionChoiceWire::Reject,
+            feedback: Some("Too broad".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            reject.response_json,
+            json!({"action": "reject", "feedback": "Too broad"})
+        );
+
+        let err = plan_launch_action_response(&LaunchActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "launch01".to_string(),
+            choice: LaunchActionChoiceWire::Feedback,
+            feedback: None,
+        })
+        .unwrap_err();
+        assert_eq!(err.code, MobileActionPlanErrorCodeWire::InvalidRequest);
+        assert_eq!(err.target.as_deref(), Some("feedback"));
     }
 
     #[test]

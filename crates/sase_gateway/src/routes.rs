@@ -24,10 +24,10 @@ use sase_core::notifications::{
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
     mobile_notification_error_from_wire,
     mobile_notification_priority_from_wire, ActionResultWire,
-    HitlActionChoiceWire, HitlActionRequestWire,
-    MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
-    NotificationWire, PlanActionChoiceWire, PlanActionRequestWire,
-    QuestionActionChoiceWire, QuestionActionRequestWire,
+    HitlActionChoiceWire, HitlActionRequestWire, LaunchActionChoiceWire,
+    LaunchActionRequestWire, MobileNotificationDetailResponseWire,
+    MobileNotificationListResponseWire, NotificationWire, PlanActionChoiceWire,
+    PlanActionRequestWire, QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -539,6 +539,15 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/actions/hitl/:prefix/accept", post(hitl_accept))
         .route("/api/v1/actions/hitl/:prefix/reject", post(hitl_reject))
         .route("/api/v1/actions/hitl/:prefix/feedback", post(hitl_feedback))
+        .route(
+            "/api/v1/actions/launch/:prefix/approve",
+            post(launch_approve),
+        )
+        .route("/api/v1/actions/launch/:prefix/reject", post(launch_reject))
+        .route(
+            "/api/v1/actions/launch/:prefix/feedback",
+            post(launch_feedback),
+        )
         .route(
             "/api/v1/actions/question/:prefix/answer",
             post(question_answer),
@@ -1457,6 +1466,14 @@ struct HitlActionBody {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct LaunchActionBody {
+    #[serde(default = "default_mobile_schema_version")]
+    schema_version: u32,
+    #[serde(default)]
+    feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct QuestionActionBody {
     #[serde(default = "default_mobile_schema_version")]
     schema_version: u32,
@@ -1702,6 +1719,101 @@ async fn execute_hitl_action_route(
             publish_notifications_changed(
                 &state,
                 "hitl_action",
+                result.notification_id.clone(),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(prefix),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
+}
+
+async fn launch_approve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<LaunchActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_launch_action_route(
+        state,
+        headers,
+        prefix,
+        LaunchActionChoiceWire::Approve,
+        payload,
+        "/api/v1/actions/launch/{prefix}/approve",
+    )
+    .await
+}
+
+async fn launch_reject(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<LaunchActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_launch_action_route(
+        state,
+        headers,
+        prefix,
+        LaunchActionChoiceWire::Reject,
+        payload,
+        "/api/v1/actions/launch/{prefix}/reject",
+    )
+    .await
+}
+
+async fn launch_feedback(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<LaunchActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_launch_action_route(
+        state,
+        headers,
+        prefix,
+        LaunchActionChoiceWire::Feedback,
+        payload,
+        "/api/v1/actions/launch/{prefix}/feedback",
+    )
+    .await
+}
+
+async fn execute_launch_action_route(
+    state: GatewayState,
+    headers: HeaderMap,
+    prefix: String,
+    choice: LaunchActionChoiceWire,
+    payload: Result<Json<LaunchActionBody>, JsonRejection>,
+    endpoint: &'static str,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    let device = authenticate(&state, &headers, endpoint).await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let request = LaunchActionRequestWire {
+        schema_version: payload.schema_version,
+        prefix: prefix.clone(),
+        choice,
+        feedback: payload.feedback,
+    };
+    match state.notification_bridge.execute_launch_action(&request) {
+        Ok(result) => {
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                result.notification_id.clone().or(Some(prefix)),
+                "success",
+            );
+            publish_notifications_changed(
+                &state,
+                "launch_action",
                 result.notification_id.clone(),
             )?;
             Ok(Json(result))
@@ -3669,6 +3781,42 @@ exit 4
         (notification, response_dir)
     }
 
+    fn seed_launch_notification(
+        tmp: &TempDir,
+        id: &str,
+    ) -> (NotificationWire, PathBuf) {
+        let response_dir = tmp.path().join("agent").join(id).join("launch");
+        std::fs::create_dir_all(&response_dir).unwrap();
+        std::fs::write(
+            response_dir.join("launch_request.json"),
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "request_id": "launch-request-1",
+                "slot_count": 2,
+                "source_surface": "agent",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut notification =
+            notification(id, "2026-05-06T17:00:00Z", Some("LaunchApproval"));
+        notification.action_data.insert(
+            "response_dir".to_string(),
+            response_dir.to_string_lossy().to_string(),
+        );
+        notification
+            .action_data
+            .insert("request_id".to_string(), "launch-request-1".to_string());
+        notification
+            .action_data
+            .insert("source_surface".to_string(), "agent".to_string());
+        notification
+            .action_data
+            .insert("slot_count".to_string(), "2".to_string());
+        seed_action_notification(tmp, &notification);
+        (notification, response_dir)
+    }
+
     fn seed_action_notification(
         tmp: &TempDir,
         notification: &NotificationWire,
@@ -3824,7 +3972,10 @@ exit 4
         .await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(
+            value["schema_version"],
+            MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
+        );
         assert!(value["pairing_id"].as_str().unwrap().starts_with("pair_"));
         assert_eq!(value["code"].as_str().unwrap().len(), 6);
         assert_eq!(value["host_label"], "workstation");
@@ -5513,6 +5664,50 @@ exit 4
         .await;
         assert_eq!(handled_status, StatusCode::CONFLICT);
         assert_eq!(handled["code"], "conflict_already_handled");
+    }
+
+    #[tokio::test]
+    async fn launch_action_feedback_writes_response_and_dismisses_notification()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (notification, response_dir) =
+            seed_launch_notification(&tmp, "launch01-row");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            action_request(
+                Some(&token),
+                "/api/v1/actions/launch/launch01/feedback",
+                json!({
+                    "schema_version": 1,
+                    "feedback": "Fanout is too broad"
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notification_id"], notification.id.as_str());
+        assert_eq!(value["action_kind"], "launch_approval");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    response_dir.join("launch_response.json"),
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({"action": "reject", "feedback": "Fanout is too broad"})
+        );
+        let snapshot = sase_core::notifications::read_notifications_snapshot(
+            &tmp.path().join("notifications").join("notifications.jsonl"),
+            true,
+        )
+        .unwrap();
+        assert!(snapshot.notifications[0].dismissed);
     }
 
     #[tokio::test]

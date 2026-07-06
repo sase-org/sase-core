@@ -14,7 +14,7 @@ use super::mobile::{
 };
 use super::wire::NotificationWire;
 
-pub const PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_PENDING_ACTION_PREFIX_LEN: usize = 8;
 pub const DEFAULT_PENDING_ACTION_STALE_SECONDS: f64 = 24.0 * 60.0 * 60.0;
 
@@ -388,13 +388,24 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("question_request.json")).exists())
         }
+        Some("LaunchApproval") => {
+            let Some(response_dir) = action_path(notification, "response_dir")
+            else {
+                return false;
+            };
+            (response_dir.join("launch_response.json")).exists()
+                || (response_dir.is_dir()
+                    && !(response_dir.join("launch_request.json")).exists())
+        }
         _ => false,
     }
 }
 
 fn required_target_missing(notification: &NotificationWire) -> bool {
     match notification.action.as_deref() {
-        Some("PlanApproval") | Some("UserQuestion") => {
+        Some("PlanApproval")
+        | Some("UserQuestion")
+        | Some("LaunchApproval") => {
             action_path(notification, "response_dir").is_none()
         }
         Some("HITL") => action_path(notification, "artifacts_dir").is_none(),
@@ -429,6 +440,7 @@ fn action_kind_from_str(action: &str) -> MobileActionKindWire {
         "PlanApproval" => MobileActionKindWire::PlanApproval,
         "HITL" => MobileActionKindWire::Hitl,
         "UserQuestion" => MobileActionKindWire::UserQuestion,
+        "LaunchApproval" => MobileActionKindWire::LaunchApproval,
         _ => MobileActionKindWire::Unsupported,
     }
 }
@@ -439,6 +451,7 @@ fn is_pending_action_kind(kind: MobileActionKindWire) -> bool {
         MobileActionKindWire::PlanApproval
             | MobileActionKindWire::Hitl
             | MobileActionKindWire::UserQuestion
+            | MobileActionKindWire::LaunchApproval
     )
 }
 
@@ -554,6 +567,33 @@ mod tests {
         fs::write(response_dir.join("plan_response.json"), "{}").unwrap();
         assert_eq!(
             pending_action_state_for_notification(&n, Some(&pending), 21.0),
+            MobileActionStateWire::AlreadyHandled
+        );
+    }
+
+    #[test]
+    fn launch_approval_is_a_pending_action_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let response_dir = tmp.path().join("launch");
+        fs::create_dir_all(&response_dir).unwrap();
+        fs::write(response_dir.join("launch_request.json"), "{}").unwrap();
+        let n = notification(
+            "launch-1234",
+            "LaunchApproval",
+            "response_dir",
+            &response_dir,
+        );
+        let pending = pending_action_from_notification(&n, 10.0).unwrap();
+
+        assert_eq!(pending.action_kind, MobileActionKindWire::LaunchApproval);
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::Available
+        );
+
+        fs::write(response_dir.join("launch_response.json"), "{}").unwrap();
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 12.0),
             MobileActionStateWire::AlreadyHandled
         );
     }

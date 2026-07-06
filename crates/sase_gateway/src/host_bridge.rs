@@ -15,13 +15,14 @@ use sase_core::notifications::{
     apply_notification_state_update, current_unix_time,
     legacy_telegram_pending_actions_path, pending_action_state_from_store,
     pending_action_store_path, plan_hitl_action_response,
-    plan_plan_action_response, plan_question_action_response_from_bytes,
+    plan_launch_action_response, plan_plan_action_response,
+    plan_question_action_response_from_bytes,
     read_notifications_snapshot_with_options, read_pending_action_store,
     resolve_pending_action_prefix, ActionResultWire, HitlActionRequestWire,
-    MobileActionStateWire, NotificationStateUpdateWire,
-    NotificationStoreSnapshotWire, NotificationWire,
-    PendingActionPrefixResolutionWire, PendingActionStoreWire,
-    PlanActionRequestWire, QuestionActionRequestWire,
+    LaunchActionRequestWire, MobileActionStateWire,
+    NotificationStateUpdateWire, NotificationStoreSnapshotWire,
+    NotificationWire, PendingActionPrefixResolutionWire,
+    PendingActionStoreWire, PlanActionRequestWire, QuestionActionRequestWire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value as JsonValue;
@@ -399,6 +400,13 @@ impl DynNotificationHostBridge {
     ) -> Result<ActionResultWire, HostBridgeError> {
         self.0.execute_question_action(request)
     }
+
+    pub fn execute_launch_action(
+        &self,
+        request: &LaunchActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.0.execute_launch_action(request)
+    }
 }
 
 impl fmt::Debug for DynNotificationHostBridge {
@@ -489,6 +497,16 @@ pub trait NotificationHostBridge: Send + Sync {
     ) -> Result<ActionResultWire, HostBridgeError> {
         Err(HostBridgeError::UnsupportedAction(
             "question action mutations are not supported by this bridge"
+                .to_string(),
+        ))
+    }
+
+    fn execute_launch_action(
+        &self,
+        _request: &LaunchActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "launch action mutations are not supported by this bridge"
                 .to_string(),
         ))
     }
@@ -740,6 +758,48 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         let mut result =
             plan_question_action_response_from_bytes(request, &request_bytes)
                 .map_err(|err| {
+                HostBridgeError::InvalidActionRequest(err.message)
+            })?;
+        result.notification_id = Some(notification.id.clone());
+        result.state = MobileActionStateWire::Available;
+
+        let response_path = response_dir.join(&result.response_file);
+        write_response_file_once(&response_path, &result.response_json)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    HostBridgeError::ActionAlreadyHandled(
+                        notification.id.clone(),
+                    )
+                } else {
+                    HostBridgeError::WriteResponse(err.to_string())
+                }
+            })?;
+        dismiss_notification_best_effort(
+            &self.notifications_path,
+            &notification,
+        );
+        Ok(result)
+    }
+
+    fn execute_launch_action(
+        &self,
+        request: &LaunchActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        let (_store, notification) = self
+            .resolve_action_notification(&request.prefix, "LaunchApproval")?;
+        let response_dir = action_path(&notification, "response_dir")
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                HostBridgeError::MissingTarget("response_dir".into())
+            })?;
+        if !response_dir.join("launch_request.json").is_file() {
+            return Err(HostBridgeError::ActionAlreadyHandled(
+                notification.id.clone(),
+            ));
+        }
+
+        let mut result =
+            plan_launch_action_response(request).map_err(|err| {
                 HostBridgeError::InvalidActionRequest(err.message)
             })?;
         result.notification_id = Some(notification.id.clone());

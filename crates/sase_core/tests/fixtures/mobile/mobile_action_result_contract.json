@@ -1,6 +1,6 @@
 {
   "plan": {
-    "schema_version": 1,
+    "schema_version": 2,
     "action_kind": "plan_approval",
     "prefix": "abcdef12",
     "notification_id": null,
@@ -16,7 +16,7 @@
     "message": "Running coder"
   },
   "hitl": {
-    "schema_version": 1,
+    "schema_version": 2,
     "action_kind": "hitl",
     "prefix": "hitl0001",
     "notification_id": null,
@@ -30,7 +30,7 @@
     "message": "Feedback received"
   },
   "question": {
-    "schema_version": 1,
+    "schema_version": 2,
     "action_kind": "user_question",
     "prefix": "ques0001",
     "notification_id": null,
@@ -49,5 +49,18 @@
       "global_note": "Answered via mobile"
     },
     "message": "Question answered"
+  },
+  "launch": {
+    "schema_version": 2,
+    "action_kind": "launch_approval",
+    "prefix": "laun0001",
+    "notification_id": null,
+    "state": "available",
+    "response_file": "launch_response.json",
+    "response_json": {
+      "action": "reject",
+      "feedback": "Needs less fanout"
+    },
+    "message": "Launch feedback received"
   }
 }
