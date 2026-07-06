@@ -220,6 +220,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub agent_family_role: Option<String>,
     #[serde(default)]
+    pub agent_family_custom_role: Option<Map<String, Value>>,
+    #[serde(default)]
     pub plan_chain_root: bool,
     #[serde(default)]
     pub tag: Option<String>,
