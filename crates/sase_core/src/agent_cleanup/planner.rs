@@ -86,6 +86,66 @@ fn selected_by_scope(
     }
 }
 
+fn scope_allows_direct_child_targets(scope: &str) -> bool {
+    matches!(
+        scope,
+        CLEANUP_SCOPE_EXPLICIT_IDENTITIES | CLEANUP_SCOPE_CUSTOM_SELECTION
+    )
+}
+
+fn parent_matches_child(
+    parent: &AgentCleanupTargetWire,
+    child: &AgentCleanupTargetWire,
+) -> bool {
+    if is_workflow_child(parent) {
+        return false;
+    }
+    if parent.raw_suffix.as_deref() != child.parent_timestamp.as_deref() {
+        return false;
+    }
+    match child.parent_workflow.as_deref() {
+        Some(parent_workflow) => {
+            parent.workflow.as_deref() == Some(parent_workflow)
+        }
+        None => true,
+    }
+}
+
+fn parent_selected_for_child(
+    child: &AgentCleanupTargetWire,
+    targets: &[AgentCleanupTargetWire],
+    request: &AgentCleanupRequestWire,
+    selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
+    parent_tags: &BTreeMap<String, Option<String>>,
+) -> bool {
+    if child.parent_timestamp.is_none() {
+        return false;
+    }
+    targets.iter().any(|candidate| {
+        parent_matches_child(candidate, child)
+            && selected_by_scope(candidate, request, selected_ids, parent_tags)
+    })
+}
+
+fn is_direct_child_target(
+    target: &AgentCleanupTargetWire,
+    targets: &[AgentCleanupTargetWire],
+    request: &AgentCleanupRequestWire,
+    selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
+    parent_tags: &BTreeMap<String, Option<String>>,
+) -> bool {
+    is_workflow_child(target)
+        && scope_allows_direct_child_targets(&request.scope)
+        && selected_ids.contains(&target.identity)
+        && !parent_selected_for_child(
+            target,
+            targets,
+            request,
+            selected_ids,
+            parent_tags,
+        )
+}
+
 fn classify_kill_kind(target: &AgentCleanupTargetWire) -> Option<&'static str> {
     let workflow = target.workflow.as_deref().unwrap_or("");
     if target.agent_type == "workflow" {
@@ -270,20 +330,14 @@ fn add_workspace_release(
         return;
     }
     if kind == KILL_KIND_WORKFLOW {
-        let workflow_name = if target.is_workflow_child {
-            target
-                .parent_workflow
-                .clone()
-                .or_else(|| target.workflow.clone())
-        } else {
-            target.workflow.clone()
-        };
+        if is_workflow_child(target) {
+            return;
+        }
+        let workflow_name = target.workflow.clone();
         let Some(workflow_name) = workflow_name else {
             return;
         };
-        let lookup_cl = if !target.is_workflow_child
-            && target.identity.cl_name != "unknown"
-        {
+        let lookup_cl = if target.identity.cl_name != "unknown" {
             Some(target.identity.cl_name.clone())
         } else {
             None
@@ -450,7 +504,14 @@ pub fn plan_agent_cleanup(
             continue;
         }
 
-        if is_workflow_child(target) {
+        let direct_child_target = is_direct_child_target(
+            target,
+            targets,
+            request,
+            &selected_ids,
+            &parent_tags,
+        );
+        if is_workflow_child(target) && !direct_child_target {
             add_skip(
                 &mut skipped_items,
                 target,
@@ -759,14 +820,167 @@ mod tests {
         request.identities =
             vec![parent.identity.clone(), child.identity.clone()];
 
-        let plan = plan_agent_cleanup(&[parent, child], &request).unwrap();
+        let plan = plan_agent_cleanup(&[child, parent], &request).unwrap();
 
         assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].identity.cl_name, "wf");
         assert_eq!(plan.cascaded_workflow_children.len(), 1);
         assert_eq!(
             plan.cascaded_workflow_children[0].raw_suffix.as_deref(),
             Some("child")
         );
+    }
+
+    #[test]
+    fn explicit_child_only_running_target_becomes_kill_item() {
+        let parent = target("run", "parent", Some("root"), "RUNNING", Some(10));
+        let mut child =
+            target("run", "child", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![child.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[parent, child], &request).unwrap();
+
+        assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].identity.cl_name, "child");
+        assert_eq!(plan.kill_items[0].kind, KILL_KIND_RUNNING);
+        assert!(plan.dismiss_items.is_empty());
+        assert!(plan.cascaded_workflow_children.is_empty());
+    }
+
+    #[test]
+    fn explicit_child_only_completed_target_becomes_dismiss_item() {
+        let parent = target("run", "parent", Some("root"), "RUNNING", Some(10));
+        let mut child = target("run", "child", Some("child"), "DONE", None);
+        child.parent_timestamp = Some("root".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![child.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[parent, child], &request).unwrap();
+
+        assert!(plan.kill_items.is_empty());
+        assert_eq!(plan.dismiss_items.len(), 1);
+        assert_eq!(plan.dismiss_items[0].identity.cl_name, "child");
+        assert!(plan.cascaded_workflow_children.is_empty());
+    }
+
+    #[test]
+    fn broad_scopes_keep_child_rows_cascade_only() {
+        let mut child =
+            target("run", "child", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        child.tag = Some("ops".to_string());
+
+        let mut focused =
+            req(CLEANUP_SCOPE_FOCUSED_PANEL, CLEANUP_MODE_KILL_AND_DISMISS);
+        focused.focused_panel_tag = Some("ops".to_string());
+        let mut tagged = req(CLEANUP_SCOPE_TAG, CLEANUP_MODE_KILL_AND_DISMISS);
+        tagged.tag = Some("ops".to_string());
+        let requests = vec![
+            req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
+            focused,
+            tagged,
+        ];
+
+        for request in requests {
+            let plan =
+                plan_agent_cleanup(std::slice::from_ref(&child), &request)
+                    .unwrap();
+
+            assert!(plan.kill_items.is_empty());
+            assert!(plan.dismiss_items.is_empty());
+            assert!(plan.cascaded_workflow_children.is_empty());
+            assert_eq!(
+                plan.skipped_items[0].reason,
+                SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY
+            );
+        }
+    }
+
+    #[test]
+    fn direct_child_side_effects_include_child_not_siblings() {
+        let parent = target("run", "parent", Some("root"), "RUNNING", Some(10));
+        let mut child =
+            target("run", "child", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        child.workspace = Some(7);
+        let mut sibling =
+            target("run", "sibling", Some("sibling"), "RUNNING", Some(12));
+        sibling.parent_timestamp = Some("root".to_string());
+        sibling.workspace = Some(8);
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![child.identity.clone()];
+
+        let plan =
+            plan_agent_cleanup(&[parent, child, sibling], &request).unwrap();
+
+        assert_eq!(
+            plan.side_effects
+                .dismissed_index_additions
+                .iter()
+                .map(|identity| identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+        assert_eq!(
+            plan.side_effects
+                .workspace_release_requests
+                .iter()
+                .map(|intent| intent.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+        assert_eq!(
+            plan.side_effects
+                .notification_dismiss_candidates
+                .iter()
+                .map(|intent| intent.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child"]
+        );
+    }
+
+    #[test]
+    fn direct_workflow_child_does_not_release_parent_workspace_claim() {
+        let mut parent =
+            target("workflow", "wf", Some("root"), "RUNNING", Some(10));
+        parent.workflow = Some("build".to_string());
+        let mut child =
+            target("workflow", "step", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        child.parent_workflow = Some("build".to_string());
+        child.is_workflow_child = true;
+        child.workspace = Some(7);
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![child.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[parent, child], &request).unwrap();
+
+        assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].identity.cl_name, "step");
+        assert_eq!(plan.kill_items[0].kind, KILL_KIND_WORKFLOW);
+        assert_eq!(
+            plan.side_effects
+                .dismissed_index_additions
+                .iter()
+                .map(|identity| identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step"]
+        );
+        assert!(plan.side_effects.workspace_release_requests.is_empty());
     }
 
     #[test]
