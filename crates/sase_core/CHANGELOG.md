@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/sase-org/sase-core/compare/v0.3.3...v0.3.4) - 2026-07-06
+
+### Added
+
+- scan completion video paths
+
+### Fixed
+
+- allow explicit child cleanup planning
+
 ## [0.3.3](https://github.com/sase-org/sase-core/compare/v0.3.2...v0.3.3) - 2026-07-06
 
 ### Added
