@@ -175,6 +175,7 @@ pub use config::{
 pub use editor::{
     analyze_document as editor_analyze_document,
     apply_vcs_project_selection as editor_apply_vcs_project_selection,
+    apply_vcs_ref_selection as editor_apply_vcs_ref_selection,
     apply_vcs_repo_selection as editor_apply_vcs_repo_selection,
     assist_entries_from_catalog as editor_assist_entries_from_catalog,
     build_directive_completion_candidates as editor_build_directive_completion_candidates,
@@ -183,6 +184,7 @@ pub use editor::{
     build_file_history_completion_candidates as editor_build_file_history_completion_candidates,
     build_snippet_completion_candidates as editor_build_snippet_completion_candidates,
     build_vcs_project_completion_candidates as editor_build_vcs_project_completion_candidates,
+    build_vcs_ref_completion_candidates as editor_build_vcs_ref_completion_candidates,
     build_vcs_repo_completion_candidates as editor_build_vcs_repo_completion_candidates,
     build_xprompt_arg_name_candidates as editor_build_xprompt_arg_name_candidates,
     build_xprompt_completion_candidates as editor_build_xprompt_completion_candidates,
@@ -191,6 +193,7 @@ pub use editor::{
     classify_completion_context_with_workflows as editor_classify_completion_context_with_workflows,
     colon_args_skeleton as editor_colon_args_skeleton,
     definition_at_position as editor_definition_at_position,
+    detect_vcs_ref_context_at_position as editor_detect_vcs_ref_context_at_position,
     detect_vcs_repo_context_at_position as editor_detect_vcs_repo_context_at_position,
     directive_argument_candidates as editor_directive_argument_candidates,
     directive_metadata as editor_directive_metadata,
@@ -211,11 +214,11 @@ pub use editor::{
     CompletionList, DefinitionTarget, DiagnosticSeverity, DirectiveMetadata,
     DocumentSnapshot, EditorDiagnostic, EditorPosition, EditorRange,
     EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
-    FrontmatterInputType, HoverPayload, TokenInfo, VcsProjectEntry,
-    VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
-    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
-    DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
-    VCS_REPO_CATALOG_SCHEMA_VERSION,
+    FrontmatterInputType, HoverPayload, TokenInfo, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
+    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
+    EDITOR_WIRE_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{is_valid_effort, split_model_effort, EFFORT_LEVELS_ORDERED};
 pub use git_query::{

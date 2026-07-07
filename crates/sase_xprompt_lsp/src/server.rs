@@ -35,8 +35,8 @@ use sase_core::{
     editor_directive_metadata, editor_extract_token_at_position,
     editor_hover_at_position, CompletionCandidate, CompletionContextKind,
     CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
-    HelperHostBridge, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
-    XpromptAssistEntry,
+    HelperHostBridge, VcsNamespaceEntry, VcsProjectEntry,
+    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -102,6 +102,13 @@ struct ModelCompletionEntry {
     aliases: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct VcsProjectCatalog {
+    entries: Vec<VcsProjectEntry>,
+    workflow_names: Vec<String>,
+    namespaces: HashMap<String, Vec<VcsNamespaceEntry>>,
+}
+
 #[derive(Debug, Clone)]
 struct OpenDocument {
     text: String,
@@ -146,14 +153,14 @@ impl XpromptLspServer {
     ) -> Option<CompletionResponse> {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
-        let (_, workflow_names) =
+        let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let document = DocumentSnapshot::new(text);
         let context = editor_classify_completion_context_with_workflows(
             &document,
             to_editor_position(position),
             entries.as_slice(),
-            &workflow_names,
+            &vcs_catalog.workflow_names,
         )?;
         if context.kind == CompletionContextKind::VcsProject {
             return Some(self.vcs_project_completion(
@@ -228,14 +235,14 @@ impl XpromptLspServer {
         let Some(token) = context.token.as_ref() else {
             return CompletionResponse::Array(Vec::new());
         };
-        let (entries, workflow_names) =
+        let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let list = editor_build_vcs_project_completion_candidates(
             token,
             document,
             to_editor_position(position),
-            &entries,
-            &workflow_names,
+            &vcs_catalog.entries,
+            &vcs_catalog.workflow_names,
         );
         // The trigger spelling the user typed (`#+` for a hash-plus token, `+`
         // for a BOF bare-plus token) drives the items' client-side `filter_text`.
@@ -642,6 +649,8 @@ impl XpromptLspServer {
             // `vcs_project_completion`, which loads the materialized project
             // catalog and known workflow names the core builder needs.
             CompletionContextKind::VcsProject => empty_completion_list(),
+            // Phase 5 wires this to the materialized project/namespace catalog.
+            CompletionContextKind::VcsRef => empty_completion_list(),
         };
         apply_replacement(list, context.replacement_range)
     }
@@ -1279,35 +1288,34 @@ fn file_history() -> Vec<String> {
 }
 
 /// Load the active project/PR completion catalog from the materialized JSON
-/// file at `path`, returning `(entries, workflow_names)`.
+/// file at `path`.
 ///
 /// Read fresh on every `#+` completion request. Any failure (no path, unreadable
 /// file, malformed JSON) degrades to empty results so the `#+` menu simply
-/// shows nothing rather than breaking completion. Schema versions 1 and 2 are
-/// accepted; v1 entries default to project rows. The file shape is
-/// `{ "schema_version": N, "workflow_names": [..], "entries": [VcsProjectEntry, ..] }`.
-fn load_vcs_project_catalog(
-    path: Option<&Path>,
-) -> (Vec<VcsProjectEntry>, Vec<String>) {
+/// shows nothing rather than breaking completion. Schema versions 1, 2, and 3
+/// are accepted; v1 entries default to project rows, and v1/v2 catalogs default
+/// `namespaces` to empty. The v3 file shape is
+/// `{ "schema_version": 3, "workflow_names": [..], "entries": [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]} }`.
+fn load_vcs_project_catalog(path: Option<&Path>) -> VcsProjectCatalog {
     let Some(path) = path else {
-        return (Vec::new(), Vec::new());
+        return VcsProjectCatalog::default();
     };
     let Ok(raw) = fs::read_to_string(path) else {
-        return (Vec::new(), Vec::new());
+        return VcsProjectCatalog::default();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         warn!("failed to parse vcs project catalog at {path:?}");
-        return (Vec::new(), Vec::new());
+        return VcsProjectCatalog::default();
     };
     let schema_version = value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if !matches!(schema_version, 1 | 2) {
+    if !matches!(schema_version, 1..=3) {
         warn!(
             "unsupported vcs project catalog schema_version {schema_version} at {path:?}"
         );
-        return (Vec::new(), Vec::new());
+        return VcsProjectCatalog::default();
     }
     let entries = value
         .get("entries")
@@ -1326,7 +1334,21 @@ fn load_vcs_project_catalog(
                 .collect()
         })
         .unwrap_or_default();
-    (entries, workflow_names)
+    let namespaces = value
+        .get("namespaces")
+        .cloned()
+        .and_then(|namespaces| {
+            serde_json::from_value::<HashMap<String, Vec<VcsNamespaceEntry>>>(
+                namespaces,
+            )
+            .ok()
+        })
+        .unwrap_or_default();
+    VcsProjectCatalog {
+        entries,
+        workflow_names,
+        namespaces,
+    }
 }
 
 /// Load the `%model` completion catalog from the materialized JSON file.
@@ -2952,14 +2974,82 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, workflow_names) =
-            load_vcs_project_catalog(Some(&catalog_path));
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
 
-        assert_eq!(workflow_names, vec!["gh"]);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].kind, "project");
-        assert_eq!(entries[0].project, "");
-        assert_eq!(entries[0].status, "");
+        assert_eq!(catalog.workflow_names, vec!["gh"]);
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].kind, "project");
+        assert_eq!(catalog.entries[0].project, "");
+        assert_eq!(catalog.entries[0].status, "");
+        assert!(catalog.namespaces.is_empty());
+    }
+
+    #[test]
+    fn loads_v3_vcs_project_catalog_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 3,
+                "workflow_names": ["gh", "git"],
+                "entries": [],
+                "namespaces": {
+                    "gh": [
+                        {
+                            "name": "sase-org",
+                            "description": "2 active projects",
+                            "kind_label": "org"
+                        },
+                        {
+                            "name": "bbugyi200"
+                        }
+                    ]
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+        assert_eq!(catalog.workflow_names, vec!["gh", "git"]);
+        assert!(catalog.entries.is_empty());
+        let namespaces = catalog.namespaces.get("gh").unwrap();
+        assert_eq!(namespaces.len(), 2);
+        assert_eq!(namespaces[0].name, "sase-org");
+        assert_eq!(namespaces[0].description, "2 active projects");
+        assert_eq!(namespaces[0].kind_label, "org");
+        assert_eq!(namespaces[1].name, "bbugyi200");
+        assert_eq!(namespaces[1].kind_label, "org");
+    }
+
+    #[test]
+    fn load_vcs_project_catalog_ignores_malformed_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 3,
+                "workflow_names": ["gh"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub"
+                    }
+                ],
+                "namespaces": ["not", "a", "map"]
+            }"##,
+        )
+        .unwrap();
+
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+        assert_eq!(catalog.workflow_names, vec!["gh"]);
+        assert_eq!(catalog.entries.len(), 1);
+        assert!(catalog.namespaces.is_empty());
     }
 
     #[test]
@@ -2972,11 +3062,11 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, workflow_names) =
-            load_vcs_project_catalog(Some(&catalog_path));
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
 
-        assert!(entries.is_empty());
-        assert!(workflow_names.is_empty());
+        assert!(catalog.entries.is_empty());
+        assert!(catalog.workflow_names.is_empty());
+        assert!(catalog.namespaces.is_empty());
     }
 
     #[tokio::test]

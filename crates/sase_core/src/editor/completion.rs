@@ -14,8 +14,8 @@ use super::token::{
 use super::wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
-    VcsProjectEntry, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoEntry,
+    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
 };
 
 pub fn assist_entries_from_catalog(
@@ -84,6 +84,13 @@ pub fn classify_completion_context_with_workflows(
     ) {
         return Some(context);
     }
+    if let Some(context) = detect_vcs_ref_context_at_position(
+        document,
+        position,
+        known_workflow_names,
+    ) {
+        return Some(context);
+    }
     if let Some(context) =
         detect_xprompt_arg_completion_at_position(document, position, entries)
     {
@@ -114,6 +121,7 @@ pub fn classify_completion_context_with_workflows(
                 active_input: None,
                 directive_name: None,
                 vcs_repo: None,
+                vcs_ref: None,
                 replacement_range: document.byte_range_to_range(byte, byte)?,
             })
         }
@@ -462,6 +470,7 @@ pub fn detect_vcs_repo_context_at_position(
         active_input: None,
         directive_name: None,
         vcs_repo: Some(trigger),
+        vcs_ref: None,
         replacement_range,
     })
 }
@@ -498,6 +507,271 @@ fn find_vcs_repo_ref_end(
         end += ch.len_utf8();
     }
     Some((end, end))
+}
+
+// --- vcs_ref (`#gh:` / `#gh(` root-ref completion) ------------------------
+
+pub fn build_vcs_ref_completion_candidates(
+    document: &DocumentSnapshot,
+    context: &CompletionContext,
+    entries: &[VcsProjectEntry],
+    namespaces: &[VcsNamespaceEntry],
+) -> CompletionList {
+    let Some(trigger) = context.vcs_ref.as_ref() else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+    let Some(replacement_range) =
+        document.byte_range_to_range(trigger.ref_start, trigger.ref_end)
+    else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+
+    let query = trigger.query.to_lowercase();
+    let mut candidates = Vec::new();
+    for include_changespecs in [false, true] {
+        for entry in entries {
+            let is_changespec = entry.kind == "changespec";
+            if is_changespec != include_changespecs
+                || entry.vcs_prefix != trigger.workflow
+                || !vcs_ref_project_matches(entry, &query)
+            {
+                continue;
+            }
+
+            let new_text = vcs_ref_replacement_text(
+                document.text(),
+                trigger,
+                &entry.name,
+                false,
+            );
+            candidates.push(CompletionCandidate {
+                display: entry.name.clone(),
+                insertion: entry.name.clone(),
+                detail: Some(format!(
+                    "{} · {}",
+                    entry.provider_display, entry.display_tag
+                )),
+                documentation: (!entry.description.is_empty())
+                    .then(|| entry.description.clone()),
+                is_dir: false,
+                name: entry.name.clone(),
+                replacement: Some(EditorTextEdit {
+                    range: replacement_range,
+                    new_text,
+                }),
+                additional_edits: Vec::new(),
+                kind: entry.kind.clone(),
+                project: entry.project.clone(),
+                status: entry.status.clone(),
+            });
+        }
+    }
+
+    for namespace in namespaces {
+        if !prefix_matches(&namespace.name, &query) {
+            continue;
+        }
+        let insertion = vcs_ref_namespace_insertion(&namespace.name);
+        let new_text = vcs_ref_replacement_text(
+            document.text(),
+            trigger,
+            &insertion,
+            true,
+        );
+        candidates.push(CompletionCandidate {
+            display: insertion.clone(),
+            insertion,
+            detail: (!namespace.description.is_empty())
+                .then(|| namespace.description.clone()),
+            documentation: None,
+            is_dir: true,
+            name: namespace.name.clone(),
+            replacement: Some(EditorTextEdit {
+                range: replacement_range,
+                new_text,
+            }),
+            additional_edits: Vec::new(),
+            kind: "namespace".to_string(),
+            project: trigger.workflow.clone(),
+            status: if namespace.kind_label.is_empty() {
+                "org".to_string()
+            } else {
+                namespace.kind_label.clone()
+            },
+        });
+    }
+
+    CompletionList {
+        candidates,
+        shared_extension: String::new(),
+    }
+}
+
+pub fn apply_vcs_ref_selection(
+    text: &str,
+    trigger: &VcsRefTrigger,
+    selected_ref: &str,
+    chain: bool,
+) -> String {
+    let replacement =
+        vcs_ref_replacement_text(text, trigger, selected_ref, chain);
+    format!(
+        "{}{}{}",
+        &text[..trigger.ref_start],
+        replacement,
+        &text[trigger.ref_end..]
+    )
+}
+
+fn vcs_ref_replacement_text(
+    text: &str,
+    trigger: &VcsRefTrigger,
+    selected_ref: &str,
+    chain: bool,
+) -> String {
+    let selected_ref = if chain {
+        vcs_ref_namespace_insertion(selected_ref)
+    } else {
+        selected_ref.to_string()
+    };
+    if chain {
+        return selected_ref;
+    }
+
+    let after = &text[trigger.ref_end..];
+    if trigger.separator == "(" {
+        let suffix = if after.starts_with(')') { "" } else { ")" };
+        return format!("{selected_ref}{suffix}");
+    }
+
+    let suffix = if after.starts_with([' ', '\t'])
+        || after.starts_with('\r') && after != "\r" && after != "\r\n"
+        || after.starts_with('\n') && after != "\n"
+    {
+        ""
+    } else {
+        " "
+    };
+    format!("{selected_ref}{suffix}")
+}
+
+fn vcs_ref_namespace_insertion(name: &str) -> String {
+    format!("{}/", name.trim_end_matches('/'))
+}
+
+fn vcs_ref_project_matches(entry: &VcsProjectEntry, query: &str) -> bool {
+    prefix_matches(&entry.name, query)
+        || entry
+            .aliases
+            .iter()
+            .any(|alias| prefix_matches(alias, query))
+}
+
+fn prefix_matches(value: &str, query_lower: &str) -> bool {
+    query_lower.is_empty() || value.to_lowercase().starts_with(query_lower)
+}
+
+pub fn detect_vcs_ref_context_at_position(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    known_workflow_names: &[String],
+) -> Option<CompletionContext> {
+    let text = document.text();
+    let cursor = document.position_to_byte_offset(position)?;
+    let mut names: Vec<&str> = known_workflow_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort_by(|left, right| {
+        right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+    });
+
+    let mut start = cursor;
+    while start > 0 {
+        let prev = previous_char_boundary(text, start)?;
+        if text[prev..].chars().next()?.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    if start >= text.len() || text.get(start..start + 1) != Some("#") {
+        return None;
+    }
+
+    let workflow = names
+        .iter()
+        .copied()
+        .find(|name| text[start + 1..].starts_with(name))?;
+    let mut pos = start + 1 + workflow.len();
+    if text[pos..].starts_with("!!") || text[pos..].starts_with("??") {
+        pos += 2;
+    }
+    let separator = match text[pos..].chars().next()? {
+        ':' => ":",
+        '(' => "(",
+        _ => return None,
+    };
+    let ref_start = pos + 1;
+    if cursor < ref_start {
+        return None;
+    }
+    let ref_before_cursor = &text[ref_start..cursor];
+    if ref_before_cursor.contains(')') || ref_before_cursor.contains('/') {
+        return None;
+    }
+
+    let (ref_end, token_end) = find_vcs_repo_ref_end(text, cursor, separator)?;
+    if cursor > ref_end {
+        return None;
+    }
+    let full_ref = &text[ref_start..ref_end];
+    if full_ref.contains('/')
+        || full_ref.contains("://")
+        || full_ref.starts_with(['~', '.'])
+        || full_ref.contains(')')
+    {
+        return None;
+    }
+
+    let trigger = VcsRefTrigger {
+        start,
+        end: token_end,
+        workflow: workflow.to_string(),
+        separator: separator.to_string(),
+        ref_start,
+        ref_end,
+        query: ref_before_cursor.to_string(),
+        query_span: (ref_start, cursor),
+    };
+    let token_range = document.byte_range_to_range(start, token_end)?;
+    let replacement_range =
+        document.byte_range_to_range(trigger.ref_start, trigger.ref_end)?;
+    Some(CompletionContext {
+        kind: CompletionContextKind::VcsRef,
+        token: Some(TokenInfo {
+            text: text[start..token_end].to_string(),
+            range: token_range,
+            byte_start: start,
+            byte_end: token_end,
+        }),
+        active_xprompt: None,
+        active_input: None,
+        directive_name: None,
+        vcs_repo: None,
+        vcs_ref: Some(trigger),
+        replacement_range,
+    })
 }
 
 fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
@@ -645,6 +919,7 @@ fn detect_vcs_project_context_at_position(
         active_input: None,
         directive_name: None,
         vcs_repo: None,
+        vcs_ref: None,
     })
 }
 
@@ -1056,6 +1331,7 @@ fn arg_context(
             .then_some(active_input.name),
         directive_name: None,
         vcs_repo: None,
+        vcs_ref: None,
         replacement_range: range,
     })
 }
@@ -1088,6 +1364,7 @@ fn detect_directive_context_at_position(
             active_input: None,
             directive_name: None,
             vcs_repo: None,
+            vcs_ref: None,
             replacement_range: range,
         });
     }
@@ -1122,6 +1399,7 @@ fn detect_directive_context_at_position(
             active_input: None,
             directive_name: Some(directive_name.to_string()),
             vcs_repo: None,
+            vcs_ref: None,
             replacement_range: range,
         });
     }
@@ -1170,6 +1448,7 @@ fn context_for_token(
         active_input: None,
         directive_name: None,
         vcs_repo: None,
+        vcs_ref: None,
     }
 }
 
@@ -1777,7 +2056,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_vcs_repo_before_xprompt_argument_hints() {
+    fn classifies_vcs_repo_then_vcs_ref_before_xprompt_argument_hints() {
         let catalog = vec![gh_entry()];
         let names = workflow_names(&["gh"]);
 
@@ -1799,11 +2078,8 @@ mod tests {
             &names,
         )
         .unwrap();
-        assert_eq!(
-            context.kind,
-            CompletionContextKind::XpromptArgumentTypeHint
-        );
-        assert_eq!(context.active_xprompt.as_deref(), Some("gh"));
+        assert_eq!(context.kind, CompletionContextKind::VcsRef);
+        assert_eq!(context.active_xprompt.as_deref(), None);
 
         let doc = DocumentSnapshot::new("#foo:bbugyi200/");
         let context = classify_completion_context_with_workflows(
@@ -1859,6 +2135,246 @@ mod tests {
         assert_eq!(edit.new_text, "bbugyi200/sase ");
         assert_eq!(apply_text_edit(&text, edit), "Fix #gh:bbugyi200/sase ");
         assert!(list.candidates[0].additional_edits.is_empty());
+    }
+
+    // --- vcs_ref (`#gh:` / `#gh(` root-ref completion) ---------------------
+
+    const VCS_REF_CURSOR: &str = "<CURSOR>";
+
+    fn vcs_ref_context(
+        text: &str,
+        cursor: usize,
+        names: &[&str],
+    ) -> CompletionContext {
+        let doc = DocumentSnapshot::new(text);
+        let position = doc.byte_offset_to_position(cursor).unwrap();
+        detect_vcs_ref_context_at_position(
+            &doc,
+            position,
+            &workflow_names(names),
+        )
+        .unwrap_or_else(|| panic!("expected ref context for {text:?}"))
+    }
+
+    fn namespace_entry(name: &str, description: &str) -> VcsNamespaceEntry {
+        VcsNamespaceEntry {
+            name: name.to_string(),
+            description: description.to_string(),
+            kind_label: "org".to_string(),
+        }
+    }
+
+    #[test]
+    fn vcs_ref_golden_vectors() {
+        // The cross-language parity contract -- identical to the Python
+        // `VCS_REF_GOLDEN_VECTORS` table. `<CURSOR>` marks the cursor.
+        let cases: &[(&str, &[&str], &str, bool, &str)] = &[
+            ("#gh:<CURSOR>", &["gh"], "sase", false, "#gh:sase "),
+            ("#gh:sa<CURSOR>", &["gh"], "sase", false, "#gh:sase "),
+            (
+                "Fix #gh:sa<CURSOR> now",
+                &["gh"],
+                "sase",
+                false,
+                "Fix #gh:sase now",
+            ),
+            ("#gh!!:sa<CURSOR>", &["gh"], "sase", false, "#gh!!:sase "),
+            ("#gh(s<CURSOR>", &["gh"], "sase", false, "#gh(sase)"),
+            (
+                "#gh(sa<CURSOR>) next",
+                &["gh"],
+                "sase",
+                false,
+                "#gh(sase) next",
+            ),
+            ("#gh??(<CURSOR>", &["gh"], "sase", false, "#gh??(sase)"),
+            ("#gh:s<CURSOR>asex", &["gh"], "sase", false, "#gh:sase "),
+            ("#gh:sa<CURSOR>\n", &["gh"], "sase", false, "#gh:sase \n"),
+            ("#gh:<CURSOR>", &["gh"], "sase-org", true, "#gh:sase-org/"),
+            ("#gh(sa<CURSOR>", &["gh"], "sase-org", true, "#gh(sase-org/"),
+            (
+                "#gh(sa<CURSOR>) next",
+                &["gh"],
+                "sase-org",
+                true,
+                "#gh(sase-org/) next",
+            ),
+        ];
+
+        for (marked, names, selected_ref, chain, expected) in cases {
+            let cursor = marked.find(VCS_REF_CURSOR).unwrap();
+            let text = marked.replace(VCS_REF_CURSOR, "");
+            let context = vcs_ref_context(&text, cursor, names);
+            let trigger = context.vcs_ref.as_ref().unwrap();
+            assert_eq!(
+                apply_vcs_ref_selection(&text, trigger, selected_ref, *chain),
+                *expected,
+                "{marked}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_vcs_ref_colon_spans() {
+        let context = vcs_ref_context("#gh:sa", 6, &["gh"]);
+        let trigger = context.vcs_ref.as_ref().unwrap();
+
+        assert_eq!(context.kind, CompletionContextKind::VcsRef);
+        assert_eq!(trigger.workflow, "gh");
+        assert_eq!(trigger.separator, ":");
+        assert_eq!(trigger.query, "sa");
+        assert_eq!((trigger.ref_start, trigger.ref_end), (4, 6));
+        assert_eq!(trigger.query_span, (4, 6));
+        assert_eq!(context.replacement_range.start, pos(4));
+        assert_eq!(context.replacement_range.end, pos(6));
+
+        let context = vcs_ref_context("#gh:", 4, &["gh"]);
+        let trigger = context.vcs_ref.as_ref().unwrap();
+        assert_eq!(trigger.query, "");
+        assert_eq!((trigger.ref_start, trigger.ref_end), (4, 4));
+    }
+
+    #[test]
+    fn detects_vcs_ref_paren_hitl() {
+        let context = vcs_ref_context("#gh??(sa", 8, &["gh"]);
+        let trigger = context.vcs_ref.as_ref().unwrap();
+        assert_eq!(trigger.workflow, "gh");
+        assert_eq!(trigger.separator, "(");
+        assert_eq!(trigger.query, "sa");
+        assert_eq!((trigger.ref_start, trigger.ref_end), (6, 8));
+    }
+
+    #[test]
+    fn classifies_vcs_repo_then_vcs_ref_then_xprompt_args() {
+        let catalog = vec![gh_entry()];
+        let names = workflow_names(&["gh"]);
+
+        let doc = DocumentSnapshot::new("#gh:owner/repo");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(14),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::VcsRepo);
+
+        let doc = DocumentSnapshot::new("#gh:");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(4),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::VcsRef);
+
+        let doc = DocumentSnapshot::new("#gh:sa");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(6),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::VcsRef);
+
+        let doc = DocumentSnapshot::new("#gh:~/x");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(7),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(
+            context.kind,
+            CompletionContextKind::XpromptArgumentTypeHint
+        );
+    }
+
+    #[test]
+    fn vcs_ref_trigger_negatives() {
+        for prompt in [
+            "#gh:/sa",
+            "#gh:~/x",
+            "#gh:./x",
+            "#gh:https://github.com/bbugyi200/sase",
+            "#gh:owner/repo",
+            "#gh_bbugyi200",
+            "word#gh:sa",
+            "#foo:sa",
+            "#gh(sa)",
+            "#gh:123)",
+        ] {
+            let doc = DocumentSnapshot::new(prompt);
+            let context = detect_vcs_ref_context_at_position(
+                &doc,
+                doc.byte_offset_to_position(prompt.len()).unwrap(),
+                &workflow_names(&["gh"]),
+            );
+            assert!(context.is_none(), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn vcs_ref_builder_groups_rows_and_replaces_root_ref() {
+        let text = "#gh:";
+        let doc = DocumentSnapshot::new(text);
+        let context = vcs_ref_context(text, text.len(), &["gh"]);
+        let list = build_vcs_ref_completion_candidates(
+            &doc,
+            &context,
+            &[
+                changespec_entry("ship-completion", "sase", "Ready"),
+                project_entry("sase", "gh"),
+                project_entry("bob", "git"),
+            ],
+            &[namespace_entry("sase-org", "2 active projects")],
+        );
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase", "ship-completion", "sase-org"]
+        );
+        assert_eq!(list.candidates[0].kind, "project");
+        assert_eq!(list.candidates[1].kind, "changespec");
+        assert_eq!(list.candidates[1].project, "sase");
+        assert_eq!(list.candidates[1].status, "Ready");
+        assert_eq!(list.candidates[2].display, "sase-org/");
+        assert_eq!(list.candidates[2].kind, "namespace");
+        assert_eq!(list.candidates[2].status, "org");
+
+        let project_edit = list.candidates[0].replacement.as_ref().unwrap();
+        assert_eq!(apply_text_edit(text, project_edit), "#gh:sase ");
+        let namespace_edit = list.candidates[2].replacement.as_ref().unwrap();
+        assert_eq!(apply_text_edit(text, namespace_edit), "#gh:sase-org/");
+    }
+
+    #[test]
+    fn vcs_ref_builder_filters_by_query_and_alias() {
+        let text = "#gh:sea";
+        let doc = DocumentSnapshot::new(text);
+        let context = vcs_ref_context(text, text.len(), &["gh"]);
+        let mut entry = project_entry("sase", "gh");
+        entry.aliases = vec!["seaside".to_string()];
+        let list = build_vcs_ref_completion_candidates(
+            &doc,
+            &context,
+            &[entry, project_entry("bob", "gh")],
+            &[namespace_entry("sase-org", "")],
+        );
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase"]
+        );
     }
 
     // --- vcs_project (`#+`) completion -------------------------------------

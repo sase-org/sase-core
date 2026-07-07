@@ -10,12 +10,14 @@ pub mod wire;
 mod xprompt_args;
 
 pub use completion::{
-    apply_vcs_project_selection, apply_vcs_repo_selection,
-    assist_entries_from_catalog, build_snippet_completion_candidates,
+    apply_vcs_project_selection, apply_vcs_ref_selection,
+    apply_vcs_repo_selection, assist_entries_from_catalog,
+    build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
-    build_vcs_repo_completion_candidates, build_xprompt_arg_name_candidates,
-    build_xprompt_completion_candidates, classify_completion_context,
-    classify_completion_context_with_workflows, colon_args_skeleton,
+    build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
+    build_xprompt_arg_name_candidates, build_xprompt_completion_candidates,
+    classify_completion_context, classify_completion_context_with_workflows,
+    colon_args_skeleton, detect_vcs_ref_context_at_position,
     detect_vcs_repo_context_at_position, named_args_skeleton,
 };
 pub use definition::{definition_at_position, DefinitionTarget};
@@ -47,9 +49,10 @@ pub use wire::{
     CompletionList, DiagnosticSeverity, DirectiveMetadata, EditorDiagnostic,
     EditorPosition, EditorRange, EditorTextEdit, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
-    VcsProjectEntry, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
-    VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
-    EDITOR_WIRE_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
+    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint, EDITOR_WIRE_SCHEMA_VERSION,
+    VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
     find_matching_bracket_for_args, parse_xprompt_reference_body,

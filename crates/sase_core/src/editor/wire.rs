@@ -44,6 +44,7 @@ pub enum CompletionContextKind {
     SnippetTrigger,
     VcsProject,
     VcsRepo,
+    VcsRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,8 @@ pub struct CompletionContext {
     pub directive_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_repo: Option<VcsRepoTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_ref: Option<VcsRefTrigger>,
     pub replacement_range: EditorRange,
 }
 
@@ -141,6 +144,21 @@ fn default_vcs_project_entry_kind() -> String {
     "project".to_string()
 }
 
+/// One org/group-style namespace completion candidate for a VCS workflow's ref
+/// root (`#gh:<namespace>/`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsNamespaceEntry {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_vcs_namespace_kind_label")]
+    pub kind_label: String,
+}
+
+fn default_vcs_namespace_kind_label() -> String {
+    "org".to_string()
+}
+
 /// Detected repository-completion trigger for a VCS workflow ref.
 ///
 /// Byte spans mirror the Python `VcsRepoTrigger` parity contract. The
@@ -158,6 +176,22 @@ pub struct VcsRepoTrigger {
     pub namespace: String,
     pub query: String,
     pub namespace_span: (usize, usize),
+    pub query_span: (usize, usize),
+}
+
+/// Detected root-ref completion trigger for a VCS workflow ref.
+///
+/// This owns only the root segment (`#gh:sa` / `#gh(sa`) before any slash.
+/// Repository-path refs containing `/` are handled by [`VcsRepoTrigger`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRefTrigger {
+    pub start: usize,
+    pub end: usize,
+    pub workflow: String,
+    pub separator: String,
+    pub ref_start: usize,
+    pub ref_end: usize,
+    pub query: String,
     pub query_span: (usize, usize),
 }
 
