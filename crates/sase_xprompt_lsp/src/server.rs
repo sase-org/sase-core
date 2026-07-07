@@ -27,6 +27,7 @@ use sase_core::{
     editor_build_file_history_completion_candidates,
     editor_build_snippet_completion_candidates,
     editor_build_vcs_project_completion_candidates,
+    editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
@@ -47,7 +48,7 @@ use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
     hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
     to_editor_position, to_lsp_range, vcs_project_completion_response,
-    vcs_repo_completion_response,
+    vcs_ref_completion_response, vcs_repo_completion_response,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
@@ -170,6 +171,13 @@ impl XpromptLspServer {
         if context.kind == CompletionContextKind::VcsRepo {
             return Some(self.vcs_repo_completion(&context, &document).await);
         }
+        if context.kind == CompletionContextKind::VcsRef {
+            return Some(self.vcs_ref_completion(
+                &context,
+                &document,
+                &vcs_catalog,
+            ));
+        }
         let list =
             self.completion_list_for_context(&context, &entries, &config);
         if context.kind == CompletionContextKind::SnippetTrigger {
@@ -256,6 +264,34 @@ impl XpromptLspServer {
             context.replacement_range,
             trigger_prefix,
         )
+    }
+
+    /// Build the `#workflow:` / `#workflow(` root-ref completion response.
+    ///
+    /// The active project/PR rows and optional namespace rows come from the
+    /// materialized catalog already loaded for context classification. No helper
+    /// bridge call is needed on this completion path.
+    fn vcs_ref_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        document: &DocumentSnapshot,
+        vcs_catalog: &VcsProjectCatalog,
+    ) -> CompletionResponse {
+        let Some(trigger) = context.vcs_ref.as_ref() else {
+            return empty_completion_response();
+        };
+        let namespaces = vcs_catalog
+            .namespaces
+            .get(&trigger.workflow)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let list = editor_build_vcs_ref_completion_candidates(
+            document,
+            context,
+            &vcs_catalog.entries,
+            namespaces,
+        );
+        vcs_ref_completion_response(list, context.replacement_range)
     }
 
     async fn vcs_repo_completion(
@@ -649,7 +685,9 @@ impl XpromptLspServer {
             // `vcs_project_completion`, which loads the materialized project
             // catalog and known workflow names the core builder needs.
             CompletionContextKind::VcsProject => empty_completion_list(),
-            // Phase 5 wires this to the materialized project/namespace catalog.
+            // Handled out-of-band in `completion_for_text` /
+            // `vcs_ref_completion`, which uses the materialized project and
+            // namespace catalog.
             CompletionContextKind::VcsRef => empty_completion_list(),
         };
         apply_replacement(list, context.replacement_range)
@@ -2870,6 +2908,66 @@ mod tests {
         .unwrap();
     }
 
+    fn write_vcs_ref_catalog(path: &Path) {
+        fs::write(
+            path,
+            r##"{
+                "schema_version": 3,
+                "workflow_names": ["gh", "git", "hg"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub",
+                        "description": "SASE repo",
+                        "aliases": ["sase-core"],
+                        "kind": "project",
+                        "project": "sase",
+                        "status": ""
+                    },
+                    {
+                        "name": "ship-completion",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:ship-completion",
+                        "provider_display": "GitHub",
+                        "description": "Completion ChangeSpec",
+                        "aliases": [],
+                        "kind": "changespec",
+                        "project": "sase",
+                        "status": "Ready"
+                    },
+                    {
+                        "name": "local",
+                        "vcs_prefix": "git",
+                        "display_tag": "#git:local",
+                        "provider_display": "Bare Git",
+                        "description": "",
+                        "aliases": [],
+                        "kind": "project",
+                        "project": "local",
+                        "status": ""
+                    }
+                ],
+                "namespaces": {
+                    "gh": [
+                        {
+                            "name": "sase-org",
+                            "description": "2 active projects",
+                            "kind_label": "org"
+                        },
+                        {
+                            "name": "bbugyi200",
+                            "description": "from github_orgs",
+                            "kind_label": "org"
+                        }
+                    ]
+                }
+            }"##,
+        )
+        .unwrap();
+    }
+
     fn repo_entry(
         name: &str,
         description: &str,
@@ -2949,6 +3047,30 @@ mod tests {
             .unwrap_or_default();
 
         assert!(triggers.contains(&"/".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn advertises_vcs_ref_completion_trigger_characters() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&":".to_string()), "{triggers:?}");
+        assert!(triggers.contains(&"(".to_string()), "{triggers:?}");
     }
 
     #[test]
@@ -3381,6 +3503,298 @@ mod tests {
             panic!("expected completion array");
         };
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completes_vcs_ref_from_v3_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_ref_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("#gh:".to_string(), Position::new(0, 4))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase", "ship-completion", "sase-org/", "bbugyi200/"]
+        );
+
+        let project = &items[0];
+        assert_eq!(project.kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(project.filter_text.as_deref(), Some("sase"));
+        assert_eq!(project.sort_text.as_deref(), Some("0:sase:0000"));
+        assert_eq!(project.detail.as_deref(), Some("GitHub · #gh:sase"));
+        assert_eq!(
+            project
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("project")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            project.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.value, "SASE repo");
+        let Some(CompletionTextEdit::Edit(project_edit)) =
+            project.text_edit.as_ref()
+        else {
+            panic!("expected project text edit");
+        };
+        assert_eq!(project_edit.range.start, Position::new(0, 4));
+        assert_eq!(project_edit.range.end, Position::new(0, 4));
+        assert_eq!(project_edit.new_text, "sase ");
+
+        let changespec = &items[1];
+        assert_eq!(changespec.kind, Some(CompletionItemKind::REFERENCE));
+        assert_eq!(changespec.filter_text.as_deref(), Some("ship-completion"));
+        assert_eq!(
+            changespec.sort_text.as_deref(),
+            Some("1:ship-completion:0001")
+        );
+        assert_eq!(
+            changespec.detail.as_deref(),
+            Some("GitHub · #gh:ship-completion")
+        );
+        let changespec_details = changespec.label_details.as_ref().unwrap();
+        assert_eq!(changespec_details.detail.as_deref(), Some(" · sase"));
+        assert_eq!(
+            changespec_details.description.as_deref(),
+            Some("PR · Ready")
+        );
+
+        let namespace = &items[2];
+        assert_eq!(namespace.kind, Some(CompletionItemKind::FOLDER));
+        assert_eq!(namespace.filter_text.as_deref(), Some("sase-org"));
+        assert_eq!(namespace.sort_text.as_deref(), Some("2:sase-org:0002"));
+        assert_eq!(namespace.detail.as_deref(), Some("2 active projects"));
+        assert_eq!(
+            namespace
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("org")
+        );
+        let command = namespace.command.as_ref().unwrap();
+        assert_eq!(command.command, "editor.action.triggerSuggest");
+        let Some(CompletionTextEdit::Edit(namespace_edit)) =
+            namespace.text_edit.as_ref()
+        else {
+            panic!("expected namespace text edit");
+        };
+        assert_eq!(namespace_edit.range.start, Position::new(0, 4));
+        assert_eq!(namespace_edit.range.end, Position::new(0, 4));
+        assert_eq!(namespace_edit.new_text, "sase-org/");
+    }
+
+    #[tokio::test]
+    async fn vcs_ref_completion_filters_aliases_and_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_ref_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("#gh:sase-c".to_string(), Position::new(0, 10))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "sase");
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected alias text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 4));
+        assert_eq!(edit.range.end, Position::new(0, 10));
+        assert_eq!(edit.new_text, "sase ");
+
+        let response = server
+            .completion_for_text("#gh:sa".to_string(), Position::new(0, 6))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase", "sase-org/"]
+        );
+    }
+
+    #[tokio::test]
+    async fn vcs_ref_completion_accepts_v2_catalog_without_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog_with_pr(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("#gh:".to_string(), Position::new(0, 4))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase", "ship-completion"]
+        );
+        assert!(!items
+            .iter()
+            .any(|item| item.kind == Some(CompletionItemKind::FOLDER)));
+    }
+
+    #[tokio::test]
+    async fn vcs_ref_completion_ignores_malformed_namespaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 3,
+                "workflow_names": ["gh"],
+                "entries": [
+                    {
+                        "name": "sase",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:sase",
+                        "provider_display": "GitHub"
+                    }
+                ],
+                "namespaces": ["not", "a", "map"]
+            }"##,
+        )
+        .unwrap();
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("#gh:".to_string(), Position::new(0, 4))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase"]
+        );
+        assert!(items[0].command.is_none());
+    }
+
+    #[tokio::test]
+    async fn vcs_ref_owner_slash_still_uses_repo_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_ref_catalog(&catalog_path);
+        let repo_response = vcs_repo_catalog_response(
+            "ok",
+            "",
+            vec![repo_entry(
+                "sase",
+                "Structured Agentic Software Engineering",
+                "private",
+                false,
+                false,
+                Some("2026-07-07T18:00:00Z"),
+            )],
+        );
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_vcs_repo_catalog(repo_response.clone())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let text = "#gh:bbugyi200/".to_string();
+        let response = server
+            .completion_for_text(
+                text.clone(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "sase");
+        assert_eq!(items[0].filter_text.as_deref(), Some("bbugyi200/sase"));
+        assert!(items[0].command.is_none());
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected repo text edit");
+        };
+        assert_eq!(edit.new_text, "bbugyi200/sase ");
     }
 
     #[tokio::test]

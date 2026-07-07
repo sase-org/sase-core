@@ -1,5 +1,5 @@
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
+    Command, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
     CompletionItemTag, CompletionResponse, CompletionTextEdit, Documentation,
     InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
     Range, TextEdit,
@@ -84,6 +84,21 @@ pub fn vcs_repo_completion_response(
                     replacement_range,
                     index,
                 )
+            })
+            .collect(),
+    )
+}
+
+pub fn vcs_ref_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                vcs_ref_completion_item(candidate, replacement_range, index)
             })
             .collect(),
     )
@@ -248,6 +263,100 @@ fn vcs_project_completion_item(
     item.label_details = label_details;
     item.detail = detail;
     item
+}
+
+fn vcs_ref_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let range = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.range)
+        .unwrap_or(replacement_range);
+    let new_text = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.new_text.clone())
+        .unwrap_or_else(|| candidate.insertion.clone());
+    let group = vcs_ref_sort_group(&candidate);
+    let is_namespace = candidate.kind == "namespace";
+    let label_details = vcs_ref_label_details(&candidate);
+    let item_kind = vcs_ref_item_kind(&candidate);
+    let filter_text = candidate.name.clone();
+    let sort_text =
+        format!("{group}:{}:{index:04}", candidate.name.to_lowercase());
+
+    CompletionItem {
+        label: candidate.display,
+        label_details: Some(label_details),
+        kind: Some(item_kind),
+        detail: candidate.detail.clone(),
+        documentation: candidate.documentation.map(markdown_doc),
+        filter_text: Some(filter_text),
+        sort_text: Some(sort_text),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(range),
+            new_text,
+        })),
+        additional_text_edits: additional_text_edits(
+            candidate.additional_edits,
+        ),
+        command: is_namespace.then(|| {
+            Command::new(
+                "Trigger Suggest".to_string(),
+                "editor.action.triggerSuggest".to_string(),
+                None,
+            )
+        }),
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+fn vcs_ref_item_kind(candidate: &CompletionCandidate) -> CompletionItemKind {
+    match candidate.kind.as_str() {
+        "changespec" => CompletionItemKind::REFERENCE,
+        "namespace" => CompletionItemKind::FOLDER,
+        _ => CompletionItemKind::MODULE,
+    }
+}
+
+fn vcs_ref_sort_group(candidate: &CompletionCandidate) -> u8 {
+    match candidate.kind.as_str() {
+        "changespec" => 1,
+        "namespace" => 2,
+        _ => 0,
+    }
+}
+
+fn vcs_ref_label_details(
+    candidate: &CompletionCandidate,
+) -> CompletionItemLabelDetails {
+    match candidate.kind.as_str() {
+        "changespec" => CompletionItemLabelDetails {
+            detail: (!candidate.project.is_empty())
+                .then(|| format!(" · {}", candidate.project)),
+            description: Some(if candidate.status.is_empty() {
+                "PR".to_string()
+            } else {
+                format!("PR · {}", candidate.status)
+            }),
+        },
+        "namespace" => CompletionItemLabelDetails {
+            detail: None,
+            description: Some(if candidate.status.is_empty() {
+                "org".to_string()
+            } else {
+                candidate.status.clone()
+            }),
+        },
+        _ => CompletionItemLabelDetails {
+            detail: None,
+            description: Some("project".to_string()),
+        },
+    }
 }
 
 fn vcs_repo_completion_item(
