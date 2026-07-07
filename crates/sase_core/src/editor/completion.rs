@@ -2179,18 +2179,32 @@ mod tests {
                 "Fix #gh:sase now",
             ),
             ("#gh!!:sa<CURSOR>", &["gh"], "sase", false, "#gh!!:sase "),
+            ("#gh:s<CURSOR>asex", &["gh"], "sase", false, "#gh:sase "),
+            (
+                "#git:sa<CURSOR>suffix",
+                &["git"],
+                "sase",
+                false,
+                "#git:sase ",
+            ),
             ("#gh(s<CURSOR>", &["gh"], "sase", false, "#gh(sase)"),
             (
-                "#gh(sa<CURSOR>) next",
+                "#gh(s<CURSOR>) next",
                 &["gh"],
                 "sase",
                 false,
                 "#gh(sase) next",
             ),
-            ("#gh??(<CURSOR>", &["gh"], "sase", false, "#gh??(sase)"),
-            ("#gh:s<CURSOR>asex", &["gh"], "sase", false, "#gh:sase "),
-            ("#gh:sa<CURSOR>\n", &["gh"], "sase", false, "#gh:sase \n"),
+            ("#gh??(s<CURSOR>", &["gh"], "sase", false, "#gh??(sase)"),
             ("#gh:<CURSOR>", &["gh"], "sase-org", true, "#gh:sase-org/"),
+            ("#gh:<CURSOR>", &["gh"], "sase-org/", true, "#gh:sase-org/"),
+            (
+                "Fix #gh:sa<CURSOR> now",
+                &["gh"],
+                "sase-org",
+                true,
+                "Fix #gh:sase-org/ now",
+            ),
             ("#gh(sa<CURSOR>", &["gh"], "sase-org", true, "#gh(sase-org/"),
             (
                 "#gh(sa<CURSOR>) next",
@@ -2212,6 +2226,22 @@ mod tests {
                 "{marked}"
             );
         }
+    }
+
+    #[test]
+    fn vcs_ref_accept_preserves_visible_space_before_document_final_newline() {
+        // Neovim documents include a final newline; the editor path treats that
+        // as end-of-input so the accepted visible line still gains a space.
+        let marked = "#gh:sa<CURSOR>\n";
+        let cursor = marked.find(VCS_REF_CURSOR).unwrap();
+        let text = marked.replace(VCS_REF_CURSOR, "");
+        let context = vcs_ref_context(&text, cursor, &["gh"]);
+        let trigger = context.vcs_ref.as_ref().unwrap();
+
+        assert_eq!(
+            apply_vcs_ref_selection(&text, trigger, "sase", false),
+            "#gh:sase \n",
+        );
     }
 
     #[test]
