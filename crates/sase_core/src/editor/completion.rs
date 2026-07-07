@@ -351,7 +351,10 @@ fn vcs_repo_replacement_text(
         return format!("{selected_ref}{suffix}");
     }
 
-    let suffix = if after.starts_with([' ', '\t', '\r', '\n']) {
+    let suffix = if after.starts_with([' ', '\t'])
+        || after.starts_with('\r') && after != "\r" && after != "\r\n"
+        || after.starts_with('\n') && after != "\n"
+    {
         ""
     } else {
         " "
@@ -1719,6 +1722,12 @@ mod tests {
                 vec!["gh"],
                 "bbugyi200/sase",
                 "#gh:bbugyi200/sase ",
+            ),
+            (
+                "#gh:bbugyi200/sa<CURSOR>\n",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh:bbugyi200/sase \n",
             ),
         ];
 
