@@ -11,7 +11,8 @@ use sase_core::{
     load_editor_xprompt_catalog, CommandHelperHostBridge, DynHelperHostBridge,
     EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
     EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
-    XpromptAssistEntry, XpromptCatalogLoadOptions,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse, XpromptAssistEntry,
+    XpromptCatalogLoadOptions,
 };
 use tokio::time;
 use tracing::warn;
@@ -19,6 +20,7 @@ use tracing::warn;
 const COMPLETION_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const EXPLICIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const CACHE_TTL: Duration = Duration::from_secs(30);
+const VCS_REPO_CACHE_TTL: Duration = Duration::from_secs(45);
 const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
@@ -41,6 +43,12 @@ struct CachedSnippetCatalog {
     refreshed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CachedVcsRepoCatalog {
+    response: Arc<VcsRepoCatalogResponse>,
+    refreshed_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct CatalogCache {
     bridge: DynHelperHostBridge,
@@ -48,6 +56,7 @@ pub struct CatalogCache {
     plugin_metadata_present: bool,
     catalogs: RwLock<HashMap<String, CachedCatalog>>,
     snippet_catalogs: RwLock<HashMap<String, CachedSnippetCatalog>>,
+    vcs_repo_catalogs: RwLock<HashMap<(String, String), CachedVcsRepoCatalog>>,
     warned_failure_classes: RwLock<BTreeSet<String>>,
 }
 
@@ -76,6 +85,7 @@ impl CatalogCache {
             plugin_metadata_present: plugin_metadata_env_present(),
             catalogs: RwLock::new(HashMap::new()),
             snippet_catalogs: RwLock::new(HashMap::new()),
+            vcs_repo_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -91,6 +101,7 @@ impl CatalogCache {
             plugin_metadata_present,
             catalogs: RwLock::new(HashMap::new()),
             snippet_catalogs: RwLock::new(HashMap::new()),
+            vcs_repo_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -128,6 +139,31 @@ impl CatalogCache {
         catalogs
             .get(key)
             .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub fn cached_vcs_repo_catalog(
+        &self,
+        workflow: &str,
+        namespace: &str,
+    ) -> Option<Arc<VcsRepoCatalogResponse>> {
+        let catalogs = self.vcs_repo_catalogs.read().ok()?;
+        catalogs
+            .get(&(workflow.to_string(), namespace.to_string()))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn vcs_repo_catalog_stale_or_missing(
+        &self,
+        workflow: &str,
+        namespace: &str,
+    ) -> bool {
+        let Ok(catalogs) = self.vcs_repo_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&(workflow.to_string(), namespace.to_string()))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= VCS_REPO_CACHE_TTL)
             .unwrap_or(true)
     }
 
@@ -181,6 +217,26 @@ impl CatalogCache {
             .await
     }
 
+    pub async fn refresh_vcs_repo_for_completion(
+        &self,
+        workflow: String,
+        namespace: String,
+    ) -> Result<Arc<VcsRepoCatalogResponse>, CatalogFailure> {
+        match self
+            .refresh_vcs_repo_catalog(
+                workflow.clone(),
+                namespace.clone(),
+                COMPLETION_REFRESH_TIMEOUT,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => self
+                .cached_vcs_repo_catalog(&workflow, &namespace)
+                .ok_or(error),
+        }
+    }
+
     pub fn should_warn(&self, class: &str) -> bool {
         let Ok(mut warned) = self.warned_failure_classes.write() else {
             return false;
@@ -193,6 +249,9 @@ impl CatalogCache {
             catalogs.clear();
         }
         if let Ok(mut catalogs) = self.snippet_catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.vcs_repo_catalogs.write() {
             catalogs.clear();
         }
     }
@@ -316,6 +375,22 @@ impl CatalogCache {
         Ok(self.store_snippets(key, entries))
     }
 
+    async fn refresh_vcs_repo_catalog(
+        &self,
+        workflow: String,
+        namespace: String,
+        timeout: Duration,
+    ) -> Result<Arc<VcsRepoCatalogResponse>, CatalogFailure> {
+        let request = VcsRepoCatalogRequest {
+            schema_version: 1,
+            workflow: workflow.clone(),
+            namespace: namespace.clone(),
+        };
+        let response =
+            self.refresh_vcs_repo_with_helper(&request, timeout).await?;
+        Ok(self.store_vcs_repo_catalog(workflow, namespace, response))
+    }
+
     async fn refresh_with_helper(
         &self,
         request: &EditorXpromptCatalogRequestWire,
@@ -386,6 +461,32 @@ impl CatalogCache {
         Ok(response.entries)
     }
 
+    async fn refresh_vcs_repo_with_helper(
+        &self,
+        request: &VcsRepoCatalogRequest,
+        timeout: Duration,
+    ) -> Result<VcsRepoCatalogResponse, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.vcs_repo_catalog(&request)
+        });
+        match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Ok(Ok(Err(error))) => {
+                Err(failure_from_bridge_error(error, "vcs repo catalog"))
+            }
+            Ok(Err(error)) => Err(CatalogFailure {
+                class: "helper_join".to_string(),
+                message: format!("vcs repo catalog helper failed: {error}"),
+            }),
+            Err(_) => Err(CatalogFailure {
+                class: "helper_timeout".to_string(),
+                message: "vcs repo catalog helper timed out".to_string(),
+            }),
+        }
+    }
+
     fn store(
         &self,
         key: String,
@@ -420,6 +521,25 @@ impl CatalogCache {
             warn!("failed to lock snippet catalog cache for write");
         }
         entries
+    }
+
+    fn store_vcs_repo_catalog(
+        &self,
+        workflow: String,
+        namespace: String,
+        response: VcsRepoCatalogResponse,
+    ) -> Arc<VcsRepoCatalogResponse> {
+        let response = Arc::new(response);
+        let cached = CachedVcsRepoCatalog {
+            response: response.clone(),
+            refreshed_at: Instant::now(),
+        };
+        if let Ok(mut catalogs) = self.vcs_repo_catalogs.write() {
+            catalogs.insert((workflow, namespace), cached);
+        } else {
+            warn!("failed to lock vcs repo catalog cache for write");
+        }
+        response
     }
 }
 
@@ -548,7 +668,8 @@ mod tests {
         MobileHelperProjectScopeWire, MobileHelperResultWire,
         MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
         MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-        MobileXpromptCatalogStatsWire,
+        MobileXpromptCatalogStatsWire, VcsRepoCatalogRequest,
+        VcsRepoCatalogResponse, VcsRepoEntry,
     };
     use std::fs;
     use std::sync::Mutex;
@@ -605,6 +726,55 @@ mod tests {
                     "helper_bridge".to_string(),
                 ))
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct VcsRepoFixtureBridge {
+        response: VcsRepoCatalogResponse,
+    }
+
+    impl HelperHostBridge for VcsRepoFixtureBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstVcsRepoBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstVcsRepoBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(vcs_repo_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowVcsRepoBridge;
+
+    impl HelperHostBridge for SlowVcsRepoBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(vcs_repo_response("slow"))
         }
     }
 
@@ -676,6 +846,26 @@ mod tests {
         }
     }
 
+    fn vcs_repo_response(name: &str) -> VcsRepoCatalogResponse {
+        VcsRepoCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            error_kind: None,
+            message: String::new(),
+            provider_display: "GitHub".to_string(),
+            stale: false,
+            entries: vec![VcsRepoEntry {
+                name: name.to_string(),
+                r#ref: format!("bbugyi200/{name}"),
+                description: format!("{name} repo"),
+                visibility: "public".to_string(),
+                is_fork: false,
+                is_archived: false,
+                pushed_at: Some("2026-07-07T18:00:00Z".to_string()),
+            }],
+        }
+    }
+
     #[tokio::test]
     async fn snippet_cache_refreshes_from_helper() {
         let cache = CatalogCache::new(Arc::new(SnippetFixtureBridge {
@@ -717,6 +907,74 @@ mod tests {
 
         assert_eq!(first[0].trigger, "cached");
         assert_eq!(second[0].trigger, "cached");
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(VcsRepoFixtureBridge {
+            response: vcs_repo_response("sase"),
+        }));
+
+        let response = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].name, "sase");
+        assert!(!cache.vcs_repo_catalog_stale_or_missing("gh", "bbugyi200"));
+        assert_eq!(
+            cache
+                .cached_vcs_repo_catalog("gh", "bbugyi200")
+                .unwrap()
+                .entries[0]
+                .r#ref,
+            "bbugyi200/sase"
+        );
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_returns_stale_response_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstVcsRepoBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+        let second = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.entries[0].name, "cached");
+        assert_eq!(second.entries[0].name, "cached");
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_reports_helper_timeout() {
+        let cache = CatalogCache::new(Arc::new(SlowVcsRepoBridge));
+
+        let error = cache
+            .refresh_vcs_repo_catalog(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.class, "helper_timeout");
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@ use lsp_types::{
 };
 use sase_core::{
     CompletionCandidate, CompletionList, DiagnosticSeverity, EditorDiagnostic,
-    EditorPosition, EditorRange, EditorTextEdit, HoverPayload,
+    EditorPosition, EditorRange, EditorTextEdit, HoverPayload, VcsRepoEntry,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -61,6 +61,28 @@ pub fn vcs_project_completion_response(
                     candidate,
                     replacement_range,
                     trigger_prefix,
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn vcs_repo_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+    entries: &[VcsRepoEntry],
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .zip(entries.iter())
+            .enumerate()
+            .map(|(index, (candidate, entry))| {
+                vcs_repo_completion_item(
+                    candidate,
+                    entry,
+                    replacement_range,
+                    index,
                 )
             })
             .collect(),
@@ -226,6 +248,83 @@ fn vcs_project_completion_item(
     item.label_details = label_details;
     item.detail = detail;
     item
+}
+
+fn vcs_repo_completion_item(
+    candidate: CompletionCandidate,
+    entry: &VcsRepoEntry,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let badges = vcs_repo_badges(entry);
+    let range = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.range)
+        .unwrap_or(replacement_range);
+    let new_text = candidate
+        .replacement
+        .map(|replacement| replacement.new_text)
+        .unwrap_or_else(|| candidate.insertion.clone());
+
+    CompletionItem {
+        label: candidate.display,
+        label_details: Some(CompletionItemLabelDetails {
+            detail: Some(format!(" · {}", entry.r#ref)),
+            description: (!badges.is_empty()).then(|| badges.join(" ")),
+        }),
+        kind: Some(CompletionItemKind::MODULE),
+        detail: Some(vcs_repo_detail(entry, &badges)),
+        documentation: vcs_repo_documentation(entry, &badges),
+        filter_text: Some(entry.r#ref.clone()),
+        sort_text: Some(format!("{index:04}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(range),
+            new_text,
+        })),
+        additional_text_edits: None,
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+fn vcs_repo_detail(entry: &VcsRepoEntry, badges: &[String]) -> String {
+    if badges.is_empty() {
+        return entry.r#ref.clone();
+    }
+    format!("{} {}", entry.r#ref, badges.join(" "))
+}
+
+fn vcs_repo_documentation(
+    entry: &VcsRepoEntry,
+    badges: &[String],
+) -> Option<Documentation> {
+    let mut sections = Vec::new();
+    if !entry.description.is_empty() {
+        sections.push(entry.description.clone());
+    }
+    if !badges.is_empty() {
+        sections.push(badges.join(" "));
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(markdown_doc(sections.join("\n\n")))
+    }
+}
+
+fn vcs_repo_badges(entry: &VcsRepoEntry) -> Vec<String> {
+    let mut badges = Vec::new();
+    if entry.visibility == "private" {
+        badges.push("[private]".to_string());
+    }
+    if entry.is_fork {
+        badges.push("[fork]".to_string());
+    }
+    if entry.is_archived {
+        badges.push("[archived]".to_string());
+    }
+    badges
 }
 
 /// Map the candidate's secondary edits (the prepend/replace-at-start tag edit)

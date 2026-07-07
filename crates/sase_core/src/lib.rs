@@ -212,9 +212,10 @@ pub use editor::{
     DocumentSnapshot, EditorDiagnostic, EditorPosition, EditorRange,
     EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
     FrontmatterInputType, HoverPayload, TokenInfo, VcsProjectEntry,
-    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
-    EDITOR_WIRE_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
+    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
+    VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{is_valid_effort, split_model_effort, EFFORT_LEVELS_ORDERED};
 pub use git_query::{

@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
@@ -26,6 +27,7 @@ use sase_core::{
     editor_build_file_history_completion_candidates,
     editor_build_snippet_completion_candidates,
     editor_build_vcs_project_completion_candidates,
+    editor_build_vcs_repo_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_workflows,
@@ -33,7 +35,8 @@ use sase_core::{
     editor_directive_metadata, editor_extract_token_at_position,
     editor_hover_at_position, CompletionCandidate, CompletionContextKind,
     CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
-    HelperHostBridge, VcsProjectEntry, XpromptAssistEntry,
+    HelperHostBridge, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
+    XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -44,6 +47,7 @@ use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
     hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
     to_editor_position, to_lsp_range, vcs_project_completion_response,
+    vcs_repo_completion_response,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
@@ -156,6 +160,9 @@ impl XpromptLspServer {
                 &context, &document, position, &config,
             ));
         }
+        if context.kind == CompletionContextKind::VcsRepo {
+            return Some(self.vcs_repo_completion(&context, &document).await);
+        }
         let list =
             self.completion_list_for_context(&context, &entries, &config);
         if context.kind == CompletionContextKind::SnippetTrigger {
@@ -242,6 +249,75 @@ impl XpromptLspServer {
             context.replacement_range,
             trigger_prefix,
         )
+    }
+
+    async fn vcs_repo_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        document: &DocumentSnapshot,
+    ) -> CompletionResponse {
+        let Some(trigger) = context.vcs_repo.as_ref() else {
+            return empty_completion_response();
+        };
+        let Some(response) = self
+            .vcs_repo_catalog_for_completion(
+                &trigger.workflow,
+                &trigger.namespace,
+            )
+            .await
+        else {
+            return empty_completion_response();
+        };
+        if response.entries.is_empty() {
+            if response.status != "ok" && !response.message.is_empty() {
+                warn!(
+                    "vcs repo catalog returned no entries: {}",
+                    response.message
+                );
+            }
+            return empty_completion_response();
+        }
+
+        let entries =
+            ranked_vcs_repo_entries(&response.entries, &trigger.query);
+        let list = editor_build_vcs_repo_completion_candidates(
+            document, context, &entries,
+        );
+        vcs_repo_completion_response(list, context.replacement_range, &entries)
+    }
+
+    async fn vcs_repo_catalog_for_completion(
+        &self,
+        workflow: &str,
+        namespace: &str,
+    ) -> Option<Arc<VcsRepoCatalogResponse>> {
+        if !self
+            .catalog_cache
+            .vcs_repo_catalog_stale_or_missing(workflow, namespace)
+        {
+            if let Some(response) = self
+                .catalog_cache
+                .cached_vcs_repo_catalog(workflow, namespace)
+            {
+                return Some(response);
+            }
+        }
+
+        match self
+            .catalog_cache
+            .refresh_vcs_repo_for_completion(
+                workflow.to_string(),
+                namespace.to_string(),
+            )
+            .await
+        {
+            Ok(response) => Some(response),
+            Err(error) => {
+                self.warn_once(&error).await;
+                self.catalog_cache
+                    .cached_vcs_repo_catalog(workflow, namespace)
+            }
+        }
     }
 
     pub async fn hover_for_text(
@@ -558,8 +634,9 @@ impl XpromptLspServer {
                 empty_completion_list()
             }
             CompletionContextKind::SnippetTrigger => empty_completion_list(),
-            // Phase 5 wires the helper bridge and item conversion. Until then,
-            // classify the context but degrade to an empty list.
+            // Handled out-of-band in `completion_for_text` /
+            // `vcs_repo_completion`, which fetches helper-bridge candidates
+            // asynchronously before using the core accept-edit builder.
             CompletionContextKind::VcsRepo => empty_completion_list(),
             // Handled out-of-band in `completion_for_text` /
             // `vcs_project_completion`, which loads the materialized project
@@ -1086,6 +1163,44 @@ fn empty_completion_list() -> CompletionList {
     }
 }
 
+fn empty_completion_response() -> CompletionResponse {
+    CompletionResponse::Array(Vec::new())
+}
+
+fn ranked_vcs_repo_entries(
+    entries: &[VcsRepoEntry],
+    query: &str,
+) -> Vec<VcsRepoEntry> {
+    let query = query.to_lowercase();
+    let mut ranked = entries.to_vec();
+    ranked.sort_by(|left, right| {
+        vcs_repo_name_matches_query(right, &query)
+            .cmp(&vcs_repo_name_matches_query(left, &query))
+            .then_with(|| compare_vcs_repo_pushed_at(left, right))
+            .then_with(|| {
+                left.name.to_lowercase().cmp(&right.name.to_lowercase())
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    ranked
+}
+
+fn vcs_repo_name_matches_query(entry: &VcsRepoEntry, query: &str) -> bool {
+    query.is_empty() || entry.name.to_lowercase().starts_with(query)
+}
+
+fn compare_vcs_repo_pushed_at(
+    left: &VcsRepoEntry,
+    right: &VcsRepoEntry,
+) -> Ordering {
+    match (left.pushed_at.as_deref(), right.pushed_at.as_deref()) {
+        (Some(left), Some(right)) => right.cmp(left),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
     let entries = load_model_catalog(path);
     let needle = partial.to_lowercase();
@@ -1561,6 +1676,15 @@ mod tests {
                     total_count: snippet_total_count,
                 },
             },
+            vcs_repo_catalog_response: VcsRepoCatalogResponse {
+                schema_version: 1,
+                status: "ok".to_string(),
+                error_kind: None,
+                message: String::new(),
+                provider_display: "GitHub".to_string(),
+                stale: false,
+                entries: Vec::new(),
+            },
             bead_list_response: serde_json::from_value(
                 serde_json::json!({
                     "schema_version": 1,
@@ -1600,6 +1724,14 @@ mod tests {
             )
             .unwrap(),
         }
+    }
+
+    fn bridge_with_vcs_repo_catalog(
+        response: VcsRepoCatalogResponse,
+    ) -> StaticHelperHostBridge {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.vcs_repo_catalog_response = response;
+        bridge
     }
 
     fn catalog_entry(
@@ -2716,6 +2848,41 @@ mod tests {
         .unwrap();
     }
 
+    fn repo_entry(
+        name: &str,
+        description: &str,
+        visibility: &str,
+        is_fork: bool,
+        is_archived: bool,
+        pushed_at: Option<&str>,
+    ) -> VcsRepoEntry {
+        VcsRepoEntry {
+            name: name.to_string(),
+            r#ref: format!("bbugyi200/{name}"),
+            description: description.to_string(),
+            visibility: visibility.to_string(),
+            is_fork,
+            is_archived,
+            pushed_at: pushed_at.map(str::to_string),
+        }
+    }
+
+    fn vcs_repo_catalog_response(
+        status: &str,
+        message: &str,
+        entries: Vec<VcsRepoEntry>,
+    ) -> VcsRepoCatalogResponse {
+        VcsRepoCatalogResponse {
+            schema_version: 1,
+            status: status.to_string(),
+            error_kind: None,
+            message: message.to_string(),
+            provider_display: "GitHub".to_string(),
+            stale: false,
+            entries,
+        }
+    }
+
     #[tokio::test]
     async fn advertises_plus_completion_trigger_character() {
         let (service, _) = LspService::new(|client| {
@@ -2737,6 +2904,29 @@ mod tests {
             .unwrap_or_default();
 
         assert!(triggers.contains(&"+".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn advertises_slash_completion_trigger_character() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&"/".to_string()), "{triggers:?}");
     }
 
     #[test]
@@ -3100,6 +3290,140 @@ mod tests {
         let CompletionResponse::Array(items) = response else {
             panic!("expected completion array");
         };
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn completes_vcs_repo_with_ranked_items_and_text_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let repo_response = vcs_repo_catalog_response(
+            "ok",
+            "",
+            vec![
+                repo_entry(
+                    "tooling",
+                    "Tooling repo",
+                    "public",
+                    false,
+                    false,
+                    Some("2026-07-07T18:30:00Z"),
+                ),
+                repo_entry(
+                    "sase-old",
+                    "Old SASE repo",
+                    "public",
+                    false,
+                    false,
+                    Some("2025-01-01T00:00:00Z"),
+                ),
+                repo_entry(
+                    "sase",
+                    "Structured Agentic Software Engineering",
+                    "private",
+                    true,
+                    true,
+                    Some("2026-07-07T18:00:00Z"),
+                ),
+            ],
+        );
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_vcs_repo_catalog(repo_response.clone())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let text = "#gh:bbugyi200/sa".to_string();
+        let response = server
+            .completion_for_text(
+                text.clone(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].label, "sase");
+        assert_eq!(items[1].label, "sase-old");
+        assert_eq!(items[2].label, "tooling");
+        let item = &items[0];
+        assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(item.filter_text.as_deref(), Some("bbugyi200/sase"));
+        assert_eq!(item.sort_text.as_deref(), Some("0000"));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("[private] [fork] [archived]")
+        );
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("bbugyi200/sase [private] [fork] [archived]")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert!(documentation
+            .value
+            .contains("Structured Agentic Software Engineering"));
+        assert!(documentation.value.contains("[private] [fork] [archived]"));
+
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 4));
+        assert_eq!(edit.range.end, Position::new(0, text.len() as u32));
+        assert_eq!(edit.new_text, "bbugyi200/sase ");
+        assert!(item.additional_text_edits.is_none());
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_completion_error_response_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let repo_response = vcs_repo_catalog_response(
+            "error",
+            "repo listing failed - run gh auth login",
+            Vec::new(),
+        );
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_vcs_repo_catalog(repo_response.clone())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+
+        let text = "#gh:bbugyi200/".to_string();
+        let response = server
+            .completion_for_text(
+                text.clone(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
         assert!(items.is_empty());
     }
 }

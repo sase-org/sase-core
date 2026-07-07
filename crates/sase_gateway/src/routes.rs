@@ -3241,6 +3241,18 @@ mod tests {
                     }),
                 )
                 .unwrap(),
+                vcs_repo_catalog_response: serde_json::from_value(
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "status": "ok",
+                        "error_kind": null,
+                        "message": "",
+                        "provider_display": "GitHub",
+                        "stale": false,
+                        "entries": []
+                    }),
+                )
+                .unwrap(),
                 bead_list_response: MobileBeadListResponseWire {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                     result: result.clone(),

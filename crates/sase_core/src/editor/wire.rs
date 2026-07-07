@@ -181,6 +181,14 @@ pub struct VcsRepoEntry {
 
 pub const VCS_REPO_CATALOG_SCHEMA_VERSION: u32 = 1;
 
+/// Repository completion catalog request sent to the Python helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRepoCatalogRequest {
+    pub schema_version: u32,
+    pub workflow: String,
+    pub namespace: String,
+}
+
 /// Repository completion catalog returned by the Python helper bridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcsRepoCatalogResponse {

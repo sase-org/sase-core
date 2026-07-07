@@ -15,7 +15,9 @@ use std::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::editor::wire::EditorRange;
+use crate::editor::wire::{
+    EditorRange, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+};
 
 #[derive(Clone)]
 pub struct DynHelperHostBridge(Arc<dyn HelperHostBridge>);
@@ -44,6 +46,13 @@ impl DynHelperHostBridge {
         request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         self.0.snippet_catalog(request)
+    }
+
+    pub fn vcs_repo_catalog(
+        &self,
+        request: &VcsRepoCatalogRequest,
+    ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+        self.0.vcs_repo_catalog(request)
     }
 
     pub fn list_beads(
@@ -105,6 +114,15 @@ pub trait HelperHostBridge: Send + Sync {
         &self,
         _request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn vcs_repo_catalog(
+        &self,
+        _request: &VcsRepoCatalogRequest,
+    ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
@@ -315,6 +333,13 @@ impl HelperHostBridge for CommandHelperHostBridge {
         self.invoke_editor("snippet-catalog", request)
     }
 
+    fn vcs_repo_catalog(
+        &self,
+        request: &VcsRepoCatalogRequest,
+    ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+        self.invoke_editor("vcs-repo-catalog", request)
+    }
+
     fn list_beads(
         &self,
         request: &MobileBeadListRequestWire,
@@ -349,6 +374,7 @@ pub struct StaticHelperHostBridge {
     pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
     pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
     pub snippet_catalog_response: EditorSnippetCatalogResponseWire,
+    pub vcs_repo_catalog_response: VcsRepoCatalogResponse,
     pub bead_list_response: MobileBeadListResponseWire,
     pub bead_show_response: MobileBeadShowResponseWire,
     pub update_start_response: MobileUpdateStartResponseWire,
@@ -375,6 +401,13 @@ impl HelperHostBridge for StaticHelperHostBridge {
         _request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         Ok(self.snippet_catalog_response.clone())
+    }
+
+    fn vcs_repo_catalog(
+        &self,
+        _request: &VcsRepoCatalogRequest,
+    ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+        Ok(self.vcs_repo_catalog_response.clone())
     }
 
     fn list_beads(
@@ -898,6 +931,24 @@ mod tests {
                 }],
                 stats: EditorSnippetCatalogStatsWire { total_count: 1 },
             },
+            vcs_repo_catalog_response: VcsRepoCatalogResponse {
+                schema_version: 1,
+                status: "ok".to_string(),
+                error_kind: None,
+                message: String::new(),
+                provider_display: "GitHub".to_string(),
+                stale: false,
+                entries: vec![crate::editor::VcsRepoEntry {
+                    name: "sase".to_string(),
+                    r#ref: "bbugyi200/sase".to_string(),
+                    description: "Structured Agentic Software Engineering"
+                        .to_string(),
+                    visibility: "private".to_string(),
+                    is_fork: false,
+                    is_archived: false,
+                    pushed_at: Some("2026-07-07T18:00:00Z".to_string()),
+                }],
+            },
             bead_list_response: MobileBeadListResponseWire {
                 schema_version: 1,
                 result: helper_result(),
@@ -1054,6 +1105,23 @@ mod tests {
     }
 
     #[test]
+    fn static_helper_bridge_returns_vcs_repo_catalog_response() {
+        let bridge = DynHelperHostBridge::new(Arc::new(static_bridge()));
+        let response = bridge
+            .vcs_repo_catalog(&VcsRepoCatalogRequest {
+                schema_version: 1,
+                workflow: "gh".to_string(),
+                namespace: "bbugyi200".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.provider_display, "GitHub");
+        assert_eq!(response.entries[0].name, "sase");
+        assert_eq!(response.entries[0].r#ref, "bbugyi200/sase");
+    }
+
+    #[test]
     fn snippet_catalog_wire_accepts_minimal_entry_json() {
         let response: EditorSnippetCatalogResponseWire =
             serde_json::from_value(json!({
@@ -1142,6 +1210,53 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
             .unwrap();
 
         assert_eq!(response.entries[0].trigger, "fix");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_bridge_invokes_editor_vcs_repo_catalog() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("helper");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" != "editor" ] || [ "$2" != "helper-bridge" ] || [ "$3" != "vcs-repo-catalog" ]; then
+  exit 7
+fi
+cat >"$0.request.json"
+printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"","provider_display":"GitHub","stale":false,"entries":[{"name":"sase","ref":"bbugyi200/sase","description":"SASE repo","visibility":"private","is_fork":false,"is_archived":false,"pushed_at":"2026-07-07T18:00:00Z"}]}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let bridge = CommandHelperHostBridge::new(vec![script
+            .to_string_lossy()
+            .into_owned()]);
+        let response = bridge
+            .vcs_repo_catalog(&VcsRepoCatalogRequest {
+                schema_version: 1,
+                workflow: "gh".to_string(),
+                namespace: "bbugyi200".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(response.entries[0].r#ref, "bbugyi200/sase");
+        let request: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(format!(
+                "{}.request.json",
+                script.to_string_lossy()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["workflow"], "gh");
+        assert_eq!(request["namespace"], "bbugyi200");
     }
 
     #[test]

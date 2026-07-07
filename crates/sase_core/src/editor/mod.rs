@@ -47,9 +47,9 @@ pub use wire::{
     CompletionList, DiagnosticSeverity, DirectiveMetadata, EditorDiagnostic,
     EditorPosition, EditorRange, EditorTextEdit, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
-    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger,
-    XpromptAssistEntry, XpromptInputHint, EDITOR_WIRE_SCHEMA_VERSION,
-    VCS_REPO_CATALOG_SCHEMA_VERSION,
+    VcsProjectEntry, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    EDITOR_WIRE_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
     find_matching_bracket_for_args, parse_xprompt_reference_body,
