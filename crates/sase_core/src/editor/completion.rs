@@ -14,7 +14,8 @@ use super::token::{
 use super::wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
-    VcsProjectEntry, XpromptAssistEntry, XpromptInputHint,
+    VcsProjectEntry, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint,
 };
 
 pub fn assist_entries_from_catalog(
@@ -67,6 +68,22 @@ pub fn classify_completion_context(
     position: EditorPosition,
     entries: &[XpromptAssistEntry],
 ) -> Option<CompletionContext> {
+    classify_completion_context_with_workflows(document, position, entries, &[])
+}
+
+pub fn classify_completion_context_with_workflows(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    entries: &[XpromptAssistEntry],
+    known_workflow_names: &[String],
+) -> Option<CompletionContext> {
+    if let Some(context) = detect_vcs_repo_context_at_position(
+        document,
+        position,
+        known_workflow_names,
+    ) {
+        return Some(context);
+    }
     if let Some(context) =
         detect_xprompt_arg_completion_at_position(document, position, entries)
     {
@@ -96,6 +113,7 @@ pub fn classify_completion_context(
                 active_xprompt: None,
                 active_input: None,
                 directive_name: None,
+                vcs_repo: None,
                 replacement_range: document.byte_range_to_range(byte, byte)?,
             })
         }
@@ -251,6 +269,241 @@ pub fn build_snippet_completion_candidates(
     }
 }
 
+// --- vcs_repo (`#gh:owner/`) completion -----------------------------------
+
+pub fn build_vcs_repo_completion_candidates(
+    document: &DocumentSnapshot,
+    context: &CompletionContext,
+    entries: &[VcsRepoEntry],
+) -> CompletionList {
+    let Some(trigger) = context.vcs_repo.as_ref() else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+    let Some(replacement_range) =
+        document.byte_range_to_range(trigger.ref_start, trigger.ref_end)
+    else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+
+    let candidates = entries
+        .iter()
+        .map(|entry| {
+            let new_text = vcs_repo_replacement_text(
+                document.text(),
+                trigger,
+                &entry.r#ref,
+            );
+            CompletionCandidate {
+                display: entry.name.clone(),
+                insertion: entry.r#ref.clone(),
+                detail: (!entry.visibility.is_empty())
+                    .then(|| entry.visibility.clone()),
+                documentation: (!entry.description.is_empty())
+                    .then(|| entry.description.clone()),
+                is_dir: false,
+                name: entry.name.clone(),
+                replacement: Some(EditorTextEdit {
+                    range: replacement_range,
+                    new_text,
+                }),
+                additional_edits: Vec::new(),
+                kind: "repo".to_string(),
+                project: trigger.namespace.clone(),
+                status: entry.visibility.clone(),
+            }
+        })
+        .collect();
+
+    CompletionList {
+        candidates,
+        shared_extension: String::new(),
+    }
+}
+
+pub fn apply_vcs_repo_selection(
+    text: &str,
+    trigger: &VcsRepoTrigger,
+    selected_ref: &str,
+) -> String {
+    let replacement = vcs_repo_replacement_text(text, trigger, selected_ref);
+    format!(
+        "{}{}{}",
+        &text[..trigger.ref_start],
+        replacement,
+        &text[trigger.ref_end..]
+    )
+}
+
+fn vcs_repo_replacement_text(
+    text: &str,
+    trigger: &VcsRepoTrigger,
+    selected_ref: &str,
+) -> String {
+    let after = &text[trigger.ref_end..];
+    if trigger.separator == "(" {
+        let suffix = if after.starts_with(')') { "" } else { ")" };
+        return format!("{selected_ref}{suffix}");
+    }
+
+    let suffix = if after.starts_with([' ', '\t', '\r', '\n']) {
+        ""
+    } else {
+        " "
+    };
+    format!("{selected_ref}{suffix}")
+}
+
+pub fn detect_vcs_repo_context_at_position(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    known_workflow_names: &[String],
+) -> Option<CompletionContext> {
+    let text = document.text();
+    let cursor = document.position_to_byte_offset(position)?;
+    let mut names: Vec<&str> = known_workflow_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort_by(|left, right| {
+        right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+    });
+
+    let mut start = cursor;
+    while start > 0 {
+        let prev = previous_char_boundary(text, start)?;
+        if text[prev..].chars().next()?.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    if start >= text.len() || text.get(start..start + 1) != Some("#") {
+        return None;
+    }
+
+    let workflow = names
+        .iter()
+        .copied()
+        .find(|name| text[start + 1..].starts_with(name))?;
+    let mut pos = start + 1 + workflow.len();
+    if text[pos..].starts_with("!!") || text[pos..].starts_with("??") {
+        pos += 2;
+    }
+    let separator = match text[pos..].chars().next()? {
+        ':' => ":",
+        '(' => "(",
+        _ => return None,
+    };
+    let ref_start = pos + 1;
+    if cursor < ref_start {
+        return None;
+    }
+    if separator == "(" && text[ref_start..cursor].contains(')') {
+        return None;
+    }
+
+    let (ref_end, token_end) = find_vcs_repo_ref_end(text, cursor, separator)?;
+    if cursor > ref_end {
+        return None;
+    }
+    let ref_before_cursor = &text[ref_start..cursor];
+    let slash_offset = ref_before_cursor.rfind('/')?;
+    let full_ref = &text[ref_start..ref_end];
+    if full_ref.contains("://") {
+        return None;
+    }
+
+    let namespace = &ref_before_cursor[..slash_offset];
+    if namespace.is_empty()
+        || namespace.starts_with('~')
+        || namespace.starts_with('.')
+    {
+        return None;
+    }
+
+    let query_start = ref_start + slash_offset + 1;
+    let trigger = VcsRepoTrigger {
+        start,
+        end: token_end,
+        workflow: workflow.to_string(),
+        separator: separator.to_string(),
+        ref_start,
+        ref_end,
+        namespace: namespace.to_string(),
+        query: ref_before_cursor[slash_offset + 1..].to_string(),
+        namespace_span: (ref_start, ref_start + slash_offset),
+        query_span: (query_start, cursor),
+    };
+    let token_range = document.byte_range_to_range(start, token_end)?;
+    let replacement_range =
+        document.byte_range_to_range(trigger.ref_start, trigger.ref_end)?;
+    Some(CompletionContext {
+        kind: CompletionContextKind::VcsRepo,
+        token: Some(TokenInfo {
+            text: text[start..token_end].to_string(),
+            range: token_range,
+            byte_start: start,
+            byte_end: token_end,
+        }),
+        active_xprompt: None,
+        active_input: None,
+        directive_name: None,
+        vcs_repo: Some(trigger),
+        replacement_range,
+    })
+}
+
+fn find_vcs_repo_ref_end(
+    text: &str,
+    cursor: usize,
+    separator: &str,
+) -> Option<(usize, usize)> {
+    let mut end = cursor;
+    if separator == "(" {
+        while end < text.len() {
+            let ch = text[end..].chars().next()?;
+            if ch.is_whitespace() || ch == ')' {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+        let token_end = if end < text.len()
+            && text[end..].chars().next().is_some_and(|ch| ch == ')')
+        {
+            end + 1
+        } else {
+            end
+        };
+        return Some((end, token_end));
+    }
+
+    while end < text.len() {
+        let ch = text[end..].chars().next()?;
+        if ch.is_whitespace() {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    Some((end, end))
+}
+
+fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
+    text.get(..byte_idx)?
+        .char_indices()
+        .last()
+        .map(|(idx, _)| idx)
+}
+
 // --- vcs_project (`#+`) completion ----------------------------------------
 
 /// Build `vcs_project` completion candidates for a `#+query` or BOF `+query`
@@ -388,6 +641,7 @@ fn detect_vcs_project_context_at_position(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        vcs_repo: None,
     })
 }
 
@@ -798,6 +1052,7 @@ fn arg_context(
         active_input: (!active_input.name.is_empty())
             .then_some(active_input.name),
         directive_name: None,
+        vcs_repo: None,
         replacement_range: range,
     })
 }
@@ -829,6 +1084,7 @@ fn detect_directive_context_at_position(
             active_xprompt: None,
             active_input: None,
             directive_name: None,
+            vcs_repo: None,
             replacement_range: range,
         });
     }
@@ -862,6 +1118,7 @@ fn detect_directive_context_at_position(
             active_xprompt: None,
             active_input: None,
             directive_name: Some(directive_name.to_string()),
+            vcs_repo: None,
             replacement_range: range,
         });
     }
@@ -909,6 +1166,7 @@ fn context_for_token(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        vcs_repo: None,
     }
 }
 
@@ -1331,6 +1589,267 @@ mod tests {
             list.candidates[0].documentation.as_deref(),
             Some("Run a deeper pass\n\ndefault: false")
         );
+    }
+
+    // --- vcs_repo (`#gh:owner/`) completion -------------------------------
+
+    const VCS_REPO_CURSOR: &str = "<CURSOR>";
+
+    fn workflow_names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn gh_entry() -> XpromptAssistEntry {
+        XpromptAssistEntry {
+            name: "gh".to_string(),
+            display_label: "gh".to_string(),
+            insertion: "#gh".to_string(),
+            reference_prefix: "#".to_string(),
+            kind: Some("workflow".to_string()),
+            source_bucket: "builtin".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: Some("(gh_ref: word)".to_string()),
+            inputs: vec![XpromptInputHint {
+                name: "gh_ref".to_string(),
+                r#type: "word".to_string(),
+                description: None,
+                required: true,
+                default_display: None,
+                position: 0,
+            }],
+            content_preview: None,
+            description: None,
+            source_path_display: None,
+            definition_path: None,
+            definition_range: None,
+            is_skill: false,
+        }
+    }
+
+    fn repo_entry(name: &str, full_ref: &str) -> VcsRepoEntry {
+        VcsRepoEntry {
+            name: name.to_string(),
+            r#ref: full_ref.to_string(),
+            description: format!("{name} repo"),
+            visibility: "public".to_string(),
+            is_fork: false,
+            is_archived: false,
+            pushed_at: None,
+        }
+    }
+
+    fn vcs_repo_context(
+        text: &str,
+        cursor: usize,
+        names: &[&str],
+    ) -> CompletionContext {
+        let doc = DocumentSnapshot::new(text);
+        let position = doc.byte_offset_to_position(cursor).unwrap();
+        detect_vcs_repo_context_at_position(
+            &doc,
+            position,
+            &workflow_names(names),
+        )
+        .unwrap_or_else(|| panic!("expected repo context for {text:?}"))
+    }
+
+    fn apply_text_edit(text: &str, edit: &EditorTextEdit) -> String {
+        let doc = DocumentSnapshot::new(text);
+        let start = doc.position_to_byte_offset(edit.range.start).unwrap();
+        let end = doc.position_to_byte_offset(edit.range.end).unwrap();
+        format!("{}{}{}", &text[..start], edit.new_text, &text[end..])
+    }
+
+    #[test]
+    fn vcs_repo_golden_vectors() {
+        // The cross-language parity contract -- identical to the Python
+        // `VCS_REPO_GOLDEN_VECTORS` table. `<CURSOR>` marks the cursor.
+        let cases = [
+            (
+                "#gh:bbugyi200/<CURSOR>",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh:bbugyi200/sase ",
+            ),
+            (
+                "#gh:bbugyi200/sa<CURSOR>",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh:bbugyi200/sase ",
+            ),
+            (
+                "Fix #gh:bbugyi200/sa<CURSOR> now",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "Fix #gh:bbugyi200/sase now",
+            ),
+            (
+                "#gh!!:bbugyi200/sa<CURSOR>",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh!!:bbugyi200/sase ",
+            ),
+            (
+                "#gh(bbugyi200/sa<CURSOR>",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh(bbugyi200/sase)",
+            ),
+            (
+                "#gh(bbugyi200/sa<CURSOR>) next",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh(bbugyi200/sase) next",
+            ),
+            (
+                "#gh??(bbugyi200/<CURSOR>",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh??(bbugyi200/sase)",
+            ),
+            (
+                "#gl:group/sub/re<CURSOR>",
+                vec!["gl"],
+                "group/sub/repo",
+                "#gl:group/sub/repo ",
+            ),
+            (
+                "#gh:bbugyi200/s<CURSOR>asex",
+                vec!["gh"],
+                "bbugyi200/sase",
+                "#gh:bbugyi200/sase ",
+            ),
+        ];
+
+        for (marked, names, selected_ref, expected) in cases {
+            let cursor = marked.find(VCS_REPO_CURSOR).unwrap();
+            let text = marked.replace(VCS_REPO_CURSOR, "");
+            let context = vcs_repo_context(&text, cursor, &names);
+            let trigger = context.vcs_repo.as_ref().unwrap();
+            assert_eq!(
+                apply_vcs_repo_selection(&text, trigger, selected_ref),
+                expected,
+                "{marked}"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_vcs_repo_colon_spans() {
+        let context = vcs_repo_context("#gh:bbugyi200/sa", 16, &["gh"]);
+        let trigger = context.vcs_repo.as_ref().unwrap();
+
+        assert_eq!(context.kind, CompletionContextKind::VcsRepo);
+        assert_eq!(trigger.workflow, "gh");
+        assert_eq!(trigger.separator, ":");
+        assert_eq!(trigger.namespace, "bbugyi200");
+        assert_eq!(trigger.query, "sa");
+        assert_eq!((trigger.ref_start, trigger.ref_end), (4, 16));
+        assert_eq!(trigger.namespace_span, (4, 13));
+        assert_eq!(trigger.query_span, (14, 16));
+        assert_eq!(context.replacement_range.start, pos(4));
+        assert_eq!(context.replacement_range.end, pos(16));
+    }
+
+    #[test]
+    fn detects_vcs_repo_paren_hitl_and_nested_namespaces() {
+        let context = vcs_repo_context("#gh??(bbugyi200/sa", 18, &["gh"]);
+        let trigger = context.vcs_repo.as_ref().unwrap();
+        assert_eq!(trigger.workflow, "gh");
+        assert_eq!(trigger.separator, "(");
+        assert_eq!(trigger.namespace, "bbugyi200");
+        assert_eq!(trigger.query, "sa");
+
+        let context = vcs_repo_context("#gl:group/subgroup/sa", 21, &["gl"]);
+        let trigger = context.vcs_repo.as_ref().unwrap();
+        assert_eq!(trigger.namespace, "group/subgroup");
+        assert_eq!(trigger.query, "sa");
+    }
+
+    #[test]
+    fn classifies_vcs_repo_before_xprompt_argument_hints() {
+        let catalog = vec![gh_entry()];
+        let names = workflow_names(&["gh"]);
+
+        let doc = DocumentSnapshot::new("#gh:bbugyi200/");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(14),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::VcsRepo);
+
+        let doc = DocumentSnapshot::new("#gh:bbugyi200");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(13),
+            &catalog,
+            &names,
+        )
+        .unwrap();
+        assert_eq!(
+            context.kind,
+            CompletionContextKind::XpromptArgumentTypeHint
+        );
+        assert_eq!(context.active_xprompt.as_deref(), Some("gh"));
+
+        let doc = DocumentSnapshot::new("#foo:bbugyi200/");
+        let context = classify_completion_context_with_workflows(
+            &doc,
+            pos(15),
+            &[],
+            &names,
+        );
+        assert_ne!(
+            context.map(|context| context.kind),
+            Some(CompletionContextKind::VcsRepo)
+        );
+    }
+
+    #[test]
+    fn vcs_repo_trigger_negatives() {
+        for prompt in [
+            "#gh:bbugyi200",
+            "#gh:/sa",
+            "#gh:~/sa",
+            "#gh:./sa",
+            "#gh:https://github.com/bbugyi200/sase",
+            "#gh_bbugyi200/sase",
+            "word#gh:bbugyi200/sa",
+            "#foo:bbugyi200/sa",
+            "#gh(bbugyi200/sa)",
+        ] {
+            let doc = DocumentSnapshot::new(prompt);
+            let context = detect_vcs_repo_context_at_position(
+                &doc,
+                doc.byte_offset_to_position(prompt.len()).unwrap(),
+                &workflow_names(&["gh"]),
+            );
+            assert!(context.is_none(), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn vcs_repo_builder_replaces_only_the_ref_value() {
+        let marked = "Fix #gh:bbugyi200/s<CURSOR>asex";
+        let cursor = marked.find(VCS_REPO_CURSOR).unwrap();
+        let text = marked.replace(VCS_REPO_CURSOR, "");
+        let doc = DocumentSnapshot::new(text.clone());
+        let context = vcs_repo_context(&text, cursor, &["gh"]);
+        let list = build_vcs_repo_completion_candidates(
+            &doc,
+            &context,
+            &[repo_entry("sase", "bbugyi200/sase")],
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        let edit = list.candidates[0].replacement.as_ref().unwrap();
+        assert_eq!(edit.new_text, "bbugyi200/sase ");
+        assert_eq!(apply_text_edit(&text, edit), "Fix #gh:bbugyi200/sase ");
+        assert!(list.candidates[0].additional_edits.is_empty());
     }
 
     // --- vcs_project (`#+`) completion -------------------------------------

@@ -28,12 +28,12 @@ use sase_core::{
     editor_build_vcs_project_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
-    editor_classify_completion_context, editor_definition_at_position,
-    editor_directive_argument_candidates, editor_directive_metadata,
-    editor_extract_token_at_position, editor_hover_at_position,
-    CompletionCandidate, CompletionContextKind, CompletionList,
-    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, HelperHostBridge,
-    VcsProjectEntry, XpromptAssistEntry,
+    editor_classify_completion_context_with_workflows,
+    editor_definition_at_position, editor_directive_argument_candidates,
+    editor_directive_metadata, editor_extract_token_at_position,
+    editor_hover_at_position, CompletionCandidate, CompletionContextKind,
+    CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
+    HelperHostBridge, VcsProjectEntry, XpromptAssistEntry,
 };
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
@@ -142,11 +142,14 @@ impl XpromptLspServer {
     ) -> Option<CompletionResponse> {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
+        let (_, workflow_names) =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let document = DocumentSnapshot::new(text);
-        let context = editor_classify_completion_context(
+        let context = editor_classify_completion_context_with_workflows(
             &document,
             to_editor_position(position),
             entries.as_slice(),
+            &workflow_names,
         )?;
         if context.kind == CompletionContextKind::VcsProject {
             return Some(self.vcs_project_completion(
@@ -555,6 +558,9 @@ impl XpromptLspServer {
                 empty_completion_list()
             }
             CompletionContextKind::SnippetTrigger => empty_completion_list(),
+            // Phase 5 wires the helper bridge and item conversion. Until then,
+            // classify the context but degrade to an empty list.
+            CompletionContextKind::VcsRepo => empty_completion_list(),
             // Handled out-of-band in `completion_for_text` /
             // `vcs_project_completion`, which loads the materialized project
             // catalog and known workflow names the core builder needs.

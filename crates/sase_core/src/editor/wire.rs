@@ -43,6 +43,7 @@ pub enum CompletionContextKind {
     DirectiveArgument,
     SnippetTrigger,
     VcsProject,
+    VcsRepo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +56,8 @@ pub struct CompletionContext {
     pub active_input: Option<String>,
     #[serde(default)]
     pub directive_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_repo: Option<VcsRepoTrigger>,
     pub replacement_range: EditorRange,
 }
 
@@ -136,6 +139,63 @@ pub struct VcsProjectEntry {
 
 fn default_vcs_project_entry_kind() -> String {
     "project".to_string()
+}
+
+/// Detected repository-completion trigger for a VCS workflow ref.
+///
+/// Byte spans mirror the Python `VcsRepoTrigger` parity contract. The
+/// `replacement_range` on [`CompletionContext`] covers `value_span`; the
+/// namespace/query spans are carried separately so frontends can render and
+/// filter without reparsing the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRepoTrigger {
+    pub start: usize,
+    pub end: usize,
+    pub workflow: String,
+    pub separator: String,
+    pub ref_start: usize,
+    pub ref_end: usize,
+    pub namespace: String,
+    pub query: String,
+    pub namespace_span: (usize, usize),
+    pub query_span: (usize, usize),
+}
+
+/// One repository completion entry returned by the helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRepoEntry {
+    pub name: String,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub visibility: String,
+    #[serde(default)]
+    pub is_fork: bool,
+    #[serde(default)]
+    pub is_archived: bool,
+    #[serde(default)]
+    pub pushed_at: Option<String>,
+}
+
+pub const VCS_REPO_CATALOG_SCHEMA_VERSION: u32 = 1;
+
+/// Repository completion catalog returned by the Python helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRepoCatalogResponse {
+    pub schema_version: u32,
+    pub status: String,
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub provider_display: String,
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default)]
+    pub entries: Vec<VcsRepoEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
