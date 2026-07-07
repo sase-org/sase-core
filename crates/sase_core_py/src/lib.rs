@@ -3597,7 +3597,7 @@ mod tests {
 
     fn spec_json(name: &str, status: &str, parent: Option<&str>) -> JsonValue {
         json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "name": name,
             "project_basename": "proj",
             "file_path": "proj.sase",
@@ -3608,7 +3608,7 @@ mod tests {
             },
             "status": status,
             "parent": parent,
-            "cl_or_pr": null,
+            "pr_url": null,
             "bug": null,
             "description": format!("description for {name}"),
             "commits": [],

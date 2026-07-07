@@ -49,7 +49,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj.sase", MYPROJ_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "alpha",
             "project_basename": "myproj",
             "file_path": "myproj.sase",
@@ -60,7 +60,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "Submitted",
             "parent": null,
-            "cl_or_pr": "https://example.test/repo/pull/1",
+            "pr_url": "https://example.test/repo/pull/1",
             "bug": "BUG-100",
             "description": "Initial feature work.\nSpans multiple lines.",
             "commits": [
@@ -131,7 +131,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             ]
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "beta",
             "project_basename": "myproj",
             "file_path": "myproj.sase",
@@ -142,7 +142,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "WIP",
             "parent": "alpha",
-            "cl_or_pr": null,
+            "pr_url": null,
             "bug": null,
             "description": "Sibling feature.",
             "commits": [],
@@ -153,7 +153,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "beta__260102_010101",
             "project_basename": "myproj",
             "file_path": "myproj.sase",
@@ -164,7 +164,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "Reverted",
             "parent": "alpha",
-            "cl_or_pr": null,
+            "pr_url": null,
             "bug": null,
             "description": "Reverted retry of beta.",
             "commits": [],
@@ -175,7 +175,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "gamma",
             "project_basename": "myproj",
             "file_path": "myproj.sase",
@@ -186,7 +186,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "Ready",
             "parent": null,
-            "cl_or_pr": null,
+            "pr_url": null,
             "bug": null,
             "description": "Ready feature with running agent.",
             "commits": [],
@@ -221,7 +221,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj-archive.sase", MYPROJ_ARCHIVE_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "archived_one",
             "project_basename": "myproj",
             "file_path": "myproj-archive.sase",
@@ -232,7 +232,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "Archived",
             "parent": null,
-            "cl_or_pr": "https://example.test/repo/pull/99",
+            "pr_url": "https://example.test/repo/pull/99",
             "bug": null,
             "description": "An archived spec.",
             "commits": [
@@ -255,7 +255,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "name": "reverted_two",
             "project_basename": "myproj",
             "file_path": "myproj-archive.sase",
@@ -266,7 +266,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             },
             "status": "Reverted",
             "parent": null,
-            "cl_or_pr": null,
+            "pr_url": null,
             "bug": null,
             "description": "A reverted spec.",
             "commits": [],

@@ -20,7 +20,7 @@
 //!     source_span=SourceSpanWire(file_path='myproj.sase', start_line=5, end_line=42),
 //!     status='WIP',
 //!     parent='parent_cl',
-//!     cl_or_pr='123',
+//!     pr_url='123',
 //!     bug=None,
 //!     description='first line\\nsecond line',
 //!     commits=[CommitWire(number=1, note='init', suffix='@', suffix_type='running', body=['body line'])],
@@ -46,7 +46,7 @@ use sase_core::{
 use serde_json::Value;
 
 const PYTHON_FIXTURE: &str = r#"{
-    "schema_version": 2,
+    "schema_version": 3,
     "name": "rust_workspace",
     "project_basename": "myproj",
     "file_path": "myproj.sase",
@@ -57,7 +57,7 @@ const PYTHON_FIXTURE: &str = r#"{
     },
     "status": "WIP",
     "parent": "parent_cl",
-    "cl_or_pr": "123",
+    "pr_url": "123",
     "bug": null,
     "description": "first line\nsecond line",
     "commits": [
@@ -143,7 +143,7 @@ fn rust_changespec() -> ChangeSpecWire {
         },
         status: "WIP".to_string(),
         parent: Some("parent_cl".to_string()),
-        cl_or_pr: Some("123".to_string()),
+        pr_url: Some("123".to_string()),
         bug: None,
         description: "first line\nsecond line".to_string(),
         commits: vec![CommitWire {

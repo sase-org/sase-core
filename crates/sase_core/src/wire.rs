@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version mirrored from `wire.py::CHANGESPEC_WIRE_SCHEMA_VERSION`.
-pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 3;
 
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -129,7 +129,8 @@ pub struct ChangeSpecWire {
     pub source_span: SourceSpanWire,
     pub status: String,
     pub parent: Option<String>,
-    pub cl_or_pr: Option<String>,
+    #[serde(alias = "cl_or_pr")]
+    pub pr_url: Option<String>,
     pub bug: Option<String>,
     pub description: String,
     #[serde(default)]
@@ -203,7 +204,7 @@ mod tests {
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
-            cl_or_pr: None,
+            pr_url: None,
             bug: None,
             description: "".to_string(),
             commits: vec![],
@@ -233,14 +234,14 @@ mod tests {
     #[test]
     fn none_fields_serialize_as_json_null() {
         let cs = ChangeSpecWire {
-            schema_version: 2,
+            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
-            cl_or_pr: None,
+            pr_url: None,
             bug: None,
             description: "".to_string(),
             commits: vec![],
@@ -251,9 +252,40 @@ mod tests {
             deltas: vec![],
         };
         let json = serde_json::to_value(&cs).unwrap();
-        for key in ["parent", "cl_or_pr", "bug"] {
+        for key in ["parent", "pr_url", "bug"] {
             assert_eq!(json.get(key), Some(&Value::Null), "{key} must be null");
         }
+    }
+
+    #[test]
+    fn legacy_cl_or_pr_key_deserializes_as_pr_url() {
+        let json = json!({
+            "schema_version": 2,
+            "name": "n",
+            "project_basename": "p",
+            "file_path": "p.sase",
+            "source_span": {
+                "file_path": "p.sase",
+                "start_line": 1,
+                "end_line": 10,
+            },
+            "status": "WIP",
+            "parent": null,
+            "cl_or_pr": "https://example.test/repo/pull/1",
+            "bug": null,
+            "description": "",
+            "commits": [],
+            "hooks": [],
+            "comments": [],
+            "mentors": [],
+            "timestamps": [],
+            "deltas": [],
+        });
+        let cs: ChangeSpecWire = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            cs.pr_url.as_deref(),
+            Some("https://example.test/repo/pull/1")
+        );
     }
 
     #[test]
@@ -261,14 +293,14 @@ mod tests {
         // Python uses `dataclasses.asdict`, which preserves declaration order.
         // We replicate that order so byte-for-byte JSON parity is reachable.
         let cs = ChangeSpecWire {
-            schema_version: 2,
+            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
             parent: None,
-            cl_or_pr: None,
+            pr_url: None,
             bug: None,
             description: "".to_string(),
             commits: vec![],
@@ -287,7 +319,7 @@ mod tests {
             "source_span",
             "status",
             "parent",
-            "cl_or_pr",
+            "pr_url",
             "bug",
             "description",
             "commits",
@@ -310,7 +342,7 @@ mod tests {
     #[test]
     fn populated_changespec_round_trips() {
         let cs = ChangeSpecWire {
-            schema_version: 2,
+            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "rust_workspace".to_string(),
             project_basename: "myproj".to_string(),
             file_path: "myproj.sase".to_string(),
@@ -321,7 +353,7 @@ mod tests {
             },
             status: "WIP".to_string(),
             parent: Some("parent_cl".to_string()),
-            cl_or_pr: Some("123".to_string()),
+            pr_url: Some("123".to_string()),
             bug: None,
             description: "first line\nsecond line".to_string(),
             commits: vec![CommitWire {

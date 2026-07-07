@@ -91,7 +91,7 @@ pub fn get_searchable_text(cs: &ChangeSpecWire) -> String {
     if let Some(parent) = &cs.parent {
         parts.push(parent.clone());
     }
-    if let Some(cl) = &cs.cl_or_pr {
+    if let Some(cl) = &cs.pr_url {
         parts.push(cl.clone());
     }
     for entry in &cs.commits {

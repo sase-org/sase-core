@@ -12,7 +12,7 @@
 
 use sase_core::{
     compile_query, evaluate_query_many, evaluate_query_many_in_corpus,
-    parse_project_bytes, QueryCorpus,
+    parse_project_bytes, QueryCorpus, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
 const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
@@ -225,14 +225,14 @@ fn ancestor_walk_avoids_cycles() {
         end_line: 1,
     };
     let mk = |name: &str, parent: &str| ChangeSpecWire {
-        schema_version: 2,
+        schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
         name: name.into(),
         project_basename: "p".into(),
         file_path: "core_golden/p.sase".into(),
         source_span: span.clone(),
         status: "WIP".into(),
         parent: Some(parent.into()),
-        cl_or_pr: None,
+        pr_url: None,
         bug: None,
         description: String::new(),
         commits: vec![],

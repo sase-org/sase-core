@@ -6,7 +6,7 @@
 //! - ChangeSpec boundaries: `## ChangeSpec` headers, direct `NAME:` starts,
 //!   end-on-next-header, end-on-two-blank-lines, end-on-new-NAME.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
-//! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `CL`/`PR`, `BUG`,
+//! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted), `BUG`,
 //!   `STATUS`.
 //! - Section bodies: `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
 //!   `TIMESTAMPS`, `DELTAS`. The wire records produced here match Python
@@ -94,7 +94,7 @@ struct ParserState {
     name: Option<String>,
     description_lines: Vec<String>,
     parent: Option<String>,
-    cl: Option<String>,
+    pr_url: Option<String>,
     bug: Option<String>,
     status: Option<String>,
 
@@ -163,7 +163,7 @@ impl ParserState {
             },
             status,
             parent: self.parent,
-            cl_or_pr: self.cl,
+            pr_url: self.pr_url,
             bug: self.bug,
             description,
             commits: self.commits,
@@ -215,13 +215,13 @@ fn try_field_header(state: &mut ParserState, line: &str) -> FieldHeaderOutcome {
     }
     if let Some(rest) = line.strip_prefix("CL: ") {
         state.save_pending_entries();
-        state.cl = Some(rest.trim().to_string());
+        state.pr_url = Some(rest.trim().to_string());
         state.reset_section_flags();
         return FieldHeaderOutcome::Parsed;
     }
     if let Some(rest) = line.strip_prefix("PR: ") {
         state.save_pending_entries();
-        state.cl = Some(rest.trim().to_string());
+        state.pr_url = Some(rest.trim().to_string());
         state.reset_section_flags();
         return FieldHeaderOutcome::Parsed;
     }
@@ -520,11 +520,11 @@ STATUS: WIP
 ";
         let s = &parse(src)[0];
         assert_eq!(s.parent.as_deref(), Some("some_parent"));
-        assert_eq!(s.cl_or_pr.as_deref(), Some("https://example/pr/1"));
+        assert_eq!(s.pr_url.as_deref(), Some("https://example/pr/1"));
         assert_eq!(s.bug.as_deref(), Some("BUG-100"));
 
         let cl_src = "NAME: a\nCL: 12345\nSTATUS: WIP\n";
-        assert_eq!(parse(cl_src)[0].cl_or_pr.as_deref(), Some("12345"));
+        assert_eq!(parse(cl_src)[0].pr_url.as_deref(), Some("12345"));
     }
 
     #[test]
@@ -532,7 +532,7 @@ STATUS: WIP
         let src = "NAME: a\nPARENT:\nPR:\nSTATUS: WIP\n";
         let s = &parse(src)[0];
         assert_eq!(s.parent, None);
-        assert_eq!(s.cl_or_pr, None);
+        assert_eq!(s.pr_url, None);
 
         let src2 = "NAME: a\nPARENT: \nSTATUS: WIP\n";
         let s2 = &parse(src2)[0];
