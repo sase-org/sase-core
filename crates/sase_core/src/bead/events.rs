@@ -390,6 +390,78 @@ pub fn reduce_event_streams(
     Ok(reduced)
 }
 
+pub fn merge_bead_event_streams(
+    base: &BeadEventStreamWire,
+    ours: &BeadEventStreamWire,
+    theirs: &BeadEventStreamWire,
+) -> Result<BeadEventStreamWire, BeadError> {
+    base.validate()?;
+    ours.validate()?;
+    theirs.validate()?;
+    if ours.stream_id != theirs.stream_id
+        || ours.root_issue_id != theirs.root_issue_id
+    {
+        return Err(BeadError::validation(format!(
+            "cannot merge bead event streams with different ids: {} != {}",
+            ours.stream_id, theirs.stream_id
+        )));
+    }
+    if base.stream_id != ours.stream_id
+        || base.root_issue_id != ours.root_issue_id
+    {
+        return Err(BeadError::validation(format!(
+            "cannot merge base bead event stream {} into {}",
+            base.stream_id, ours.stream_id
+        )));
+    }
+
+    let mut merged = theirs.clone();
+    let base_events = event_keys(&base.events)?;
+    let theirs_events = event_keys(&theirs.events)?;
+    let mut ordinal = merged.events.len();
+    for event in &ours.events {
+        let event_key = serde_json::to_string(event)?;
+        if base_events.contains(&event_key)
+            || theirs_events.contains(&event_key)
+        {
+            continue;
+        }
+        ordinal += 1;
+        merged
+            .events
+            .push(renumber_event(event, &merged.stream_id, ordinal)?);
+    }
+    merged.validate()?;
+    Ok(merged)
+}
+
+fn event_keys(
+    events: &[BeadEventRecordWire],
+) -> Result<BTreeSet<String>, BeadError> {
+    events
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(BeadError::from)
+}
+
+fn renumber_event(
+    event: &BeadEventRecordWire,
+    stream_id: &str,
+    ordinal: usize,
+) -> Result<BeadEventRecordWire, BeadError> {
+    let operation_label = serde_json::to_string(&event.operation)?
+        .trim_matches('"')
+        .to_string();
+    let mut event = event.clone();
+    event.event_id = format!(
+        "{stream_id}:{ordinal:06}:{operation_label}:{}",
+        event.issue_id
+    );
+    event.validate()?;
+    Ok(event)
+}
+
 struct OrderedEvent<'a> {
     event: &'a BeadEventRecordWire,
     stream_index: usize,

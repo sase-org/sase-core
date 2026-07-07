@@ -139,7 +139,7 @@ pub use bead::{
     import_issues_to_event_streams, init_store as bead_init_store,
     is_ready_to_work_migration_sql, issue_type_migration_sql,
     list_issues as bead_list_issues, load_config, load_config_from_str,
-    mark_ready_to_work as bead_mark_ready_to_work,
+    mark_ready_to_work as bead_mark_ready_to_work, merge_bead_event_streams,
     missing_changespec_metadata_columns, model_migration_sql,
     needs_epic_count_migration, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration,

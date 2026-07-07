@@ -366,7 +366,8 @@ pub fn close_issues(
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let mut store = MutableStore::load(beads_dir)?;
     let now = now.unwrap_or_else(now_utc);
-    let mut closed = Vec::new();
+    let mut event_closed = Vec::new();
+    let mut returned = Vec::new();
     let mut closed_ids = Vec::new();
 
     for issue_id in issue_ids {
@@ -379,16 +380,24 @@ pub fn close_issues(
                     .map(|child| child.id.clone())
                     .collect();
             for child_id in child_ids {
-                let child = store.close_one(&child_id, &now, reason.clone())?;
-                closed_ids.push(child.id.clone());
-                closed.push(child);
+                if let Some(child) =
+                    store.close_one(&child_id, &now, reason.clone())?
+                {
+                    closed_ids.push(child.id.clone());
+                    event_closed.push(child.clone());
+                    returned.push(child);
+                }
             }
         }
-        let issue = store.close_one(issue_id, &now, reason.clone())?;
-        closed_ids.push(issue.id.clone());
-        closed.push(issue);
+        if let Some(issue) = store.close_one(issue_id, &now, reason.clone())? {
+            closed_ids.push(issue.id.clone());
+            event_closed.push(issue.clone());
+            returned.push(issue);
+        } else {
+            returned.push(store.get_issue(issue_id)?.clone());
+        }
     }
-    for issue in &closed {
+    for issue in &event_closed {
         store.append_issue_event(
             &issue.id,
             BeadEventOperationWire::IssueClosed,
@@ -401,8 +410,12 @@ pub fn close_issues(
     }
 
     store.save()?;
-    let mut result = outcome("close", true, closed_ids);
-    result.issues = closed;
+    let changed = !closed_ids.is_empty();
+    let mut result = outcome("close", changed, closed_ids);
+    if !changed {
+        result.message = "all requested issues were already closed".to_string();
+    }
+    result.issues = returned;
     Ok(result)
 }
 
@@ -849,13 +862,16 @@ impl MutableStore {
         issue_id: &str,
         closed_at: &str,
         reason: Option<String>,
-    ) -> Result<IssueWire, BeadError> {
+    ) -> Result<Option<IssueWire>, BeadError> {
         let index = self.issue_index(issue_id)?;
+        if self.issues[index].status == StatusWire::Closed {
+            return Ok(None);
+        }
         self.issues[index].status = StatusWire::Closed;
         self.issues[index].closed_at = Some(closed_at.to_string());
         self.issues[index].close_reason = reason;
         self.issues[index].updated_at = closed_at.to_string();
-        Ok(self.issues[index].clone())
+        Ok(Some(self.issues[index].clone()))
     }
 }
 
@@ -1092,6 +1108,58 @@ mod tests {
         assert!(exported
             .contains(r#""id":"sase-1.1","title":"A","status":"closed""#));
         assert!(exported.contains(r#""close_reason":"done""#));
+    }
+
+    #[test]
+    fn close_skips_already_closed_issues_without_new_events() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            issue(
+                "sase-1",
+                "Already done",
+                "plan",
+                None,
+                "closed",
+                "2026-01-01T00:00:00Z",
+            ) + "\n",
+        )
+        .unwrap();
+        close_issues(
+            &beads_dir,
+            &["sase-1".to_string()],
+            None,
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let event_count_before = streams
+            .iter()
+            .flat_map(|stream| stream.events.iter())
+            .count();
+
+        let result = close_issues(
+            &beads_dir,
+            &["sase-1".to_string()],
+            None,
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(!result.changed);
+        assert!(result.issue_ids.is_empty());
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].id, "sase-1");
+        assert_eq!(result.issues[0].status, StatusWire::Closed);
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let event_count_after = streams
+            .iter()
+            .flat_map(|stream| stream.events.iter())
+            .count();
+        assert_eq!(event_count_after, event_count_before);
     }
 
     #[test]

@@ -24,9 +24,9 @@ pub use config::{
     BeadConfigWire,
 };
 pub use events::{
-    import_issues_to_event_streams, reduce_event_streams,
-    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
-    BeadEventStoreManifestWire, BeadEventStreamWire,
+    import_issues_to_event_streams, merge_bead_event_streams,
+    reduce_event_streams, BeadEventOperationWire, BeadEventPayloadWire,
+    BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
     BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 pub use jsonl::{

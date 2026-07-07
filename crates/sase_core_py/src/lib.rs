@@ -202,18 +202,21 @@ use sase_core::bead::{
     get_epic_children as core_bead_get_epic_children,
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
+    merge_bead_event_streams as core_merge_bead_event_streams,
     open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     read_event_store_issues as core_bead_read_event_store_issues,
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
     read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
+    reduce_event_streams as core_reduce_event_streams,
     remove_issue as core_bead_remove_issue,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue, stats as core_bead_stats,
     sync_is_clean as core_bead_sync_is_clean,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
+    BeadEventStoreManifestWire, BeadEventStreamWire,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
 };
 use sase_core::config::{
@@ -2010,6 +2013,49 @@ fn py_bead_close<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_merge_event_streams")]
+fn py_bead_merge_event_streams<'py>(
+    py: Python<'py>,
+    base: &Bound<'py, PyDict>,
+    ours: &Bound<'py, PyDict>,
+    theirs: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let base = bead_event_stream_from_pydict(base, "base")?;
+    let ours = bead_event_stream_from_pydict(ours, "ours")?;
+    let theirs = bead_event_stream_from_pydict(theirs, "theirs")?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_merge_bead_event_streams(&base, &ours, &theirs)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_reduce_event_streams")]
+fn py_bead_reduce_event_streams<'py>(
+    py: Python<'py>,
+    streams: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let streams = bead_event_streams_from_py_list(streams)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_reduce_event_streams(&streams)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_event_store_manifest")]
+fn py_bead_event_store_manifest<'py>(
+    py: Python<'py>,
+    streams: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let streams = bead_event_streams_from_py_list(streams)?;
+    let manifest = BeadEventStoreManifestWire::from_streams(&streams);
+    bead_result_to_py(py, Ok(manifest))
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_remove")]
 fn py_bead_remove<'py>(
     py: Python<'py>,
@@ -2299,6 +2345,39 @@ fn issues_from_py_list(list: &Bound<'_, PyList>) -> PyResult<Vec<IssueWire>> {
             PyValueError::new_err(format!("issues[{idx}] is invalid: {e}"))
         })?;
         values.push(issue);
+    }
+    Ok(values)
+}
+
+fn bead_event_stream_from_pydict(
+    dict: &Bound<'_, PyDict>,
+    label: &str,
+) -> PyResult<BeadEventStreamWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    let stream: BeadEventStreamWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "{label} is not a valid BeadEventStreamWire dict: {e}"
+            ))
+        })?;
+    stream.validate().map_err(bead_error_to_pyerr)?;
+    Ok(stream)
+}
+
+fn bead_event_streams_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<BeadEventStreamWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let stream: BeadEventStreamWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "streams[{idx}] is not a valid BeadEventStreamWire dict: {e}"
+                ))
+            })?;
+        stream.validate().map_err(bead_error_to_pyerr)?;
+        values.push(stream);
     }
     Ok(values)
 }
@@ -3515,6 +3594,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_preclaim_epic_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_merge_event_streams, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_reduce_event_streams, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;

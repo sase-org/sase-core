@@ -1,10 +1,10 @@
 use sase_core::{
-    export_issues_to_jsonl, import_issues_to_event_streams, parse_issues_jsonl,
-    reduce_event_streams, BeadError, BeadEventOperationWire,
-    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire, BeadTierWire,
-    DependencyWire, IssueTypeWire, IssueWire, StatusWire,
-    BEAD_EVENT_SCHEMA_VERSION,
+    export_issues_to_jsonl, import_issues_to_event_streams,
+    merge_bead_event_streams, parse_issues_jsonl, reduce_event_streams,
+    BeadError, BeadEventOperationWire, BeadEventPayloadWire,
+    BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
+    BeadIssueUpdateEventFieldsWire, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 
 const EVENT_ROUNDTRIP_SCHEMA: &str =
@@ -383,6 +383,97 @@ fn event_validation_rejects_operation_payload_mismatch() {
     assert!(err.message.contains("operation/payload mismatch"));
 }
 
+#[test]
+fn merge_event_stream_keeps_upstream_and_appends_local_extras_renumbered() {
+    let epic = issue(
+        "gold-1",
+        "Epic",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let phase_one = issue(
+        "gold-1.1",
+        "Phase One",
+        IssueTypeWire::Phase,
+        Some("gold-1"),
+        "2026-01-01T00:01:00Z",
+    );
+    let phase_two = issue(
+        "gold-1.2",
+        "Phase Two",
+        IssueTypeWire::Phase,
+        Some("gold-1"),
+        "2026-01-01T00:02:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            numbered_event(
+                "gold-1",
+                1,
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: epic },
+            ),
+            numbered_event(
+                "gold-1.1",
+                2,
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: phase_one },
+            ),
+            numbered_event(
+                "gold-1.2",
+                3,
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: phase_two },
+            ),
+        ],
+    };
+    let mut ours = base.clone();
+    ours.events.push(numbered_event(
+        "gold-1.1",
+        4,
+        "2026-01-01T00:03:00Z",
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: Some("local done".to_string()),
+        },
+    ));
+    let mut theirs = base.clone();
+    theirs.events.push(numbered_event(
+        "gold-1.2",
+        4,
+        "2026-01-01T00:04:00Z",
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: Some("upstream done".to_string()),
+        },
+    ));
+
+    let merged = merge_bead_event_streams(&base, &ours, &theirs).unwrap();
+
+    assert_eq!(merged.events.len(), 5);
+    assert_eq!(merged.events[3].issue_id, "gold-1.2");
+    assert_eq!(merged.events[4].issue_id, "gold-1.1");
+    assert_eq!(
+        merged.events[4].event_id,
+        "gold-1:000005:issue_closed:gold-1.1"
+    );
+    let reduced = reduce_event_streams(&[merged]).unwrap();
+    assert_eq!(
+        reduced
+            .iter()
+            .filter(|issue| issue.status == StatusWire::Closed)
+            .map(|issue| issue.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gold-1.1", "gold-1.2"]
+    );
+}
+
 fn event(
     issue_id: &str,
     timestamp: &str,
@@ -392,6 +483,28 @@ fn event(
     BeadEventRecordWire {
         schema_version: BEAD_EVENT_SCHEMA_VERSION,
         event_id: format!("{issue_id}:{timestamp:?}"),
+        timestamp: timestamp.to_string(),
+        actor: "owner@example.com".to_string(),
+        operation,
+        issue_id: issue_id.to_string(),
+        payload,
+    }
+}
+
+fn numbered_event(
+    issue_id: &str,
+    ordinal: usize,
+    timestamp: &str,
+    operation: BeadEventOperationWire,
+    payload: BeadEventPayloadWire,
+) -> BeadEventRecordWire {
+    let operation_label = serde_json::to_string(&operation)
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+    BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: format!("gold-1:{ordinal:06}:{operation_label}:{issue_id}"),
         timestamp: timestamp.to_string(),
         actor: "owner@example.com".to_string(),
         operation,
