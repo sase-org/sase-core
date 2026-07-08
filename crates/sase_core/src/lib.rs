@@ -30,6 +30,7 @@ pub mod query;
 pub mod sections;
 pub mod status;
 pub mod suffix;
+pub mod vcs_log;
 pub mod wire;
 pub mod xprompt_catalog;
 
@@ -328,6 +329,10 @@ pub use status::{
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
+pub use vcs_log::{
+    aggregate_commit_log, parse_git_log, AggregatedCommitWire, VcsCommitWire,
+    VCS_LOG_WIRE_SCHEMA_VERSION,
+};
 pub use wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
     HookWire, MentorStatusLineWire, MentorWire, ParseErrorWire, SourceSpanWire,

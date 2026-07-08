@@ -47,6 +47,8 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `parse_git_log(stdout: str) -> list[dict]`
+//! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
@@ -271,6 +273,10 @@ use sase_core::status::{
     read_status_from_lines as core_read_status_from_lines,
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
+};
+use sase_core::vcs_log::{
+    aggregate_commit_log as core_aggregate_commit_log,
+    parse_git_log as core_parse_git_log, VcsCommitWire,
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
@@ -1622,6 +1628,77 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
         Some(text) => text.into_py(py),
         None => py.None(),
     }
+}
+
+// --- vcs_log parser + aggregator bindings --------------------------------
+
+/// Serialize a `VcsCommitWire` into a `PyDict` mirroring the Python
+/// `VcsCommitWire` dataclass JSON shape.
+fn vcs_commit_wire_to_py<'py>(
+    py: Python<'py>,
+    commit: &VcsCommitWire,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("full_id", &commit.full_id)?;
+    dict.set_item("short_id", &commit.short_id)?;
+    dict.set_item("author_name", &commit.author_name)?;
+    dict.set_item("author_email", &commit.author_email)?;
+    dict.set_item("timestamp", commit.timestamp)?;
+    dict.set_item("subject", &commit.subject)?;
+    dict.set_item("body", &commit.body)?;
+    Ok(dict)
+}
+
+/// Parse a pinned, separator-delimited `git log --format=...` stream into
+/// a `list[dict]` mirroring the `VcsCommitWire` JSON shape.
+///
+/// Mirrors `sase.core.vcs_log_facade._parse_git_log_python`. The Python
+/// facade rehydrates each dict into a `VcsCommitWire` via
+/// `vcs_commit_from_dict`.
+#[pyfunction]
+#[pyo3(name = "parse_git_log")]
+fn py_parse_git_log<'py>(
+    py: Python<'py>,
+    stdout: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let commits = core_parse_git_log(stdout);
+    let list = PyList::empty_bound(py);
+    for commit in &commits {
+        list.append(vcs_commit_wire_to_py(py, commit)?)?;
+    }
+    Ok(list)
+}
+
+/// Interleave per-repo commit lists into a single newest-first timeline.
+///
+/// `repos` is a `list[tuple[str, list[dict]]]` of `(repo_label, commits)`
+/// where each commit dict has the `VcsCommitWire` shape. Returns a
+/// `list[dict]` of `AggregatedCommitWire`-shape dicts (the commit fields
+/// flattened with a leading `repo` key), sorted by `timestamp` desc with a
+/// stable `(repo, full_id)` tie-break and truncated to `limit`.
+///
+/// Mirrors `sase.core.vcs_log_facade._aggregate_commit_log_python`.
+#[pyfunction]
+#[pyo3(name = "aggregate_commit_log")]
+fn py_aggregate_commit_log<'py>(
+    py: Python<'py>,
+    repos: &Bound<'_, PyAny>,
+    limit: usize,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(repos)?;
+    let parsed: Vec<(String, Vec<VcsCommitWire>)> = serde_json::from_value(
+        value,
+    )
+    .map_err(|e| {
+        PyValueError::new_err(format!(
+            "repos is not a valid list[tuple[str, list[VcsCommitWire]]]: {e}"
+        ))
+    })?;
+    let aggregated = core_aggregate_commit_log(parsed, limit);
+    let out = serde_json::to_value(&aggregated).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &out)
 }
 
 // --- Project lifecycle bindings ------------------------------------------
@@ -3568,6 +3645,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
+    m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_read_project_lifecycle_from_content,
         m
