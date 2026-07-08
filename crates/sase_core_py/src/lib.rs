@@ -1686,14 +1686,12 @@ fn py_aggregate_commit_log<'py>(
     limit: usize,
 ) -> PyResult<PyObject> {
     let value = py_to_json_value(repos)?;
-    let parsed: Vec<(String, Vec<VcsCommitWire>)> = serde_json::from_value(
-        value,
-    )
-    .map_err(|e| {
-        PyValueError::new_err(format!(
+    let parsed: Vec<(String, Vec<VcsCommitWire>)> =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
             "repos is not a valid list[tuple[str, list[VcsCommitWire]]]: {e}"
         ))
-    })?;
+        })?;
     let aggregated = core_aggregate_commit_log(parsed, limit);
     let out = serde_json::to_value(&aggregated).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
