@@ -11,7 +11,7 @@
 //! (`\x1f`) between fields and a record separator (`\x1e`) between
 //! commits, so multi-line commit bodies never corrupt parsing.
 
-use super::wire::VcsCommitWire;
+use super::wire::{CommitPresenceWire, VcsCommitWire};
 
 /// Field separator emitted by `%x1f` in the pinned `git log` format.
 pub const UNIT_SEP: char = '\u{1f}';
@@ -68,6 +68,7 @@ pub fn parse_git_log(stdout: &str) -> Vec<VcsCommitWire> {
             timestamp,
             subject: fields[5].to_string(),
             body: fields[6].to_string(),
+            presence: CommitPresenceWire::Unknown,
         });
     }
     commits
@@ -110,6 +111,7 @@ mod tests {
             timestamp: ts,
             subject: subject.to_string(),
             body: body.to_string(),
+            presence: CommitPresenceWire::Unknown,
         }
     }
 

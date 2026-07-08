@@ -48,6 +48,7 @@
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
 //! - `parse_git_log(stdout: str) -> list[dict]`
+//! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
 //! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
@@ -276,7 +277,8 @@ use sase_core::status::{
 };
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
-    parse_git_log as core_parse_git_log, VcsCommitWire,
+    classify_commit_presence as core_classify_commit_presence,
+    parse_git_log as core_parse_git_log, CommitPresenceWire, VcsCommitWire,
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
@@ -1646,7 +1648,17 @@ fn vcs_commit_wire_to_py<'py>(
     dict.set_item("timestamp", commit.timestamp)?;
     dict.set_item("subject", &commit.subject)?;
     dict.set_item("body", &commit.body)?;
+    dict.set_item("presence", commit_presence_to_str(commit.presence))?;
     Ok(dict)
+}
+
+fn commit_presence_to_str(presence: CommitPresenceWire) -> &'static str {
+    match presence {
+        CommitPresenceWire::Unknown => "unknown",
+        CommitPresenceWire::Synced => "synced",
+        CommitPresenceWire::RemoteOnly => "remote_only",
+        CommitPresenceWire::LocalOnly => "local_only",
+    }
 }
 
 /// Parse a pinned, separator-delimited `git log --format=...` stream into
@@ -1667,6 +1679,30 @@ fn py_parse_git_log<'py>(
         list.append(vcs_commit_wire_to_py(py, commit)?)?;
     }
     Ok(list)
+}
+
+/// Stamp VCS-log commits with local/remote presence.
+#[pyfunction]
+#[pyo3(name = "classify_commit_presence")]
+fn py_classify_commit_presence<'py>(
+    py: Python<'py>,
+    commits: &Bound<'_, PyAny>,
+    ahead_ids: Vec<String>,
+    behind_ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(commits)?;
+    let parsed: Vec<VcsCommitWire> =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "commits is not a valid list[VcsCommitWire]: {e}"
+            ))
+        })?;
+    let classified =
+        core_classify_commit_presence(parsed, ahead_ids, behind_ids);
+    let out = serde_json::to_value(&classified).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &out)
 }
 
 /// Interleave per-repo commit lists into a single newest-first timeline.
@@ -3644,6 +3680,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_read_project_lifecycle_from_content,

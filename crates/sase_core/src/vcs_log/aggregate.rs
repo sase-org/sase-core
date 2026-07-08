@@ -46,6 +46,7 @@ pub fn aggregate_commit_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vcs_log::CommitPresenceWire;
 
     fn commit(full: &str, ts: i64) -> VcsCommitWire {
         VcsCommitWire {
@@ -56,6 +57,7 @@ mod tests {
             timestamp: ts,
             subject: format!("subject {full}"),
             body: String::new(),
+            presence: CommitPresenceWire::Unknown,
         }
     }
 
@@ -131,5 +133,14 @@ mod tests {
         assert!(!obj.contains_key("commit"));
         assert_eq!(obj["repo"], "sase");
         assert_eq!(obj["timestamp"], 500);
+    }
+
+    #[test]
+    fn preserves_commit_presence() {
+        let mut row = commit("a1b2c3d", 500);
+        row.presence = CommitPresenceWire::RemoteOnly;
+        let out =
+            aggregate_commit_log(vec![("sase".to_string(), vec![row])], 20);
+        assert_eq!(out[0].commit.presence, CommitPresenceWire::RemoteOnly);
     }
 }

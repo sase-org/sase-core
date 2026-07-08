@@ -14,7 +14,7 @@
 //! - [`AggregatedCommitWire`] flattens a [`VcsCommitWire`] and prefixes it
 //!   with the `repo` label, so its JSON object is the flat shape
 //!   `{"repo", "full_id", "short_id", "author_name", "author_email",
-//!   "timestamp", "subject", "body"}`.
+//!   "timestamp", "subject", "body", "presence"}`.
 //! - Schema-version pinning is provided by
 //!   [`VCS_LOG_WIRE_SCHEMA_VERSION`].
 
@@ -22,7 +22,25 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version mirrored from
 /// `vcs_log_wire.py::VCS_LOG_WIRE_SCHEMA_VERSION`.
-pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 2;
+
+/// Where a commit is present relative to the local checkout and the
+/// compared remote ref.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitPresenceWire {
+    /// Remote state was not available, so only local history was read.
+    #[default]
+    Unknown,
+    /// Commit is in both local `HEAD` and the compared remote ref.
+    Synced,
+    /// Commit is in the compared remote ref but not the local checkout.
+    RemoteOnly,
+    /// Commit is in local `HEAD` but not the compared remote ref.
+    LocalOnly,
+}
 
 /// One commit from a single repository's history.
 ///
@@ -48,6 +66,9 @@ pub struct VcsCommitWire {
     pub subject: String,
     /// Remaining commit-message body (may be empty or multi-line).
     pub body: String,
+    /// Local/remote presence classification.
+    #[serde(default)]
+    pub presence: CommitPresenceWire,
 }
 
 /// A [`VcsCommitWire`] tagged with the label of the repo it came from.

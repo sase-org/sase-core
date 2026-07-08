@@ -8,7 +8,8 @@
 
 use sase_core::vcs_log::parsers::{RECORD_SEP, UNIT_SEP};
 use sase_core::vcs_log::{
-    aggregate_commit_log, parse_git_log, AggregatedCommitWire, VcsCommitWire,
+    aggregate_commit_log, classify_commit_presence, parse_git_log,
+    AggregatedCommitWire, CommitPresenceWire, VcsCommitWire,
     VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 use serde_json::json;
@@ -38,6 +39,7 @@ fn commit(full: &str, ts: i64, subject: &str) -> VcsCommitWire {
         timestamp: ts,
         subject: subject.to_string(),
         body: String::new(),
+        presence: CommitPresenceWire::Unknown,
     }
 }
 
@@ -69,6 +71,7 @@ fn parse_single_commit_all_fields() {
             timestamp: 1700000000,
             subject: "fix(sdd): link store".to_string(),
             body: String::new(),
+            presence: CommitPresenceWire::Unknown,
         }]
     );
 }
@@ -215,8 +218,8 @@ fn aggregate_truncates_to_limit() {
 // -- Wire helpers ---------------------------------------------------------
 
 #[test]
-fn vcs_log_wire_schema_version_is_one() {
-    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 1);
+fn vcs_log_wire_schema_version_is_two() {
+    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 2);
 }
 
 #[test]
@@ -229,6 +232,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
         timestamp: 1700000000,
         subject: "fix: thing".to_string(),
         body: "body text".to_string(),
+        presence: CommitPresenceWire::LocalOnly,
     };
     let value = serde_json::to_value(&row).unwrap();
     assert_eq!(
@@ -241,6 +245,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
             "timestamp": 1700000000,
             "subject": "fix: thing",
             "body": "body text",
+            "presence": "local_only",
         })
     );
 }
@@ -257,6 +262,7 @@ fn aggregated_commit_wire_serializes_flat() {
             timestamp: 1700000000,
             subject: "fix: thing".to_string(),
             body: String::new(),
+            presence: CommitPresenceWire::RemoteOnly,
         },
     };
     let value = serde_json::to_value(&row).unwrap();
@@ -271,6 +277,7 @@ fn aggregated_commit_wire_serializes_flat() {
             "timestamp": 1700000000,
             "subject": "fix: thing",
             "body": "",
+            "presence": "remote_only",
         })
     );
 }
@@ -284,4 +291,44 @@ fn aggregated_commit_wire_round_trips_through_json() {
     let value = serde_json::to_value(&row).unwrap();
     let back: AggregatedCommitWire = serde_json::from_value(value).unwrap();
     assert_eq!(back, row);
+}
+
+#[test]
+fn vcs_commit_wire_defaults_presence_to_unknown() {
+    let value = json!({
+        "full_id": "a1b2c3d4",
+        "short_id": "a1b2c3d",
+        "author_name": "bryan",
+        "author_email": "bryan@example.com",
+        "timestamp": 1700000000,
+        "subject": "fix: thing",
+        "body": "",
+    });
+    let row: VcsCommitWire = serde_json::from_value(value).unwrap();
+    assert_eq!(row.presence, CommitPresenceWire::Unknown);
+}
+
+// -- classify_commit_presence --------------------------------------------
+
+#[test]
+fn classify_commit_presence_marks_synced_local_and_remote() {
+    let out = classify_commit_presence(
+        vec![
+            commit("synced", 300, "synced"),
+            commit("local", 200, "local"),
+            commit("remote", 100, "remote"),
+        ],
+        vec!["local".to_string()],
+        vec!["remote".to_string()],
+    );
+    let states: Vec<CommitPresenceWire> =
+        out.iter().map(|commit| commit.presence).collect();
+    assert_eq!(
+        states,
+        vec![
+            CommitPresenceWire::Synced,
+            CommitPresenceWire::LocalOnly,
+            CommitPresenceWire::RemoteOnly,
+        ]
+    );
 }
