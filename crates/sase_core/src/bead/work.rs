@@ -357,14 +357,14 @@ mod tests {
         let mut epic = epic("e1");
         epic.model = "claude/opus".to_string();
         let mut p1 = phase("p1", "e1");
-        p1.model = "codex/gpt-5.5".to_string();
+        p1.model = "codex/gpt-5.6".to_string();
         let p2 = phase("p2", "e1");
 
         let plan =
             build_epic_work_plan_from_issues(vec![epic, p1, p2], "e1").unwrap();
 
         assert_eq!(plan.waves[0][0].bead_id, "p1");
-        assert_eq!(plan.waves[0][0].model, "codex/gpt-5.5");
+        assert_eq!(plan.waves[0][0].model, "codex/gpt-5.6");
         assert_eq!(plan.waves[0][1].bead_id, "p2");
         assert_eq!(plan.waves[0][1].model, "");
         assert_eq!(plan.land_model, "claude/opus");

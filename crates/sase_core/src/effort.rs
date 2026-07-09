@@ -60,8 +60,8 @@ mod tests {
     fn splits_trailing_known_effort() {
         assert_eq!(split_model_effort("opus@xhigh"), ("opus", Some("xhigh")));
         assert_eq!(
-            split_model_effort("codex/gpt-5.5@low"),
-            ("codex/gpt-5.5", Some("low"))
+            split_model_effort("codex/gpt-5.6@low"),
+            ("codex/gpt-5.6", Some("low"))
         );
     }
 

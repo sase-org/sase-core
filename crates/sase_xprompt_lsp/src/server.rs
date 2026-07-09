@@ -2682,6 +2682,14 @@ mod tests {
                         "aliases": ["fable"]
                     },
                     {
+                        "value": "gpt-5.6",
+                        "display": "gpt-5.6",
+                        "description": "Codex (gpt56)",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": ["gpt56"]
+                    },
+                    {
                         "value": "gpt-5.5",
                         "display": "gpt-5.5",
                         "description": "Codex (gpt55)",
@@ -2732,7 +2740,14 @@ mod tests {
             panic!("expected completion array");
         };
 
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-fable-5", "gpt-5.6", "gpt-5.5"]
+        );
         let item = &items[0];
         assert_eq!(item.label, "claude-fable-5");
         assert_eq!(item.filter_text.as_deref(), Some("claude-fable-5"));

@@ -2996,7 +2996,7 @@ mod tests {
             project: Some("sase".to_string()),
             status: "running".to_string(),
             pid: Some(4242),
-            model: Some("gpt-5.5".to_string()),
+            model: Some("gpt-5.6".to_string()),
             provider: Some("codex".to_string()),
             workspace_number: Some(102),
             started_at: Some("2026-05-06T14:30:00Z".to_string()),
@@ -3287,7 +3287,7 @@ request_path="$0.$operation.json"
 cat >"$request_path"
 case "$operation" in
   list-agents)
-    printf '%s\n' '{"schema_version":1,"agents":[{"name":"cmd-demo","project":"sase","status":"running","pid":4242,"model":"gpt-5.5","provider":"codex","workspace_number":102,"started_at":"2026-05-06T14:30:00Z","duration_seconds":90,"prompt_snippet":"Command bridge","has_artifact_dir":true,"retry_lineage":{"retry_of_timestamp":null,"retried_as_timestamp":null,"retry_chain_root_timestamp":null,"retry_attempt":null,"parent_agent_name":null},"actions":{"can_resume":true,"can_wait":true,"can_kill":true,"can_retry":true},"display":{"title":"cmd-demo","subtitle":"sase","status_label":"Running"}}],"total_count":1}'
+    printf '%s\n' '{"schema_version":1,"agents":[{"name":"cmd-demo","project":"sase","status":"running","pid":4242,"model":"gpt-5.6","provider":"codex","workspace_number":102,"started_at":"2026-05-06T14:30:00Z","duration_seconds":90,"prompt_snippet":"Command bridge","has_artifact_dir":true,"retry_lineage":{"retry_of_timestamp":null,"retried_as_timestamp":null,"retry_chain_root_timestamp":null,"retry_attempt":null,"parent_agent_name":null},"actions":{"can_resume":true,"can_wait":true,"can_kill":true,"can_retry":true},"display":{"title":"cmd-demo","subtitle":"sase","status_label":"Running"}}],"total_count":1}'
     ;;
   resume-options)
     printf '%s\n' '{"schema_version":1,"options":[{"id":"cmd-demo:resume","agent_name":"cmd-demo","kind":"resume","label":"Resume cmd-demo","prompt_text":"#resume:cmd-demo\n","direct_launch_supported":true}]}'
@@ -4464,7 +4464,7 @@ exit 4
             "prompt": "Implement mobile gateway agent route tests",
             "display_name": "Mobile demo",
             "name": "mobile-demo",
-            "model": "gpt-5.5",
+            "model": "gpt-5.6",
             "provider": "codex",
             "runtime": "codex",
             "project": "sase",
