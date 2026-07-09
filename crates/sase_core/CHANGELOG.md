@@ -233,9 +233,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - add artifact graph query APIs
 - add artifact mutation operations (sase-23.1.2)
 - add artifact graph wire schema
-- allow legend beads to be marked ready
-- add legend work planner
-- add legend epic count bead metadata
 - add bounded agent artifact scans
 - add persistent agent artifact index
 - name epic land agents by bead id
@@ -296,7 +293,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - preserve xprompt definitions in LSP catalogs
 - load plugin xprompts in Rust LSP catalog
 - carry agent meta tags in scan wire
-- resolve legend launch tag in epic work plans
 - enforce artifact directory invariants
 - enforce artifact binding request parity
 - harden artifact graph primitive coverage (sase-23.6.1)

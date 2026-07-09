@@ -19,14 +19,11 @@ const EVENT_MANIFEST: &str =
     include_str!("fixtures/bead/events/event_roundtrip/manifest.json");
 const EVENT_GOLD_1_STREAM: &str =
     include_str!("fixtures/bead/events/event_roundtrip/streams/gold-1.jsonl");
-const EVENT_GOLD_LEGEND_STREAM: &str = include_str!(
-    "fixtures/bead/events/event_roundtrip/streams/gold-legend.jsonl"
-);
 
 #[test]
 fn jsonl_import_to_events_reduces_to_byte_compatible_projection() {
     let outcome = parse_issues_jsonl(EVENT_ROUNDTRIP_SCHEMA);
-    assert_eq!(outcome.loaded_rows, 3);
+    assert_eq!(outcome.loaded_rows, 2);
 
     let streams = import_issues_to_event_streams(&outcome.issues).unwrap();
     assert_eq!(
@@ -34,11 +31,11 @@ fn jsonl_import_to_events_reduces_to_byte_compatible_projection() {
             .iter()
             .map(|stream| stream.stream_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["gold-1", "gold-legend"]
+        vec!["gold-1"]
     );
     let manifest = BeadEventStoreManifestWire::from_streams(&streams);
     manifest.validate().unwrap();
-    assert_eq!(manifest.stream_count, 2);
+    assert_eq!(manifest.stream_count, 1);
 
     let operations = streams
         .iter()
@@ -57,10 +54,7 @@ fn serialized_event_store_fixture_matches_import_and_reduces() {
     let manifest: BeadEventStoreManifestWire =
         serde_json::from_str(EVENT_MANIFEST).unwrap();
     manifest.validate().unwrap();
-    let streams = vec![
-        event_stream_fixture("gold-1", EVENT_GOLD_1_STREAM),
-        event_stream_fixture("gold-legend", EVENT_GOLD_LEGEND_STREAM),
-    ];
+    let streams = vec![event_stream_fixture("gold-1", EVENT_GOLD_1_STREAM)];
     assert_eq!(manifest, BeadEventStoreManifestWire::from_streams(&streams));
 
     let imported = import_issues_to_event_streams(
@@ -556,7 +550,6 @@ fn issue(
         design: String::new(),
         model: String::new(),
         is_ready_to_work: false,
-        epic_count: None,
         changespec_name: String::new(),
         changespec_bug_id: String::new(),
         dependencies: Vec::new(),

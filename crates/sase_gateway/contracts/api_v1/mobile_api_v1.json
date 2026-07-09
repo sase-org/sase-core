@@ -529,7 +529,7 @@
       "platform": "string"
     },
     "PlanActionRequestWire": {
-      "choice": "approve|run|reject|epic|legend|feedback",
+      "choice": "approve|run|reject|epic|feedback",
       "coder_model": "string|null",
       "coder_prompt": "string|null",
       "commit_plan": "bool|null",
@@ -934,16 +934,6 @@
       ],
       "method": "POST",
       "path": "/api/v1/actions/plan/{prefix}/epic",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/legend",
       "request": "PlanActionRequestWire without path-derived prefix/choice",
       "success": "ActionResultWire"
     },

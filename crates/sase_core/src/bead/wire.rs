@@ -26,7 +26,6 @@ pub enum BeadTierWire {
     Plan,
     #[default]
     Epic,
-    Legend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -184,8 +183,6 @@ pub struct IssueWire {
     pub model: String,
     #[serde(default = "false_value")]
     pub is_ready_to_work: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub epic_count: Option<i64>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -222,23 +219,6 @@ impl IssueWire {
             return Err(BeadError::validation(
                 "Only plan issues can be marked is_ready_to_work",
             ));
-        }
-        if self.issue_type != IssueTypeWire::Plan && self.epic_count.is_some() {
-            return Err(BeadError::validation(
-                "Only plan issues can carry epic_count",
-            ));
-        }
-        if let Some(epic_count) = self.epic_count {
-            if self.tier != Some(BeadTierWire::Legend) {
-                return Err(BeadError::validation(
-                    "Only legend plan beads can carry epic_count",
-                ));
-            }
-            if epic_count <= 0 {
-                return Err(BeadError::validation(
-                    "epic_count must be a positive integer",
-                ));
-            }
         }
         if self.issue_type == IssueTypeWire::Phase
             && (!self.changespec_name.is_empty()
@@ -308,7 +288,6 @@ mod tests {
             design: String::new(),
             model: String::new(),
             is_ready_to_work: false,
-            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: vec![],
@@ -369,7 +348,6 @@ mod tests {
 
         assert_eq!(issue.created_at, "");
         assert!(!issue.is_ready_to_work);
-        assert_eq!(issue.epic_count, None);
         assert_eq!(issue.model, "");
         assert_eq!(issue.changespec_name, "");
         assert_eq!(issue.dependencies[0].created_at, "");
@@ -406,46 +384,5 @@ mod tests {
         assert_eq!(issue.parent_id, None);
         assert_eq!(issue.closed_at, None);
         assert_eq!(issue.close_reason, None);
-    }
-
-    #[test]
-    fn legend_plan_allows_positive_epic_count() {
-        let mut issue = phase(Some("test-0"));
-        issue.issue_type = IssueTypeWire::Plan;
-        issue.parent_id = None;
-        issue.tier = Some(BeadTierWire::Legend);
-        issue.epic_count = Some(3);
-
-        issue.validate().unwrap();
-    }
-
-    #[test]
-    fn non_legend_epic_count_is_invalid() {
-        let mut issue = phase(Some("test-0"));
-        issue.issue_type = IssueTypeWire::Plan;
-        issue.parent_id = None;
-        issue.tier = Some(BeadTierWire::Epic);
-        issue.epic_count = Some(3);
-
-        assert!(issue
-            .validate()
-            .unwrap_err()
-            .message
-            .contains("Only legend plan beads"));
-    }
-
-    #[test]
-    fn non_positive_epic_count_is_invalid() {
-        let mut issue = phase(Some("test-0"));
-        issue.issue_type = IssueTypeWire::Plan;
-        issue.parent_id = None;
-        issue.tier = Some(BeadTierWire::Legend);
-        issue.epic_count = Some(0);
-
-        assert!(issue
-            .validate()
-            .unwrap_err()
-            .message
-            .contains("positive integer"));
     }
 }

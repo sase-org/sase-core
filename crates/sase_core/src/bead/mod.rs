@@ -46,10 +46,9 @@ pub use read::{
     ready_issues, show_issue, stats, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
-    changespec_metadata_migration_sql, epic_count_migration_sql,
-    is_ready_to_work_migration_sql, issue_type_migration_sql,
-    missing_changespec_metadata_columns, model_migration_sql,
-    needs_epic_count_migration, needs_is_ready_to_work_migration,
+    changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
+    issue_type_migration_sql, missing_changespec_metadata_columns,
+    model_migration_sql, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
@@ -58,8 +57,6 @@ pub use wire::{
     DependencyWire, IssueTypeWire, IssueWire, OperationOutcomeWire, StatusWire,
 };
 pub use work::{
-    build_epic_work_plan, build_epic_work_plan_from_issues,
-    build_legend_work_plan, build_legend_work_plan_from_issues,
-    EpicWorkPlanWire, LegendEpicAssignmentWire, LegendWorkPlanWire,
+    build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,
     PhaseAssignmentWire,
 };

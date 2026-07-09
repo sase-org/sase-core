@@ -82,7 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - expose artifact graph export binding
 - add artifact ingestion path framework
 - expose artifact graph bindings (sase-23.1.6)
-- add legend work planner
 - add persistent agent artifact index
 - Add bead tier metadata
 - add Rust bead CLI planner

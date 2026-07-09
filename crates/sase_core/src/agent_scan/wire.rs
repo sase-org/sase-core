@@ -202,8 +202,6 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub phase_bead_id: Option<String>,
     #[serde(default)]
-    pub legend_bead_id: Option<String>,
-    #[serde(default)]
     pub commit_changespec_name: Option<String>,
     #[serde(default)]
     pub commit_entry_id: Option<String>,

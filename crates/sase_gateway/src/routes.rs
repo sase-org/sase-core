@@ -534,7 +534,6 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/actions/plan/:prefix/run", post(plan_run))
         .route("/api/v1/actions/plan/:prefix/reject", post(plan_reject))
         .route("/api/v1/actions/plan/:prefix/epic", post(plan_epic))
-        .route("/api/v1/actions/plan/:prefix/legend", post(plan_legend))
         .route("/api/v1/actions/plan/:prefix/feedback", post(plan_feedback))
         .route("/api/v1/actions/hitl/:prefix/accept", post(hitl_accept))
         .route("/api/v1/actions/hitl/:prefix/reject", post(hitl_reject))
@@ -1555,23 +1554,6 @@ async fn plan_epic(
         PlanActionChoiceWire::Epic,
         payload,
         "/api/v1/actions/plan/{prefix}/epic",
-    )
-    .await
-}
-
-async fn plan_legend(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Legend,
-        payload,
-        "/api/v1/actions/plan/{prefix}/legend",
     )
     .await
 }

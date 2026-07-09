@@ -178,10 +178,6 @@ fn handle_show(
         writeln!(stdout, "Model: {}", issue.model)
             .expect("writing to String cannot fail");
     }
-    if let Some(epic_count) = issue.epic_count {
-        writeln!(stdout, "Epic Count: {epic_count}")
-            .expect("writing to String cannot fail");
-    }
     if let Some(parent_id) = &issue.parent_id {
         if let Some(parent) = find_issue(&issues, parent_id) {
             write!(
@@ -848,8 +844,6 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             ("--model", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
-        } else if let Some(value) = arg.strip_prefix("--epic-count=") {
-            ("--epic-count", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--tier=") {
             ("--tier", value.to_string())
         } else {
@@ -866,9 +860,6 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             "-D" | "--design" => fields.design = Some(value),
             "-m" | "--model" => fields.model = Some(value),
             "-a" | "--assignee" => fields.assignee = Some(value),
-            "-E" | "--epic-count" => {
-                fields.epic_count = Some(parse_positive_i64(&value)?);
-            }
             "--tier" => fields.tier = Some(parse_tier(&value)?),
             _ => return None,
         }
@@ -1336,14 +1327,8 @@ fn parse_tier(value: &str) -> Option<BeadTierWire> {
     match value {
         "plan" => Some(BeadTierWire::Plan),
         "epic" => Some(BeadTierWire::Epic),
-        "legend" => Some(BeadTierWire::Legend),
         _ => None,
     }
-}
-
-fn parse_positive_i64(value: &str) -> Option<i64> {
-    let parsed = value.parse::<i64>().ok()?;
-    (parsed > 0).then_some(parsed)
 }
 
 fn is_ready_surface_issue(issue: &IssueWire) -> bool {
@@ -1397,7 +1382,6 @@ fn tier_value(tier: &BeadTierWire) -> &'static str {
     match tier {
         BeadTierWire::Plan => "plan",
         BeadTierWire::Epic => "epic",
-        BeadTierWire::Legend => "legend",
     }
 }
 
@@ -1748,7 +1732,6 @@ mod tests {
             design: String::new(),
             model: String::new(),
             is_ready_to_work: false,
-            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: Vec::new(),

@@ -182,7 +182,6 @@ pub enum PlanActionChoiceWire {
     Run,
     Reject,
     Epic,
-    Legend,
     Feedback,
 }
 
@@ -427,7 +426,6 @@ pub fn mobile_action_detail_from_notification(
                 PlanActionChoiceWire::Run,
                 PlanActionChoiceWire::Reject,
                 PlanActionChoiceWire::Epic,
-                PlanActionChoiceWire::Legend,
                 PlanActionChoiceWire::Feedback,
             ],
         },
@@ -551,10 +549,6 @@ pub fn plan_plan_action_response(
         PlanActionChoiceWire::Epic => {
             response.insert("action".to_string(), json!("epic"));
             "Epic created"
-        }
-        PlanActionChoiceWire::Legend => {
-            response.insert("action".to_string(), json!("legend"));
-            "Legend created"
         }
         PlanActionChoiceWire::Feedback => {
             let feedback = request.feedback.as_deref().ok_or_else(|| {
@@ -1150,7 +1144,6 @@ mod tests {
             ),
             (PlanActionChoiceWire::Reject, json!({"action": "reject"})),
             (PlanActionChoiceWire::Epic, json!({"action": "epic"})),
-            (PlanActionChoiceWire::Legend, json!({"action": "legend"})),
             (
                 PlanActionChoiceWire::Feedback,
                 json!({"action": "reject", "feedback": "try again"}),

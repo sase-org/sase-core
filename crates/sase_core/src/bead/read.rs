@@ -333,7 +333,6 @@ fn parse_tier(value: &str) -> Result<BeadTierWire, BeadError> {
     match value {
         "plan" => Ok(BeadTierWire::Plan),
         "epic" => Ok(BeadTierWire::Epic),
-        "legend" => Ok(BeadTierWire::Legend),
         _ => Err(BeadError::validation(format!("invalid bead tier: {value}"))),
     }
 }

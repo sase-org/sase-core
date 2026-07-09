@@ -49,7 +49,7 @@ The HTTP status code carries transport status, while `code` is the stable client
   device that inspected the detail response, expire after a short TTL, are never stored in the audit log, and are
   rejected if the target path disappears, changes size, crosses a symlink, contains traversal, is not a regular file, or
   exceeds the MVP download limit.
-- `POST /api/v1/actions/plan/{prefix}/approve|run|reject|epic|legend|feedback` writes `plan_response.json` for a
+- `POST /api/v1/actions/plan/{prefix}/approve|run|reject|epic|feedback` writes `plan_response.json` for a
   currently pending plan notification.
 - `POST /api/v1/actions/hitl/{prefix}/accept|reject|feedback` writes `hitl_response.json` for a pending HITL
   notification.

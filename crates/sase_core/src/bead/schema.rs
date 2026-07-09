@@ -10,7 +10,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     issue_type  TEXT NOT NULL DEFAULT 'phase'
                   CHECK(issue_type IN ('plan', 'phase')),
     tier        TEXT
-                  CHECK(tier IN ('plan', 'epic', 'legend')),
+                  CHECK(tier IN ('plan', 'epic')),
     parent_id   TEXT
                   REFERENCES issues(id) ON DELETE CASCADE,
     owner       TEXT,
@@ -25,7 +25,6 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     design      TEXT,
     model       TEXT NOT NULL DEFAULT '',
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
-    epic_count  INTEGER,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
     CHECK(
@@ -34,10 +33,6 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     ),
     CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
-    CHECK(
-        epic_count IS NULL OR
-        (issue_type = 'plan' AND tier = 'legend' AND epic_count > 0)
-    ),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -77,7 +72,7 @@ CREATE TABLE _issues_new (
     CHECK(status IN ('open','in_progress','closed')),
   issue_type TEXT NOT NULL DEFAULT 'phase'
     CHECK(issue_type IN ('plan','phase')),
-  tier TEXT CHECK(tier IN ('plan','epic','legend')),
+  tier TEXT CHECK(tier IN ('plan','epic')),
   parent_id TEXT, owner TEXT, assignee TEXT,
   created_at TEXT NOT NULL, created_by TEXT,
   updated_at TEXT NOT NULL, closed_at TEXT,
@@ -119,17 +114,6 @@ pub fn needs_is_ready_to_work_migration(
 
 pub fn is_ready_to_work_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN is_ready_to_work INTEGER NOT NULL DEFAULT 0"
-}
-
-pub fn needs_epic_count_migration(create_table_sql: Option<&str>) -> bool {
-    match create_table_sql {
-        None => false,
-        Some(sql) => !sql.contains("epic_count"),
-    }
-}
-
-pub fn epic_count_migration_sql() -> &'static str {
-    "ALTER TABLE issues ADD COLUMN epic_count INTEGER"
 }
 
 pub fn needs_model_migration(create_table_sql: Option<&str>) -> bool {
@@ -186,7 +170,7 @@ pub fn needs_tier_migration(create_table_sql: Option<&str>) -> bool {
 }
 
 pub fn tier_migration_sql() -> &'static str {
-    "ALTER TABLE issues ADD COLUMN tier TEXT CHECK(tier IN ('plan','epic','legend'))"
+    "ALTER TABLE issues ADD COLUMN tier TEXT CHECK(tier IN ('plan','epic'))"
 }
 
 #[cfg(test)]
@@ -197,7 +181,6 @@ mod tests {
     fn schema_contains_current_constraints() {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
-        assert!(BEAD_SQLITE_SCHEMA.contains("epic_count  INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("model       TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
@@ -221,12 +204,6 @@ mod tests {
         assert!(!needs_is_ready_to_work_migration(Some(
             "is_ready_to_work INTEGER"
         )));
-
-        assert!(!needs_epic_count_migration(None));
-        assert!(needs_epic_count_migration(Some(
-            "CREATE TABLE issues(id TEXT)"
-        )));
-        assert!(!needs_epic_count_migration(Some("epic_count INTEGER")));
 
         assert!(!needs_model_migration(None));
         assert!(needs_model_migration(Some("CREATE TABLE issues(id TEXT)")));

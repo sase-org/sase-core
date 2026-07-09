@@ -251,8 +251,6 @@ pub struct BeadIssueUpdateEventFieldsWire {
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
-    #[serde(default)]
-    pub epic_count: Option<i64>,
 }
 
 impl BeadIssueUpdateEventFieldsWire {
@@ -270,7 +268,6 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.changespec_bug_id.is_none()
             && self.tier.is_none()
             && self.is_ready_to_work.is_none()
-            && self.epic_count.is_none()
         {
             return Err(BeadError::validation(
                 "issue_updated event has no fields",
@@ -627,9 +624,6 @@ fn apply_update_event_fields(
     }
     if let Some(value) = fields.is_ready_to_work {
         issue.is_ready_to_work = value;
-    }
-    if let Some(value) = fields.epic_count {
-        issue.epic_count = Some(value);
     }
 }
 

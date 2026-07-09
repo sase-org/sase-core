@@ -45,7 +45,7 @@ impl From<std::io::Error> for PlanError {
 ///
 /// `source` is `"repo"` for committed `sdd/` plans and `"local"` for the
 /// machine-local archive. `kind` is one of the repo plan kinds
-/// (`tale`/`epic`/`legend`/`myth`/`research`) or the synthetic `"local"` kind
+/// (`tale`/`epic`/`research`) or the synthetic `"local"` kind
 /// for archive entries (which have no kind directory). `relpath` is relative to
 /// the plan's root (the `sdd/` directory for repo plans, the local archive
 /// directory for local plans) and always uses `/` separators.

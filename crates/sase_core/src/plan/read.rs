@@ -29,8 +29,6 @@ const LOCAL_KIND: &str = "local";
 const REPO_PLAN_KINDS: &[(&str, &str)] = &[
     ("tales", "tale"),
     ("epics", "epic"),
-    ("legends", "legend"),
-    ("myths", "myth"),
     ("research", "research"),
 ];
 
@@ -394,7 +392,7 @@ mod tests {
         // Deterministic order follows REPO_PLAN_KINDS.
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
-        assert_eq!(kinds, ["tale", "epic", "legend", "myth", "research"]);
+        assert_eq!(kinds, ["tale", "epic", "research"]);
     }
 
     #[test]
@@ -548,14 +546,14 @@ mod tests {
         let sdd = temp.path().join("sdd");
         write(&sdd.join("tales").join("202606").join("a.md"), "# A\n");
         write(&sdd.join("epics").join("202606").join("b.md"), "# B\n");
-        write(&sdd.join("myths").join("202606").join("c.md"), "# C\n");
+        write(&sdd.join("research").join("202606").join("c.md"), "# C\n");
 
-        let kinds = vec!["epic".to_string(), "myth".to_string()];
+        let kinds = vec!["epic".to_string(), "research".to_string()];
         let plans = read_plans(Some(&sdd), None, Some(&kinds)).unwrap();
 
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
-        assert_eq!(kinds, ["epic", "myth"]);
+        assert_eq!(kinds, ["epic", "research"]);
     }
 
     #[test]

@@ -1088,7 +1088,6 @@ fn persist_plan_approval_metadata(
             }
         }
         sase_core::notifications::PlanActionChoiceWire::Epic => "epic",
-        sase_core::notifications::PlanActionChoiceWire::Legend => "legend",
         _ => return,
     };
     meta.insert("plan_approved".to_string(), JsonValue::Bool(true));

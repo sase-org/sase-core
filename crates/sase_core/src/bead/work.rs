@@ -29,33 +29,11 @@ pub struct EpicWorkPlanWire {
     pub land_waits_on: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegendEpicAssignmentWire {
-    pub epic_number: usize,
-    pub agent_name: String,
-    pub waits_on: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LegendWorkPlanWire {
-    pub legend_id: String,
-    pub plan_file: String,
-    pub land_model: String,
-    pub assignments: Vec<LegendEpicAssignmentWire>,
-}
-
 pub fn build_epic_work_plan(
     beads_dir: &Path,
     epic_id: &str,
 ) -> Result<EpicWorkPlanWire, BeadError> {
     build_epic_work_plan_from_issues(read_store_issues(beads_dir)?, epic_id)
-}
-
-pub fn build_legend_work_plan(
-    beads_dir: &Path,
-    legend_id: &str,
-) -> Result<LegendWorkPlanWire, BeadError> {
-    build_legend_work_plan_from_issues(read_store_issues(beads_dir)?, legend_id)
 }
 
 pub fn build_epic_work_plan_from_issues(
@@ -80,20 +58,6 @@ pub fn build_epic_work_plan_from_issues(
             "'{epic_id}' is not an epic bead"
         )));
     }
-    let launch_tag_id = epic
-        .parent_id
-        .as_deref()
-        .and_then(|parent_id| {
-            issue_by_id
-                .get(parent_id)
-                .filter(|parent| {
-                    parent.issue_type == IssueTypeWire::Plan
-                        && parent.tier == Some(BeadTierWire::Legend)
-                })
-                .map(|_| parent_id)
-        })
-        .unwrap_or(epic_id);
-
     let children: Vec<&IssueWire> = issues
         .iter()
         .filter(|issue| issue.parent_id.as_deref() == Some(epic_id))
@@ -224,66 +188,11 @@ pub fn build_epic_work_plan_from_issues(
 
     Ok(EpicWorkPlanWire {
         epic_id: epic_id.to_string(),
-        launch_tag_id: launch_tag_id.to_string(),
+        launch_tag_id: epic_id.to_string(),
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
         land_model: epic.model.clone(),
         land_waits_on,
-    })
-}
-
-pub fn build_legend_work_plan_from_issues(
-    issues: Vec<IssueWire>,
-    legend_id: &str,
-) -> Result<LegendWorkPlanWire, BeadError> {
-    let issue_by_id: BTreeMap<&str, &IssueWire> = issues
-        .iter()
-        .map(|issue| (issue.id.as_str(), issue))
-        .collect();
-    let legend = issue_by_id.get(legend_id).ok_or_else(|| BeadError {
-        kind: "not_found".to_string(),
-        message: format!("Legend '{legend_id}' not found"),
-    })?;
-    if legend.issue_type != IssueTypeWire::Plan {
-        return Err(BeadError::validation(format!(
-            "'{legend_id}' is not a plan/legend bead"
-        )));
-    }
-    if legend.tier != Some(BeadTierWire::Legend) {
-        return Err(BeadError::validation(format!(
-            "'{legend_id}' is not a legend bead"
-        )));
-    }
-
-    let Some(epic_count) = legend.epic_count else {
-        return Err(BeadError::validation(format!(
-            "Legend '{legend_id}' is missing epic_count"
-        )));
-    };
-    if epic_count <= 0 {
-        return Err(BeadError::validation(format!(
-            "Legend '{legend_id}' has invalid epic_count {epic_count}"
-        )));
-    }
-    if legend.design.trim().is_empty() {
-        return Err(BeadError::validation(format!(
-            "Legend '{legend_id}' is missing a design/plan file"
-        )));
-    }
-
-    let assignments = (1..=epic_count as usize)
-        .map(|epic_number| LegendEpicAssignmentWire {
-            epic_number,
-            agent_name: legend_epic_agent_name(legend_id, epic_number),
-            waits_on: legend_epic_waits_on(legend_id, epic_number),
-        })
-        .collect();
-
-    Ok(LegendWorkPlanWire {
-        legend_id: legend_id.to_string(),
-        plan_file: legend.design.clone(),
-        land_model: legend.model.clone(),
-        assignments,
     })
 }
 
@@ -293,22 +202,6 @@ fn phase_agent_name(bead_id: &str) -> String {
 
 fn land_agent_name(epic_id: &str) -> String {
     epic_id.to_string()
-}
-
-fn legend_epic_agent_name(legend_id: &str, epic_number: usize) -> String {
-    format!("{legend_id}.{epic_number}.0")
-}
-
-fn legend_epic_land_agent_name(legend_id: &str, epic_number: usize) -> String {
-    format!("{legend_id}.{epic_number}")
-}
-
-fn legend_epic_waits_on(legend_id: &str, epic_number: usize) -> Vec<String> {
-    if epic_number <= 1 {
-        vec![]
-    } else {
-        vec![legend_epic_land_agent_name(legend_id, epic_number - 1)]
-    }
 }
 
 fn format_id_list<'a>(ids: impl Iterator<Item = &'a str>) -> String {
@@ -331,14 +224,6 @@ mod tests {
 
     fn epic_child(id: &str, parent_id: &str) -> IssueWire {
         issue(id, IssueTypeWire::Plan, Some(parent_id))
-    }
-
-    fn legend(id: &str, epic_count: Option<i64>, design: &str) -> IssueWire {
-        let mut issue = issue(id, IssueTypeWire::Plan, None);
-        issue.tier = Some(BeadTierWire::Legend);
-        issue.epic_count = epic_count;
-        issue.design = design.to_string();
-        issue
     }
 
     fn phase(id: &str, parent_id: &str) -> IssueWire {
@@ -371,7 +256,6 @@ mod tests {
             design: String::new(),
             model: String::new(),
             is_ready_to_work: false,
-            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: vec![],
@@ -429,23 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn legend_child_epic_uses_legend_launch_tag() {
-        let plan = build_epic_work_plan_from_issues(
-            vec![
-                legend("l1", Some(1), "sdd/legends/l1.md"),
-                epic_child("e1", "l1"),
-                phase("p1", "e1"),
-            ],
-            "e1",
-        )
-        .unwrap();
-
-        assert_eq!(plan.epic_id, "e1");
-        assert_eq!(plan.launch_tag_id, "l1");
-    }
-
-    #[test]
-    fn non_legend_parent_does_not_change_epic_launch_tag() {
+    fn parent_does_not_change_epic_launch_tag() {
         let plan = build_epic_work_plan_from_issues(
             vec![epic("p0"), epic_child("e1", "p0"), phase("p1", "e1")],
             "e1",
@@ -529,94 +397,5 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(err.kind, "cycle");
-    }
-
-    #[test]
-    fn plans_legend_epics_in_linear_wait_chain() {
-        let plan = build_legend_work_plan_from_issues(
-            vec![legend("l1", Some(3), "sdd/legends/l1.md")],
-            "l1",
-        )
-        .unwrap();
-
-        assert_eq!(plan.legend_id, "l1");
-        assert_eq!(plan.plan_file, "sdd/legends/l1.md");
-        assert_eq!(plan.land_model, "");
-        assert_eq!(plan.assignments.len(), 3);
-        assert_eq!(plan.assignments[0].epic_number, 1);
-        assert_eq!(plan.assignments[0].agent_name, "l1.1.0");
-        assert_eq!(plan.assignments[0].waits_on, Vec::<String>::new());
-        assert_eq!(plan.assignments[1].agent_name, "l1.2.0");
-        assert_eq!(plan.assignments[1].waits_on, vec!["l1.1"]);
-        assert_eq!(plan.assignments[2].agent_name, "l1.3.0");
-        assert_eq!(plan.assignments[2].waits_on, vec!["l1.2"]);
-    }
-
-    #[test]
-    fn copies_legend_model_to_land_model() {
-        let mut legend = legend("l1", Some(1), "sdd/legends/l1.md");
-        legend.model = "codex/gpt-5.5".to_string();
-
-        let plan =
-            build_legend_work_plan_from_issues(vec![legend], "l1").unwrap();
-
-        assert_eq!(plan.land_model, "codex/gpt-5.5");
-    }
-
-    #[test]
-    fn rejects_missing_legend_epic_count() {
-        let err = build_legend_work_plan_from_issues(
-            vec![legend("l1", None, "legend.md")],
-            "l1",
-        )
-        .unwrap_err();
-
-        assert_eq!(err.kind, "validation");
-        assert!(err.message.contains("missing epic_count"));
-    }
-
-    #[test]
-    fn rejects_non_positive_legend_epic_count() {
-        let err = build_legend_work_plan_from_issues(
-            vec![legend("l1", Some(0), "legend.md")],
-            "l1",
-        )
-        .unwrap_err();
-
-        assert_eq!(err.kind, "validation");
-        assert!(err.message.contains("invalid epic_count 0"));
-    }
-
-    #[test]
-    fn rejects_legend_without_design_path() {
-        let err = build_legend_work_plan_from_issues(
-            vec![legend("l1", Some(1), "")],
-            "l1",
-        )
-        .unwrap_err();
-
-        assert_eq!(err.kind, "validation");
-        assert!(err.message.contains("missing a design/plan file"));
-    }
-
-    #[test]
-    fn rejects_non_legend_plan_for_legend_work() {
-        let err = build_legend_work_plan_from_issues(vec![epic("e1")], "e1")
-            .unwrap_err();
-
-        assert_eq!(err.kind, "validation");
-        assert!(err.message.contains("not a legend bead"));
-    }
-
-    #[test]
-    fn rejects_phase_for_legend_work() {
-        let err = build_legend_work_plan_from_issues(
-            vec![epic("e1"), phase("p1", "e1")],
-            "p1",
-        )
-        .unwrap_err();
-
-        assert_eq!(err.kind, "validation");
-        assert!(err.message.contains("not a plan/legend bead"));
     }
 }

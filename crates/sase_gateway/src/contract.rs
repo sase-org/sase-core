@@ -267,14 +267,6 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "POST",
-                "path": "/api/v1/actions/plan/{prefix}/legend",
-                "auth": true,
-                "request": "PlanActionRequestWire without path-derived prefix/choice",
-                "success": "ActionResultWire",
-                "errors": ["ApiErrorWire"]
-            },
-            {
-                "method": "POST",
                 "path": "/api/v1/actions/plan/{prefix}/feedback",
                 "auth": true,
                 "request": "PlanActionRequestWire without path-derived prefix/choice",
@@ -890,7 +882,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::notifications::mobile",
                 "schema_version": "u32",
                 "prefix": "string",
-                "choice": "approve|run|reject|epic|legend|feedback",
+                "choice": "approve|run|reject|epic|feedback",
                 "feedback": "string|null",
                 "commit_plan": "bool|null",
                 "run_coder": "bool|null",

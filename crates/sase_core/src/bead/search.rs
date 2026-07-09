@@ -141,7 +141,6 @@ fn tier_value(tier: &BeadTierWire) -> &'static str {
     match tier {
         BeadTierWire::Plan => "plan",
         BeadTierWire::Epic => "epic",
-        BeadTierWire::Legend => "legend",
     }
 }
 
@@ -230,13 +229,7 @@ mod tests {
                 "closed",
             ),
             ("type", phase_issue_with(|_| {}), "phase"),
-            (
-                "tier",
-                plan_issue_with(|issue| {
-                    issue.tier = Some(BeadTierWire::Legend)
-                }),
-                "legend",
-            ),
+            ("tier", plan_issue_with(|_| {}), "epic"),
         ];
 
         for (field_name, issue, query) in cases {
@@ -260,9 +253,7 @@ mod tests {
 
     #[test]
     fn field_names_constant_matches_collected_plan_fields() {
-        let issue = plan_issue_with(|issue| {
-            issue.tier = Some(BeadTierWire::Legend);
-        });
+        let issue = plan_issue_with(|_| {});
         let field_names = searchable_fields(&issue)
             .into_iter()
             .map(|field| field.name)
@@ -329,15 +320,8 @@ mod tests {
             issue.tier = Some(BeadTierWire::Epic);
             issue.created_at = "2026-01-01T00:03:00Z".to_string();
         });
-        let legend_plan = plan_issue_with(|issue| {
-            issue.id = "beads-3".to_string();
-            issue.title = "Auth legend".to_string();
-            issue.tier = Some(BeadTierWire::Legend);
-            issue.created_at = "2026-01-01T00:04:00Z".to_string();
-        });
-
         let results = search_issues_in_issues(
-            vec![open_phase, closed_phase, epic_plan, legend_plan],
+            vec![open_phase, closed_phase, epic_plan],
             "auth",
             Some(&["open".to_string()]),
             Some(&["plan".to_string()]),
@@ -513,7 +497,6 @@ mod tests {
             design: String::new(),
             model: String::new(),
             is_ready_to_work: false,
-            epic_count: None,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: Vec::new(),

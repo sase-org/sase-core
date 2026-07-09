@@ -822,7 +822,6 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         question_session_id: coerce_str(data.get("question_session_id")),
         epic_bead_id: coerce_str(data.get("epic_bead_id")),
         phase_bead_id: coerce_str(data.get("phase_bead_id")),
-        legend_bead_id: coerce_str(data.get("legend_bead_id")),
         commit_changespec_name: coerce_str(data.get("commit_changespec_name")),
         commit_entry_id: coerce_str(data.get("commit_entry_id")),
         commit_result: coerce_str(data.get("commit_result")),
