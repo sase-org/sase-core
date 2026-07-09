@@ -2682,12 +2682,12 @@ mod tests {
                         "aliases": ["fable"]
                     },
                     {
-                        "value": "gpt-5.6",
-                        "display": "gpt-5.6",
-                        "description": "Codex (gpt56)",
+                        "value": "gpt-5.6-sol",
+                        "display": "gpt-5.6-sol",
+                        "description": "Codex (gpt56sol)",
                         "kind": "model",
                         "provider": "codex",
-                        "aliases": ["gpt56"]
+                        "aliases": ["gpt56sol"]
                     },
                     {
                         "value": "gpt-5.5",
@@ -2746,7 +2746,7 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["claude-fable-5", "gpt-5.6", "gpt-5.5"]
+            vec!["claude-fable-5", "gpt-5.6-sol", "gpt-5.5"]
         );
         let item = &items[0];
         assert_eq!(item.label, "claude-fable-5");

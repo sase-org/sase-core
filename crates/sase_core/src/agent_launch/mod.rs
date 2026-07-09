@@ -2665,8 +2665,8 @@ mod tests {
             Some("opus".to_string())
         );
         assert_eq!(
-            extract_first_model_value("%m:codex/gpt-5.6@low do work"),
-            Some("codex/gpt-5.6".to_string())
+            extract_first_model_value("%m:codex/gpt-5.6-sol@low do work"),
+            Some("codex/gpt-5.6-sol".to_string())
         );
         // No suffix → unchanged.
         assert_eq!(
@@ -2937,7 +2937,7 @@ mod tests {
 
     #[test]
     fn fanout_planner_empty_branch_preserves_following_directive_separator() {
-        let prompt = "Do work. %{extra} %{%m:opus | %m:gpt-5.6}";
+        let prompt = "Do work. %{extra} %{%m:opus | %m:gpt-5.6-sol}";
 
         let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
 
@@ -2946,7 +2946,12 @@ mod tests {
                 .iter()
                 .map(|slot| slot.model.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("opus"), Some("gpt-5.6"), Some("opus"), Some("gpt-5.6")]
+            vec![
+                Some("opus"),
+                Some("gpt-5.6-sol"),
+                Some("opus"),
+                Some("gpt-5.6-sol")
+            ]
         );
         assert_eq!(
             plan.slots
@@ -2955,9 +2960,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "Do work. extra %m:opus",
-                "Do work. extra %m:gpt-5.6",
+                "Do work. extra %m:gpt-5.6-sol",
                 "Do work. %m:opus",
-                "Do work. %m:gpt-5.6",
+                "Do work. %m:gpt-5.6-sol",
             ]
         );
     }
