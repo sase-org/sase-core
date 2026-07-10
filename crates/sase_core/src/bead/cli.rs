@@ -637,10 +637,9 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
             idx += 1;
             let value = args.get(idx)?;
             tiers.push(parse_tier(value)?);
-        } else if let Some(value) = arg.strip_prefix("--tier=") {
-            tiers.push(parse_tier(value)?);
         } else {
-            return None;
+            let value = arg.strip_prefix("--tier=")?;
+            tiers.push(parse_tier(value)?);
         }
         idx += 1;
     }
@@ -844,10 +843,9 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
             ("--model", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
-        } else if let Some(value) = arg.strip_prefix("--tier=") {
-            ("--tier", value.to_string())
         } else {
-            return None;
+            let value = arg.strip_prefix("--tier=")?;
+            ("--tier", value.to_string())
         };
         match name {
             "-s" | "--status" => {
