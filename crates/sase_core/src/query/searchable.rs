@@ -43,6 +43,15 @@ pub fn project_dir_name(file_path: &str) -> &str {
     }
 }
 
+/// Effective project identity used by the exact `project:` property filter.
+/// A configured display name replaces, rather than aliases, the canonical
+/// directory key.
+pub fn effective_project_name(cs: &ChangeSpecWire) -> &str {
+    cs.project_display_name
+        .as_deref()
+        .unwrap_or_else(|| project_dir_name(&cs.file_path))
+}
+
 fn display_command(command: &str) -> &str {
     command.trim_start_matches(['!', '$'])
 }

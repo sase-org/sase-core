@@ -46,9 +46,10 @@ use sase_core::{
 use serde_json::Value;
 
 const PYTHON_FIXTURE: &str = r#"{
-    "schema_version": 3,
+    "schema_version": 4,
     "name": "rust_workspace",
     "project_basename": "myproj",
+    "project_display_name": "widgets",
     "file_path": "myproj.sase",
     "source_span": {
         "file_path": "myproj.sase",
@@ -135,6 +136,7 @@ fn rust_changespec() -> ChangeSpecWire {
         schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
         name: "rust_workspace".to_string(),
         project_basename: "myproj".to_string(),
+        project_display_name: Some("widgets".to_string()),
         file_path: "myproj.sase".to_string(),
         source_span: SourceSpanWire {
             file_path: "myproj.sase".to_string(),

@@ -20,7 +20,9 @@
 //!   the Python facade's placeholder, `end_line` here is the real last
 //!   non-blank line of the spec.
 
-use crate::project_spec::project_spec_basename;
+use crate::project_spec::{
+    project_display_name_from_content, project_spec_basename,
+};
 use crate::sections::{
     parse_comments_line, parse_commits_line, parse_deltas_line,
     parse_hooks_line, parse_mentors_line, parse_timestamps_line,
@@ -49,19 +51,30 @@ pub fn parse_project_bytes(
     })?;
 
     let lines: Vec<&str> = text.lines().collect();
+    let project_display_name = project_display_name_from_content(text);
     let mut specs: Vec<ChangeSpecWire> = Vec::new();
     let mut idx = 0usize;
 
     while idx < lines.len() {
         let line = lines[idx];
         if is_changespec_header(line) {
-            let (spec, next_idx) = parse_one_changespec(&lines, idx + 1, path);
+            let (spec, next_idx) = parse_one_changespec(
+                &lines,
+                idx + 1,
+                path,
+                project_display_name.as_deref(),
+            );
             if let Some(s) = spec {
                 specs.push(s);
             }
             idx = next_idx;
         } else if line.starts_with("NAME: ") {
-            let (spec, next_idx) = parse_one_changespec(&lines, idx, path);
+            let (spec, next_idx) = parse_one_changespec(
+                &lines,
+                idx,
+                path,
+                project_display_name.as_deref(),
+            );
             if let Some(s) = spec {
                 specs.push(s);
             }
@@ -144,6 +157,7 @@ impl ParserState {
     fn build(
         mut self,
         file_path: &str,
+        project_display_name: Option<&str>,
         start_line: u32,
         end_line: u32,
     ) -> Option<ChangeSpecWire> {
@@ -155,6 +169,7 @@ impl ParserState {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name,
             project_basename: project_spec_basename(file_path),
+            project_display_name: project_display_name.map(str::to_string),
             file_path: file_path.to_string(),
             source_span: SourceSpanWire {
                 file_path: file_path.to_string(),
@@ -345,6 +360,7 @@ fn parse_one_changespec(
     lines: &[&str],
     start_idx: usize,
     file_path: &str,
+    project_display_name: Option<&str>,
 ) -> (Option<ChangeSpecWire>, usize) {
     let mut state = ParserState::default();
     let mut idx = start_idx;
@@ -400,7 +416,8 @@ fn parse_one_changespec(
 
     let start_line = (start_idx as u32) + 1;
     let end_line = (last_content_idx as u32) + 1;
-    let spec = state.build(file_path, start_line, end_line);
+    let spec =
+        state.build(file_path, project_display_name, start_line, end_line);
     (spec, idx)
 }
 
@@ -422,6 +439,29 @@ mod tests {
         assert_eq!(project_spec_basename("/tmp/myproj-archive.gp"), "myproj");
         assert_eq!(project_spec_basename("/tmp/no_ext"), "no_ext");
         assert_eq!(project_spec_basename("foo.bar.sase"), "foo.bar");
+    }
+
+    #[test]
+    fn project_name_metadata_is_stamped_on_every_changespec() {
+        let specs = parse(
+            "PROJECT_NAME: Widgets\n\
+             NAME: first\nSTATUS: WIP\n\n\
+             NAME: second\nSTATUS: Ready\n",
+        );
+        assert_eq!(specs.len(), 2);
+        assert!(specs.iter().all(|spec| {
+            spec.project_display_name.as_deref() == Some("Widgets")
+        }));
+    }
+
+    #[test]
+    fn missing_or_invalid_project_name_metadata_stays_absent() {
+        let missing = parse("NAME: first\nSTATUS: WIP\n");
+        assert_eq!(missing[0].project_display_name, None);
+
+        let invalid =
+            parse("PROJECT_NAME: .hidden\nNAME: first\nSTATUS: WIP\n");
+        assert_eq!(invalid[0].project_display_name, None);
     }
 
     #[test]

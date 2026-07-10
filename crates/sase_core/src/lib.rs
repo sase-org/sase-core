@@ -307,12 +307,12 @@ pub use prompt_stash::{
     PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
-    canonicalize_query, compile_query, evaluate_query_many,
-    evaluate_query_many_in_corpus, evaluate_query_one, get_base_status,
-    get_searchable_text, has_any_status_suffix, parse_query, project_dir_name,
-    strip_reverted_suffix, tokenize_query, QueryCorpus, QueryErrorWire,
-    QueryEvaluationContext, QueryExprWire, QueryProgram, QueryProgramWire,
-    QueryTokenKind, QueryTokenWire,
+    canonicalize_query, compile_query, effective_project_name,
+    evaluate_query_many, evaluate_query_many_in_corpus, evaluate_query_one,
+    get_base_status, get_searchable_text, has_any_status_suffix, parse_query,
+    project_dir_name, strip_reverted_suffix, tokenize_query, QueryCorpus,
+    QueryErrorWire, QueryEvaluationContext, QueryExprWire, QueryProgram,
+    QueryProgramWire, QueryTokenKind, QueryTokenWire,
 };
 pub use status::{
     apply_status_update as apply_status_update_lines, get_next_suffix_number,

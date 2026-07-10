@@ -27,7 +27,7 @@ use crate::query::matchers::{
 };
 use crate::query::parser::parse_query;
 use crate::query::searchable::{
-    get_searchable_text, project_dir_name, RUNNING_AGENT_MARKER,
+    effective_project_name, get_searchable_text, RUNNING_AGENT_MARKER,
     RUNNING_PROCESS_MARKER,
 };
 use crate::query::types::{QueryErrorWire, QueryExprWire};
@@ -112,7 +112,7 @@ impl QueryCorpus {
             name_map.insert(lower_name.clone(), idx);
             lower_names.push(lower_name);
             base_statuses.push(get_base_status(&cs.status));
-            project_names.push(project_dir_name(&cs.file_path).to_string());
+            project_names.push(effective_project_name(cs).to_string());
             sibling_bases.push(strip_reverted_suffix(&cs.name).to_lowercase());
 
             let text = get_searchable_text(cs);

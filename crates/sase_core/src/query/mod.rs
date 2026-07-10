@@ -37,8 +37,8 @@ pub use matchers::{
 };
 pub use parser::{canonicalize_query, parse_query};
 pub use searchable::{
-    get_searchable_text, project_dir_name, RUNNING_AGENT_MARKER,
-    RUNNING_PROCESS_MARKER,
+    effective_project_name, get_searchable_text, project_dir_name,
+    RUNNING_AGENT_MARKER, RUNNING_PROCESS_MARKER,
 };
 pub use tokenizer::tokenize_query;
 pub use types::{

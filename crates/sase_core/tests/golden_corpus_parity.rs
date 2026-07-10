@@ -49,9 +49,10 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj.sase", MYPROJ_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "alpha",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj.sase",
             "source_span": {
                 "file_path": "myproj.sase",
@@ -131,9 +132,10 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             ]
         },
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "beta",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj.sase",
             "source_span": {
                 "file_path": "myproj.sase",
@@ -153,9 +155,10 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "beta__260102_010101",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj.sase",
             "source_span": {
                 "file_path": "myproj.sase",
@@ -175,9 +178,10 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "gamma",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj.sase",
             "source_span": {
                 "file_path": "myproj.sase",
@@ -221,9 +225,10 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj-archive.sase", MYPROJ_ARCHIVE_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "archived_one",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj-archive.sase",
             "source_span": {
                 "file_path": "myproj-archive.sase",
@@ -255,9 +260,10 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "name": "reverted_two",
             "project_basename": "myproj",
+            "project_display_name": null,
             "file_path": "myproj-archive.sase",
             "source_span": {
                 "file_path": "myproj-archive.sase",

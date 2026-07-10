@@ -215,6 +215,51 @@ fn persistent_corpus_keeps_ancestor_memo_query_specific() {
 }
 
 #[test]
+fn configured_project_name_replaces_directory_key_in_all_query_paths() {
+    let data = b"PROJECT_NAME: Widgets\nNAME: alpha\nSTATUS: WIP\n";
+    let specs =
+        parse_project_bytes("/tmp/directory-key/directory-key.sase", data)
+            .unwrap();
+    let corpus = QueryCorpus::new(specs.clone());
+
+    for query in ["project:widgets", "project:WIDGETS", "+Widgets"] {
+        let program = compile_query(query).unwrap();
+        assert_eq!(evaluate_query_many(&program, &specs), vec![true]);
+        assert_eq!(
+            evaluate_query_many_in_corpus(&program, &corpus),
+            vec![true]
+        );
+        assert!(sase_core::evaluate_query_one(&program, &specs[0], &specs));
+    }
+
+    let canonical = compile_query("project:directory-key").unwrap();
+    assert_eq!(evaluate_query_many(&canonical, &specs), vec![false]);
+    assert_eq!(
+        evaluate_query_many_in_corpus(&canonical, &corpus),
+        vec![false]
+    );
+}
+
+#[test]
+fn project_query_falls_back_to_directory_key_without_valid_metadata() {
+    for data in [
+        b"NAME: alpha\nSTATUS: WIP\n".as_slice(),
+        b"PROJECT_NAME: .hidden\nNAME: alpha\nSTATUS: WIP\n".as_slice(),
+    ] {
+        let specs =
+            parse_project_bytes("/tmp/directory-key/directory-key.sase", data)
+                .unwrap();
+        let corpus = QueryCorpus::new(specs.clone());
+        let program = compile_query("+DIRECTORY-KEY").unwrap();
+        assert_eq!(evaluate_query_many(&program, &specs), vec![true]);
+        assert_eq!(
+            evaluate_query_many_in_corpus(&program, &corpus),
+            vec![true]
+        );
+    }
+}
+
+#[test]
 fn ancestor_walk_avoids_cycles() {
     // Construct a synthetic 2-spec list where parents form a cycle. The
     // evaluator must not recurse forever — the cycle guard breaks the walk.
@@ -228,6 +273,7 @@ fn ancestor_walk_avoids_cycles() {
         schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
         name: name.into(),
         project_basename: "p".into(),
+        project_display_name: None,
         file_path: "core_golden/p.sase".into(),
         source_span: span.clone(),
         status: "WIP".into(),

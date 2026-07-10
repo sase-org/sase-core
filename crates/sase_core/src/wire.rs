@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version mirrored from `wire.py::CHANGESPEC_WIRE_SCHEMA_VERSION`.
-pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 4;
 
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,6 +125,10 @@ pub struct ChangeSpecWire {
     pub schema_version: u32,
     pub name: String,
     pub project_basename: String,
+    /// Configured user-facing project name from the ProjectSpec metadata
+    /// header. Query evaluation falls back to the canonical directory key.
+    #[serde(default)]
+    pub project_display_name: Option<String>,
     pub file_path: String,
     pub source_span: SourceSpanWire,
     pub status: String,
@@ -200,6 +204,7 @@ mod tests {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "my_cl".to_string(),
             project_basename: "myproj".to_string(),
+            project_display_name: None,
             file_path: "myproj.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
@@ -237,6 +242,7 @@ mod tests {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
+            project_display_name: None,
             file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
@@ -286,6 +292,7 @@ mod tests {
             cs.pr_url.as_deref(),
             Some("https://example.test/repo/pull/1")
         );
+        assert_eq!(cs.project_display_name, None);
     }
 
     #[test]
@@ -296,6 +303,7 @@ mod tests {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
+            project_display_name: None,
             file_path: "p.sase".to_string(),
             source_span: empty_span(),
             status: "WIP".to_string(),
@@ -315,6 +323,7 @@ mod tests {
             "schema_version",
             "name",
             "project_basename",
+            "project_display_name",
             "file_path",
             "source_span",
             "status",
@@ -345,6 +354,7 @@ mod tests {
             schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
             name: "rust_workspace".to_string(),
             project_basename: "myproj".to_string(),
+            project_display_name: Some("widgets".to_string()),
             file_path: "myproj.sase".to_string(),
             source_span: SourceSpanWire {
                 file_path: "myproj.sase".to_string(),

@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::query::searchable::project_dir_name;
+use crate::query::searchable::effective_project_name;
 use crate::wire::ChangeSpecWire;
 
 /// `r" \([a-zA-Z0-9_-]+_\d+\)$"` — matches workspace suffixes like
@@ -85,11 +85,10 @@ pub fn match_status(value: &str, cs: &ChangeSpecWire) -> bool {
     get_base_status(&cs.status).eq_ignore_ascii_case(value)
 }
 
-/// `project:<value>` — case-insensitive equality on the parent-directory
-/// component of `file_path`. See `project_dir_name` for why this isn't
-/// `ChangeSpecWire.project_basename`.
+/// `project:<value>` — case-insensitive equality on the configured project
+/// display name, falling back to the canonical parent-directory key.
 pub fn match_project(value: &str, cs: &ChangeSpecWire) -> bool {
-    project_dir_name(&cs.file_path).eq_ignore_ascii_case(value)
+    effective_project_name(cs).eq_ignore_ascii_case(value)
 }
 
 /// `name:<value>` — case-insensitive exact match on the ChangeSpec NAME.
