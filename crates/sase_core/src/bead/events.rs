@@ -4,7 +4,8 @@
 //! `IssueWire` snapshots into deterministic streams, then reduce streams back
 //! into the current snapshot model. Later phases own filesystem integration.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
 
@@ -353,7 +354,7 @@ pub fn reduce_event_streams(
 ) -> Result<Vec<IssueWire>, BeadError> {
     let mut stream_ids = BTreeSet::new();
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
-    let mut ordered_events = Vec::new();
+    let mut event_queue = BinaryHeap::new();
 
     let mut streams = streams.to_vec();
     streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
@@ -365,18 +366,24 @@ pub fn reduce_event_streams(
                 stream.stream_id
             )));
         }
-        for (event_index, event) in stream.events.iter().enumerate() {
-            ordered_events.push(OrderedEvent {
-                event,
-                stream_index,
-                event_index,
-            });
+        if let Some(event) = stream.events.first() {
+            event_queue.push(Reverse(event_order_key(event, stream_index, 0)));
         }
     }
-    ordered_events.sort_by(compare_ordered_events);
 
-    for ordered in ordered_events {
-        apply_event(&mut issues, ordered.event)?;
+    while let Some(Reverse((_, _, _, stream_index, event_index))) =
+        event_queue.pop()
+    {
+        let stream = &streams[stream_index];
+        apply_event(&mut issues, &stream.events[event_index])?;
+        let next_index = event_index + 1;
+        if let Some(event) = stream.events.get(next_index) {
+            event_queue.push(Reverse(event_order_key(
+                event,
+                stream_index,
+                next_index,
+            )));
+        }
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
@@ -459,26 +466,18 @@ fn renumber_event(
     Ok(event)
 }
 
-struct OrderedEvent<'a> {
-    event: &'a BeadEventRecordWire,
+fn event_order_key(
+    event: &BeadEventRecordWire,
     stream_index: usize,
     event_index: usize,
-}
-
-fn compare_ordered_events(
-    left: &OrderedEvent<'_>,
-    right: &OrderedEvent<'_>,
-) -> std::cmp::Ordering {
-    if left.stream_index == right.stream_index {
-        return left.event_index.cmp(&right.event_index);
-    }
-    let timestamp_order = left.event.timestamp.cmp(&right.event.timestamp);
-    if !timestamp_order.is_eq() {
-        return timestamp_order;
-    }
-    event_operation_priority(left.event.operation)
-        .cmp(&event_operation_priority(right.event.operation))
-        .then_with(|| left.event.event_id.cmp(&right.event.event_id))
+) -> (String, usize, String, usize, usize) {
+    (
+        event.timestamp.clone(),
+        event_operation_priority(event.operation),
+        event.event_id.clone(),
+        stream_index,
+        event_index,
+    )
 }
 
 fn event_operation_priority(operation: BeadEventOperationWire) -> usize {

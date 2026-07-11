@@ -365,6 +365,71 @@ fn cross_stream_dependencies_resolve_after_all_creates() {
 }
 
 #[test]
+fn reducer_preserves_stream_order_with_non_monotonic_timestamps() {
+    let alpha = issue(
+        "alpha",
+        "Alpha",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:03:00Z",
+    );
+    let beta = issue(
+        "beta",
+        "Beta",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:02:00Z",
+    );
+    let streams = [
+        BeadEventStreamWire {
+            stream_id: "alpha".to_string(),
+            root_issue_id: "alpha".to_string(),
+            events: vec![
+                event(
+                    "alpha",
+                    "2026-01-01T00:03:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated { issue: alpha },
+                ),
+                event(
+                    "alpha",
+                    "2026-01-01T00:01:00Z",
+                    BeadEventOperationWire::IssueUpdated,
+                    BeadEventPayloadWire::IssueUpdated {
+                        fields: BeadIssueUpdateEventFieldsWire {
+                            title: Some("Updated Alpha".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                ),
+            ],
+        },
+        BeadEventStreamWire {
+            stream_id: "beta".to_string(),
+            root_issue_id: "beta".to_string(),
+            events: vec![event(
+                "beta",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: beta },
+            )],
+        },
+    ];
+
+    let reduced = reduce_event_streams(&streams).unwrap();
+
+    assert_eq!(reduced.len(), 2);
+    assert_eq!(
+        reduced
+            .iter()
+            .find(|issue| issue.id == "alpha")
+            .unwrap()
+            .title,
+        "Updated Alpha"
+    );
+}
+
+#[test]
 fn event_validation_rejects_operation_payload_mismatch() {
     let invalid = event(
         "gold-1",
