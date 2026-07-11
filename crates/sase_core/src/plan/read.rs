@@ -1,6 +1,8 @@
 //! Read-only plan discovery: scan + parse markdown plan artifacts.
 //!
-//! Repo plans live under `<sdd_root>/<kind>s/<YYYYMM>/*.md`; local plans live
+//! Repo plans live canonically under `<sdd_root>/plans/<YYYYMM>/*.md`, with
+//! their tale/epic classification stored in `tier` frontmatter. Legacy
+//! `tales/` and `epics/` directories remain readable. Local plans live
 //! under `<local_dir>/*.md` (flat) and `<local_dir>/<YYYYMM>/*.md` (sharded).
 //! Discovery is deliberately resilient: missing root directories yield no
 //! plans (not an error), unreadable/non-UTF-8 files are skipped, and malformed
@@ -22,11 +24,13 @@ const REPO_SOURCE: &str = "repo";
 const LOCAL_SOURCE: &str = "local";
 const LOCAL_KIND: &str = "local";
 
-/// Repo `sdd/` plan corpus: `(directory name, kind label)`.
+/// Repo `sdd/` plan corpus: `(directory name, fallback kind label)`.
 ///
-/// Directory names are plural (`sdd/tales/…`) while the kind label surfaced on
-/// each [`PlanWire`] and accepted by the `kinds` filter is singular (`tale`).
+/// Canonical `plans/` sorts first, followed by legacy plan directories and
+/// then research. A valid `tier: tale|epic` overrides the fallback kind for
+/// plan files; research remains directory-classified.
 const REPO_PLAN_KINDS: &[(&str, &str)] = &[
+    ("plans", "tale"),
     ("tales", "tale"),
     ("epics", "epic"),
     ("research", "research"),
@@ -65,19 +69,22 @@ fn read_repo_plans(
     out: &mut Vec<PlanWire>,
 ) -> Result<(), PlanError> {
     for (dir_name, kind) in REPO_PLAN_KINDS {
-        if !kind_selected(kinds, kind) {
-            continue;
-        }
         let kind_dir = sdd_root.join(dir_name);
         if !kind_dir.is_dir() {
             continue;
         }
         for shard in sorted_subdirs(&kind_dir)? {
             for file in sorted_markdown_files(&shard)? {
-                if let Some(plan) =
-                    build_plan(REPO_SOURCE, kind, sdd_root, &file)
-                {
-                    out.push(plan);
+                if let Some(plan) = build_plan(
+                    REPO_SOURCE,
+                    kind,
+                    sdd_root,
+                    &file,
+                    *dir_name != "research",
+                ) {
+                    if kind_selected(kinds, &plan.kind) {
+                        out.push(plan);
+                    }
                 }
             }
         }
@@ -94,7 +101,7 @@ fn read_local_plans(
     }
     for file in sorted_markdown_files(local_dir)? {
         if let Some(plan) =
-            build_plan(LOCAL_SOURCE, LOCAL_KIND, local_dir, &file)
+            build_plan(LOCAL_SOURCE, LOCAL_KIND, local_dir, &file, false)
         {
             out.push(plan);
         }
@@ -102,7 +109,7 @@ fn read_local_plans(
     for shard in sorted_subdirs(local_dir)? {
         for file in sorted_markdown_files(&shard)? {
             if let Some(plan) =
-                build_plan(LOCAL_SOURCE, LOCAL_KIND, local_dir, &file)
+                build_plan(LOCAL_SOURCE, LOCAL_KIND, local_dir, &file, false)
             {
                 out.push(plan);
             }
@@ -125,6 +132,7 @@ fn build_plan(
     kind: &str,
     root: &Path,
     file: &Path,
+    tier_classified: bool,
 ) -> Option<PlanWire> {
     let content = fs::read_to_string(file).ok()?;
     let name = file
@@ -137,6 +145,11 @@ fn build_plan(
         .as_deref()
         .map(parse_frontmatter_map)
         .unwrap_or_default();
+    let kind = if tier_classified {
+        plan_kind_from_tier(&frontmatter, kind)
+    } else {
+        kind.to_string()
+    };
     let title = derive_title(&body).unwrap_or_else(|| humanize(&name));
     let status = frontmatter.get("status").cloned().unwrap_or_default();
     let prompt_link = frontmatter.get("prompt").cloned().unwrap_or_default();
@@ -148,7 +161,7 @@ fn build_plan(
     let summary = derive_summary(&body);
     Some(PlanWire {
         source: source.to_string(),
-        kind: kind.to_string(),
+        kind,
         path: file.to_string_lossy().into_owned(),
         relpath: relpath_from(root, file),
         name,
@@ -160,6 +173,19 @@ fn build_plan(
         body,
         frontmatter,
     })
+}
+
+fn plan_kind_from_tier(
+    frontmatter: &BTreeMap<String, String>,
+    fallback: &str,
+) -> String {
+    match frontmatter
+        .get("tier")
+        .map(|value| value.trim().to_lowercase())
+    {
+        Some(tier) if tier == "tale" || tier == "epic" => tier,
+        _ => fallback.to_string(),
+    }
 }
 
 /// Split a document into its YAML frontmatter text (if a complete `---` block
@@ -392,7 +418,70 @@ mod tests {
         // Deterministic order follows REPO_PLAN_KINDS.
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
-        assert_eq!(kinds, ["tale", "epic", "research"]);
+        assert_eq!(kinds, ["tale", "tale", "epic", "research"]);
+    }
+
+    #[test]
+    fn canonical_plans_are_tier_classified_with_tale_fallback() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        write(
+            &sdd.join("plans").join("202606").join("epic.md"),
+            "---\ntier: ' EPIC '\n---\n# Epic\n",
+        );
+        write(
+            &sdd.join("plans").join("202606").join("bare.md"),
+            "# Bare\n",
+        );
+        write(
+            &sdd.join("plans").join("202606").join("unknown.md"),
+            "---\ntier: future\n---\n# Unknown\n",
+        );
+        write(
+            &sdd.join("plans").join("202606").join("malformed.md"),
+            "---\ntier: : bad\n---\n# Malformed\n",
+        );
+
+        let plans = read_plans(Some(&sdd), None, None).unwrap();
+
+        assert_eq!(plan_with(&plans, "plans/202606/epic.md").kind, "epic");
+        assert_eq!(plan_with(&plans, "plans/202606/bare.md").kind, "tale");
+        assert_eq!(plan_with(&plans, "plans/202606/unknown.md").kind, "tale");
+        assert_eq!(plan_with(&plans, "plans/202606/malformed.md").kind, "tale");
+    }
+
+    #[test]
+    fn tier_frontmatter_wins_in_legacy_directories_and_filters_post_parse() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        write(
+            &sdd.join("tales").join("202606").join("declared_epic.md"),
+            "---\ntier: epic\n---\n# Epic\n",
+        );
+        write(
+            &sdd.join("epics").join("202606").join("declared_tale.md"),
+            "---\ntier: tale\n---\n# Tale\n",
+        );
+        write(
+            &sdd.join("research").join("202606").join("tier_ignored.md"),
+            "---\ntier: epic\n---\n# Research\n",
+        );
+
+        let epic = vec!["epic".to_string()];
+        let epic_plans = read_plans(Some(&sdd), None, Some(&epic)).unwrap();
+        assert_eq!(epic_plans.len(), 1);
+        assert_eq!(epic_plans[0].relpath, "tales/202606/declared_epic.md");
+
+        let tale = vec!["tale".to_string()];
+        let tale_plans = read_plans(Some(&sdd), None, Some(&tale)).unwrap();
+        assert_eq!(tale_plans.len(), 1);
+        assert_eq!(tale_plans[0].relpath, "epics/202606/declared_tale.md");
+
+        let research = vec!["research".to_string()];
+        let research_plans =
+            read_plans(Some(&sdd), None, Some(&research)).unwrap();
+        assert_eq!(research_plans.len(), 1);
+        assert_eq!(research_plans[0].kind, "research");
     }
 
     #[test]
