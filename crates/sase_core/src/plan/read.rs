@@ -1,9 +1,8 @@
 //! Read-only plan discovery: scan + parse markdown plan artifacts.
 //!
 //! Repo plans live canonically under `<sdd_root>/plans/<YYYYMM>/*.md`, with
-//! their tale/epic classification stored in `tier` frontmatter. Legacy
-//! `tales/` and `epics/` directories remain readable. Local plans live
-//! under `<local_dir>/*.md` (flat) and `<local_dir>/<YYYYMM>/*.md` (sharded).
+//! their tale/epic classification stored in `tier` frontmatter. Local plans
+//! live under `<local_dir>/*.md` (flat) and `<local_dir>/<YYYYMM>/*.md` (sharded).
 //! Discovery is deliberately resilient: missing root directories yield no
 //! plans (not an error), unreadable/non-UTF-8 files are skipped, and malformed
 //! or absent frontmatter degrades to a body-derived title and a file-mtime
@@ -26,15 +25,11 @@ const LOCAL_KIND: &str = "local";
 
 /// Repo `sdd/` plan corpus: `(directory name, fallback kind label)`.
 ///
-/// Canonical `plans/` sorts first, followed by legacy plan directories and
-/// then research. A valid `tier: tale|epic` overrides the fallback kind for
-/// plan files; research remains directory-classified.
-const REPO_PLAN_KINDS: &[(&str, &str)] = &[
-    ("plans", "tale"),
-    ("tales", "tale"),
-    ("epics", "epic"),
-    ("research", "research"),
-];
+/// Canonical `plans/` sorts before research. A valid `tier: tale|epic`
+/// overrides the tale fallback for plan files; research remains
+/// directory-classified.
+const REPO_PLAN_KINDS: &[(&str, &str)] =
+    &[("plans", "tale"), ("research", "research")];
 
 /// Canonical `created_at` representation: a naive ISO-8601 timestamp with no
 /// timezone marker (frontmatter `create_time` is naive local; mtime is UTC).
@@ -418,7 +413,7 @@ mod tests {
         // Deterministic order follows REPO_PLAN_KINDS.
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
-        assert_eq!(kinds, ["tale", "tale", "epic", "research"]);
+        assert_eq!(kinds, ["tale", "research"]);
     }
 
     #[test]
@@ -451,15 +446,15 @@ mod tests {
     }
 
     #[test]
-    fn tier_frontmatter_wins_in_legacy_directories_and_filters_post_parse() {
+    fn tier_frontmatter_classifies_canonical_plans_and_filters_post_parse() {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("tales").join("202606").join("declared_epic.md"),
+            &sdd.join("plans").join("202606").join("declared_epic.md"),
             "---\ntier: epic\n---\n# Epic\n",
         );
         write(
-            &sdd.join("epics").join("202606").join("declared_tale.md"),
+            &sdd.join("plans").join("202606").join("declared_tale.md"),
             "---\ntier: tale\n---\n# Tale\n",
         );
         write(
@@ -470,12 +465,12 @@ mod tests {
         let epic = vec!["epic".to_string()];
         let epic_plans = read_plans(Some(&sdd), None, Some(&epic)).unwrap();
         assert_eq!(epic_plans.len(), 1);
-        assert_eq!(epic_plans[0].relpath, "tales/202606/declared_epic.md");
+        assert_eq!(epic_plans[0].relpath, "plans/202606/declared_epic.md");
 
         let tale = vec!["tale".to_string()];
         let tale_plans = read_plans(Some(&sdd), None, Some(&tale)).unwrap();
         assert_eq!(tale_plans.len(), 1);
-        assert_eq!(tale_plans[0].relpath, "epics/202606/declared_tale.md");
+        assert_eq!(tale_plans[0].relpath, "plans/202606/declared_tale.md");
 
         let research = vec!["research".to_string()];
         let research_plans =
@@ -512,7 +507,7 @@ mod tests {
         let sdd = temp.path().join("sdd");
         let local = temp.path().join("plans");
         write(
-            &sdd.join("tales").join("202606").join("repo.md"),
+            &sdd.join("plans").join("202606").join("repo.md"),
             "# Repo\n",
         );
         write(&local.join("local.md"), "# Local\n");
@@ -529,7 +524,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("epics").join("202606").join("auth.md"),
+            &sdd.join("plans").join("202606").join("auth.md"),
             "---\n\
              create_time: 2026-06-18 21:29:20\n\
              status: wip\n\
@@ -560,22 +555,22 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("tales").join("202606").join("with_h1.md"),
+            &sdd.join("plans").join("202606").join("with_h1.md"),
             "Intro line\n\n## Section\n\n# Real Title\n",
         );
         write(
-            &sdd.join("tales").join("202606").join("no_h1_here.md"),
+            &sdd.join("plans").join("202606").join("no_h1_here.md"),
             "Just prose, no heading at all.\n",
         );
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
         assert_eq!(
-            plan_with(&plans, "tales/202606/with_h1.md").title,
+            plan_with(&plans, "plans/202606/with_h1.md").title,
             "Real Title"
         );
         assert_eq!(
-            plan_with(&plans, "tales/202606/no_h1_here.md").title,
+            plan_with(&plans, "plans/202606/no_h1_here.md").title,
             "No H1 Here"
         );
     }
@@ -585,7 +580,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("tales").join("202606").join("no_time.md"),
+            &sdd.join("plans").join("202606").join("no_time.md"),
             "# No time\n\nBody.\n",
         );
 
@@ -608,23 +603,23 @@ mod tests {
         let sdd = temp.path().join("sdd");
         // Malformed YAML inside a well-formed delimiter block.
         write(
-            &sdd.join("tales").join("202606").join("broken.md"),
+            &sdd.join("plans").join("202606").join("broken.md"),
             "---\nstatus: : : oops\n  bad indent\n---\n# Broken plan\n\nBody.\n",
         );
         // No frontmatter delimiters at all.
         write(
-            &sdd.join("tales").join("202606").join("bare.md"),
+            &sdd.join("plans").join("202606").join("bare.md"),
             "# Bare plan\n\nBody.\n",
         );
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
-        let broken = plan_with(&plans, "tales/202606/broken.md");
+        let broken = plan_with(&plans, "plans/202606/broken.md");
         assert_eq!(broken.title, "Broken plan");
         assert!(broken.frontmatter.is_empty());
         assert_eq!(broken.status, "");
 
-        let bare = plan_with(&plans, "tales/202606/bare.md");
+        let bare = plan_with(&plans, "plans/202606/bare.md");
         assert_eq!(bare.title, "Bare plan");
         assert!(bare.frontmatter.is_empty());
     }
@@ -633,8 +628,11 @@ mod tests {
     fn filters_repo_corpus_by_kind() {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
-        write(&sdd.join("tales").join("202606").join("a.md"), "# A\n");
-        write(&sdd.join("epics").join("202606").join("b.md"), "# B\n");
+        write(&sdd.join("plans").join("202606").join("a.md"), "# A\n");
+        write(
+            &sdd.join("plans").join("202606").join("b.md"),
+            "---\ntier: epic\n---\n# B\n",
+        );
         write(&sdd.join("research").join("202606").join("c.md"), "# C\n");
 
         let kinds = vec!["epic".to_string(), "research".to_string()];
@@ -650,7 +648,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         let local = temp.path().join("plans");
-        write(&sdd.join("epics").join("202606").join("e.md"), "# E\n");
+        write(
+            &sdd.join("plans").join("202606").join("e.md"),
+            "---\ntier: epic\n---\n# E\n",
+        );
         write(&local.join("l.md"), "# L\n");
 
         let kinds = vec!["tale".to_string()];
@@ -665,7 +666,7 @@ mod tests {
     fn empty_kind_filter_selects_no_repo_plans() {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
-        write(&sdd.join("tales").join("202606").join("a.md"), "# A\n");
+        write(&sdd.join("plans").join("202606").join("a.md"), "# A\n");
 
         let plans = read_plans(Some(&sdd), None, Some(&[])).unwrap();
 
@@ -691,11 +692,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("tales").join("202606").join("keep.md"),
+            &sdd.join("plans").join("202606").join("keep.md"),
             "# Keep\n",
         );
-        write(&sdd.join("tales").join("202606").join("skip.txt"), "nope\n");
-        write(&sdd.join("tales").join("202606").join("notes"), "nope\n");
+        write(&sdd.join("plans").join("202606").join("skip.txt"), "nope\n");
+        write(&sdd.join("plans").join("202606").join("notes"), "nope\n");
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
@@ -707,8 +708,8 @@ mod tests {
     fn sorts_files_within_a_shard() {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
-        write(&sdd.join("tales").join("202606").join("zebra.md"), "# Z\n");
-        write(&sdd.join("tales").join("202606").join("alpha.md"), "# A\n");
+        write(&sdd.join("plans").join("202606").join("zebra.md"), "# Z\n");
+        write(&sdd.join("plans").join("202606").join("alpha.md"), "# A\n");
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
@@ -722,22 +723,22 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
-            &sdd.join("epics").join("202606").join("aware.md"),
+            &sdd.join("plans").join("202606").join("aware.md"),
             "---\ncreate_time: 2026-06-18T21:29:20Z\n---\n# Aware\n",
         );
         write(
-            &sdd.join("epics").join("202606").join("dateonly.md"),
+            &sdd.join("plans").join("202606").join("dateonly.md"),
             "---\ncreate_time: 2026-06-18\n---\n# Date only\n",
         );
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
         assert_eq!(
-            plan_with(&plans, "epics/202606/aware.md").created_at,
+            plan_with(&plans, "plans/202606/aware.md").created_at,
             "2026-06-18T21:29:20"
         );
         assert_eq!(
-            plan_with(&plans, "epics/202606/dateonly.md").created_at,
+            plan_with(&plans, "plans/202606/dateonly.md").created_at,
             "2026-06-18T00:00:00"
         );
     }

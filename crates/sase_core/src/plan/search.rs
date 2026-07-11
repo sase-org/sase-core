@@ -467,8 +467,8 @@ mod tests {
         let mut plan = PlanWire {
             source: REPO_SOURCE.to_string(),
             kind: "tale".to_string(),
-            path: "/repo/sdd/tales/202606/neutral.md".to_string(),
-            relpath: "tales/202606/neutral.md".to_string(),
+            path: "/repo/sdd/plans/202606/neutral.md".to_string(),
+            relpath: "plans/202606/neutral.md".to_string(),
             name: "neutral".to_string(),
             title: "Neutral plan".to_string(),
             status: "wip".to_string(),
@@ -533,7 +533,7 @@ mod tests {
             (
                 "path",
                 plan_with(|p| {
-                    p.relpath = "tales/202606/findpath.md".to_string()
+                    p.relpath = "plans/202606/findpath.md".to_string()
                 }),
                 "findpath",
             ),
@@ -1035,12 +1035,12 @@ mod tests {
         let sdd = temp.path().join("sdd");
         let local = temp.path().join("plans");
         write(
-            &sdd.join("epics").join("202606").join("repo_auth.md"),
-            "---\ncreate_time: 2026-06-01 00:00:00\nstatus: wip\n---\n\
+            &sdd.join("plans").join("202606").join("repo_auth.md"),
+            "---\ntier: epic\ncreate_time: 2026-06-01 00:00:00\nstatus: wip\n---\n\
              # Repo auth epic\n\nNeedle in the repo body.\n",
         );
         write(
-            &sdd.join("tales").join("202606").join("unrelated.md"),
+            &sdd.join("plans").join("202606").join("unrelated.md"),
             "# Unrelated\n\nNothing to see.\n",
         );
         write(
@@ -1066,7 +1066,7 @@ mod tests {
         // Both auth plans match; the unrelated plan does not. Repo first.
         assert_eq!(
             relpaths(&results),
-            vec!["epics/202606/repo_auth.md", "local_auth.md"]
+            vec!["plans/202606/repo_auth.md", "local_auth.md"]
         );
         assert_eq!(results[0].plan.source, "repo");
         assert_eq!(results[1].plan.source, "local");
@@ -1077,8 +1077,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         let local = temp.path().join("plans");
-        write(&sdd.join("tales").join("202606").join("t.md"), "# Tale\n");
-        write(&sdd.join("epics").join("202606").join("e.md"), "# Epic\n");
+        write(&sdd.join("plans").join("202606").join("t.md"), "# Tale\n");
+        write(
+            &sdd.join("plans").join("202606").join("e.md"),
+            "---\ntier: epic\n---\n# Epic\n",
+        );
         write(&local.join("l.md"), "# Local\n");
 
         let results = search_plans(
