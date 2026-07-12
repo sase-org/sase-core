@@ -1273,6 +1273,46 @@ fn waiting_marker_decode_error_does_not_crash() {
 }
 
 #[test]
+fn waiting_marker_carries_runner_slot_fields() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+    let waiting_path = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join(TS_WAITING)
+        .join("waiting.json");
+    write_json(
+        &waiting_path,
+        &json!({
+            "waiting_for": ["upstream"],
+            "wait_duration": 600.0,
+            "wait_until": "2026-07-12T19:30:00Z",
+            "wait_runners": 3,
+            "wait_runners_explicit": true,
+            "slot_requested_at": "2026-07-12T19:20:00Z",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let waiting = record_by_timestamp(&snapshot, TS_WAITING)
+        .waiting
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(waiting.waiting_for, vec!["upstream".to_string()]);
+    assert_eq!(waiting.wait_duration, Some(600.0));
+    assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
+    assert_eq!(waiting.wait_runners, Some(3));
+    assert!(waiting.wait_runners_explicit);
+    assert_eq!(
+        waiting.slot_requested_at.as_deref(),
+        Some("2026-07-12T19:20:00Z")
+    );
+}
+
+#[test]
 fn malformed_agent_meta_is_skipped() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));

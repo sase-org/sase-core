@@ -321,6 +321,12 @@ pub struct WaitingMarkerWire {
     pub wait_duration: Option<f64>,
     #[serde(default)]
     pub wait_until: Option<String>,
+    #[serde(default)]
+    pub wait_runners: Option<i64>,
+    #[serde(default)]
+    pub wait_runners_explicit: bool,
+    #[serde(default)]
+    pub slot_requested_at: Option<String>,
 }
 
 /// Compact projection of `pending_question.json`.
