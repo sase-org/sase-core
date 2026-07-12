@@ -325,6 +325,8 @@ fn add_workspace_release(
                 workflow: target.workflow.clone(),
                 cl_name: Some(target.identity.cl_name.clone()),
                 lookup_workflow: false,
+                lookup_timestamp: false,
+                artifacts_timestamp: None,
             },
         );
         return;
@@ -350,9 +352,36 @@ fn add_workspace_release(
                 workflow: Some(workflow_name),
                 cl_name: lookup_cl,
                 lookup_workflow: target.workspace.is_none(),
+                lookup_timestamp: false,
+                artifacts_timestamp: None,
             },
         );
     }
+}
+
+fn add_held_workspace_release(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<AgentCleanupIdentityWire>,
+    target: &AgentCleanupTargetWire,
+) {
+    if is_workflow_child(target) || !seen.insert(target.identity.clone()) {
+        return;
+    }
+    let Some(artifacts_timestamp) = target.raw_suffix.clone() else {
+        return;
+    };
+    side_effects.workspace_release_requests.push(
+        AgentCleanupWorkspaceReleaseIntentWire {
+            identity: target.identity.clone(),
+            project_file: target.project_file.clone().unwrap_or_default(),
+            workspace: None,
+            workflow: target.workflow.clone(),
+            cl_name: Some(target.identity.cl_name.clone()),
+            lookup_workflow: false,
+            lookup_timestamp: true,
+            artifacts_timestamp: Some(artifacts_timestamp),
+        },
+    );
 }
 
 fn related_workflow_targets<'a>(
@@ -394,6 +423,7 @@ fn build_side_effects(
     let mut seen_bundle = BTreeSet::new();
     let mut seen_artifacts = BTreeSet::new();
     let mut seen_workspace = BTreeSet::new();
+    let mut seen_held_workspace = BTreeSet::new();
     let mut seen_notifications = BTreeSet::new();
 
     for dismiss in dismiss_items {
@@ -410,6 +440,13 @@ fn build_side_effects(
                 &mut seen_notifications,
                 item,
             );
+            if item.agent_type == "run" || item.agent_type == "workflow" {
+                add_held_workspace_release(
+                    &mut side_effects,
+                    &mut seen_held_workspace,
+                    item,
+                );
+            }
             if item.agent_type == "workflow" {
                 add_workspace_release(
                     &mut side_effects,
@@ -754,6 +791,48 @@ mod tests {
         assert_eq!(
             plan.confirmation_severity,
             CONFIRMATION_SEVERITY_DESTRUCTIVE
+        );
+        assert_eq!(plan.side_effects.workspace_release_requests.len(), 1);
+        let held = &plan.side_effects.workspace_release_requests[0];
+        assert_eq!(held.identity.cl_name, "done");
+        assert!(held.lookup_timestamp);
+        assert_eq!(held.artifacts_timestamp.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn completed_workflow_parent_gets_timestamp_and_workflow_releases() {
+        let mut workflow = target(
+            "workflow",
+            "feature",
+            Some("20260712120000"),
+            "FAILED",
+            None,
+        );
+        workflow.workflow = Some("deploy".to_string());
+        workflow.workspace = Some(17);
+
+        let plan = plan_agent_cleanup(
+            std::slice::from_ref(&workflow),
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED),
+        )
+        .unwrap();
+
+        assert_eq!(plan.side_effects.workspace_release_requests.len(), 2);
+        assert!(
+            plan.side_effects.workspace_release_requests[0].lookup_timestamp
+        );
+        assert_eq!(
+            plan.side_effects.workspace_release_requests[0]
+                .artifacts_timestamp
+                .as_deref(),
+            Some("20260712120000")
+        );
+        assert!(
+            !plan.side_effects.workspace_release_requests[1].lookup_timestamp
+        );
+        assert_eq!(
+            plan.side_effects.workspace_release_requests[1].workspace,
+            Some(17)
         );
     }
 

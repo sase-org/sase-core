@@ -177,6 +177,10 @@ pub struct AgentCleanupWorkspaceReleaseIntentWire {
     pub cl_name: Option<String>,
     #[serde(default)]
     pub lookup_workflow: bool,
+    #[serde(default)]
+    pub lookup_timestamp: bool,
+    #[serde(default)]
+    pub artifacts_timestamp: Option<String>,
 }
 
 /// Notification lookup key to dismiss after cleanup succeeds.
