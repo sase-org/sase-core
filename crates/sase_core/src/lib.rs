@@ -303,7 +303,7 @@ pub use project_spec::{
 pub use prompt_stash::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
     rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,
-    PromptStashPopOutcomeWire, PromptStashSnapshotWire,
+    PromptStashPopOutcomeWire, PromptStashSnapshotWire, PromptStashStoreError,
     PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 pub use query::{

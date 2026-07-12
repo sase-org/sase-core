@@ -113,7 +113,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_archive::{
@@ -259,7 +259,7 @@ use sase_core::prompt_stash::{
     read_prompt_stash_snapshot as core_read_prompt_stash_snapshot,
     rewrite_prompt_stash as core_rewrite_prompt_stash,
     set_prompt_stash_pinned as core_set_prompt_stash_pinned,
-    PromptStashEntryWire,
+    PromptStashEntryWire, PromptStashStoreError,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -2608,6 +2608,15 @@ fn py_rewrite_notifications_counts<'py>(
 
 // --- Prompt stash store bindings -----------------------------------------
 
+fn prompt_stash_error_to_pyerr(error: PromptStashStoreError) -> PyErr {
+    match error {
+        error @ PromptStashStoreError::LockTimeout { .. } => {
+            PyTimeoutError::new_err(error.to_string())
+        }
+        error => PyValueError::new_err(error.to_string()),
+    }
+}
+
 /// Read the prompt-stash JSONL store and return a snapshot dict.
 ///
 /// The GIL is released while Rust performs filesystem work.
@@ -2619,10 +2628,11 @@ fn py_read_prompt_stash_snapshot(
 ) -> PyResult<PyObject> {
     let path = PathBuf::from(path);
     let snapshot = py.allow_threads(|| core_read_prompt_stash_snapshot(&path));
-    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
-        .map_err(|e| {
-            PyValueError::new_err(format!("internal serialize error: {e}"))
-        })?;
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
     json_value_to_py(py, &value)
 }
 
@@ -2637,10 +2647,11 @@ fn py_append_prompt_stash<'py>(
     let entry = prompt_stash_entry_from_pydict(entry)?;
     let path = PathBuf::from(path);
     let snapshot = py.allow_threads(|| core_append_prompt_stash(&path, &entry));
-    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
-        .map_err(|e| {
-            PyValueError::new_err(format!("internal serialize error: {e}"))
-        })?;
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
     json_value_to_py(py, &value)
 }
 
@@ -2654,10 +2665,11 @@ fn py_pop_prompt_stash(
 ) -> PyResult<PyObject> {
     let path = PathBuf::from(path);
     let outcome = py.allow_threads(|| core_pop_prompt_stash(&path, &ids));
-    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
-        .map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
     json_value_to_py(py, &value)
 }
 
@@ -2673,10 +2685,11 @@ fn py_set_prompt_stash_pinned(
     let path = PathBuf::from(path);
     let snapshot =
         py.allow_threads(|| core_set_prompt_stash_pinned(&path, &ids, pinned));
-    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
-        .map_err(|e| {
-            PyValueError::new_err(format!("internal serialize error: {e}"))
-        })?;
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
     json_value_to_py(py, &value)
 }
 
@@ -2692,10 +2705,11 @@ fn py_rewrite_prompt_stash<'py>(
     let path = PathBuf::from(path);
     let snapshot =
         py.allow_threads(|| core_rewrite_prompt_stash(&path, &entries));
-    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
-        .map_err(|e| {
-            PyValueError::new_err(format!("internal serialize error: {e}"))
-        })?;
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
     json_value_to_py(py, &value)
 }
 

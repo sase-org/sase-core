@@ -3,7 +3,7 @@ pub mod wire;
 
 pub use store::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
-    rewrite_prompt_stash, set_prompt_stash_pinned,
+    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashStoreError,
 };
 pub use wire::{
     PromptStashEntryWire, PromptStashPopOutcomeWire, PromptStashSnapshotWire,
