@@ -7,14 +7,16 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
+use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::mutation::{
-    add_dependency, close_issues, open_issue, update_issue,
-    BeadMutationOutcomeWire, BeadUpdateFieldsWire,
+    add_dependency, close_issues, create_issue, open_issue, remove_issue,
+    update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
+    BeadUpdateFieldsWire,
 };
 use super::read::read_store_issues;
 use super::search::search_issues_in_issues;
@@ -81,10 +83,17 @@ pub fn execute_bead_cli(
             handle_blocked(&argv[1..], read_beads_dirs, write_beads_dir)
         }
         "stats" => handle_stats(&argv[1..], read_beads_dirs, write_beads_dir),
+        "create" => handle_create(
+            &argv[1..],
+            write_beads_dir,
+            cwd,
+            relativize_design_paths,
+        ),
         "open" => handle_open(&argv[1..], write_beads_dir),
         "update" => handle_update(&argv[1..], write_beads_dir),
         "close" => handle_close(&argv[1..], write_beads_dir),
         "dep" => handle_dep(&argv[1..], write_beads_dir),
+        "rm" => handle_rm(&argv[1..], write_beads_dir),
         _ => Ok(defer()),
     }
 }
@@ -428,6 +437,293 @@ fn handle_stats(
     Ok(success(stdout))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateArgs {
+    title: String,
+    issue_type: IssueTypeWire,
+    parent_id: Option<String>,
+    plan_path: Option<String>,
+    description: String,
+    assignee: String,
+    tier: Option<BeadTierWire>,
+    changespec_name: String,
+    changespec_bug_id: String,
+    model: String,
+}
+
+fn handle_create(
+    args: &[String],
+    write_beads_dir: &Path,
+    cwd: &Path,
+    _relativize_design_paths: bool,
+) -> Result<BeadCliOutcomeWire, BeadError> {
+    let parsed = match parse_create_args(args) {
+        Ok(Some(parsed)) => parsed,
+        Ok(None) => return Ok(defer()),
+        Err(message) => return Ok(error(format!("Error: {message}\n"))),
+    };
+
+    if parsed.issue_type != IssueTypeWire::Plan
+        && (!parsed.changespec_name.is_empty()
+            || !parsed.changespec_bug_id.is_empty())
+    {
+        return Ok(error(
+            "Error: ChangeSpec metadata can only be attached to plan beads\n"
+                .to_string(),
+        ));
+    }
+    if !parsed.changespec_bug_id.is_empty() && parsed.changespec_name.is_empty()
+    {
+        return Ok(error(
+            "Error: --bug-id requires --changespec\n".to_string(),
+        ));
+    }
+    if parsed.issue_type != IssueTypeWire::Plan && parsed.tier.is_some() {
+        return Ok(error(
+            "Error: --tier can only be set on plan beads\n".to_string(),
+        ));
+    }
+    if let Some(parent_id) = parsed.parent_id.as_deref() {
+        let issues = read_store_issues(write_beads_dir).unwrap_or_default();
+        if find_issue(&issues, parent_id).is_none() {
+            return Ok(error(format!(
+                "Error: parent bead not found: {parent_id}\n"
+            )));
+        }
+    }
+
+    let design = match parsed.plan_path.as_deref() {
+        Some(plan_path) => {
+            match storage_design_path(plan_path, cwd, write_beads_dir) {
+                Ok(path) => path,
+                Err(message) => {
+                    return Ok(error(format!("Error: {message}\n")))
+                }
+            }
+        }
+        None => String::new(),
+    };
+    let request = BeadCreateRequestWire {
+        title: parsed.title,
+        issue_type: parsed.issue_type,
+        tier: parsed.tier,
+        parent_id: parsed.parent_id,
+        description: parsed.description,
+        design,
+        model: parsed.model,
+        assignee: parsed.assignee,
+        changespec_name: parsed.changespec_name,
+        changespec_bug_id: parsed.changespec_bug_id,
+        ..BeadCreateRequestWire::default()
+    };
+    match create_issue(write_beads_dir, request) {
+        Ok(outcome) => {
+            let issue =
+                outcome.issue.as_ref().expect("create outcome has issue");
+            Ok(success_with_mutation(
+                format!(
+                    "Created {}: {} — {}\n",
+                    issue_type_value(&issue.issue_type),
+                    issue.id,
+                    issue.title
+                ),
+                mutation_summary("create", &outcome, None),
+            ))
+        }
+        Err(err) if err.kind == "validation" || err.kind == "not_found" => {
+            Ok(error(format!("Error: {}\n", err.message)))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn storage_design_path(
+    raw_path: &str,
+    cwd: &Path,
+    write_beads_dir: &Path,
+) -> Result<String, String> {
+    let supplied = Path::new(raw_path);
+    let resolved = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        cwd.join(supplied)
+    };
+    if !resolved.is_file() {
+        return Err(format!("plan file not found: {raw_path}"));
+    }
+    let normalized = fs::canonicalize(&resolved).unwrap_or(resolved);
+    let storage_root = design_storage_root(cwd, write_beads_dir);
+    Ok(normalized
+        .strip_prefix(storage_root)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| normalized.display().to_string()))
+}
+
+fn design_storage_root<'a>(cwd: &'a Path, beads_dir: &'a Path) -> &'a Path {
+    let components = beads_dir
+        .components()
+        .rev()
+        .take(4)
+        .map(|component| component.as_os_str())
+        .collect::<Vec<_>>();
+    if components
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "plans", "repos", "sase"])
+    {
+        return beads_dir
+            .ancestors()
+            .nth(4)
+            .expect("four matched path components have a parent");
+    }
+    if components
+        .iter()
+        .take(3)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "sdd", ".sase"])
+    {
+        return beads_dir
+            .ancestors()
+            .nth(3)
+            .expect("three matched path components have a parent");
+    }
+    if components
+        .iter()
+        .take(2)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "sdd"])
+    {
+        return beads_dir
+            .ancestors()
+            .nth(2)
+            .expect("two matched path components have a parent");
+    }
+    cwd
+}
+
+fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
+    let mut title = None;
+    let mut type_arg = None;
+    let mut description = String::new();
+    let mut assignee = String::new();
+    let mut tier = None;
+    let mut changespec_name = String::new();
+    let mut changespec_bug_id = String::new();
+    let mut model = String::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        let arg = &args[idx];
+        let (name, value) = if matches!(
+            arg.as_str(),
+            "-t" | "--title"
+                | "-T"
+                | "--type"
+                | "-d"
+                | "--description"
+                | "-a"
+                | "--assignee"
+                | "--tier"
+                | "-c"
+                | "--changespec"
+                | "-b"
+                | "--bug-id"
+                | "-m"
+                | "--model"
+        ) {
+            idx += 1;
+            let Some(value) = args.get(idx) else {
+                return Ok(None);
+            };
+            (arg.as_str(), value.clone())
+        } else if let Some((name, value)) = arg.split_once('=') {
+            (name, value.to_string())
+        } else {
+            return Ok(None);
+        };
+        match name {
+            "-t" | "--title" => title = Some(value),
+            "-T" | "--type" => type_arg = Some(value),
+            "-d" | "--description" => description = value,
+            "-a" | "--assignee" => assignee = value,
+            "--tier" => {
+                tier =
+                    Some(parse_tier(&value).ok_or_else(|| {
+                        format!("invalid --tier value: {value}")
+                    })?)
+            }
+            "-c" | "--changespec" => changespec_name = value,
+            "-b" | "--bug-id" => changespec_bug_id = value,
+            "-m" | "--model" => model = value,
+            _ => return Ok(None),
+        }
+        idx += 1;
+    }
+    let (Some(title), Some(type_arg)) = (title, type_arg) else {
+        return Ok(None);
+    };
+    let (issue_type, plan_path, parent_id) = parse_create_type(&type_arg)?;
+    Ok(Some(CreateArgs {
+        title,
+        issue_type,
+        parent_id,
+        plan_path,
+        description,
+        assignee,
+        tier,
+        changespec_name,
+        changespec_bug_id,
+        model,
+    }))
+}
+
+fn parse_create_type(
+    value: &str,
+) -> Result<(IssueTypeWire, Option<String>, Option<String>), String> {
+    let Some((kind, rest)) = value.split_once('(') else {
+        return Err(format!(
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+        ));
+    };
+    let Some(inner) = rest.strip_suffix(')') else {
+        return Err(format!(
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+        ));
+    };
+    let parts = inner
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    match (kind, parts.as_slice()) {
+        ("plan", [path]) => Ok((
+            IssueTypeWire::Plan,
+            Some(path.clone()),
+            None,
+        )),
+        ("plan", [path, parent]) => Ok((
+            IssueTypeWire::Plan,
+            Some(path.clone()),
+            Some(parent.clone()),
+        )),
+        ("plan", _) => Err(format!(
+            "plan() expects 1 or 2 arguments, got {}",
+            parts.len()
+        )),
+        ("phase", [parent]) => Ok((
+            IssueTypeWire::Phase,
+            None,
+            Some(parent.clone()),
+        )),
+        ("phase", _) => Err(format!(
+            "phase() expects exactly 1 argument, got {}",
+            parts.len()
+        )),
+        _ => Err(format!(
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+        )),
+    }
+}
+
 fn handle_open(
     args: &[String],
     write_beads_dir: &Path,
@@ -443,7 +739,7 @@ fn handle_open(
             let issue = outcome.issue.as_ref().expect("open outcome has issue");
             Ok(success_with_mutation(
                 format!("○ Opened: {} — {}\n", issue.id, issue.title),
-                mutation_summary("update", &outcome, old.as_ref()),
+                mutation_summary("open", &outcome, old.as_ref()),
             ))
         }
         Err(err) if err.kind == "not_found" => {
@@ -497,6 +793,7 @@ fn handle_close(
     if ids.is_empty() {
         return Ok(defer());
     }
+    let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
     match close_issues(write_beads_dir, &ids, reason, None) {
         Ok(outcome) => {
             let mut stdout = String::new();
@@ -508,13 +805,19 @@ fn handle_close(
                 stdout,
                 BeadCliMutationSummaryWire {
                     operation: "close".to_string(),
-                    issue_ids: outcome.issue_ids.clone(),
+                    issue_ids: ids,
                     status_transitions: outcome
                         .issues
                         .iter()
-                        .map(|_| BeadCliStatusTransitionWire {
-                            from_status: "open".to_string(),
-                            to_status: "closed".to_string(),
+                        .filter_map(|issue| {
+                            let old = find_issue(&old_issues, &issue.id)?;
+                            (old.status != StatusWire::Closed).then(|| {
+                                BeadCliStatusTransitionWire {
+                                    from_status: status_value(&old.status)
+                                        .to_string(),
+                                    to_status: "closed".to_string(),
+                                }
+                            })
                         })
                         .collect(),
                 },
@@ -549,10 +852,40 @@ fn handle_dep(
                 ),
                 BeadCliMutationSummaryWire {
                     operation: "dep_add".to_string(),
-                    issue_ids: outcome.issue_ids.clone(),
+                    issue_ids: vec![issue_id.clone(), depends_on_id.clone()],
                     status_transitions: Vec::new(),
                 },
             ))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn handle_rm(
+    args: &[String],
+    write_beads_dir: &Path,
+) -> Result<BeadCliOutcomeWire, BeadError> {
+    if args.len() != 1 {
+        return Ok(defer());
+    }
+    match remove_issue(write_beads_dir, &args[0]) {
+        Ok(outcome) => {
+            let mut stdout = String::new();
+            for issue in &outcome.issues {
+                writeln!(stdout, "✗ Removed: {} — {}", issue.id, issue.title)
+                    .expect("writing to String cannot fail");
+            }
+            Ok(success_with_mutation(
+                stdout,
+                BeadCliMutationSummaryWire {
+                    operation: "rm".to_string(),
+                    issue_ids: vec![args[0].clone()],
+                    status_transitions: Vec::new(),
+                },
+            ))
+        }
+        Err(err) if err.kind == "not_found" => {
+            Ok(error(format!("Error: issue not found: {}\n", args[0])))
         }
         Err(err) => Err(err),
     }
@@ -1666,6 +1999,110 @@ mod tests {
 
         assert_eq!(outcome.exit_code, 2);
         assert_eq!(outcome.stderr, "Error: search query cannot be empty\n");
+    }
+
+    #[test]
+    fn create_and_remove_are_handled_with_mutation_summaries() {
+        let store = seed_issues(Vec::new());
+        let plan_path = store.beads_dir.parent().unwrap().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap();
+        let create_args = vec![
+            "create".to_string(),
+            "--title".to_string(),
+            "Fast plan".to_string(),
+            "--type".to_string(),
+            format!("plan({})", plan_path.display()),
+            "--tier".to_string(),
+            "epic".to_string(),
+            "--model".to_string(),
+            "codex/test".to_string(),
+        ];
+
+        let created = execute_bead_cli(
+            &create_args,
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            store.beads_dir.parent().unwrap(),
+            false,
+        )
+        .unwrap();
+
+        assert!(created.handled);
+        assert_eq!(created.exit_code, 0);
+        assert!(created
+            .stdout
+            .starts_with("Created plan: beads-1 — Fast plan"));
+        let summary = created.mutation_summary.unwrap();
+        assert_eq!(summary.operation, "create");
+        assert_eq!(summary.issue_ids, vec!["beads-1"]);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.design, "sdd/plan.md");
+        assert_eq!(issue.tier, Some(BeadTierWire::Epic));
+        assert_eq!(issue.model, "codex/test");
+
+        let removed = execute_bead_cli(
+            &["rm".to_string(), "beads-1".to_string()],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            store.beads_dir.parent().unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(removed.exit_code, 0);
+        assert_eq!(removed.mutation_summary.unwrap().operation, "rm");
+        assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn close_summary_preserves_requested_ids_and_real_prior_status() {
+        let store = seed_issues(vec![phase_issue(
+            "beads-1.1",
+            "Active phase",
+            "",
+            StatusWire::InProgress,
+            "2026-01-01T00:01:00Z",
+        )]);
+        let outcome = execute_bead_cli(
+            &["close".to_string(), "beads-1.1".to_string()],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+        )
+        .unwrap();
+        let summary = outcome.mutation_summary.unwrap();
+        assert_eq!(summary.issue_ids, vec!["beads-1.1"]);
+        assert_eq!(summary.status_transitions.len(), 1);
+        assert_eq!(summary.status_transitions[0].from_status, "in_progress");
+        assert_eq!(summary.status_transitions[0].to_status, "closed");
+    }
+
+    #[test]
+    fn create_plan_path_is_relative_to_store_workspace_from_nested_cwd() {
+        let store = seed_issues(Vec::new());
+        let workspace = store.beads_dir.ancestors().nth(2).unwrap();
+        let nested = workspace.join("src/pkg");
+        let plan_path = workspace.join("plans/plan.md");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Plan\n").unwrap();
+        let outcome = execute_bead_cli(
+            &[
+                "create".to_string(),
+                "--title".to_string(),
+                "Nested plan".to_string(),
+                "--type".to_string(),
+                format!("plan({})", plan_path.display()),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            &nested,
+            true,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.design, "plans/plan.md");
     }
 
     fn execute_search(beads_dir: &Path, args: &[&str]) -> BeadCliOutcomeWire {
