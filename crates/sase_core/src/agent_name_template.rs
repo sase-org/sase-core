@@ -56,7 +56,15 @@ impl AgentNameTemplate {
         token: &str,
     ) -> Result<String, AgentNameTemplateError> {
         validate_agent_name_template_token(token)?;
-        Ok(format!("{}{}{}", self.prefix, token, self.suffix))
+        let separator = if self.requires_auto_id_separator(token) {
+            "-"
+        } else {
+            ""
+        };
+        Ok(format!(
+            "{}{}{}{}",
+            self.prefix, separator, token, self.suffix
+        ))
     }
 
     pub fn namespace_template(&self) -> String {
@@ -82,14 +90,42 @@ impl AgentNameTemplate {
             return Ok(None);
         }
 
-        let token_start = self.prefix.len();
+        let mut token_start = self.prefix.len();
         let token_end = concrete.len() - self.suffix.len();
-        let token = &concrete[token_start..token_end];
-        if is_valid_agent_name_template_token(token) {
-            Ok(Some(token.to_string()))
-        } else {
-            Ok(None)
+        let rendered_token = &concrete[token_start..token_end];
+        if self.prefix_requires_separator_protection() {
+            if let Some(token) = rendered_token.strip_prefix('-') {
+                if !token.starts_with(|character: char| {
+                    character.is_ascii_lowercase()
+                }) {
+                    return Ok(None);
+                }
+                token_start += 1;
+            } else if !rendered_token
+                .starts_with(|character: char| character.is_ascii_digit())
+            {
+                return Ok(None);
+            }
         }
+
+        let token = &concrete[token_start..token_end];
+        Ok(
+            is_valid_agent_name_template_token(token)
+                .then(|| token.to_string()),
+        )
+    }
+
+    fn requires_auto_id_separator(&self, token: &str) -> bool {
+        self.prefix_requires_separator_protection()
+            && token
+                .starts_with(|character: char| character.is_ascii_lowercase())
+    }
+
+    fn prefix_requires_separator_protection(&self) -> bool {
+        self.prefix
+            .chars()
+            .next_back()
+            .is_some_and(|character| !matches!(character, '-' | '.'))
     }
 }
 
@@ -218,16 +254,25 @@ mod tests {
 
     #[test]
     fn renders_template_shapes() {
-        assert_eq!(render_agent_name_template("@", "0").unwrap(), "0");
-        assert_eq!(
-            render_agent_name_template("build-@", "1").unwrap(),
-            "build-1"
-        );
-        assert_eq!(render_agent_name_template("@.cld", "a").unwrap(), "a.cld");
-        assert_eq!(
-            render_agent_name_template("research.@.final", "00").unwrap(),
-            "research.00.final"
-        );
+        let cases = [
+            ("@", "0", "0"),
+            ("@", "a", "a"),
+            ("@.cld", "a", "a.cld"),
+            ("foo.f@", "0", "foo.f0"),
+            ("foo.f@", "a", "foo.f-a"),
+            ("foo.f@", "0a", "foo.f0a"),
+            ("foo.f@", "a0", "foo.f-a0"),
+            ("foo-@", "a", "foo-a"),
+            ("foo.@", "a", "foo.a"),
+            ("research.@.final", "00", "research.00.final"),
+        ];
+
+        for (template, token, concrete) in cases {
+            assert_eq!(
+                render_agent_name_template(template, token).unwrap(),
+                concrete
+            );
+        }
     }
 
     #[test]
@@ -253,23 +298,60 @@ mod tests {
 
     #[test]
     fn matches_template_tokens() {
-        assert_eq!(
-            match_agent_name_template("build-@", "build-1").unwrap(),
-            Some("1".to_string())
-        );
-        assert_eq!(
-            match_agent_name_template("build-@", "build-a").unwrap(),
-            Some("a".to_string())
-        );
-        assert_eq!(
-            match_agent_name_template("build-@", "other-1").unwrap(),
-            None
-        );
-        assert_eq!(
-            match_agent_name_template("@.cld", "00.cld").unwrap(),
-            Some("00".to_string())
-        );
-        assert_eq!(match_agent_name_template("@", "not.auto").unwrap(), None);
+        let matching_cases = [
+            ("@", "0", "0"),
+            ("@", "a", "a"),
+            ("@.cld", "00", "00.cld"),
+            ("@.cld", "a", "a.cld"),
+            ("foo.f@", "0", "foo.f0"),
+            ("foo.f@", "a", "foo.f-a"),
+            ("foo.f@", "0a", "foo.f0a"),
+            ("foo.f@", "a0", "foo.f-a0"),
+            ("foo-@", "a", "foo-a"),
+            ("foo.@", "a", "foo.a"),
+        ];
+
+        for (template, token, concrete) in matching_cases {
+            assert_eq!(
+                match_agent_name_template(template, concrete).unwrap(),
+                Some(token.to_string())
+            );
+        }
+
+        let rejected_cases = [
+            ("foo.f@", "foo.fa"),
+            ("foo.f@", "foo.f-0"),
+            ("foo.f@", "foo.f--a"),
+            ("foo.f@", "other.f0"),
+            ("foo-@", "foo--a"),
+            ("foo.@", "foo.-a"),
+            ("@", "-a"),
+            ("@", "not.auto"),
+        ];
+
+        for (template, concrete) in rejected_cases {
+            assert_eq!(
+                match_agent_name_template(template, concrete).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn render_and_match_are_exact_inverses() {
+        let templates = ["@", "@.cld", "foo.f@", "foo-@", "foo.@"];
+        let tokens = ["0", "9", "a", "z", "0a", "a0", "00"];
+
+        for template in templates {
+            for token in tokens {
+                let concrete =
+                    render_agent_name_template(template, token).unwrap();
+                assert_eq!(
+                    match_agent_name_template(template, &concrete).unwrap(),
+                    Some(token.to_string())
+                );
+            }
+        }
     }
 
     #[test]
