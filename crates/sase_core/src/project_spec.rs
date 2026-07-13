@@ -12,35 +12,38 @@ use std::path::{Path, PathBuf};
 pub const PROJECT_SPEC_EXTENSION: &str = ".sase";
 pub const LEGACY_PROJECT_SPEC_EXTENSION: &str = ".gp";
 pub const PROJECT_SPEC_ARCHIVE_SUFFIX: &str = "-archive";
-pub const PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION: u32 = 3;
 
 const PROJECT_ALIASES_PREFIX: &str = "PROJECT_ALIASES:";
 const PROJECT_NAME_PREFIX: &str = "PROJECT_NAME:";
 const PROJECT_STATE_PREFIX: &str = "PROJECT_STATE:";
+const BARE_REPO_DIR_PREFIX: &str = "BARE_REPO_DIR:";
 const WORKSPACE_DIR_PREFIX: &str = "WORKSPACE_DIR:";
 const RUNNING_PREFIX: &str = "RUNNING:";
 const NAME_PREFIX: &str = "NAME:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectLifecycleState {
-    Active,
-    Inactive,
+    Enabled,
+    Disabled,
     Sibling,
 }
 
 impl ProjectLifecycleState {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Active => "active",
-            Self::Inactive => "inactive",
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
             Self::Sibling => "sibling",
         }
     }
 
     pub fn parse_target(value: &str) -> Result<Self, ProjectLifecycleError> {
         match value.trim() {
-            "active" => Ok(Self::Active),
-            "inactive" | "archived" | "closed" => Ok(Self::Inactive),
+            "enabled" | "active" => Ok(Self::Enabled),
+            "disabled" | "inactive" | "archived" | "closed" => {
+                Ok(Self::Disabled)
+            }
             "sibling" => Ok(Self::Sibling),
             other => {
                 Err(ProjectLifecycleError::InvalidState(other.to_string()))
@@ -48,12 +51,12 @@ impl ProjectLifecycleState {
         }
     }
 
-    pub fn is_active(self) -> bool {
-        self == Self::Active
+    pub fn is_enabled(self) -> bool {
+        self == Self::Enabled
     }
 
-    pub fn is_inactive(self) -> bool {
-        self == Self::Inactive
+    pub fn is_disabled(self) -> bool {
+        self == Self::Disabled
     }
 }
 
@@ -71,7 +74,7 @@ impl fmt::Display for ProjectLifecycleError {
             Self::InvalidProjectName(message) => write!(f, "{message}"),
             Self::InvalidState(value) => write!(
                 f,
-                "invalid project lifecycle state {value:?}; expected active, inactive, or sibling"
+                "invalid project lifecycle state {value:?}; expected enabled, disabled, or sibling"
             ),
         }
     }
@@ -111,6 +114,10 @@ pub struct ProjectRecordWire {
     pub parse_warnings: Vec<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_project: bool,
+    #[serde(default)]
+    pub vcs_kind: Option<String>,
 }
 
 pub fn active_project_spec_filename(project_name: &str) -> String {
@@ -215,7 +222,7 @@ pub fn read_project_lifecycle_from_content(
     let Some(first_value) = values.first() else {
         return ProjectLifecycleWire {
             schema_version: PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION,
-            state: ProjectLifecycleState::Active.as_str().to_string(),
+            state: ProjectLifecycleState::Enabled.as_str().to_string(),
             explicit: false,
             warnings,
         };
@@ -229,19 +236,25 @@ pub fn read_project_lifecycle_from_content(
     }
 
     let state = match first_value.as_str() {
-        "archived" | "closed" => {
+        "active" => {
             warnings.push(format!(
-                "legacy PROJECT_STATE value {first_value:?} treated as inactive"
+                "legacy PROJECT_STATE value {first_value:?} treated as enabled"
             ));
-            ProjectLifecycleState::Inactive
+            ProjectLifecycleState::Enabled
+        }
+        "inactive" | "archived" | "closed" => {
+            warnings.push(format!(
+                "legacy PROJECT_STATE value {first_value:?} treated as disabled"
+            ));
+            ProjectLifecycleState::Disabled
         }
         _ => match ProjectLifecycleState::parse_target(first_value) {
             Ok(state) => state,
             Err(_) => {
                 warnings.push(format!(
-                    "invalid PROJECT_STATE value {first_value:?}; using active"
+                    "invalid PROJECT_STATE value {first_value:?}; using enabled"
                 ));
-                ProjectLifecycleState::Active
+                ProjectLifecycleState::Enabled
             }
         },
     };
@@ -416,6 +429,7 @@ pub fn list_project_records(
     projects_root: &Path,
     include_states: &[String],
     include_home: bool,
+    projects_only: bool,
 ) -> Result<Vec<ProjectRecordWire>, ProjectLifecycleError> {
     let include_filter = include_state_filter(include_states)?;
     let mut all_records = Vec::new();
@@ -462,8 +476,11 @@ pub fn list_project_records(
 
     let mut records = Vec::new();
     for record in all_records {
+        if projects_only && !record.is_project {
+            continue;
+        }
         let state = ProjectLifecycleState::parse_target(&record.state)
-            .unwrap_or(ProjectLifecycleState::Active);
+            .unwrap_or(ProjectLifecycleState::Enabled);
         if include_filter
             .as_ref()
             .is_some_and(|states| !states.contains(&state))
@@ -508,12 +525,14 @@ fn build_project_record(
     let system_managed = project_name == "home";
     let mut warnings = Vec::new();
     let mut parse_warnings = Vec::new();
-    let mut state = ProjectLifecycleState::Active.as_str().to_string();
+    let mut state = ProjectLifecycleState::Enabled.as_str().to_string();
     let mut state_explicit = false;
     let mut workspace_dir = None;
     let mut aliases = Vec::new();
     let mut display_name = None;
     let mut active_claim_count = 0u32;
+    let mut vcs_kind =
+        github_provider_project_name(project_name).then(|| "gh".to_string());
 
     if project_file_path.is_file() {
         match fs::read_to_string(&project_file_path) {
@@ -530,6 +549,9 @@ fn build_project_record(
                 display_name = project_name_parse.display_name;
                 parse_warnings.extend(project_name_parse.warnings);
                 workspace_dir = read_workspace_dir_from_content(&content);
+                if carries_bare_repo_dir(&content) {
+                    vcs_kind = Some("git".to_string());
+                }
                 active_claim_count =
                     crate::agent_launch::list_workspace_claims_from_content(
                         &content,
@@ -553,8 +575,8 @@ fn build_project_record(
     }
 
     let lifecycle_state = ProjectLifecycleState::parse_target(&state)
-        .unwrap_or(ProjectLifecycleState::Active);
-    if lifecycle_state.is_inactive()
+        .unwrap_or(ProjectLifecycleState::Enabled);
+    if lifecycle_state.is_disabled()
         || lifecycle_state == ProjectLifecycleState::Sibling
     {
         warnings.push(format!("project is {state}"));
@@ -568,9 +590,11 @@ fn build_project_record(
         None => warnings.push("WORKSPACE_DIR is not set".to_string()),
     }
 
-    let launchable = !system_managed
-        && lifecycle_state.is_active()
-        && project_file_path.is_file()
+    let is_project = project_file_path.is_file()
+        && !system_managed
+        && lifecycle_state != ProjectLifecycleState::Sibling;
+    let launchable = is_project
+        && lifecycle_state.is_enabled()
         && workspace_dir
             .as_deref()
             .is_some_and(|path| Path::new(path).expand_home().exists());
@@ -591,7 +615,30 @@ fn build_project_record(
         warnings,
         parse_warnings,
         display_name,
+        is_project,
+        vcs_kind,
     }
+}
+
+fn github_provider_project_name(project_name: &str) -> bool {
+    let Some(body) = project_name.strip_prefix("gh_") else {
+        return false;
+    };
+    body.split_once("__")
+        .is_some_and(|(owner, repo)| !owner.is_empty() && !repo.is_empty())
+}
+
+fn carries_bare_repo_dir(content: &str) -> bool {
+    for line in content.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(NAME_PREFIX) {
+            break;
+        }
+        if line.starts_with(BARE_REPO_DIR_PREFIX) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1095,20 +1142,20 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_read_defaults_missing_state_to_active() {
+    fn lifecycle_read_defaults_missing_state_to_enabled() {
         let read =
             read_project_lifecycle_from_content("NAME: demo\nSTATUS: WIP\n");
-        assert_eq!(read.state, "active");
+        assert_eq!(read.state, "enabled");
         assert!(!read.explicit);
         assert!(read.warnings.is_empty());
     }
 
     #[test]
-    fn lifecycle_read_accepts_canonical_inactive_state() {
+    fn lifecycle_read_accepts_canonical_disabled_state() {
         let read = read_project_lifecycle_from_content(
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n",
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: disabled\nNAME: demo\n",
         );
-        assert_eq!(read.state, "inactive");
+        assert_eq!(read.state, "disabled");
         assert!(read.explicit);
         assert!(read.warnings.is_empty());
     }
@@ -1124,16 +1171,23 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_read_normalizes_legacy_inactive_states() {
-        for legacy in ["archived", "closed"] {
+    fn lifecycle_read_normalizes_legacy_enabled_and_disabled_states() {
+        for (legacy, canonical) in [
+            ("active", "enabled"),
+            ("inactive", "disabled"),
+            ("archived", "disabled"),
+            ("closed", "disabled"),
+        ] {
             let read = read_project_lifecycle_from_content(&format!(
                 "WORKSPACE_DIR: /tmp\nPROJECT_STATE: {legacy}\nNAME: demo\n"
             ));
-            assert_eq!(read.state, "inactive");
+            assert_eq!(read.state, canonical);
             assert!(read.explicit);
             assert_eq!(read.warnings.len(), 1);
             assert!(read.warnings[0].contains("legacy PROJECT_STATE value"));
-            assert!(read.warnings[0].contains("treated as inactive"));
+            assert!(
+                read.warnings[0].contains(&format!("treated as {canonical}"))
+            );
         }
     }
 
@@ -1142,7 +1196,7 @@ mod tests {
         let read = read_project_lifecycle_from_content(
             "PROJECT_STATE: sleeping\nNAME: demo\n",
         );
-        assert_eq!(read.state, "active");
+        assert_eq!(read.state, "enabled");
         assert!(read.explicit);
         assert_eq!(read.warnings.len(), 1);
         assert!(read.warnings[0].contains("invalid PROJECT_STATE value"));
@@ -1153,7 +1207,7 @@ mod tests {
         let read = read_project_lifecycle_from_content(
             "PROJECT_STATE: archived\nPROJECT_STATE: closed\nNAME: demo\n",
         );
-        assert_eq!(read.state, "inactive");
+        assert_eq!(read.state, "disabled");
         assert!(read.explicit);
         assert_eq!(read.warnings.len(), 2);
         assert!(read.warnings[0].contains("multiple PROJECT_STATE"));
@@ -1163,19 +1217,19 @@ mod tests {
     #[test]
     fn lifecycle_update_replaces_existing_state_line() {
         let content =
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: enabled\nNAME: demo\n";
         let updated =
-            apply_project_lifecycle_update(content, "inactive").unwrap();
+            apply_project_lifecycle_update(content, "disabled").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: disabled\nNAME: demo\n"
         );
     }
 
     #[test]
     fn lifecycle_update_accepts_sibling_target_state() {
         let content =
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: enabled\nNAME: demo\n";
         let updated =
             apply_project_lifecycle_update(content, "sibling").unwrap();
         assert_eq!(
@@ -1185,15 +1239,22 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_update_normalizes_legacy_target_state() {
+    fn lifecycle_update_normalizes_legacy_target_states() {
         let content =
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: active\nNAME: demo\n";
-        for legacy in ["archived", "closed"] {
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: enabled\nNAME: demo\n";
+        for (legacy, canonical) in [
+            ("active", "enabled"),
+            ("inactive", "disabled"),
+            ("archived", "disabled"),
+            ("closed", "disabled"),
+        ] {
             let updated =
                 apply_project_lifecycle_update(content, legacy).unwrap();
             assert_eq!(
                 updated,
-                "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
+                format!(
+                    "WORKSPACE_DIR: /tmp\nPROJECT_STATE: {canonical}\nNAME: demo\n"
+                )
             );
         }
     }
@@ -1202,10 +1263,10 @@ mod tests {
     fn lifecycle_update_inserts_before_running_and_preserves_crlf() {
         let content = "WORKSPACE_DIR: /tmp\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n";
         let updated =
-            apply_project_lifecycle_update(content, "inactive").unwrap();
+            apply_project_lifecycle_update(content, "disabled").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\r\nPROJECT_STATE: inactive\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n"
+            "WORKSPACE_DIR: /tmp\r\nPROJECT_STATE: disabled\r\nRUNNING:\r\n  #1 | 111 | run | demo\r\n\r\nNAME: demo\r\n"
         );
     }
 
@@ -1213,10 +1274,10 @@ mod tests {
     fn lifecycle_update_inserts_before_first_name() {
         let content = "WORKSPACE_DIR: /tmp\nNAME: demo\n";
         let updated =
-            apply_project_lifecycle_update(content, "inactive").unwrap();
+            apply_project_lifecycle_update(content, "disabled").unwrap();
         assert_eq!(
             updated,
-            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: inactive\nNAME: demo\n"
+            "WORKSPACE_DIR: /tmp\nPROJECT_STATE: disabled\nNAME: demo\n"
         );
     }
 
@@ -1425,7 +1486,7 @@ mod tests {
         .unwrap();
 
         let records =
-            list_project_records(&projects, &["all".to_string()], false)
+            list_project_records(&projects, &["all".to_string()], false, false)
                 .unwrap();
 
         assert_eq!(records.len(), 3);
@@ -1520,25 +1581,40 @@ mod tests {
         )
         .unwrap();
 
-        let active =
-            list_project_records(&projects, &["active".to_string()], false)
-                .unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].project_name, "beta");
-        assert_eq!(active[0].state, "active");
-        assert!(!active[0].state_explicit);
-        assert_eq!(active[0].active_claim_count, 1);
-        assert!(active[0].launchable);
-        assert!(active[0].project_file.ends_with("beta.gp"));
+        let enabled = list_project_records(
+            &projects,
+            &["enabled".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].project_name, "beta");
+        assert_eq!(enabled[0].state, "enabled");
+        assert!(!enabled[0].state_explicit);
+        assert_eq!(enabled[0].active_claim_count, 1);
+        assert!(enabled[0].launchable);
+        assert!(enabled[0].is_project);
+        assert!(enabled[0].project_file.ends_with("beta.gp"));
 
-        let all = list_project_records(&projects, &["all".to_string()], true)
-            .unwrap();
+        let legacy_active = list_project_records(
+            &projects,
+            &["active".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(legacy_active, enabled);
+
+        let all =
+            list_project_records(&projects, &["all".to_string()], true, false)
+                .unwrap();
         let names: Vec<&str> = all
             .iter()
             .map(|record| record.project_name.as_str())
             .collect();
         assert_eq!(names, vec!["alpha", "beta", "gamma", "home"]);
-        assert_eq!(all[0].state, "inactive");
+        assert_eq!(all[0].state, "disabled");
         assert_eq!(all[0].display_name, None);
         assert!(all[0]
             .parse_warnings
@@ -1546,32 +1622,94 @@ mod tests {
             .any(|warning| warning.contains("legacy PROJECT_STATE value")));
         assert!(all[0].archive_file.as_deref().unwrap().ends_with(".sase"));
         assert_eq!(all[2].state, "sibling");
+        assert!(!all[2].is_project);
         assert!(!all[2].launchable);
         assert!(all[2]
             .warnings
             .iter()
             .any(|warning| warning == "project is sibling"));
         assert!(all[3].system_managed);
+        assert!(!all[3].is_project);
         assert!(!all[3].launchable);
 
-        let inactive =
-            list_project_records(&projects, &["inactive".to_string()], false)
-                .unwrap();
-        assert_eq!(inactive.len(), 1);
-        assert_eq!(inactive[0].project_name, "alpha");
-        assert_eq!(inactive[0].state, "inactive");
+        let disabled = list_project_records(
+            &projects,
+            &["disabled".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].project_name, "alpha");
+        assert_eq!(disabled[0].state, "disabled");
+        assert!(disabled[0].is_project);
 
-        let legacy_archived =
-            list_project_records(&projects, &["archived".to_string()], false)
-                .unwrap();
+        let legacy_archived = list_project_records(
+            &projects,
+            &["archived".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(legacy_archived.len(), 1);
-        assert_eq!(legacy_archived[0].state, "inactive");
+        assert_eq!(legacy_archived[0].state, "disabled");
 
-        let sibling =
-            list_project_records(&projects, &["sibling".to_string()], false)
-                .unwrap();
+        let sibling = list_project_records(
+            &projects,
+            &["sibling".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(sibling.len(), 1);
         assert_eq!(sibling[0].project_name, "gamma");
         assert_eq!(sibling[0].state, "sibling");
+    }
+
+    #[test]
+    fn lifecycle_project_records_classify_true_projects_and_vcs_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        for (name, content) in [
+            ("bare", "BARE_REPO_DIR: /tmp/bare.git\nNAME: bare\n"),
+            ("gh_acme__widgets", "NAME: widgets\n"),
+            ("linked", "PROJECT_STATE: sibling\nNAME: linked\n"),
+            ("home", "NAME: home\n"),
+        ] {
+            let project_dir = projects.join(name);
+            fs::create_dir(&project_dir).unwrap();
+            fs::write(project_dir.join(format!("{name}.sase")), content)
+                .unwrap();
+        }
+        fs::create_dir(projects.join("telemetry-only")).unwrap();
+
+        let records =
+            list_project_records(&projects, &["all".to_string()], true, false)
+                .unwrap();
+        let by_name = records
+            .iter()
+            .map(|record| (record.project_name.as_str(), record))
+            .collect::<BTreeMap<_, _>>();
+
+        assert!(by_name["bare"].is_project);
+        assert_eq!(by_name["bare"].vcs_kind.as_deref(), Some("git"));
+        assert!(by_name["gh_acme__widgets"].is_project);
+        assert_eq!(by_name["gh_acme__widgets"].vcs_kind.as_deref(), Some("gh"));
+        assert!(!by_name["linked"].is_project);
+        assert!(!by_name["home"].is_project);
+        assert!(!by_name["telemetry-only"].is_project);
+
+        let projects_only =
+            list_project_records(&projects, &["all".to_string()], true, true)
+                .unwrap();
+        assert_eq!(
+            projects_only
+                .iter()
+                .map(|record| record.project_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bare", "gh_acme__widgets"]
+        );
     }
 }

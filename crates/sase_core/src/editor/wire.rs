@@ -103,7 +103,7 @@ pub struct CompletionList {
     pub shared_extension: String,
 }
 
-/// One active project or ChangeSpec completion candidate for the `+`
+/// One enabled project or ChangeSpec completion candidate for the `+`
 /// (`vcs_project`) completion kind.
 ///
 /// This mirrors the Python `VcsProjectEntry` produced by

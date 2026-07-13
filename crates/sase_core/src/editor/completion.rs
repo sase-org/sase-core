@@ -2360,7 +2360,7 @@ mod tests {
                 project_entry("sase", "gh"),
                 project_entry("bob", "git"),
             ],
-            &[namespace_entry("sase-org", "2 active projects")],
+            &[namespace_entry("sase-org", "2 enabled projects")],
         );
 
         assert_eq!(

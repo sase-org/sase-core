@@ -399,6 +399,7 @@ pub(crate) fn project_filter_for_scan(
         projects_root,
         &options.include_project_states,
         true,
+        false,
     )
     .unwrap_or_default();
     let state_names = state_records

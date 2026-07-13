@@ -56,7 +56,7 @@ const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 
 /// Env var carrying the path to the JSON `vcs_project` completion catalog
-/// (active-project entries + known VCS workflow names). Materialized by the
+/// (enabled-project entries + known VCS workflow names). Materialized by the
 /// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
 /// fresh on every `#+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
@@ -228,7 +228,7 @@ impl XpromptLspServer {
 
     /// Build the `#+` (`vcs_project`) completion response.
     ///
-    /// The project catalog (active-project entries + known VCS workflow names)
+    /// The project catalog (enabled-project entries + known VCS workflow names)
     /// is read fresh from the materialized JSON file on every request so
     /// external rewrites are picked up without restarting the server. The
     /// canonical expansion is produced by the shared core builder, keeping the
@@ -268,7 +268,7 @@ impl XpromptLspServer {
 
     /// Build the `#workflow:` / `#workflow(` root-ref completion response.
     ///
-    /// The active project/PR rows and optional namespace rows come from the
+    /// The enabled project/PR rows and optional namespace rows come from the
     /// materialized catalog already loaded for context classification. No helper
     /// bridge call is needed on this completion path.
     fn vcs_ref_completion(
@@ -1325,7 +1325,7 @@ fn file_history() -> Vec<String> {
         .collect()
 }
 
-/// Load the active project/PR completion catalog from the materialized JSON
+/// Load the enabled project/PR completion catalog from the materialized JSON
 /// file at `path`.
 ///
 /// Read fresh on every `#+` completion request. Any failure (no path, unreadable
@@ -2968,7 +2968,7 @@ mod tests {
                     "gh": [
                         {
                             "name": "sase-org",
-                            "description": "2 active projects",
+                            "description": "2 enabled projects",
                             "kind_label": "org"
                         },
                         {
@@ -3135,7 +3135,7 @@ mod tests {
                     "gh": [
                         {
                             "name": "sase-org",
-                            "description": "2 active projects",
+                            "description": "2 enabled projects",
                             "kind_label": "org"
                         },
                         {
@@ -3154,7 +3154,7 @@ mod tests {
         let namespaces = catalog.namespaces.get("gh").unwrap();
         assert_eq!(namespaces.len(), 2);
         assert_eq!(namespaces[0].name, "sase-org");
-        assert_eq!(namespaces[0].description, "2 active projects");
+        assert_eq!(namespaces[0].description, "2 enabled projects");
         assert_eq!(namespaces[0].kind_label, "org");
         assert_eq!(namespaces[1].name, "bbugyi200");
         assert_eq!(namespaces[1].kind_label, "org");
@@ -3602,7 +3602,7 @@ mod tests {
         assert_eq!(namespace.kind, Some(CompletionItemKind::FOLDER));
         assert_eq!(namespace.filter_text.as_deref(), Some("sase-org"));
         assert_eq!(namespace.sort_text.as_deref(), Some("2:sase-org:0002"));
-        assert_eq!(namespace.detail.as_deref(), Some("2 active projects"));
+        assert_eq!(namespace.detail.as_deref(), Some("2 enabled projects"));
         assert_eq!(
             namespace
                 .label_details

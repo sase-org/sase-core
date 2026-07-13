@@ -54,7 +54,7 @@
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
 //! - `apply_project_name_update(content: str, name: str | None) -> str`
-//! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False) -> list[dict]`
+//! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False, projects_only: bool = False) -> list[dict]`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
 //! - `apply_notification_state_update_counts(path: str, update: dict) -> dict`
@@ -1786,18 +1786,24 @@ fn py_apply_project_name_update(
 
 /// List lifecycle records for project directories under *projects_root*.
 #[pyfunction]
-#[pyo3(name = "list_project_records", signature = (projects_root, include_states, include_home = false))]
+#[pyo3(name = "list_project_records", signature = (projects_root, include_states, include_home = false, projects_only = false))]
 fn py_list_project_records<'py>(
     py: Python<'py>,
     projects_root: &str,
     include_states: &Bound<'py, PyList>,
     include_home: bool,
+    projects_only: bool,
 ) -> PyResult<PyObject> {
     let states = strings_from_py_list(include_states, "include_states")?;
     let root = PathBuf::from(projects_root);
     let records = py
         .allow_threads(|| {
-            core_list_project_records(&root, &states, include_home)
+            core_list_project_records(
+                &root,
+                &states,
+                include_home,
+                projects_only,
+            )
         })
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
     let value = serde_json::to_value(&records).map_err(|e| {
