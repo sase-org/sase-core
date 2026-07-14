@@ -468,6 +468,136 @@ fn merge_event_stream_keeps_upstream_and_appends_local_extras_renumbered() {
     );
 }
 
+#[test]
+fn reduce_applies_merged_stream_events_in_recorded_order() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:05:00Z",
+    );
+    let other = issue(
+        "gold-2",
+        "Other",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:03:00Z",
+    );
+    let streams = [
+        BeadEventStreamWire {
+            stream_id: "gold-1".to_string(),
+            root_issue_id: "gold-1".to_string(),
+            events: vec![
+                event(
+                    "gold-1",
+                    "2026-01-01T00:05:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated { issue: root },
+                ),
+                // Merged-in event appended after later-timestamped entries:
+                // recorded order, not timestamp order, is causal in-stream.
+                event(
+                    "gold-1",
+                    "2026-01-01T00:01:00Z",
+                    BeadEventOperationWire::IssueClosed,
+                    BeadEventPayloadWire::IssueClosed { close_reason: None },
+                ),
+            ],
+        },
+        BeadEventStreamWire {
+            stream_id: "gold-2".to_string(),
+            root_issue_id: "gold-2".to_string(),
+            events: vec![event(
+                "gold-2",
+                "2026-01-01T00:03:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: other },
+            )],
+        },
+    ];
+
+    let reduced = reduce_event_streams(&streams).unwrap();
+
+    let root = reduced.iter().find(|issue| issue.id == "gold-1").unwrap();
+    assert_eq!(root.status, StatusWire::Closed);
+    assert_eq!(root.closed_at.as_deref(), Some("2026-01-01T00:01:00Z"));
+}
+
+#[test]
+fn reduce_survives_many_merged_streams_with_non_monotonic_timestamps() {
+    let timestamp = |seconds: usize| {
+        format!(
+            "2026-01-01T{:02}:{:02}:{:02}Z",
+            seconds / 3600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    };
+    let streams: Vec<BeadEventStreamWire> = (0..24)
+        .map(|index| {
+            let id = format!("meld-{index:02}");
+            let base = 1000 + (index * 37) % 700;
+            let created_at = timestamp(base);
+            BeadEventStreamWire {
+                stream_id: id.clone(),
+                root_issue_id: id.clone(),
+                events: vec![
+                    event(
+                        &id,
+                        &created_at,
+                        BeadEventOperationWire::IssueCreated,
+                        BeadEventPayloadWire::IssueCreated {
+                            issue: issue(
+                                &id,
+                                "Merged",
+                                IssueTypeWire::Plan,
+                                None,
+                                &created_at,
+                            ),
+                        },
+                    ),
+                    event(
+                        &id,
+                        &timestamp(base + 50),
+                        BeadEventOperationWire::IssueOpened,
+                        BeadEventPayloadWire::IssueOpened,
+                    ),
+                    event(
+                        &id,
+                        &timestamp(base + 100),
+                        BeadEventOperationWire::ReadyMarked,
+                        BeadEventPayloadWire::ReadyMarked,
+                    ),
+                    event(
+                        &id,
+                        &timestamp(base + 150),
+                        BeadEventOperationWire::ReadyUnmarked,
+                        BeadEventPayloadWire::ReadyUnmarked,
+                    ),
+                    // Merged-in tail whose timestamp predates the whole
+                    // stream, as produced by merge_bead_event_streams.
+                    event(
+                        &id,
+                        &timestamp(base - 400),
+                        BeadEventOperationWire::IssueClosed,
+                        BeadEventPayloadWire::IssueClosed {
+                            close_reason: None,
+                        },
+                    ),
+                ],
+            }
+        })
+        .collect();
+
+    let reduced = reduce_event_streams(&streams).unwrap();
+
+    assert_eq!(reduced.len(), 24);
+    assert!(reduced
+        .iter()
+        .all(|issue| issue.status == StatusWire::Closed));
+}
+
 fn event(
     issue_id: &str,
     timestamp: &str,

@@ -4,7 +4,8 @@
 //! `IssueWire` snapshots into deterministic streams, then reduce streams back
 //! into the current snapshot model. Later phases own filesystem integration.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
 
@@ -353,11 +354,10 @@ pub fn reduce_event_streams(
 ) -> Result<Vec<IssueWire>, BeadError> {
     let mut stream_ids = BTreeSet::new();
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
-    let mut ordered_events = Vec::new();
 
     let mut streams = streams.to_vec();
     streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
-    for (stream_index, stream) in streams.iter().enumerate() {
+    for stream in &streams {
         stream.validate()?;
         if !stream_ids.insert(stream.stream_id.clone()) {
             return Err(BeadError::validation(format!(
@@ -365,18 +365,10 @@ pub fn reduce_event_streams(
                 stream.stream_id
             )));
         }
-        for (event_index, event) in stream.events.iter().enumerate() {
-            ordered_events.push(OrderedEvent {
-                event,
-                stream_index,
-                event_index,
-            });
-        }
     }
-    ordered_events.sort_by(compare_ordered_events);
 
-    for ordered in ordered_events {
-        apply_event(&mut issues, ordered.event)?;
+    for event in merge_stream_events(&streams) {
+        apply_event(&mut issues, event)?;
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
@@ -459,26 +451,84 @@ fn renumber_event(
     Ok(event)
 }
 
-struct OrderedEvent<'a> {
+/// Interleave events from every stream into one deterministic apply order.
+///
+/// Events within a stream must apply in recorded order: stream merges append
+/// events whose timestamps can predate earlier entries, so intra-stream
+/// position is the causal order while timestamps only decide how independent
+/// streams interleave. No single comparator can express both rules (mixing
+/// index order with timestamp order is not a total order), so a k-way merge
+/// keeps one cursor per stream and always emits the smallest head event by
+/// (timestamp, operation priority, event_id, stream index).
+fn merge_stream_events(
+    streams: &[BeadEventStreamWire],
+) -> Vec<&BeadEventRecordWire> {
+    let mut heads: BinaryHeap<Reverse<StreamHead<'_>>> = streams
+        .iter()
+        .enumerate()
+        .filter_map(|(stream_index, stream)| {
+            stream.events.first().map(|event| {
+                Reverse(StreamHead {
+                    event,
+                    stream_index,
+                    event_index: 0,
+                })
+            })
+        })
+        .collect();
+    let mut ordered = Vec::with_capacity(
+        streams.iter().map(|stream| stream.events.len()).sum(),
+    );
+    while let Some(Reverse(head)) = heads.pop() {
+        ordered.push(head.event);
+        let event_index = head.event_index + 1;
+        if let Some(event) = streams[head.stream_index].events.get(event_index)
+        {
+            heads.push(Reverse(StreamHead {
+                event,
+                stream_index: head.stream_index,
+                event_index,
+            }));
+        }
+    }
+    ordered
+}
+
+struct StreamHead<'a> {
     event: &'a BeadEventRecordWire,
     stream_index: usize,
     event_index: usize,
 }
 
-fn compare_ordered_events(
-    left: &OrderedEvent<'_>,
-    right: &OrderedEvent<'_>,
-) -> std::cmp::Ordering {
-    if left.stream_index == right.stream_index {
-        return left.event_index.cmp(&right.event_index);
+impl StreamHead<'_> {
+    fn merge_key(&self) -> (&str, usize, &str, usize) {
+        (
+            self.event.timestamp.as_str(),
+            event_operation_priority(self.event.operation),
+            self.event.event_id.as_str(),
+            self.stream_index,
+        )
     }
-    let timestamp_order = left.event.timestamp.cmp(&right.event.timestamp);
-    if !timestamp_order.is_eq() {
-        return timestamp_order;
+}
+
+impl PartialEq for StreamHead<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.merge_key() == other.merge_key()
     }
-    event_operation_priority(left.event.operation)
-        .cmp(&event_operation_priority(right.event.operation))
-        .then_with(|| left.event.event_id.cmp(&right.event.event_id))
+}
+
+impl Eq for StreamHead<'_> {}
+
+impl PartialOrd for StreamHead<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StreamHead<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.merge_key().cmp(&other.merge_key())
+    }
 }
 
 fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
