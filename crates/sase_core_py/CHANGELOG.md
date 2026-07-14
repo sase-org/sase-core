@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/sase-org/sase-core/compare/v0.3.4...v0.4.0) - 2026-07-14
+
+### Added
+
+- *(plan)* add strict frontmatter validation (sase-61.1)
+- *(projects)* classify projects and canonicalize lifecycle (sase-5w.1)
+- [**breaking**] remove legend-tier core support
+- *(vcs)* add remote commit presence classification
+- *(core)* add unified VCS commit-log parser and aggregator
+- *(bead)* merge event streams for conflict resolution
+- rename ChangeSpec wire review field
+
+### Fixed
+
+- *(prompt-stash)* bound shared lock acquisition
+
+### Other
+
+- Format with `cargo fmt`
+
 ## [0.3.2](https://github.com/sase-org/sase-core/compare/v0.3.1...v0.3.2) - 2026-07-06
 
 ### Added
