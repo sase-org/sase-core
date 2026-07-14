@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/sase-org/sase-core/compare/v0.3.4...v0.4.0) - 2026-07-14
+
+### Added
+
+- *(plan)* add strict frontmatter validation (sase-61.1)
+- *(projects)* classify projects and canonicalize lifecycle (sase-5w.1)
+- [**breaking**] add conditional separators to agent auto IDs
+- *(agent-scan)* project runner slot waiting fields (sase-5u.3)
+- plan held workspace release on agent dismissal
+- *(beads)* expand fast CLI mutations
+- *(plan)* [**breaking**] retire legacy plan directories
+- *(plan)* discover tiered plans in canonical directory
+- add gpt-5.6 model catalog support
+- [**breaking**] remove legend-tier core support
+- *(vcs)* add remote commit presence classification
+- *(core)* add unified VCS commit-log parser and aggregator
+- *(bead)* merge event streams for conflict resolution
+- *(editor)* add VCS ref completion core (sase-5i.4)
+- *(lsp)* complete VCS repo slash completions (sase-5h.5)
+- *(editor)* add VCS repo completion context (sase-5h.4)
+- rename ChangeSpec wire review field
+
+### Fixed
+
+- *(bead)* merge event streams without violating strict total order
+- *(prompt-stash)* bound shared lock acquisition
+- *(query)* match ChangeSpecs by configured project name
+- align VCS ref completion vectors (sase-5i)
+- preserve repo completion spacing before final newline (sase-5h.6)
+
+### Other
+
+- *(bead)* address Rust 1.97 clippy lints ([#20](https://github.com/sase-org/sase-core/pull/20))
+- update GPT-5.6 SOL model fixtures
+- Format with `cargo fmt`
+
 ## [0.3.4](https://github.com/sase-org/sase-core/compare/v0.3.3...v0.3.4) - 2026-07-06
 
 ### Added
