@@ -88,6 +88,8 @@
 //! - `config_inventory(request: dict) -> dict`
 //! - `config_plan_edit(request: dict) -> dict`
 //! - `config_validate(request: dict) -> list[dict]`
+//! - `plan_validate(content: str, tier: str) -> dict`
+//! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -245,7 +247,11 @@ use sase_core::notifications::{
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
 };
-use sase_core::plan::{search_plans as core_plan_search, PlanError};
+use sase_core::plan::{
+    plan_frontmatter_schema as core_plan_frontmatter_schema,
+    plan_validate as core_plan_validate, search_plans as core_plan_search,
+    PlanError,
+};
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
@@ -1966,6 +1972,33 @@ fn py_plan_search<'py>(
     )
 }
 
+/// Strictly validate one complete markdown plan against an explicit tier.
+#[pyfunction]
+#[pyo3(name = "plan_validate")]
+fn py_plan_validate<'py>(
+    py: Python<'py>,
+    content: &str,
+    tier: &str,
+) -> PyResult<PyObject> {
+    plan_result_to_py(
+        py,
+        py.allow_threads(|| core_plan_validate(content, tier)),
+    )
+}
+
+/// Return ordered authoritative frontmatter field metadata for a plan tier.
+#[pyfunction]
+#[pyo3(name = "plan_frontmatter_schema")]
+fn py_plan_frontmatter_schema<'py>(
+    py: Python<'py>,
+    tier: &str,
+) -> PyResult<PyObject> {
+    plan_result_to_py(
+        py,
+        py.allow_threads(|| core_plan_frontmatter_schema(tier)),
+    )
+}
+
 #[pyfunction]
 #[pyo3(name = "bead_ready")]
 fn py_bead_ready<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
@@ -3683,6 +3716,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_frontmatter_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -3812,6 +3847,34 @@ mod tests {
         list.iter()
             .map(|item| item.extract::<bool>().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn plan_validation_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n---\n# Plan\nImplement it.\n";
+            let result = py_plan_validate(py, content, "epic").unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value["schema_version"], json!(2));
+            assert_eq!(value["ok"], json!(true));
+            assert_eq!(value["diagnostics"], json!([]));
+            assert_eq!(value["plan"]["title"], json!("Binding parity"));
+            assert_eq!(value["plan"]["phases"][0]["depends_on"], json!([]));
+
+            let schema = py_plan_frontmatter_schema(py, "epic").unwrap();
+            let schema_value = py_to_json_value(schema.bind(py)).unwrap();
+            assert_eq!(schema_value[0]["name"], json!("tier"));
+            assert_eq!(schema_value[0]["type"], json!("tale | epic"));
+            assert!(schema_value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| { field["name"] == json!("phases[].model") }));
+
+            let error = py_plan_validate(py, content, "story").unwrap_err();
+            assert!(error.to_string().contains("unsupported plan tier"));
+        });
     }
 
     fn query_module<'py>(py: Python<'py>) -> Bound<'py, PyModule> {

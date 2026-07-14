@@ -8,11 +8,17 @@
 
 pub mod read;
 pub mod search;
+pub mod validate;
 pub mod wire;
 
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use search::{
     search_plans, PLAN_SEARCH_FIELD_NAMES, PLAN_SEARCH_WIRE_SCHEMA_VERSION,
+};
+pub use validate::{
+    plan_frontmatter_schema, plan_validate, PlanDiagnosticWire,
+    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanValidationResultWire,
+    ValidatedPlanWire,
 };
 pub use wire::{
     PlanError, PlanSearchMatchWire, PlanWire, PLAN_WIRE_SCHEMA_VERSION,

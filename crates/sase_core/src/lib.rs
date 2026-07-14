@@ -284,7 +284,9 @@ pub use notifications::{
 };
 pub use parser::parse_project_bytes;
 pub use plan::{
-    read_plans, search_plans, PlanError, PlanSearchMatchWire, PlanWire,
+    plan_frontmatter_schema, plan_validate, read_plans, search_plans,
+    PlanDiagnosticWire, PlanError, PlanFrontmatterFieldSpecWire, PlanPhaseWire,
+    PlanSearchMatchWire, PlanValidationResultWire, PlanWire, ValidatedPlanWire,
     PLAN_READ_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };
