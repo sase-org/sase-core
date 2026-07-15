@@ -793,6 +793,14 @@ fn coerce_bool_truthy(value: Option<&Value>) -> bool {
     }
 }
 
+/// Preserve an explicitly stored boolean without truthiness coercion.
+fn coerce_strict_bool(value: Option<&Value>) -> Option<bool> {
+    match value {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
 /// Strict-int variant for `retry_attempt` (the Python facade only accepts
 /// real `int` values here, mirroring the source dataclass field type).
 fn coerce_strict_int(value: Option<&Value>) -> Option<i64> {
@@ -857,6 +865,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         plan: coerce_bool_truthy(data.get("plan")),
         plan_approved: coerce_bool_truthy(data.get("plan_approved")),
         plan_action: coerce_str(data.get("plan_action")),
+        plan_committed: coerce_strict_bool(data.get("plan_committed")),
         wait_for: coerce_str_list(data.get("wait_for")),
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),

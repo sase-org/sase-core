@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 7;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 8;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -685,6 +685,9 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if prior_version.map_or(true, |v| v < 7) {
         migrate_record_json_refresh_v7(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 8) {
+        migrate_record_json_refresh_v8(&mut conn)?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -893,6 +896,13 @@ fn migrate_record_json_refresh_v6(conn: &mut Connection) -> Result<(), String> {
 /// There is no DDL to apply; callers that need existing rows refreshed run a
 /// full rebuild so each row is reserialized from source marker files.
 fn migrate_record_json_refresh_v7(conn: &mut Connection) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v8 adds `agent_meta.plan_committed` inside `record_json`. The Python
+/// lifecycle checks the stored version before opening the Rust index and
+/// performs a source rebuild so existing rows receive the new projection.
+fn migrate_record_json_refresh_v8(conn: &mut Connection) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 

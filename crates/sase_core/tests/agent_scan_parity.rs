@@ -140,6 +140,7 @@ fn build_ace_run_running(root: &Path) {
             "approve": false,
             "plan": true,
             "plan_approved": false,
+            "plan_committed": false,
             "wait_for": ["bob", "carol"],
             "wait_duration": 3600.0,
         }),
@@ -161,6 +162,7 @@ fn build_ace_run_done(root: &Path) {
             "vcs_provider": "github",
             "workspace_dir": "/tmp/workspaces/alpha_3",
             "stopped_at": "2026-04-27T12:05:00Z",
+            "plan_committed": true,
         }),
     );
     write_json(
@@ -649,9 +651,80 @@ fn running_record_carries_agent_meta() {
     assert_eq!(meta.pid, Some(22222));
     assert!(meta.plan);
     assert!(!meta.plan_approved);
+    assert_eq!(meta.plan_committed, Some(false));
     assert_eq!(meta.wait_for, vec!["bob".to_string(), "carol".to_string()]);
     assert_eq!(meta.wait_duration, Some(3600.0));
     assert_eq!(meta.workspace_dir.as_deref(), Some("/tmp/workspaces/alpha"));
+}
+
+#[test]
+fn plan_committed_survives_live_scan_and_indexed_reads() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+
+    let source =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    assert_eq!(
+        record_by_timestamp(&source, TS_ACE_RUN_RUNNING)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .plan_committed,
+        Some(false)
+    );
+    assert_eq!(
+        record_by_timestamp(&source, TS_ACE_RUN_DONE)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .plan_committed,
+        Some(true)
+    );
+    assert_eq!(
+        record_by_timestamp(&source, TS_HOME_RUNNING)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .plan_committed,
+        None
+    );
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: true,
+            include_full_history: true,
+            active_limit: None,
+            recent_completed_limit: None,
+            include_hidden: true,
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    for timestamp in [TS_ACE_RUN_RUNNING, TS_ACE_RUN_DONE, TS_HOME_RUNNING] {
+        assert_eq!(
+            record_by_timestamp(&indexed, timestamp)
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .plan_committed,
+            record_by_timestamp(&source, timestamp)
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .plan_committed,
+        );
+    }
 }
 
 #[test]

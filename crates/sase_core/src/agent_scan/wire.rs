@@ -260,6 +260,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub plan_action: Option<String>,
     #[serde(default)]
+    pub plan_committed: Option<bool>,
+    #[serde(default)]
     pub wait_for: Vec<String>,
     #[serde(default)]
     pub wait_duration: Option<f64>,
