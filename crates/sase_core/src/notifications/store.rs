@@ -676,19 +676,27 @@ fn matches_agent_notification(
         }
         Some("PlanApproval" | "UserQuestion") => {
             let cl_name = notification.action_data.get("agent_cl_name");
-            let timestamp = notification
+            let agent_timestamp = notification
                 .action_data
                 .get("agent_timestamp")
                 .and_then(|value| normalize_to_14_digit(value));
-            match timestamp {
-                None => {
-                    agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
-                }
-                Some(timestamp) => agents.iter().any(|agent| {
+            let agent_root_timestamp = notification
+                .action_data
+                .get("agent_root_timestamp")
+                .and_then(|value| normalize_to_14_digit(value));
+            if agent_timestamp.is_none() && agent_root_timestamp.is_none() {
+                agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
+            } else {
+                agents.iter().any(|agent| {
                     Some(&agent.cl_name) == cl_name
-                        && agent.raw_suffix.as_deref()
-                            == Some(timestamp.as_str())
-                }),
+                        && agent.raw_suffix.as_deref().is_some_and(
+                            |raw_suffix| {
+                                agent_timestamp.as_deref() == Some(raw_suffix)
+                                    || agent_root_timestamp.as_deref()
+                                        == Some(raw_suffix)
+                            },
+                        )
+                })
             }
         }
         _ => false,

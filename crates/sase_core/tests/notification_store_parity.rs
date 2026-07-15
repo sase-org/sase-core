@@ -466,6 +466,157 @@ fn notification_dismiss_matching_agents_covers_notification_action_shapes() {
 }
 
 #[test]
+fn notification_dismiss_matching_agents_matches_question_root_identity() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+
+    let mut question = notification("question-root-match");
+    question.action = Some("UserQuestion".to_string());
+    question
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    question
+        .action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+    question.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "20260501030405".to_string(),
+    );
+
+    let mut plan = notification("plan-root-match");
+    plan.action = Some("PlanApproval".to_string());
+    plan.action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    plan.action_data
+        .insert("agent_timestamp".to_string(), "20260501010203".to_string());
+    plan.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "260501_030405".to_string(),
+    );
+
+    let mut legacy = notification("legacy-name-match");
+    legacy.action = Some("UserQuestion".to_string());
+    legacy
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+
+    let mut wrong_cl = notification("wrong-cl");
+    wrong_cl.action = Some("UserQuestion".to_string());
+    wrong_cl
+        .action_data
+        .insert("agent_cl_name".to_string(), "other".to_string());
+    wrong_cl.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "260501_030405".to_string(),
+    );
+
+    let mut wrong_timestamp = notification("wrong-timestamp");
+    wrong_timestamp.action = Some("UserQuestion".to_string());
+    wrong_timestamp
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    wrong_timestamp
+        .action_data
+        .insert("agent_timestamp".to_string(), "260501_010204".to_string());
+    wrong_timestamp.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "260501_030406".to_string(),
+    );
+
+    let mut already_dismissed = notification("already-dismissed");
+    already_dismissed.action = Some("UserQuestion".to_string());
+    already_dismissed
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    already_dismissed.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "260501_030405".to_string(),
+    );
+    already_dismissed.dismissed = true;
+
+    rewrite_notifications(
+        &path,
+        &[
+            question,
+            plan,
+            legacy,
+            wrong_cl,
+            wrong_timestamp,
+            already_dismissed,
+        ],
+    )
+    .unwrap();
+
+    let update = NotificationStateUpdateWire::DismissMatchingAgents {
+        agents: vec![NotificationAgentKeyWire {
+            cl_name: "feature".to_string(),
+            raw_suffix: Some("20260501030405".to_string()),
+        }],
+    };
+    let outcome = apply_notification_state_update(&path, &update).unwrap();
+    assert_eq!(outcome.matched_count, 3);
+    assert_eq!(outcome.changed_count, 3);
+
+    let by_id: std::collections::HashMap<_, _> = outcome
+        .notifications
+        .iter()
+        .map(|notification| (notification.id.as_str(), notification.dismissed))
+        .collect();
+    assert_eq!(by_id.get("question-root-match"), Some(&true));
+    assert_eq!(by_id.get("plan-root-match"), Some(&true));
+    assert_eq!(by_id.get("legacy-name-match"), Some(&true));
+    assert_eq!(by_id.get("wrong-cl"), Some(&false));
+    assert_eq!(by_id.get("wrong-timestamp"), Some(&false));
+    assert_eq!(by_id.get("already-dismissed"), Some(&true));
+
+    let repeated = apply_notification_state_update(&path, &update).unwrap();
+    assert_eq!(repeated.matched_count, 0);
+    assert_eq!(repeated.changed_count, 0);
+    assert!(
+        repeated
+            .notifications
+            .iter()
+            .find(|notification| notification.id == "already-dismissed")
+            .unwrap()
+            .dismissed
+    );
+}
+
+#[test]
+fn notification_dismiss_matching_agents_matches_question_child_identity() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut question = notification("question-child-match");
+    question.action = Some("UserQuestion".to_string());
+    question
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    question
+        .action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+    question.action_data.insert(
+        "agent_root_timestamp".to_string(),
+        "260501_030405".to_string(),
+    );
+    rewrite_notifications(&path, &[question]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "feature".to_string(),
+                raw_suffix: Some("20260501010203".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(outcome.notifications[0].dismissed);
+}
+
+#[test]
 fn notification_dismiss_matching_agents_covers_user_agent_view_error_report() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
