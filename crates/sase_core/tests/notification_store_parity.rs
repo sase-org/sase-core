@@ -420,13 +420,31 @@ fn notification_dismiss_matching_agents_covers_notification_action_shapes() {
         .insert("agent_cl_name".to_string(), "feature".to_string());
     plan.action_data
         .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+    let mut epic = notification("epic");
+    epic.action = Some("EpicApproval".to_string());
+    epic.action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    epic.action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+    let mut launch = notification("launch");
+    launch.action = Some("LaunchApproval".to_string());
+    launch
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    launch
+        .action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
     let mut question = notification("question");
     question.action = Some("UserQuestion".to_string());
     question
         .action_data
         .insert("agent_cl_name".to_string(), "other".to_string());
     let untouched = notification("untouched");
-    rewrite_notifications(&path, &[jump, plan, question, untouched]).unwrap();
+    rewrite_notifications(
+        &path,
+        &[jump, plan, epic, launch, question, untouched],
+    )
+    .unwrap();
 
     let outcome = apply_notification_state_update(
         &path,
@@ -438,12 +456,28 @@ fn notification_dismiss_matching_agents_covers_notification_action_shapes() {
         },
     )
     .unwrap();
-    assert_eq!(outcome.changed_count, 2);
+    assert_eq!(outcome.changed_count, 4);
     assert!(
         outcome
             .notifications
             .iter()
             .find(|n| n.id == "jump")
+            .unwrap()
+            .dismissed
+    );
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "epic")
+            .unwrap()
+            .dismissed
+    );
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "launch")
             .unwrap()
             .dismissed
     );

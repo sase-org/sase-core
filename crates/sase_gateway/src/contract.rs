@@ -275,6 +275,30 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "POST",
+                "path": "/api/v1/actions/epic/{prefix}/approve",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/epic/{prefix}/reject",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/epic/{prefix}/feedback",
+                "auth": true,
+                "request": "PlanActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
                 "path": "/api/v1/actions/hitl/{prefix}/accept",
                 "auth": true,
                 "request": "HitlActionRequestWire without path-derived prefix/choice",
@@ -294,6 +318,30 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "path": "/api/v1/actions/hitl/{prefix}/feedback",
                 "auth": true,
                 "request": "HitlActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/launch/{prefix}/approve",
+                "auth": true,
+                "request": "LaunchActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/launch/{prefix}/reject",
+                "auth": true,
+                "request": "LaunchActionRequestWire without path-derived prefix/choice",
+                "success": "ActionResultWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/v1/actions/launch/{prefix}/feedback",
+                "auth": true,
+                "request": "LaunchActionRequestWire without path-derived prefix/choice",
                 "success": "ActionResultWire",
                 "errors": ["ApiErrorWire"]
             },
@@ -346,11 +394,11 @@ pub fn api_v1_contract_snapshot() -> Value {
             "ActionResultWire": {
                 "defined_by": "sase_core::notifications::mobile",
                 "schema_version": "u32",
-                "action_kind": "plan_approval|hitl|user_question|non_action|unsupported",
+                "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|non_action|unsupported",
                 "prefix": "string",
                 "notification_id": "string|null",
                 "state": "available|already_handled|stale|missing_request|missing_target|unsupported",
-                "response_file": "plan_response.json|hitl_response.json|question_response.json",
+                "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json",
                 "response_json": "json",
                 "message": "string|null"
             },
@@ -888,6 +936,13 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "run_coder": "bool|null",
                 "coder_prompt": "string|null",
                 "coder_model": "string|null"
+            },
+            "LaunchActionRequestWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "schema_version": "u32",
+                "prefix": "string",
+                "choice": "approve|reject|feedback",
+                "feedback": "string|null"
             },
             "HitlActionRequestWire": {
                 "defined_by": "sase_core::notifications::mobile",

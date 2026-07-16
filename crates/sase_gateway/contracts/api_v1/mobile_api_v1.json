@@ -29,12 +29,12 @@
   },
   "records": {
     "ActionResultWire": {
-      "action_kind": "plan_approval|hitl|user_question|non_action|unsupported",
+      "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|non_action|unsupported",
       "defined_by": "sase_core::notifications::mobile",
       "message": "string|null",
       "notification_id": "string|null",
       "prefix": "string",
-      "response_file": "plan_response.json|hitl_response.json|question_response.json",
+      "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json",
       "response_json": "json",
       "schema_version": "u32",
       "state": "available|already_handled|stale|missing_request|missing_target|unsupported"
@@ -128,6 +128,13 @@
     },
     "HitlActionRequestWire": {
       "choice": "accept|reject|feedback",
+      "defined_by": "sase_core::notifications::mobile",
+      "feedback": "string|null",
+      "prefix": "string",
+      "schema_version": "u32"
+    },
+    "LaunchActionRequestWire": {
+      "choice": "approve|reject|feedback",
       "defined_by": "sase_core::notifications::mobile",
       "feedback": "string|null",
       "prefix": "string",
@@ -953,6 +960,36 @@
         "ApiErrorWire"
       ],
       "method": "POST",
+      "path": "/api/v1/actions/epic/{prefix}/approve",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/epic/{prefix}/reject",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/epic/{prefix}/feedback",
+      "request": "PlanActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
       "path": "/api/v1/actions/hitl/{prefix}/accept",
       "request": "HitlActionRequestWire without path-derived prefix/choice",
       "success": "ActionResultWire"
@@ -975,6 +1012,36 @@
       "method": "POST",
       "path": "/api/v1/actions/hitl/{prefix}/feedback",
       "request": "HitlActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/launch/{prefix}/approve",
+      "request": "LaunchActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/launch/{prefix}/reject",
+      "request": "LaunchActionRequestWire without path-derived prefix/choice",
+      "success": "ActionResultWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/v1/actions/launch/{prefix}/feedback",
+      "request": "LaunchActionRequestWire without path-derived prefix/choice",
       "success": "ActionResultWire"
     },
     {

@@ -14,15 +14,16 @@ pub use sase_core::host_bridge::{
 use sase_core::notifications::{
     apply_notification_state_update, current_unix_time,
     legacy_telegram_pending_actions_path, pending_action_state_from_store,
-    pending_action_store_path, plan_hitl_action_response,
-    plan_launch_action_response, plan_plan_action_response,
-    plan_question_action_response_from_bytes,
+    pending_action_store_path, plan_epic_action_response,
+    plan_hitl_action_response, plan_launch_action_response,
+    plan_plan_action_response, plan_question_action_response_from_bytes,
     read_notifications_snapshot_with_options, read_pending_action_store,
     resolve_pending_action_prefix, ActionResultWire, HitlActionRequestWire,
-    LaunchActionRequestWire, MobileActionStateWire,
+    LaunchActionRequestWire, MobileActionKindWire, MobileActionStateWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationWire, PendingActionPrefixResolutionWire,
-    PendingActionStoreWire, PlanActionRequestWire, QuestionActionRequestWire,
+    PendingActionStoreWire, PlanActionChoiceWire, PlanActionRequestWire,
+    QuestionActionRequestWire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value as JsonValue;
@@ -387,6 +388,13 @@ impl DynNotificationHostBridge {
         self.0.execute_plan_action(request)
     }
 
+    pub fn execute_epic_action(
+        &self,
+        request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.0.execute_epic_action(request)
+    }
+
     pub fn execute_hitl_action(
         &self,
         request: &HitlActionRequestWire,
@@ -481,6 +489,16 @@ pub trait NotificationHostBridge: Send + Sync {
         ))
     }
 
+    fn execute_epic_action(
+        &self,
+        _request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        Err(HostBridgeError::UnsupportedAction(
+            "epic action mutations are not supported by this bridge"
+                .to_string(),
+        ))
+    }
+
     fn execute_hitl_action(
         &self,
         _request: &HitlActionRequestWire,
@@ -541,7 +559,7 @@ impl LocalJsonlNotificationBridge {
     fn resolve_action_notification(
         &self,
         prefix: &str,
-        expected_action: &str,
+        expected_action_kind: MobileActionKindWire,
     ) -> Result<(PendingActionStoreWire, NotificationWire), HostBridgeError>
     {
         let store = read_pending_action_store(
@@ -572,7 +590,10 @@ impl LocalJsonlNotificationBridge {
             .ok_or_else(|| {
                 HostBridgeError::ActionMissing(identity.notification_id.clone())
             })?;
-        if notification.action.as_deref() != Some(expected_action) {
+        if MobileActionKindWire::from_notification_action(
+            notification.action.as_deref(),
+        ) != expected_action_kind
+        {
             return Err(HostBridgeError::UnsupportedAction(
                 notification
                     .action
@@ -582,6 +603,65 @@ impl LocalJsonlNotificationBridge {
         }
         ensure_action_available(&store, &notification)?;
         Ok((store, notification))
+    }
+
+    fn execute_plan_action_for_kind(
+        &self,
+        request: &PlanActionRequestWire,
+        action_kind: MobileActionKindWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        let (_store, notification) =
+            self.resolve_action_notification(&request.prefix, action_kind)?;
+
+        let response_dir = action_path(&notification, "response_dir")
+            .filter(|path| path.is_dir())
+            .ok_or_else(|| {
+                HostBridgeError::MissingTarget("response_dir".into())
+            })?;
+        if !response_dir.join("plan_request.json").is_file() {
+            return Err(HostBridgeError::ActionAlreadyHandled(
+                notification.id.clone(),
+            ));
+        }
+        if notification.files.is_empty() {
+            return Err(HostBridgeError::MissingTarget("plan_file".into()));
+        }
+
+        let mut result = match action_kind {
+            MobileActionKindWire::PlanApproval => {
+                plan_plan_action_response(request)
+            }
+            MobileActionKindWire::EpicApproval => {
+                plan_epic_action_response(request)
+            }
+            _ => {
+                return Err(HostBridgeError::UnsupportedAction(
+                    action_kind.label().to_string(),
+                ));
+            }
+        }
+        .map_err(|err| HostBridgeError::InvalidActionRequest(err.message))?;
+        result.notification_id = Some(notification.id.clone());
+        result.state = MobileActionStateWire::Available;
+
+        let response_path = response_dir.join(&result.response_file);
+        write_response_file_once(&response_path, &result.response_json)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    HostBridgeError::ActionAlreadyHandled(
+                        notification.id.clone(),
+                    )
+                } else {
+                    HostBridgeError::WriteResponse(err.to_string())
+                }
+            })?;
+
+        dismiss_notification_best_effort(
+            &self.notifications_path,
+            &notification,
+        );
+        persist_plan_approval_metadata(&notification, request, action_kind);
+        Ok(result)
     }
 }
 
@@ -647,57 +727,30 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         &self,
         request: &PlanActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) =
-            self.resolve_action_notification(&request.prefix, "PlanApproval")?;
+        self.execute_plan_action_for_kind(
+            request,
+            MobileActionKindWire::PlanApproval,
+        )
+    }
 
-        let response_dir = action_path(&notification, "response_dir")
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                HostBridgeError::MissingTarget("response_dir".into())
-            })?;
-        if !response_dir.join("plan_request.json").is_file() {
-            return Err(HostBridgeError::ActionAlreadyHandled(
-                notification.id.clone(),
-            ));
-        }
-        if notification.files.is_empty() {
-            return Err(HostBridgeError::MissingTarget("plan_file".into()));
-        }
-
-        let mut result = plan_plan_action_response(request).map_err(|err| {
-            HostBridgeError::InvalidActionRequest(err.message)
-        })?;
-        result.notification_id = Some(notification.id.clone());
-        result.state = MobileActionStateWire::Available;
-
-        let response_path = response_dir.join(&result.response_file);
-        write_response_file_once(&response_path, &result.response_json)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    HostBridgeError::ActionAlreadyHandled(
-                        notification.id.clone(),
-                    )
-                } else {
-                    HostBridgeError::WriteResponse(err.to_string())
-                }
-            })?;
-
-        let _ = apply_notification_state_update(
-            &self.notifications_path,
-            &NotificationStateUpdateWire::MarkDismissed {
-                id: notification.id.clone(),
-            },
-        );
-        persist_plan_approval_metadata(&notification, request);
-        Ok(result)
+    fn execute_epic_action(
+        &self,
+        request: &PlanActionRequestWire,
+    ) -> Result<ActionResultWire, HostBridgeError> {
+        self.execute_plan_action_for_kind(
+            request,
+            MobileActionKindWire::EpicApproval,
+        )
     }
 
     fn execute_hitl_action(
         &self,
         request: &HitlActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) =
-            self.resolve_action_notification(&request.prefix, "HITL")?;
+        let (_store, notification) = self.resolve_action_notification(
+            &request.prefix,
+            MobileActionKindWire::Hitl,
+        )?;
         let artifacts_dir = action_path(&notification, "artifacts_dir")
             .filter(|path| path.is_dir())
             .ok_or_else(|| {
@@ -737,8 +790,10 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         &self,
         request: &QuestionActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) =
-            self.resolve_action_notification(&request.prefix, "UserQuestion")?;
+        let (_store, notification) = self.resolve_action_notification(
+            &request.prefix,
+            MobileActionKindWire::UserQuestion,
+        )?;
         let response_dir = action_path(&notification, "response_dir")
             .filter(|path| path.is_dir())
             .ok_or_else(|| {
@@ -785,8 +840,10 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         &self,
         request: &LaunchActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) = self
-            .resolve_action_notification(&request.prefix, "LaunchApproval")?;
+        let (_store, notification) = self.resolve_action_notification(
+            &request.prefix,
+            MobileActionKindWire::LaunchApproval,
+        )?;
         let response_dir = action_path(&notification, "response_dir")
             .filter(|path| path.is_dir())
             .ok_or_else(|| {
@@ -1062,6 +1119,7 @@ fn write_response_file_once(
 fn persist_plan_approval_metadata(
     notification: &NotificationWire,
     request: &PlanActionRequestWire,
+    action_kind: MobileActionKindWire,
 ) {
     let Some(response_dir) = action_path(notification, "response_dir") else {
         return;
@@ -1077,8 +1135,11 @@ fn persist_plan_approval_metadata(
         Some(JsonValue::Object(object)) => object,
         _ => serde_json::Map::new(),
     };
-    let action = match request.choice {
-        sase_core::notifications::PlanActionChoiceWire::Approve => {
+    let action = match (action_kind, request.choice) {
+        (MobileActionKindWire::EpicApproval, PlanActionChoiceWire::Approve) => {
+            "epic"
+        }
+        (MobileActionKindWire::PlanApproval, PlanActionChoiceWire::Approve) => {
             if request.commit_plan.unwrap_or(true)
                 && !request.run_coder.unwrap_or(true)
             {
@@ -1087,7 +1148,9 @@ fn persist_plan_approval_metadata(
                 "approve"
             }
         }
-        sase_core::notifications::PlanActionChoiceWire::Epic => "epic",
+        (MobileActionKindWire::PlanApproval, PlanActionChoiceWire::Epic) => {
+            "epic"
+        }
         _ => return,
     };
     meta.insert("plan_approved".to_string(), JsonValue::Bool(true));

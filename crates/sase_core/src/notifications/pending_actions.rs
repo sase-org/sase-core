@@ -14,7 +14,7 @@ use super::mobile::{
 };
 use super::wire::NotificationWire;
 
-pub const PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_PENDING_ACTION_PREFIX_LEN: usize = 8;
 pub const DEFAULT_PENDING_ACTION_STALE_SECONDS: f64 = 24.0 * 60.0 * 60.0;
 
@@ -72,8 +72,9 @@ pub fn pending_action_from_notification(
     now_unix: f64,
 ) -> Option<PendingActionWire> {
     let action = notification.action.as_deref()?;
-    let action_kind = action_kind_from_str(action);
-    if !is_pending_action_kind(action_kind) {
+    let action_kind =
+        MobileActionKindWire::from_notification_action(Some(action));
+    if !action_kind.is_gate() {
         return None;
     }
     let identity = pending_action_identity(
@@ -189,8 +190,9 @@ pub fn pending_action_state_for_notification(
     let Some(action) = notification.action.as_deref() else {
         return MobileActionStateWire::Unsupported;
     };
-    let action_kind = action_kind_from_str(action);
-    if !is_pending_action_kind(action_kind) {
+    let action_kind =
+        MobileActionKindWire::from_notification_action(Some(action));
+    if !action_kind.is_gate() {
         return MobileActionStateWire::Unsupported;
     }
     if externally_handled_state(notification) {
@@ -300,8 +302,9 @@ fn merge_legacy_telegram_pending_actions(
         else {
             continue;
         };
-        let action_kind = action_kind_from_str(action);
-        if !is_pending_action_kind(action_kind) {
+        let action_kind =
+            MobileActionKindWire::from_notification_action(Some(action));
+        if !action_kind.is_gate() {
             continue;
         }
         let action_data = object
@@ -358,8 +361,11 @@ fn merge_legacy_telegram_pending_actions(
 }
 
 fn externally_handled_state(notification: &NotificationWire) -> bool {
-    match notification.action.as_deref() {
-        Some("PlanApproval") => {
+    match MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    ) {
+        MobileActionKindWire::PlanApproval
+        | MobileActionKindWire::EpicApproval => {
             let Some(response_dir) = action_path(notification, "response_dir")
             else {
                 return false;
@@ -369,7 +375,7 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("plan_request.json")).exists())
         }
-        Some("HITL") => {
+        MobileActionKindWire::Hitl => {
             let Some(artifacts_dir) =
                 action_path(notification, "artifacts_dir")
             else {
@@ -379,7 +385,7 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (artifacts_dir.is_dir()
                     && !(artifacts_dir.join("hitl_request.json")).exists())
         }
-        Some("UserQuestion") => {
+        MobileActionKindWire::UserQuestion => {
             let Some(response_dir) = action_path(notification, "response_dir")
             else {
                 return false;
@@ -388,7 +394,7 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("question_request.json")).exists())
         }
-        Some("LaunchApproval") => {
+        MobileActionKindWire::LaunchApproval => {
             let Some(response_dir) = action_path(notification, "response_dir")
             else {
                 return false;
@@ -397,19 +403,28 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("launch_request.json")).exists())
         }
-        _ => false,
+        MobileActionKindWire::NonAction | MobileActionKindWire::Unsupported => {
+            false
+        }
     }
 }
 
 fn required_target_missing(notification: &NotificationWire) -> bool {
-    match notification.action.as_deref() {
-        Some("PlanApproval")
-        | Some("UserQuestion")
-        | Some("LaunchApproval") => {
+    match MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    ) {
+        MobileActionKindWire::PlanApproval
+        | MobileActionKindWire::EpicApproval
+        | MobileActionKindWire::UserQuestion
+        | MobileActionKindWire::LaunchApproval => {
             action_path(notification, "response_dir").is_none()
         }
-        Some("HITL") => action_path(notification, "artifacts_dir").is_none(),
-        _ => false,
+        MobileActionKindWire::Hitl => {
+            action_path(notification, "artifacts_dir").is_none()
+        }
+        MobileActionKindWire::NonAction | MobileActionKindWire::Unsupported => {
+            false
+        }
     }
 }
 
@@ -433,26 +448,6 @@ fn expand_home_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
-}
-
-fn action_kind_from_str(action: &str) -> MobileActionKindWire {
-    match action {
-        "PlanApproval" => MobileActionKindWire::PlanApproval,
-        "HITL" => MobileActionKindWire::Hitl,
-        "UserQuestion" => MobileActionKindWire::UserQuestion,
-        "LaunchApproval" => MobileActionKindWire::LaunchApproval,
-        _ => MobileActionKindWire::Unsupported,
-    }
-}
-
-fn is_pending_action_kind(kind: MobileActionKindWire) -> bool {
-    matches!(
-        kind,
-        MobileActionKindWire::PlanApproval
-            | MobileActionKindWire::Hitl
-            | MobileActionKindWire::UserQuestion
-            | MobileActionKindWire::LaunchApproval
-    )
 }
 
 fn ensure_parent(path: &Path) -> Result<&Path, String> {
@@ -595,6 +590,63 @@ mod tests {
         assert_eq!(
             pending_action_state_for_notification(&n, Some(&pending), 12.0),
             MobileActionStateWire::AlreadyHandled
+        );
+    }
+
+    #[test]
+    fn epic_approval_is_typed_and_resolves_through_pending_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let response_dir = tmp.path().join("epic");
+        fs::create_dir_all(&response_dir).unwrap();
+        fs::write(response_dir.join("plan_request.json"), "{}").unwrap();
+        let n = notification(
+            "epic1234-full",
+            "EpicApproval",
+            "response_dir",
+            &response_dir,
+        );
+        let pending = pending_action_from_notification(&n, 10.0).unwrap();
+
+        assert_eq!(pending.schema_version, 3);
+        assert_eq!(pending.action_kind, MobileActionKindWire::EpicApproval);
+        assert_eq!(
+            serde_json::to_value(&pending).unwrap()["action_kind"],
+            "epic_approval"
+        );
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::Available
+        );
+
+        let path = pending_action_store_path(tmp.path());
+        register_pending_action(&path, &pending).unwrap();
+        let store = read_pending_action_store(&path, None).unwrap();
+        assert_eq!(
+            resolve_pending_action_prefix(&store, "epic1234").resolution,
+            PendingActionPrefixResolutionWire::UniquePrefix
+        );
+
+        fs::write(response_dir.join("plan_response.json"), "{}").unwrap();
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 12.0),
+            MobileActionStateWire::AlreadyHandled
+        );
+    }
+
+    #[test]
+    fn epic_approval_without_response_dir_has_missing_target_state() {
+        let mut n = notification(
+            "epic-missing",
+            "EpicApproval",
+            "response_dir",
+            Path::new("/tmp/unused"),
+        );
+        n.action_data.clear();
+        let pending = pending_action_from_notification(&n, 10.0).unwrap();
+
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::MissingTarget
         );
     }
 

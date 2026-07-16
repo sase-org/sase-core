@@ -5,7 +5,7 @@ use serde_json::{json, Value as JsonValue};
 
 use super::wire::NotificationWire;
 
-pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileNotificationListRequestWire {
@@ -86,11 +86,80 @@ pub enum PendingActionPrefixResolutionWire {
 #[serde(rename_all = "snake_case")]
 pub enum MobileActionKindWire {
     PlanApproval,
+    EpicApproval,
     Hitl,
     UserQuestion,
     LaunchApproval,
     NonAction,
     Unsupported,
+}
+
+impl MobileActionKindWire {
+    pub fn from_notification_action(action: Option<&str>) -> Self {
+        match action {
+            Some("PlanApproval") => Self::PlanApproval,
+            Some("EpicApproval") => Self::EpicApproval,
+            Some("HITL") => Self::Hitl,
+            Some("UserQuestion") => Self::UserQuestion,
+            Some("LaunchApproval") => Self::LaunchApproval,
+            None => Self::NonAction,
+            Some(_) => Self::Unsupported,
+        }
+    }
+
+    pub const fn notification_action(self) -> Option<&'static str> {
+        match self {
+            Self::PlanApproval => Some("PlanApproval"),
+            Self::EpicApproval => Some("EpicApproval"),
+            Self::Hitl => Some("HITL"),
+            Self::UserQuestion => Some("UserQuestion"),
+            Self::LaunchApproval => Some("LaunchApproval"),
+            Self::NonAction | Self::Unsupported => None,
+        }
+    }
+
+    pub const fn is_gate(self) -> bool {
+        matches!(
+            self,
+            Self::PlanApproval
+                | Self::EpicApproval
+                | Self::Hitl
+                | Self::UserQuestion
+                | Self::LaunchApproval
+        )
+    }
+
+    pub const fn is_priority_gate(self) -> bool {
+        matches!(
+            self,
+            Self::PlanApproval
+                | Self::EpicApproval
+                | Self::UserQuestion
+                | Self::LaunchApproval
+        )
+    }
+
+    pub const fn is_agent_dismissable_gate(self) -> bool {
+        matches!(
+            self,
+            Self::PlanApproval
+                | Self::EpicApproval
+                | Self::UserQuestion
+                | Self::LaunchApproval
+        )
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PlanApproval => "Plan approval",
+            Self::EpicApproval => "Epic approval",
+            Self::Hitl => "HITL",
+            Self::UserQuestion => "Question",
+            Self::LaunchApproval => "Launch approval",
+            Self::NonAction => "Notification",
+            Self::Unsupported => "Unsupported action",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +177,13 @@ pub enum MobileActionStateWire {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MobileActionDetailWire {
     PlanApproval {
+        identity: PendingActionIdentityWire,
+        state: MobileActionStateWire,
+        response_dir: Option<String>,
+        plan_file: Option<String>,
+        choices: Vec<PlanActionChoiceWire>,
+    },
+    EpicApproval {
         identity: PendingActionIdentityWire,
         state: MobileActionStateWire,
         response_dir: Option<String>,
@@ -358,14 +434,11 @@ pub fn mobile_notification_card_from_wire(
     state: MobileActionStateWire,
     priority: bool,
 ) -> MobileNotificationCardWire {
-    let action_kind = mobile_action_kind(notification.action.as_deref());
-    let actionable = matches!(
-        action_kind,
-        MobileActionKindWire::PlanApproval
-            | MobileActionKindWire::Hitl
-            | MobileActionKindWire::UserQuestion
-            | MobileActionKindWire::LaunchApproval
-    ) && state == MobileActionStateWire::Available;
+    let action_kind = MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    );
+    let actionable =
+        action_kind.is_gate() && state == MobileActionStateWire::Available;
     MobileNotificationCardWire {
         id: notification.id.clone(),
         timestamp: notification.timestamp.clone(),
@@ -384,7 +457,7 @@ pub fn mobile_notification_card_from_wire(
             _ => Some(MobileActionSummaryWire {
                 kind: action_kind,
                 state,
-                label: action_label(action_kind).to_string(),
+                label: action_kind.label().to_string(),
             }),
         },
     }
@@ -403,11 +476,12 @@ pub fn mobile_notification_priority_from_wire(
     if mobile_notification_error_from_wire(notification) {
         return false;
     }
-    matches!(
+    MobileActionKindWire::from_notification_action(
         notification.action.as_deref(),
-        Some("PlanApproval" | "UserQuestion" | "JumpToMentorReview")
-            | Some("LaunchApproval")
-    ) || matches!(notification.sender.as_str(), "axe" | "crs")
+    )
+    .is_priority_gate()
+        || notification.action.as_deref() == Some("JumpToMentorReview")
+        || matches!(notification.sender.as_str(), "axe" | "crs")
 }
 
 pub fn mobile_action_detail_from_notification(
@@ -415,21 +489,44 @@ pub fn mobile_action_detail_from_notification(
     state: MobileActionStateWire,
 ) -> MobileActionDetailWire {
     let identity = pending_action_identity(&notification.id, 8);
-    match notification.action.as_deref() {
-        Some("PlanApproval") => MobileActionDetailWire::PlanApproval {
-            identity,
-            state,
-            response_dir: notification.action_data.get("response_dir").cloned(),
-            plan_file: notification.files.first().cloned(),
-            choices: vec![
-                PlanActionChoiceWire::Approve,
-                PlanActionChoiceWire::Run,
-                PlanActionChoiceWire::Reject,
-                PlanActionChoiceWire::Epic,
-                PlanActionChoiceWire::Feedback,
-            ],
-        },
-        Some("HITL") => MobileActionDetailWire::Hitl {
+    match MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    ) {
+        MobileActionKindWire::PlanApproval => {
+            MobileActionDetailWire::PlanApproval {
+                identity,
+                state,
+                response_dir: notification
+                    .action_data
+                    .get("response_dir")
+                    .cloned(),
+                plan_file: notification.files.first().cloned(),
+                choices: vec![
+                    PlanActionChoiceWire::Approve,
+                    PlanActionChoiceWire::Run,
+                    PlanActionChoiceWire::Reject,
+                    PlanActionChoiceWire::Epic,
+                    PlanActionChoiceWire::Feedback,
+                ],
+            }
+        }
+        MobileActionKindWire::EpicApproval => {
+            MobileActionDetailWire::EpicApproval {
+                identity,
+                state,
+                response_dir: notification
+                    .action_data
+                    .get("response_dir")
+                    .cloned(),
+                plan_file: notification.files.first().cloned(),
+                choices: vec![
+                    PlanActionChoiceWire::Approve,
+                    PlanActionChoiceWire::Reject,
+                    PlanActionChoiceWire::Feedback,
+                ],
+            }
+        }
+        MobileActionKindWire::Hitl => MobileActionDetailWire::Hitl {
             identity,
             state,
             artifacts_dir: notification
@@ -446,48 +543,60 @@ pub fn mobile_action_detail_from_notification(
                 HitlActionChoiceWire::Feedback,
             ],
         },
-        Some("UserQuestion") => MobileActionDetailWire::UserQuestion {
-            identity,
-            state,
-            response_dir: notification.action_data.get("response_dir").cloned(),
-            question_count: notification
-                .action_data
-                .get("question_count")
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(0),
-            choices: vec![
-                QuestionActionChoiceWire::Answer,
-                QuestionActionChoiceWire::Custom,
-            ],
-        },
-        Some("LaunchApproval") => MobileActionDetailWire::LaunchApproval {
-            identity,
-            state,
-            response_dir: notification.action_data.get("response_dir").cloned(),
-            request_id: notification.action_data.get("request_id").cloned(),
-            source_surface: notification
-                .action_data
-                .get("source_surface")
-                .cloned(),
-            slot_count: notification
-                .action_data
-                .get("slot_count")
-                .and_then(|value| value.parse::<u32>().ok())
-                .unwrap_or(0),
-            choices: vec![
-                LaunchActionChoiceWire::Approve,
-                LaunchActionChoiceWire::Reject,
-                LaunchActionChoiceWire::Feedback,
-            ],
-        },
-        None => MobileActionDetailWire::NonAction {
+        MobileActionKindWire::UserQuestion => {
+            MobileActionDetailWire::UserQuestion {
+                identity,
+                state,
+                response_dir: notification
+                    .action_data
+                    .get("response_dir")
+                    .cloned(),
+                question_count: notification
+                    .action_data
+                    .get("question_count")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0),
+                choices: vec![
+                    QuestionActionChoiceWire::Answer,
+                    QuestionActionChoiceWire::Custom,
+                ],
+            }
+        }
+        MobileActionKindWire::LaunchApproval => {
+            MobileActionDetailWire::LaunchApproval {
+                identity,
+                state,
+                response_dir: notification
+                    .action_data
+                    .get("response_dir")
+                    .cloned(),
+                request_id: notification.action_data.get("request_id").cloned(),
+                source_surface: notification
+                    .action_data
+                    .get("source_surface")
+                    .cloned(),
+                slot_count: notification
+                    .action_data
+                    .get("slot_count")
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0),
+                choices: vec![
+                    LaunchActionChoiceWire::Approve,
+                    LaunchActionChoiceWire::Reject,
+                    LaunchActionChoiceWire::Feedback,
+                ],
+            }
+        }
+        MobileActionKindWire::NonAction => MobileActionDetailWire::NonAction {
             state: MobileActionStateWire::Unsupported,
         },
-        other => MobileActionDetailWire::Unsupported {
-            identity,
-            state: MobileActionStateWire::Unsupported,
-            action: other.map(str::to_string),
-        },
+        MobileActionKindWire::Unsupported => {
+            MobileActionDetailWire::Unsupported {
+                identity,
+                state: MobileActionStateWire::Unsupported,
+                action: notification.action.clone(),
+            }
+        }
     }
 }
 
@@ -572,6 +681,56 @@ pub fn plan_plan_action_response(
         state: MobileActionStateWire::Available,
         response_file: "plan_response.json".to_string(),
         response_json: JsonValue::Object(response),
+        message: Some(message.to_string()),
+    })
+}
+
+pub fn plan_epic_action_response(
+    request: &PlanActionRequestWire,
+) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
+    validate_schema(request.schema_version)?;
+    let (response_json, message) = match request.choice {
+        PlanActionChoiceWire::Approve => {
+            (json!({"action": "epic"}), "Epic approved")
+        }
+        PlanActionChoiceWire::Reject => {
+            let mut response = serde_json::Map::new();
+            response.insert("action".to_string(), json!("reject"));
+            if let Some(feedback) = &request.feedback {
+                response.insert("feedback".to_string(), json!(feedback));
+            }
+            (JsonValue::Object(response), "Epic rejected")
+        }
+        PlanActionChoiceWire::Feedback => {
+            let feedback = request.feedback.as_deref().ok_or_else(|| {
+                plan_error(
+                    MobileActionPlanErrorCodeWire::InvalidRequest,
+                    "epic feedback requires feedback text",
+                    Some("feedback"),
+                )
+            })?;
+            (
+                json!({"action": "reject", "feedback": feedback}),
+                "Epic feedback received",
+            )
+        }
+        PlanActionChoiceWire::Run | PlanActionChoiceWire::Epic => {
+            return Err(plan_error(
+                MobileActionPlanErrorCodeWire::InvalidRequest,
+                "epic approval supports approve, reject, or feedback",
+                Some("choice"),
+            ));
+        }
+    };
+
+    Ok(ActionResultWire {
+        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+        action_kind: MobileActionKindWire::EpicApproval,
+        prefix: request.prefix.clone(),
+        notification_id: None,
+        state: MobileActionStateWire::Available,
+        response_file: "plan_response.json".to_string(),
+        response_json,
         message: Some(message.to_string()),
     })
 }
@@ -719,28 +878,6 @@ pub fn plan_launch_action_response(
         response_json,
         message: Some(message.to_string()),
     })
-}
-
-fn mobile_action_kind(action: Option<&str>) -> MobileActionKindWire {
-    match action {
-        Some("PlanApproval") => MobileActionKindWire::PlanApproval,
-        Some("HITL") => MobileActionKindWire::Hitl,
-        Some("UserQuestion") => MobileActionKindWire::UserQuestion,
-        Some("LaunchApproval") => MobileActionKindWire::LaunchApproval,
-        None => MobileActionKindWire::NonAction,
-        Some(_) => MobileActionKindWire::Unsupported,
-    }
-}
-
-fn action_label(kind: MobileActionKindWire) -> &'static str {
-    match kind {
-        MobileActionKindWire::PlanApproval => "Plan approval",
-        MobileActionKindWire::Hitl => "HITL",
-        MobileActionKindWire::UserQuestion => "Question",
-        MobileActionKindWire::LaunchApproval => "Launch approval",
-        MobileActionKindWire::NonAction => "Notification",
-        MobileActionKindWire::Unsupported => "Unsupported action",
-    }
 }
 
 fn classify_attachment_display_name(
@@ -982,6 +1119,24 @@ mod tests {
         }
     }
 
+    fn sample_epic_notification() -> NotificationWire {
+        NotificationWire {
+            id: "epic1234567890".to_string(),
+            timestamp: "2026-07-16T15:30:00Z".to_string(),
+            sender: "planner".to_string(),
+            notes: vec!["Epic ready for review".to_string()],
+            files: vec!["/tmp/epic.md".to_string()],
+            tags: vec!["epic".to_string(), "review".to_string()],
+            action: Some("EpicApproval".to_string()),
+            action_data: _action_data(&[("response_dir", "/tmp/epic")]),
+            read: false,
+            dismissed: false,
+            silent: false,
+            muted: false,
+            snooze_until: None,
+        }
+    }
+
     #[test]
     fn mobile_notification_contract_snapshot_is_stable() {
         let notification = sample_plan_notification();
@@ -1008,6 +1163,36 @@ mod tests {
         };
         let expected: JsonValue = serde_json::from_str(include_str!(
             "../../tests/fixtures/mobile/mobile_notification_contract.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::to_value(detail).unwrap(), expected);
+    }
+
+    #[test]
+    fn epic_notification_contract_snapshot_is_stable() {
+        let notification = sample_epic_notification();
+        let detail = MobileNotificationDetailResponseWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            notification: mobile_notification_card_from_wire(
+                &notification,
+                MobileActionStateWire::Available,
+                mobile_notification_priority_from_wire(&notification),
+            ),
+            notes: notification.notes.clone(),
+            attachments: vec![mobile_attachment_manifest_from_path(
+                &notification.id,
+                0,
+                "epic.md",
+                Some(84),
+                true,
+            )],
+            action: mobile_action_detail_from_notification(
+                &notification,
+                MobileActionStateWire::Available,
+            ),
+        };
+        let expected: JsonValue = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mobile/mobile_epic_notification_contract.json"
         ))
         .unwrap();
         assert_eq!(serde_json::to_value(detail).unwrap(), expected);
@@ -1084,6 +1269,17 @@ mod tests {
             feedback: Some("Please revise".to_string()),
         })
         .unwrap();
+        let epic = plan_epic_action_response(&PlanActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "epic0001".to_string(),
+            choice: PlanActionChoiceWire::Approve,
+            feedback: None,
+            commit_plan: None,
+            run_coder: None,
+            coder_prompt: None,
+            coder_model: None,
+        })
+        .unwrap();
         let question = plan_question_action_response(
             &QuestionActionRequestWire {
                 schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
@@ -1122,6 +1318,7 @@ mod tests {
         assert_eq!(
             json!({
                 "plan": plan,
+                "epic": epic,
                 "hitl": hitl,
                 "question": question,
                 "launch": launch,
@@ -1168,6 +1365,37 @@ mod tests {
             .unwrap();
             assert_eq!(result.response_json, response_json);
         }
+    }
+
+    #[test]
+    fn epic_response_planner_has_a_typed_action_and_closed_choices() {
+        let approve = plan_epic_action_response(&PlanActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "epic0001".to_string(),
+            choice: PlanActionChoiceWire::Approve,
+            feedback: None,
+            commit_plan: None,
+            run_coder: None,
+            coder_prompt: None,
+            coder_model: None,
+        })
+        .unwrap();
+        assert_eq!(approve.action_kind, MobileActionKindWire::EpicApproval);
+        assert_eq!(approve.response_json, json!({"action": "epic"}));
+
+        let invalid = plan_epic_action_response(&PlanActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "epic0001".to_string(),
+            choice: PlanActionChoiceWire::Run,
+            feedback: None,
+            commit_plan: None,
+            run_coder: None,
+            coder_prompt: None,
+            coder_model: None,
+        })
+        .unwrap_err();
+        assert_eq!(invalid.code, MobileActionPlanErrorCodeWire::InvalidRequest);
+        assert_eq!(invalid.target.as_deref(), Some("choice"));
     }
 
     #[test]
@@ -1386,5 +1614,28 @@ mod tests {
         };
         assert!(!mobile_notification_error_from_wire(&plan_approval));
         assert!(mobile_notification_priority_from_wire(&plan_approval));
+
+        let epic_approval = sample_epic_notification();
+        assert!(!mobile_notification_error_from_wire(&epic_approval));
+        assert!(mobile_notification_priority_from_wire(&epic_approval));
+    }
+
+    #[test]
+    fn gate_action_string_mapping_is_complete() {
+        let expected = [
+            ("PlanApproval", MobileActionKindWire::PlanApproval),
+            ("EpicApproval", MobileActionKindWire::EpicApproval),
+            ("HITL", MobileActionKindWire::Hitl),
+            ("UserQuestion", MobileActionKindWire::UserQuestion),
+            ("LaunchApproval", MobileActionKindWire::LaunchApproval),
+        ];
+        for (action, kind) in expected {
+            assert_eq!(
+                MobileActionKindWire::from_notification_action(Some(action)),
+                kind
+            );
+            assert_eq!(kind.notification_action(), Some(action));
+            assert!(kind.is_gate());
+        }
     }
 }

@@ -25,9 +25,10 @@ use sase_core::notifications::{
     mobile_notification_error_from_wire,
     mobile_notification_priority_from_wire, ActionResultWire,
     HitlActionChoiceWire, HitlActionRequestWire, LaunchActionChoiceWire,
-    LaunchActionRequestWire, MobileNotificationDetailResponseWire,
-    MobileNotificationListResponseWire, NotificationWire, PlanActionChoiceWire,
-    PlanActionRequestWire, QuestionActionChoiceWire, QuestionActionRequestWire,
+    LaunchActionRequestWire, MobileActionKindWire,
+    MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
+    NotificationWire, PlanActionChoiceWire, PlanActionRequestWire,
+    QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
@@ -535,6 +536,9 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/actions/plan/:prefix/reject", post(plan_reject))
         .route("/api/v1/actions/plan/:prefix/epic", post(plan_epic))
         .route("/api/v1/actions/plan/:prefix/feedback", post(plan_feedback))
+        .route("/api/v1/actions/epic/:prefix/approve", post(epic_approve))
+        .route("/api/v1/actions/epic/:prefix/reject", post(epic_reject))
+        .route("/api/v1/actions/epic/:prefix/feedback", post(epic_feedback))
         .route("/api/v1/actions/hitl/:prefix/accept", post(hitl_accept))
         .route("/api/v1/actions/hitl/:prefix/reject", post(hitl_reject))
         .route("/api/v1/actions/hitl/:prefix/feedback", post(hitl_feedback))
@@ -1623,6 +1627,105 @@ async fn execute_plan_action_route(
     }
 }
 
+async fn epic_approve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<PlanActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_epic_action_route(
+        state,
+        headers,
+        prefix,
+        PlanActionChoiceWire::Approve,
+        payload,
+        "/api/v1/actions/epic/{prefix}/approve",
+    )
+    .await
+}
+
+async fn epic_reject(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<PlanActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_epic_action_route(
+        state,
+        headers,
+        prefix,
+        PlanActionChoiceWire::Reject,
+        payload,
+        "/api/v1/actions/epic/{prefix}/reject",
+    )
+    .await
+}
+
+async fn epic_feedback(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    AxumPath(prefix): AxumPath<String>,
+    payload: Result<Json<PlanActionBody>, JsonRejection>,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    execute_epic_action_route(
+        state,
+        headers,
+        prefix,
+        PlanActionChoiceWire::Feedback,
+        payload,
+        "/api/v1/actions/epic/{prefix}/feedback",
+    )
+    .await
+}
+
+async fn execute_epic_action_route(
+    state: GatewayState,
+    headers: HeaderMap,
+    prefix: String,
+    choice: PlanActionChoiceWire,
+    payload: Result<Json<PlanActionBody>, JsonRejection>,
+    endpoint: &'static str,
+) -> Result<Json<ActionResultWire>, ApiError> {
+    let device = authenticate(&state, &headers, endpoint).await?;
+    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
+    let request = PlanActionRequestWire {
+        schema_version: payload.schema_version,
+        prefix: prefix.clone(),
+        choice,
+        feedback: payload.feedback,
+        commit_plan: payload.commit_plan,
+        run_coder: payload.run_coder,
+        coder_prompt: payload.coder_prompt,
+        coder_model: payload.coder_model,
+    };
+    match state.notification_bridge.execute_epic_action(&request) {
+        Ok(result) => {
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                result.notification_id.clone().or(Some(prefix)),
+                "success",
+            );
+            publish_notifications_changed(
+                &state,
+                "epic_action",
+                result.notification_id.clone(),
+            )?;
+            Ok(Json(result))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                Some(device.device_id),
+                endpoint,
+                Some(prefix),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
+}
+
 async fn hitl_accept(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -2245,8 +2348,11 @@ fn attachment_candidates(
             push_unique_path(&mut paths, path);
         }
     }
-    match notification.action.as_deref() {
-        Some("PlanApproval") => {
+    match MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    ) {
+        MobileActionKindWire::PlanApproval
+        | MobileActionKindWire::EpicApproval => {
             if let Some(dir) = action_path(notification, "response_dir") {
                 push_unique_path(
                     &mut paths,
@@ -2254,7 +2360,7 @@ fn attachment_candidates(
                 );
             }
         }
-        Some("HITL") => {
+        MobileActionKindWire::Hitl => {
             if let Some(dir) = action_path(notification, "artifacts_dir") {
                 let request_path = dir.join("hitl_request.json");
                 push_unique_path(&mut paths, &request_path.to_string_lossy());
@@ -2263,7 +2369,7 @@ fn attachment_candidates(
                 }
             }
         }
-        Some("UserQuestion") => {
+        MobileActionKindWire::UserQuestion => {
             if let Some(dir) = action_path(notification, "response_dir") {
                 push_unique_path(
                     &mut paths,
@@ -2271,7 +2377,9 @@ fn attachment_candidates(
                 );
             }
         }
-        _ => {}
+        MobileActionKindWire::LaunchApproval
+        | MobileActionKindWire::NonAction
+        | MobileActionKindWire::Unsupported => {}
     }
     paths
         .into_iter()
@@ -3721,6 +3829,27 @@ exit 4
             &pending,
         )
         .unwrap();
+        (notification, response_dir)
+    }
+
+    fn seed_epic_notification(
+        tmp: &TempDir,
+        id: &str,
+    ) -> (NotificationWire, PathBuf) {
+        let response_dir =
+            tmp.path().join("agent").join(id).join("epic_approval");
+        std::fs::create_dir_all(&response_dir).unwrap();
+        std::fs::write(response_dir.join("plan_request.json"), "{}").unwrap();
+        let plan_file = tmp.path().join("epic.md");
+        std::fs::write(&plan_file, "# Epic\n").unwrap();
+        let mut notification =
+            notification(id, "2026-07-16T17:00:00Z", Some("EpicApproval"));
+        notification.files = vec![plan_file.to_string_lossy().to_string()];
+        notification.action_data.insert(
+            "response_dir".to_string(),
+            response_dir.to_string_lossy().to_string(),
+        );
+        seed_action_notification(tmp, &notification);
         (notification, response_dir)
     }
 
@@ -5549,6 +5678,67 @@ exit 4
         .unwrap();
         assert_eq!(meta["plan_approved"], true);
         assert_eq!(meta["plan_action"], "commit");
+    }
+
+    #[tokio::test]
+    async fn epic_action_approve_uses_typed_route_and_epic_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (notification, response_dir) =
+            seed_epic_notification(&tmp, "epic1234-plan");
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (detail_status, detail) = json_response_with_state(
+            state.clone(),
+            notifications_request(
+                Some(&token),
+                &format!("/api/v1/notifications/{}", notification.id),
+            ),
+        )
+        .await;
+        assert_eq!(detail_status, StatusCode::OK);
+        assert_eq!(detail["action"]["kind"], "epic_approval");
+        assert!(detail["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["display_name"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("plan_request.json"))));
+
+        let (status, value) = json_response_with_state(
+            state,
+            action_request(
+                Some(&token),
+                "/api/v1/actions/epic/epic1234/approve",
+                json!({"schema_version": 1}),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["action_kind"], "epic_approval");
+        assert_eq!(value["notification_id"], "epic1234-plan");
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(
+                    response_dir.join("plan_response.json")
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            json!({"action": "epic"})
+        );
+        let meta: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                response_dir.parent().unwrap().join("agent_meta.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["plan_approved"], true);
+        assert_eq!(meta["plan_action"], "epic");
     }
 
     #[tokio::test]

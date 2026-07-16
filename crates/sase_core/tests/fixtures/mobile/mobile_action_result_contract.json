@@ -1,6 +1,6 @@
 {
   "plan": {
-    "schema_version": 2,
+    "schema_version": 3,
     "action_kind": "plan_approval",
     "prefix": "abcdef12",
     "notification_id": null,
@@ -15,8 +15,20 @@
     },
     "message": "Running coder"
   },
+  "epic": {
+    "schema_version": 3,
+    "action_kind": "epic_approval",
+    "prefix": "epic0001",
+    "notification_id": null,
+    "state": "available",
+    "response_file": "plan_response.json",
+    "response_json": {
+      "action": "epic"
+    },
+    "message": "Epic approved"
+  },
   "hitl": {
-    "schema_version": 2,
+    "schema_version": 3,
     "action_kind": "hitl",
     "prefix": "hitl0001",
     "notification_id": null,
@@ -30,7 +42,7 @@
     "message": "Feedback received"
   },
   "question": {
-    "schema_version": 2,
+    "schema_version": 3,
     "action_kind": "user_question",
     "prefix": "ques0001",
     "notification_id": null,
@@ -51,7 +63,7 @@
     "message": "Question answered"
   },
   "launch": {
-    "schema_version": 2,
+    "schema_version": 3,
     "action_kind": "launch_approval",
     "prefix": "laun0001",
     "notification_id": null,

@@ -51,7 +51,11 @@ The HTTP status code carries transport status, while `code` is the stable client
   exceeds the MVP download limit.
 - `POST /api/v1/actions/plan/{prefix}/approve|run|reject|epic|feedback` writes `plan_response.json` for a
   currently pending plan notification.
+- `POST /api/v1/actions/epic/{prefix}/approve|reject|feedback` writes `plan_response.json` for a currently pending
+  epic-plan notification.
 - `POST /api/v1/actions/hitl/{prefix}/accept|reject|feedback` writes `hitl_response.json` for a pending HITL
+  notification.
+- `POST /api/v1/actions/launch/{prefix}/approve|reject|feedback` writes `launch_response.json` for a pending launch
   notification.
 - `POST /api/v1/actions/question/{prefix}/answer|custom` validates `question_request.json` and writes
   `question_response.json` for a pending user-question notification.
@@ -172,6 +176,11 @@ curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/feedback" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
   -d '{"schema_version":1,"feedback":"Revise the rollout section"}'
+
+curl -sS -X POST "$BASE_URL/api/v1/actions/epic/$PREFIX/approve" \
+  -H "$AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"schema_version":1}'
 ```
 
 HITL and question actions write the same response-file shapes as existing TUI and Telegram flows:

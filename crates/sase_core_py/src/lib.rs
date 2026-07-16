@@ -4434,7 +4434,7 @@ mod tests {
                     "sender": "axe",
                     "notes": ["hello"],
                     "files": [],
-                    "action": "PlanApproval",
+                    "action": "EpicApproval",
                     "action_data": {},
                     "read": false,
                     "dismissed": false,
@@ -4466,6 +4466,10 @@ mod tests {
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["schema_version"], json!(1));
             assert_eq!(snapshot_value["notifications"][0]["id"], json!("n1"));
+            assert_eq!(
+                snapshot_value["notifications"][0]["action"],
+                json!("EpicApproval")
+            );
             assert_eq!(snapshot_value["counts"]["priority"], json!(1));
 
             let update_obj =

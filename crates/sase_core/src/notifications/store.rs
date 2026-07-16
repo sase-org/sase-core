@@ -674,7 +674,12 @@ fn matches_agent_notification(
                 }),
             }
         }
-        Some("PlanApproval" | "UserQuestion") => {
+        Some(action)
+            if super::mobile::MobileActionKindWire::from_notification_action(
+                Some(action),
+            )
+            .is_agent_dismissable_gate() =>
+        {
             let cl_name = notification.action_data.get("agent_cl_name");
             let agent_timestamp = notification
                 .action_data
