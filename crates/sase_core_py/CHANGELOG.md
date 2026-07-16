@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/sase-org/sase-core/compare/v0.4.1...v0.5.0) - 2026-07-16
+
+### Added
+
+- *(editor)* add placeholder completion support (sase-6b.1)
+- [**breaking**] require titles for all plans
+
 ## [0.4.0](https://github.com/sase-org/sase-core/compare/v0.3.4...v0.4.0) - 2026-07-14
 
 ### Added
