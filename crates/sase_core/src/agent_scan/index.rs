@@ -893,8 +893,7 @@ fn migrate_record_json_refresh_v6(conn: &mut Connection) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
-/// v7 adds `agent_meta.agent_family_custom_role` inside `record_json` so the
-/// ACE TUI can render custom-role display labels from indexed rows.
+/// v7 is a reserved `record_json` refresh migration.
 ///
 /// There is no DDL to apply; callers that need existing rows refreshed run a
 /// full rebuild so each row is reserialized from source marker files.
