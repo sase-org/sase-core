@@ -228,6 +228,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub output_variables: BTreeMap<String, String>,
     #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
     pub pid: Option<i64>,
     #[serde(default)]
     pub model: Option<String>,

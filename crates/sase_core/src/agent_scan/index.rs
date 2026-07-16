@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 8;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 9;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -688,6 +688,9 @@ fn open_index(index_path: &Path) -> Result<Connection, String> {
     if prior_version.map_or(true, |v| v < 8) {
         migrate_record_json_refresh_v8(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 9) {
+        migrate_record_json_refresh_v9(&mut conn)?;
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -903,6 +906,12 @@ fn migrate_record_json_refresh_v7(conn: &mut Connection) -> Result<(), String> {
 /// lifecycle checks the stored version before opening the Rust index and
 /// performs a source rebuild so existing rows receive the new projection.
 fn migrate_record_json_refresh_v8(conn: &mut Connection) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v9 adds `agent_meta.output_path` inside `record_json` so failed workflow
+/// rows can expose their runner log without re-reading marker files.
+fn migrate_record_json_refresh_v9(conn: &mut Connection) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 

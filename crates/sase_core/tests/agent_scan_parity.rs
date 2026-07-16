@@ -163,6 +163,7 @@ fn build_ace_run_done(root: &Path) {
             "workspace_dir": "/tmp/workspaces/alpha_3",
             "stopped_at": "2026-04-27T12:05:00Z",
             "plan_committed": true,
+            "output_path": "/tmp/out_alpha.log",
         }),
     );
     write_json(
@@ -1033,6 +1034,7 @@ fn done_record_parses_done_marker() {
 
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.stopped_at.as_deref(), Some("2026-04-27T12:05:00Z"));
+    assert_eq!(meta.output_path.as_deref(), Some("/tmp/out_alpha.log"));
 }
 
 #[test]

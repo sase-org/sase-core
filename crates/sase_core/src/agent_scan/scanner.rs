@@ -847,6 +847,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         tag: coerce_str(data.get("tag")),
         output_variables: coerce_str_str_map(data.get("output_variables"))
             .unwrap_or_default(),
+        output_path: coerce_str(data.get("output_path")),
         pid: coerce_int(data.get("pid")),
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
