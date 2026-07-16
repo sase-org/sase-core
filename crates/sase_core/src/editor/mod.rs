@@ -5,6 +5,7 @@ pub mod directive;
 pub mod file;
 mod frontmatter;
 pub mod hover;
+pub mod placeholder;
 pub mod token;
 pub mod wire;
 mod xprompt_args;
@@ -38,6 +39,12 @@ pub use frontmatter::{
     validate_field as validate_frontmatter_field,
 };
 pub use hover::hover_at_position;
+pub use placeholder::{
+    build_placeholder_completion_candidates,
+    detect_placeholder_context_at_position, extract_placeholder_spans,
+    PlaceholderCompletion, PlaceholderContext, PlaceholderSpan,
+    PLACEHOLDER_MAX_INNER_CHARS,
+};
 pub use token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
     is_snippet_trigger_token, is_vcs_project_trigger_token,

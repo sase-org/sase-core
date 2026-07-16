@@ -35,6 +35,27 @@ pub fn completion_response(
     )
 }
 
+/// Build variable-like placeholder completion items in document order.
+pub fn placeholder_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+    prefix: &str,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(CompletionItemKind::VARIABLE);
+                item.filter_text = Some(prefix.to_string());
+                item.sort_text = Some(format!("{index:04}"));
+                item
+            })
+            .collect(),
+    )
+}
+
 /// Build the completion response for the `#+`/`+` (`vcs_project`) completion
 /// kind.
 ///
@@ -136,13 +157,45 @@ pub fn sase_snippet_completion_item(
     documentation: Option<String>,
     replacement_range: EditorRange,
 ) -> CompletionItem {
-    snippet_completion_item(
+    let retrigger_placeholder =
+        first_tabstop_is_immediately_inside_angles(&template);
+    let mut item = snippet_completion_item(
         label,
         sase_template_to_lsp_snippet(&template),
         detail,
         documentation,
         replacement_range,
-    )
+    );
+    if retrigger_placeholder {
+        item.command = Some(Command::new(
+            "Trigger Suggest".to_string(),
+            "editor.action.triggerSuggest".to_string(),
+            None,
+        ));
+    }
+    item
+}
+
+fn first_tabstop_is_immediately_inside_angles(template: &str) -> bool {
+    let marker = ["$1", "$0"].into_iter().find_map(|needle| {
+        template.match_indices(needle).find_map(|(index, marker)| {
+            let end = index + marker.len();
+            let digit_continues = template
+                .get(end..)
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|ch| ch.is_ascii_digit());
+            (!digit_continues).then_some((index, end))
+        })
+    });
+    let Some((start, end)) = marker else {
+        return false;
+    };
+    template
+        .get(..start)
+        .is_some_and(|before| before.ends_with('<'))
+        && template
+            .get(end..)
+            .is_some_and(|after| after.starts_with('>'))
 }
 
 pub fn sase_template_to_lsp_snippet(template: &str) -> String {
@@ -569,5 +622,41 @@ mod tests {
             r"cost $5 $1 \\ path \} $0"
         );
         assert_eq!(sase_template_to_lsp_snippet("$foo"), r"\$foo");
+    }
+
+    #[test]
+    fn placeholder_tabstop_snippet_retriggers_completion() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 3,
+            },
+        };
+        let item = sase_snippet_completion_item(
+            "cbi".to_string(),
+            "`<$1>`$0".to_string(),
+            None,
+            None,
+            range,
+        );
+        assert_eq!(
+            item.command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("editor.action.triggerSuggest")
+        );
+
+        let ordinary = sase_snippet_completion_item(
+            "plain".to_string(),
+            "$1 body $0".to_string(),
+            None,
+            None,
+            range,
+        );
+        assert!(ordinary.command.is_none());
     }
 }

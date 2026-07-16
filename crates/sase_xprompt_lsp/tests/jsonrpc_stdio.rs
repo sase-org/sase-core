@@ -643,6 +643,122 @@ async fn stdio_jsonrpc_bare_snippet_completion() {
     server_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_placeholder.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "`<the plan>` then <>"
+                }
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 19}
+            }
+        }),
+    )
+    .await;
+
+    let mut completion_item = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            completion_item = message["result"]
+                .as_array()
+                .and_then(|items| items.first())
+                .cloned();
+            break;
+        }
+    }
+    let item = completion_item.expect("expected placeholder completion item");
+    assert_eq!(item["label"], "the plan");
+    assert_eq!(item["kind"], 6);
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 19);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 20);
+    assert_eq!(item["textEdit"]["newText"], "the plan>");
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
 async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {
     let body = value.to_string();
     writer

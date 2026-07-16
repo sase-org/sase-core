@@ -90,6 +90,8 @@
 //! - `config_validate(request: dict) -> list[dict]`
 //! - `plan_validate(content: str, tier: str) -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
+//! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
+//! - `placeholder_spans(text: str) -> list[dict]`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -3162,6 +3164,46 @@ fn py_validate_frontmatter_field(
     json_value_to_py(py, &json)
 }
 
+// --- Placeholder completion and highlighting surface ---------------------
+//
+// These bindings expose the same Rust placeholder engine consumed directly
+// by the xprompt LSP. They are the single source of truth shared by the TUI
+// and LSP for extraction, completion filtering, and replacement ranges.
+
+/// Return placeholder completion context and candidates, or `None` when the
+/// cursor is outside a placeholder or no reusable candidates exist.
+#[pyfunction]
+#[pyo3(name = "placeholder_completion")]
+fn py_placeholder_completion(
+    py: Python<'_>,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> PyResult<PyObject> {
+    let document = sase_core::DocumentSnapshot::new(text);
+    let completion = sase_core::editor_build_placeholder_completion_candidates(
+        &document,
+        sase_core::EditorPosition { line, character },
+    )
+    .filter(|completion| !completion.candidates.is_empty());
+    let value = serde_json::to_value(&completion).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return all complete placeholder spans for prompt highlighting.
+#[pyfunction]
+#[pyo3(name = "placeholder_spans")]
+fn py_placeholder_spans(py: Python<'_>, text: &str) -> PyResult<PyObject> {
+    let document = sase_core::DocumentSnapshot::new(text);
+    let spans = sase_core::editor_extract_placeholder_spans(&document);
+    let value = serde_json::to_value(&spans).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Config Center backend bindings ---------------------------------------
 //
 // JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
@@ -3763,6 +3805,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
+    m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
+    m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
@@ -3912,6 +3956,37 @@ mod tests {
 
             let error = py_plan_validate(py, content, "story").unwrap_err();
             assert!(error.to_string().contains("unsupported plan tier"));
+        });
+    }
+
+    #[test]
+    fn placeholder_bindings_return_plain_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let text = "<Alpha> use <a>";
+            let completion =
+                py_placeholder_completion(py, text, 0, 14).unwrap();
+            let value = py_to_json_value(completion.bind(py)).unwrap();
+            assert_eq!(value["prefix"], json!("a"));
+            assert_eq!(value["candidates"], json!(["Alpha"]));
+            assert_eq!(value["append_closing_bracket"], json!(false));
+            assert_eq!(
+                value["replacement_range"]["start"]["character"],
+                json!(13)
+            );
+
+            let empty = py_placeholder_completion(py, "<only>", 0, 5).unwrap();
+            assert_eq!(
+                py_to_json_value(empty.bind(py)).unwrap(),
+                JsonValue::Null
+            );
+
+            let spans =
+                py_placeholder_spans(py, "`<inline>` < trailing>").unwrap();
+            let spans = py_to_json_value(spans.bind(py)).unwrap();
+            assert_eq!(spans.as_array().unwrap().len(), 1);
+            assert_eq!(spans[0]["text"], json!("inline"));
+            assert_eq!(spans[0]["range"]["start"]["character"], json!(1));
         });
     }
 

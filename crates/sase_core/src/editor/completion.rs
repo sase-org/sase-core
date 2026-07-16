@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use crate::{EditorSnippetEntryWire, EditorXpromptCatalogEntryWire};
 
 use super::directive::canonical_directive_name;
+use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
     is_snippet_trigger_token, is_xprompt_like_token, vcs_project_trigger_token,
@@ -77,6 +78,25 @@ pub fn classify_completion_context_with_workflows(
     entries: &[XpromptAssistEntry],
     known_workflow_names: &[String],
 ) -> Option<CompletionContext> {
+    if let Some(placeholder) =
+        detect_placeholder_context_at_position(document, position)
+    {
+        return Some(CompletionContext {
+            kind: CompletionContextKind::Placeholder,
+            token: Some(TokenInfo {
+                text: placeholder.prefix,
+                range: placeholder.prefix_range,
+                byte_start: placeholder.prefix_byte_start,
+                byte_end: placeholder.cursor_byte,
+            }),
+            active_xprompt: None,
+            active_input: None,
+            directive_name: None,
+            vcs_repo: None,
+            vcs_ref: None,
+            replacement_range: placeholder.replacement_range,
+        });
+    }
     if let Some(context) = detect_vcs_repo_context_at_position(
         document,
         position,
@@ -1648,6 +1668,42 @@ mod tests {
                 classify_completion_context(&doc, pos(col), &catalog).unwrap();
             assert_eq!(context.kind, kind, "{text}");
         }
+    }
+
+    #[test]
+    fn placeholder_context_precedes_other_explicit_completion_modes() {
+        let catalog = entries();
+        let workflow_names = vec!["gh".to_string()];
+        for (text, col) in [
+            ("<", 1),
+            ("%model:<", 8),
+            ("#review(path=<", 14),
+            ("#gh:<", 5),
+        ] {
+            let document = DocumentSnapshot::new(text);
+            let context = classify_completion_context_with_workflows(
+                &document,
+                pos(col),
+                &catalog,
+                &workflow_names,
+            )
+            .unwrap();
+            assert_eq!(
+                context.kind,
+                CompletionContextKind::Placeholder,
+                "{text}"
+            );
+            assert_eq!(context.token.as_ref().unwrap().text, "", "{text}");
+        }
+    }
+
+    #[test]
+    fn closed_placeholder_does_not_steal_following_context() {
+        let document = DocumentSnapshot::new("<done> %mo");
+        let context =
+            classify_completion_context(&document, pos(10), &entries())
+                .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::DirectiveName);
     }
 
     #[test]

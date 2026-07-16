@@ -31,6 +31,7 @@ pub struct TokenInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionContextKind {
+    Placeholder,
     Xprompt,
     SlashSkill,
     FilePath,

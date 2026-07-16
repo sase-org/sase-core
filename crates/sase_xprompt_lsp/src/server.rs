@@ -25,6 +25,7 @@ use sase_core::{
     editor_analyze_document, editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
+    editor_build_placeholder_completion_candidates,
     editor_build_snippet_completion_candidates,
     editor_build_vcs_project_completion_candidates,
     editor_build_vcs_ref_completion_candidates,
@@ -46,9 +47,10 @@ use tracing::{info, warn};
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     apply_replacement, completion_response, diagnostic as lsp_diagnostic,
-    hover as lsp_hover, sase_snippet_completion_item, snippet_completion_item,
-    to_editor_position, to_lsp_range, vcs_project_completion_response,
-    vcs_ref_completion_response, vcs_repo_completion_response,
+    hover as lsp_hover, placeholder_completion_response,
+    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
+    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
+    vcs_repo_completion_response,
 };
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
@@ -153,13 +155,47 @@ impl XpromptLspServer {
         position: Position,
     ) -> Option<CompletionResponse> {
         let config = self.current_config();
+        let document = DocumentSnapshot::new(text);
+        let editor_position = to_editor_position(position);
+
+        // Placeholder completion is document-local. Classify it before any
+        // catalog refresh so this source never depends on the helper bridge.
+        if let Some(context) =
+            editor_classify_completion_context_with_workflows(
+                &document,
+                editor_position,
+                &[],
+                &[],
+            )
+            .filter(|context| {
+                context.kind == CompletionContextKind::Placeholder
+            })
+        {
+            let list = self.completion_list_for_context(
+                &context,
+                &[],
+                &config,
+                &document,
+                position,
+            );
+            let prefix = context
+                .token
+                .as_ref()
+                .map(|token| token.text.as_str())
+                .unwrap_or_default();
+            return Some(placeholder_completion_response(
+                list,
+                context.replacement_range,
+                prefix,
+            ));
+        }
+
         let entries = self.entries_for_completion(&config).await;
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
-        let document = DocumentSnapshot::new(text);
         let context = editor_classify_completion_context_with_workflows(
             &document,
-            to_editor_position(position),
+            editor_position,
             entries.as_slice(),
             &vcs_catalog.workflow_names,
         )?;
@@ -178,8 +214,21 @@ impl XpromptLspServer {
                 &vcs_catalog,
             ));
         }
-        let list =
-            self.completion_list_for_context(&context, &entries, &config);
+        let list = self.completion_list_for_context(
+            &context, &entries, &config, &document, position,
+        );
+        if context.kind == CompletionContextKind::Placeholder {
+            let prefix = context
+                .token
+                .as_ref()
+                .map(|token| token.text.as_str())
+                .unwrap_or_default();
+            return Some(placeholder_completion_response(
+                list,
+                context.replacement_range,
+                prefix,
+            ));
+        }
         if context.kind == CompletionContextKind::SnippetTrigger {
             if !config.snippet_support {
                 return Some(CompletionResponse::Array(Vec::new()));
@@ -613,6 +662,8 @@ impl XpromptLspServer {
         context: &sase_core::CompletionContext,
         entries: &[XpromptAssistEntry],
         config: &ServerConfig,
+        document: &DocumentSnapshot,
+        position: Position,
     ) -> CompletionList {
         let token = context
             .token
@@ -620,6 +671,14 @@ impl XpromptLspServer {
             .map(|token| token.text.as_str())
             .unwrap_or_default();
         let list = match context.kind {
+            CompletionContextKind::Placeholder => {
+                editor_build_placeholder_completion_candidates(
+                    document,
+                    to_editor_position(position),
+                )
+                .map(|completion| completion.into_completion_list())
+                .unwrap_or_else(empty_completion_list)
+            }
             CompletionContextKind::Xprompt
             | CompletionContextKind::SlashSkill => {
                 editor_build_xprompt_completion_candidates(
@@ -807,6 +866,7 @@ impl LanguageServer for XpromptLspServer {
                         "(".to_string(),
                         ",".to_string(),
                         "+".to_string(),
+                        "<".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -2024,6 +2084,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completes_placeholders_from_the_current_document() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text(
+                "<Beta> <bravo> choose <b>".to_string(),
+                Position::new(0, 24),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        let labels: Vec<&str> =
+            items.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["Beta", "bravo"]);
+        assert_eq!(items[0].kind, Some(CompletionItemKind::VARIABLE));
+        assert_eq!(items[0].filter_text.as_deref(), Some("b"));
+        assert_eq!(items[0].sort_text.as_deref(), Some("0000"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected placeholder text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 23));
+        assert_eq!(edit.range.end, Position::new(0, 25));
+        assert_eq!(edit.new_text, "Beta>");
+    }
+
+    #[tokio::test]
+    async fn placeholder_completion_appends_a_missing_closing_bracket() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text(
+                "<alpha> use <a".to_string(),
+                Position::new(0, 14),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected placeholder text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 13));
+        assert_eq!(edit.range.end, Position::new(0, 14));
+        assert_eq!(edit.new_text, "alpha>");
+    }
+
+    #[tokio::test]
+    async fn placeholder_completion_is_empty_without_another_span() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text("<only>".to_string(), Position::new(0, 5))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
     async fn xprompt_snippet_completions_use_single_row_skeletons() {
         let entries = vec![
             catalog_entry(
@@ -2148,6 +2290,42 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_snippet_item(&items, "foo", r"literal \$ $1 \\ brace \} $0");
         assert_eq!(items[0].detail.as_deref(), Some("ace.snippets"));
+    }
+
+    #[tokio::test]
+    async fn placeholder_tabstop_snippet_item_retriggers_suggestions() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_and_snippets(
+                    Vec::new(),
+                    vec![snippet_entry("cbi", "`<$1>`$0", "ace.snippets")],
+                )),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            *config = ServerConfig {
+                snippet_support: true,
+                ..ServerConfig::default()
+            };
+        }
+
+        let response = server
+            .completion_for_text("cb".to_string(), Position::new(0, 2))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items[0]
+                .command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("editor.action.triggerSuggest")
+        );
     }
 
     #[tokio::test]
@@ -3039,6 +3217,29 @@ mod tests {
             .unwrap_or_default();
 
         assert!(triggers.contains(&"+".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn advertises_placeholder_completion_trigger_character() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&"<".to_string()), "{triggers:?}");
     }
 
     #[tokio::test]
