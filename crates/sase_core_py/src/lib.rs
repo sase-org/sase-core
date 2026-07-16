@@ -226,6 +226,11 @@ use sase_core::bead::{
     BeadEventStoreManifestWire, BeadEventStreamWire,
     BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
 };
+use sase_core::commit_footer::{
+    parse_commit_footer as core_parse_commit_footer,
+    update_commit_footer as core_update_commit_footer, CommitFooterUpdateWire,
+    COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
+};
 use sase_core::config::{
     config_field_model as core_config_field_model,
     config_inventory as core_config_inventory,
@@ -463,6 +468,53 @@ fn py_parse_query<'py>(py: Python<'py>, query: &str) -> PyResult<PyObject> {
 fn py_canonicalize_query(query: &str) -> PyResult<String> {
     let expr = sase_core::parse_query(query).map_err(query_error_to_pyerr)?;
     Ok(sase_core::canonicalize_query(&expr))
+}
+
+/// Return the schema version for commit-footer binding payloads.
+#[pyfunction]
+#[pyo3(name = "commit_footer_wire_schema_version")]
+fn py_commit_footer_wire_schema_version() -> u32 {
+    COMMIT_FOOTER_WIRE_SCHEMA_VERSION
+}
+
+/// Parse a terminal SASE commit footer into its structured wire payload.
+#[pyfunction]
+#[pyo3(name = "parse_commit_footer")]
+fn py_parse_commit_footer<'py>(
+    py: Python<'py>,
+    message: &str,
+) -> PyResult<PyObject> {
+    let footer = core_parse_commit_footer(message);
+    let value = serde_json::to_value(&footer).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Update a terminal SASE commit footer from typed update payloads.
+#[pyfunction]
+#[pyo3(name = "update_commit_footer")]
+fn py_update_commit_footer(
+    message: &str,
+    updates: &Bound<'_, PyList>,
+    remove_keys: Vec<String>,
+) -> PyResult<String> {
+    let mut wire_updates = Vec::with_capacity(updates.len());
+    for (index, item) in updates.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let update: CommitFooterUpdateWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "updates[{index}] is not a valid CommitFooterUpdateWire dict: {e}"
+                ))
+            })?;
+        wire_updates.push(update);
+    }
+    Ok(core_update_commit_footer(
+        message,
+        &wire_updates,
+        &remove_keys,
+    ))
 }
 
 /// Compile a persistent ChangeSpec corpus from Python wire dicts.
@@ -3722,6 +3774,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_commit_footer_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_commit_footer, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_commit_footer, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_corpus, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
@@ -3909,6 +3964,40 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn commit_footer_bindings_convert_linked_payloads() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_commit_footer_wire_schema_version(),
+                COMMIT_FOOTER_WIRE_SCHEMA_VERSION
+            );
+            let updates = PyList::empty_bound(py);
+            append_json(
+                py,
+                &updates,
+                json!({
+                    "key": "PLAN",
+                    "label": "202607/p.md",
+                    "destination": "https://github.com/o/r/blob/main/202607/p.md",
+                    "reference_id": null
+                }),
+            );
+            let message =
+                py_update_commit_footer("Subject", &updates, vec![]).unwrap();
+            assert!(message.contains("SASE_PLAN=[202607/p.md][1]"));
+
+            let parsed = py_parse_commit_footer(py, &message).unwrap();
+            let value = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(value["schema_version"], json!(1));
+            assert_eq!(value["tags"][0]["label"], json!("202607/p.md"));
+            assert_eq!(
+                value["tags"][0]["destination"],
+                json!("https://github.com/o/r/blob/main/202607/p.md")
+            );
+        });
     }
 
     fn spec_json(name: &str, status: &str, parent: Option<&str>) -> JsonValue {

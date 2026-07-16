@@ -16,6 +16,7 @@ pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_scan;
 pub mod bead;
+pub mod commit_footer;
 pub mod config;
 pub mod content_layout;
 pub mod editor;
@@ -162,6 +163,11 @@ pub use bead::{
     IssueWire, JsonlLoadOutcome, OperationOutcomeWire, StatusWire,
     BEAD_EVENT_SCHEMA_VERSION, BEAD_READ_WIRE_SCHEMA_VERSION,
     BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
+};
+pub use commit_footer::{
+    parse_commit_footer, update_commit_footer, CommitFooterReferenceWire,
+    CommitFooterTagWire, CommitFooterUpdateWire, CommitFooterWire,
+    COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
 pub use config::{
     config_field_model, config_inventory, config_plan_edit, config_validate,
