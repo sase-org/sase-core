@@ -132,6 +132,7 @@ fn build_ace_run_running(root: &Path) {
         &json!({
             "name": "running_alpha",
             "workflow_name": "wf_alpha",
+            "agent_family_parallel": true,
             "pid": 22222,
             "model": "claude-sonnet-4-6",
             "llm_provider": "claude",
@@ -649,6 +650,7 @@ fn running_record_carries_agent_meta() {
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.name.as_deref(), Some("running_alpha"));
     assert_eq!(meta.workflow_name.as_deref(), Some("wf_alpha"));
+    assert!(meta.agent_family_parallel);
     assert_eq!(meta.pid, Some(22222));
     assert!(meta.plan);
     assert!(!meta.plan_approved);
@@ -726,6 +728,59 @@ fn plan_committed_survives_live_scan_and_indexed_reads() {
                 .plan_committed,
         );
     }
+}
+
+#[test]
+fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
+    let tmp = tempdir().unwrap();
+    let root = build_fixture_tree(&tmp.path().join("projects"));
+
+    let source =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    assert!(
+        record_by_timestamp(&source, TS_ACE_RUN_RUNNING)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_family_parallel
+    );
+    assert!(
+        !record_by_timestamp(&source, TS_HOME_RUNNING)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_family_parallel
+    );
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let indexed = query_agent_artifact_index(
+        &index,
+        &root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: true,
+            include_full_history: true,
+            active_limit: None,
+            recent_completed_limit: None,
+            include_hidden: true,
+        },
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    assert!(
+        record_by_timestamp(&indexed, TS_ACE_RUN_RUNNING)
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .agent_family_parallel
+    );
 }
 
 #[test]

@@ -39,9 +39,9 @@
 //! byte ordered comparison.
 
 use sase_core::{
-    ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
-    HookWire, MentorStatusLineWire, MentorWire, SourceSpanWire, TimestampWire,
-    CHANGESPEC_WIRE_SCHEMA_VERSION,
+    AgentMetaWire, ChangeSpecWire, CommentWire, CommitWire, DeltaWire,
+    HookStatusLineWire, HookWire, MentorStatusLineWire, MentorWire,
+    SourceSpanWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -216,4 +216,21 @@ fn python_fixture_deserializes_into_rust_type() {
     // (modulo defaults) without losing information.
     let cs: ChangeSpecWire = serde_json::from_str(PYTHON_FIXTURE).unwrap();
     assert_eq!(cs, rust_changespec());
+}
+
+#[test]
+fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
+    let python_fixture: Value =
+        serde_json::from_str(r#"{"agent_family_parallel":true}"#).unwrap();
+    let meta: AgentMetaWire =
+        serde_json::from_value(python_fixture.clone()).unwrap();
+
+    assert!(meta.agent_family_parallel);
+    assert_eq!(
+        serde_json::to_value(meta).unwrap()["agent_family_parallel"],
+        python_fixture["agent_family_parallel"]
+    );
+
+    let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
+    assert!(!legacy.agent_family_parallel);
 }

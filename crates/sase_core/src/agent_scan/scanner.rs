@@ -840,6 +840,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         workflow_name: coerce_str(data.get("workflow_name")),
         agent_family: coerce_str(data.get("agent_family")),
         agent_family_role: coerce_str(data.get("agent_family_role")),
+        agent_family_parallel: coerce_bool_truthy(
+            data.get("agent_family_parallel"),
+        ),
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tag: coerce_str(data.get("tag")),
         output_variables: coerce_str_str_map(data.get("output_variables"))
