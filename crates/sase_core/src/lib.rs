@@ -17,6 +17,7 @@ pub mod agent_name_template;
 pub mod agent_scan;
 pub mod bead;
 pub mod config;
+pub mod content_layout;
 pub mod editor;
 pub mod effort;
 pub mod git_query;
@@ -171,6 +172,14 @@ pub use config::{
     ConfigInventoryWire, ConfigLayerInputWire, ConfigSourceWire,
     ConfigValidateRequestWire, ConfigWritePlanWire,
     ListStrategy as ConfigListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
+};
+pub use content_layout::{
+    resolve_layout_candidates, sase_content_layout, ChezmoiContentLayoutWire,
+    CompatibleLayoutPathWire, HomeContentLayoutWire,
+    LayoutCandidateResolutionWire, LayoutCollisionPolicyWire,
+    LayoutPathRoleWire, LayoutPathWire, LayoutTrackingWire,
+    ProjectContentLayoutWire, SaseContentLayoutWire, XpromptSourceWire,
+    CONTENT_LAYOUT_SCHEMA_VERSION,
 };
 pub use editor::{
     analyze_document as editor_analyze_document,

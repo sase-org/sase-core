@@ -88,6 +88,8 @@
 //! - `config_inventory(request: dict) -> dict`
 //! - `config_plan_edit(request: dict) -> dict`
 //! - `config_validate(request: dict) -> list[dict]`
+//! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
+//! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str) -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
@@ -231,6 +233,10 @@ use sase_core::config::{
     config_validate as core_config_validate, ConfigEditRequestWire,
     ConfigError as ConfigDomainError, ConfigInventoryRequestWire,
     ConfigValidateRequestWire,
+};
+use sase_core::content_layout::{
+    resolve_layout_candidates as core_resolve_layout_candidates,
+    sase_content_layout as core_sase_content_layout, LayoutCollisionPolicyWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -3304,6 +3310,58 @@ fn py_config_validate<'py>(
     json_value_to_py(py, &json)
 }
 
+// --- Canonical project/home content layout -------------------------------
+
+/// Return the shared canonical/legacy SASE content layout and xprompt order.
+#[pyfunction]
+#[pyo3(name = "sase_content_layout")]
+#[pyo3(signature = (
+    home_root,
+    project_root = None,
+    chezmoi_root = None,
+    project = None
+))]
+fn py_sase_content_layout(
+    py: Python<'_>,
+    home_root: &str,
+    project_root: Option<&str>,
+    chezmoi_root: Option<&str>,
+    project: Option<&str>,
+) -> PyResult<PyObject> {
+    let project_root = project_root.map(PathBuf::from);
+    let chezmoi_root = chezmoi_root.map(PathBuf::from);
+    let layout = core_sase_content_layout(
+        project_root.as_deref(),
+        &PathBuf::from(home_root),
+        chezmoi_root.as_deref(),
+        project,
+    );
+    let json = serde_json::to_value(layout).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Resolve ordered candidate presence with the core collision policy.
+#[pyfunction]
+#[pyo3(name = "resolve_layout_candidates")]
+fn py_resolve_layout_candidates(
+    py: Python<'_>,
+    policy: &str,
+    exists: Vec<bool>,
+) -> PyResult<PyObject> {
+    let policy = LayoutCollisionPolicyWire::parse(policy).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unsupported layout collision policy {policy:?}; expected 'error' or 'first_wins'"
+        ))
+    })?;
+    let resolution = core_resolve_layout_candidates(policy, &exists);
+    let json = serde_json::to_value(resolution).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Return the launch wire schema version pinned by the Rust skeleton structs.
 #[pyfunction]
 #[pyo3(name = "agent_launch_wire_schema_version")]
@@ -3811,6 +3869,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_layout_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
