@@ -1342,7 +1342,9 @@ mod tests {
                     }],
                     is_skill: false,
                     content_preview: Some("Use this workflow...".to_string()),
-                    source_path_display: Some("xprompts/gh.md".to_string()),
+                    source_path_display: Some(
+                        "sase/xprompts/gh.md".to_string(),
+                    ),
                     definition_path: None,
                     definition_range: None,
                 }],
@@ -1398,7 +1400,7 @@ mod tests {
                     }],
                     "is_skill": false,
                     "content_preview": "Use this workflow...",
-                    "source_path_display": "xprompts/gh.md"
+                    "source_path_display": "sase/xprompts/gh.md"
                 }],
                 "stats": {
                     "total_count": 1,
@@ -1552,7 +1554,7 @@ mod tests {
                 "input_signature": "topic",
                 "is_skill": false,
                 "content_preview": "Use this workflow...",
-                "source_path_display": "xprompts/gh.md"
+                "source_path_display": "sase/xprompts/gh.md"
             }))
             .unwrap();
 

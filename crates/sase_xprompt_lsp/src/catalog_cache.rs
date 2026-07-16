@@ -980,8 +980,8 @@ mod tests {
     #[tokio::test]
     async fn snippet_cache_uses_rust_fallback_when_helper_unavailable() {
         let temp = tempfile::tempdir().unwrap();
-        let xprompts = temp.path().join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = temp.path().join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("nativezz.md"),
             "---\nsnippet: nativezz\ninput: {target: word}\n---\nFix {{ target }}.",
@@ -1010,8 +1010,8 @@ mod tests {
 
     fn root_with_rust_entry() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
-        let xprompts = temp.path().join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = temp.path().join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(xprompts.join("rust_builtin.md"), "rust body").unwrap();
         temp
     }

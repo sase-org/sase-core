@@ -1281,7 +1281,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
             }],
             "is_skill": false,
             "content_preview": null,
-            "source_path_display": "xprompts/review.md"
+            "source_path_display": "sase/xprompts/review.md"
         });
         let old_entry: MobileXpromptCatalogEntryWire =
             serde_json::from_value(old_json).unwrap();
@@ -1311,7 +1311,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
                 }],
                 "is_skill": false,
                 "content_preview": null,
-                "source_path_display": "xprompts/review.md"
+                "source_path_display": "sase/xprompts/review.md"
             })
         );
 
@@ -1330,8 +1330,8 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
                 "inputs": [],
                 "is_skill": false,
                 "content_preview": null,
-                "source_path_display": "xprompts/review.md",
-                "definition_path": "/workspace/xprompts/review.md",
+                "source_path_display": "sase/xprompts/review.md",
+                "definition_path": "/workspace/sase/xprompts/review.md",
                 "definition_range": {
                     "start": {"line": 8, "character": 2},
                     "end": {"line": 8, "character": 8}
@@ -1340,7 +1340,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
             .unwrap();
         assert_eq!(
             new_entry.definition_path.as_deref(),
-            Some("/workspace/xprompts/review.md")
+            Some("/workspace/sase/xprompts/review.md")
         );
         assert_eq!(
             new_entry.definition_range.map(|range| range.start.line),

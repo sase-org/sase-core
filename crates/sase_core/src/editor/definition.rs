@@ -252,8 +252,9 @@ mod tests {
     #[test]
     fn validates_local_file_definition_paths_conservatively() {
         let temp = tempdir().unwrap();
-        let source_path = temp.path().join("global.md");
+        let source_path = temp.path().join("sase/xprompts/global.md");
         let directory_path = temp.path().join("dir");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::write(&source_path, "global").unwrap();
         fs::create_dir(&directory_path).unwrap();
 
@@ -271,7 +272,8 @@ mod tests {
     #[test]
     fn preserves_catalog_definition_range() {
         let temp = tempdir().unwrap();
-        let source_path = temp.path().join("sase.yml");
+        let source_path = temp.path().join("sase/sase.yml");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::write(&source_path, "xprompts:\n  review:\n    content: body\n")
             .unwrap();
         let range = EditorRange {

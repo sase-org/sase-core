@@ -9,6 +9,10 @@ use serde_yaml::Value;
 use thiserror::Error;
 
 use crate::{
+    content_layout::{
+        resolve_layout_candidates, sase_content_layout,
+        CompatibleLayoutPathWire, XpromptSourceWire,
+    },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     DocumentSnapshot, EditorRange, EditorSnippetCatalogRequestWire,
     EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
@@ -30,6 +34,8 @@ const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
 pub enum XpromptCatalogLoadError {
     #[error("failed to read xprompt catalog: {0}")]
     Read(String),
+    #[error("xprompt catalog layout collision: {0}")]
+    LayoutCollision(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,9 +926,12 @@ impl CatalogLoader {
 
         if project.is_none() {
             for (project_name, workspace) in &self.known_workspaces {
-                for (name, xprompt) in
-                    self.load_project_local_xprompts(project_name, workspace)?
-                {
+                let mut project_xprompts =
+                    self.load_project_local_xprompts(project_name, workspace)?;
+                project_xprompts.extend(
+                    self.load_project_file_xprompts(project_name, workspace)?,
+                );
+                for (name, xprompt) in project_xprompts {
                     let source =
                         xprompt.source_path.clone().unwrap_or_default();
                     if !seen.insert((source, name.clone())) {
@@ -976,12 +985,19 @@ impl CatalogLoader {
         }
         all.extend(self.load_plugin_xprompts()?);
         all.extend(self.load_config_xprompts(project)?);
-        all.extend(self.load_memory_xprompts()?);
-        if let Some(project) = project {
-            all.extend(self.load_project_specific_xprompts(project)?);
-        }
-        for (dir, local) in self.xprompt_search_dirs_low_to_high() {
-            all.extend(self.load_xprompts_from_dir(&dir, project, local)?);
+        for source in self
+            .xprompt_directory_sources(self.root_dir.as_deref(), project)
+            .into_iter()
+            .rev()
+        {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            all.extend(self.load_xprompts_from_dir(
+                path,
+                project,
+                source.project_namespaced,
+            )?);
         }
         Ok(all)
     }
@@ -996,37 +1012,61 @@ impl CatalogLoader {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }
         all.extend(self.load_plugin_workflows()?);
-        if let Some(project) = project {
-            all.extend(self.load_project_specific_workflows(project)?);
-            if let Some(workspace) = self.known_workspaces.get(project) {
-                for xprompt_dir in
-                    [workspace.join(".xprompts"), workspace.join("xprompts")]
-                {
-                    all.extend(self.load_workflows_from_dir(
-                        &xprompt_dir,
-                        Some(project),
-                        true,
-                    )?);
-                }
+        let sources =
+            self.xprompt_directory_sources(self.root_dir.as_deref(), project);
+        for scope in ["home_project", "home"] {
+            for source in sources.iter().rev().filter(|s| s.scope == scope) {
+                let Some(path) = source.path.as_deref().map(Path::new) else {
+                    continue;
+                };
+                all.extend(self.load_workflows_from_dir(
+                    path,
+                    project,
+                    source.project_namespaced,
+                )?);
             }
         }
-        for (dir, local) in self.xprompt_search_dirs_low_to_high() {
-            all.extend(self.load_workflows_from_dir(&dir, project, local)?);
+        if let Some(project) = project {
+            if let Some(workspace) = self.known_workspaces.get(project) {
+                all.extend(
+                    self.load_project_file_workflows(project, workspace)?,
+                );
+            }
+        }
+        for source in sources.iter().rev().filter(|s| s.scope == "project") {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            all.extend(self.load_workflows_from_dir(
+                path,
+                project,
+                source.project_namespaced,
+            )?);
         }
         Ok(all)
     }
 
-    fn xprompt_search_dirs_low_to_high(&self) -> Vec<(PathBuf, bool)> {
-        let mut dirs = Vec::new();
-        if let Some(home) = &self.home_dir {
-            dirs.push((home.join("xprompts"), false));
-            dirs.push((home.join(".xprompts"), false));
-        }
-        if let Some(root) = &self.root_dir {
-            dirs.push((root.join("xprompts"), true));
-            dirs.push((root.join(".xprompts"), true));
-        }
-        dirs
+    fn xprompt_directory_sources(
+        &self,
+        project_root: Option<&Path>,
+        project: Option<&str>,
+    ) -> Vec<XpromptSourceWire> {
+        let home_root =
+            self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        sase_content_layout(project_root, home_root, None, project)
+            .xprompt_sources
+            .into_iter()
+            .filter(|source| {
+                matches!(
+                    source.scope.as_str(),
+                    "project" | "home" | "home_project"
+                ) && (self.home_dir.is_some()
+                    || !matches!(
+                        source.scope.as_str(),
+                        "home" | "home_project"
+                    ))
+            })
+            .collect()
     }
 
     fn load_xprompts_from_dir(
@@ -1125,7 +1165,7 @@ impl CatalogLoader {
         project: Option<&str>,
     ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
         let mut result = BTreeMap::new();
-        for (source, path) in self.config_paths() {
+        for (source, path) in self.config_paths()? {
             let Some(data) = load_yaml_mapping(&path)? else {
                 continue;
             };
@@ -1155,7 +1195,9 @@ impl CatalogLoader {
         Ok(result)
     }
 
-    fn config_paths(&self) -> Vec<(String, PathBuf)> {
+    fn config_paths(
+        &self,
+    ) -> Result<Vec<(String, PathBuf)>, XpromptCatalogLoadError> {
         let mut paths = Vec::new();
         if let Some(path) = &self.default_config_path {
             paths.push(("default_config".to_string(), path.clone()));
@@ -1196,9 +1238,13 @@ impl CatalogLoader {
             }
         }
         if let Some(root) = &self.root_dir {
-            paths.push(("local_config".to_string(), root.join("sase.yml")));
+            if let Some(path) =
+                self.project_config_read_path(root, "project config")?
+            {
+                paths.push(("local_config".to_string(), path));
+            }
         }
-        paths
+        Ok(paths)
     }
 
     fn load_project_local_xprompts(
@@ -1207,7 +1253,14 @@ impl CatalogLoader {
         workspace: &Path,
     ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
         let source = format!("project_local_config:{project}");
-        let Some(data) = load_yaml_mapping(&workspace.join("sase.yml"))? else {
+        let Some(config_path) = self.project_config_read_path(
+            workspace,
+            &format!("project config for {project}"),
+        )?
+        else {
+            return Ok(BTreeMap::new());
+        };
+        let Some(data) = load_yaml_mapping(&config_path)? else {
             return Ok(BTreeMap::new());
         };
         let Some(xprompts) = mapping_get(&data, "xprompts") else {
@@ -1232,91 +1285,51 @@ impl CatalogLoader {
         Ok(result)
     }
 
-    fn load_project_specific_xprompts(
+    fn load_project_file_xprompts(
         &self,
         project: &str,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
-        let Some(home) = &self.home_dir else {
-            return Ok(BTreeMap::new());
-        };
-        self.load_xprompts_from_dir(
-            &home
-                .join(".config")
-                .join("sase")
-                .join("xprompts")
-                .join(project),
-            Some(project),
-            true,
-        )
-    }
-
-    fn load_project_specific_workflows(
-        &self,
-        project: &str,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
-        let Some(home) = &self.home_dir else {
-            return Ok(BTreeMap::new());
-        };
-        self.load_workflows_from_dir(
-            &home
-                .join(".config")
-                .join("sase")
-                .join("xprompts")
-                .join(project),
-            Some(project),
-            true,
-        )
-    }
-
-    fn load_memory_xprompts(
-        &self,
+        workspace: &Path,
     ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
         let mut result = BTreeMap::new();
-        for (dir, cwd_relative) in self.memory_search_dirs_low_to_high() {
-            for path in files_with_extensions(&dir, &["md"])? {
-                let text = match fs::read_to_string(&path) {
-                    Ok(text) => text,
-                    Err(_) => continue,
-                };
-                let (front_matter, _) = parse_front_matter(&text);
-                let Some(front_matter) = front_matter else {
-                    continue;
-                };
-                if mapping_get(&front_matter, "keywords").is_none() {
-                    continue;
-                }
-                let Some(stem) =
-                    path.file_stem().and_then(|stem| stem.to_str())
-                else {
-                    continue;
-                };
-                let cat_path = if cwd_relative {
-                    self.root_dir
-                        .as_ref()
-                        .and_then(|root| path.strip_prefix(root).ok())
-                        .unwrap_or(path.as_path())
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    path.to_string_lossy().into_owned()
-                };
-                let name = format!("memory/long/{stem}");
-                result.insert(
-                    name.clone(),
-                    CatalogXprompt {
-                        name,
-                        content: format!("$(cat {cat_path})"),
-                        inputs: Vec::new(),
-                        local_xprompts: Vec::new(),
-                        source_path: Some(path.to_string_lossy().into_owned()),
-                        tags: BTreeSet::from(["memory".to_string()]),
-                        description: None,
-                        is_skill: false,
-                        snippet: None,
-                    },
-                );
-            }
+        for source in self
+            .xprompt_directory_sources(Some(workspace), Some(project))
+            .into_iter()
+            .rev()
+            .filter(|source| source.scope == "project")
+        {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            result.extend(self.load_xprompts_from_dir(
+                path,
+                Some(project),
+                true,
+            )?);
+        }
+        Ok(result)
+    }
+
+    fn load_project_file_workflows(
+        &self,
+        project: &str,
+        workspace: &Path,
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
+    {
+        let mut result = BTreeMap::new();
+        for source in self
+            .xprompt_directory_sources(Some(workspace), Some(project))
+            .into_iter()
+            .rev()
+            .filter(|source| source.scope == "project")
+        {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            result.extend(self.load_workflows_from_dir(
+                path,
+                Some(project),
+                true,
+            )?);
         }
         Ok(result)
     }
@@ -1325,7 +1338,7 @@ impl CatalogLoader {
         &self,
     ) -> Result<BTreeMap<String, String>, XpromptCatalogLoadError> {
         let mut snippets = BTreeMap::new();
-        for (_source, path) in self.config_paths() {
+        for (_source, path) in self.config_paths()? {
             let Some(data) = load_yaml_mapping(&path)? else {
                 continue;
             };
@@ -1354,26 +1367,19 @@ impl CatalogLoader {
         Ok(snippets)
     }
 
-    fn memory_search_dirs_low_to_high(&self) -> Vec<(PathBuf, bool)> {
-        let mut dirs = Vec::new();
-        if let Some(home) = &self.home_dir {
-            dirs.push((home.join(".codex").join("memory").join("long"), false));
-            dirs.push((
-                home.join(".gemini").join("memory").join("long"),
-                false,
-            ));
-            dirs.push((
-                home.join(".claude").join("memory").join("long"),
-                false,
-            ));
-        }
-        if let Some(root) = &self.root_dir {
-            dirs.push((root.join(".codex").join("memory").join("long"), true));
-            dirs.push((root.join(".gemini").join("memory").join("long"), true));
-            dirs.push((root.join(".claude").join("memory").join("long"), true));
-            dirs.push((root.join("memory").join("long"), true));
-        }
-        dirs
+    fn project_config_read_path(
+        &self,
+        root: &Path,
+        label: &str,
+    ) -> Result<Option<PathBuf>, XpromptCatalogLoadError> {
+        let home_root =
+            self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        let layout = sase_content_layout(Some(root), home_root, None, None);
+        let config = layout
+            .project
+            .expect("explicit project root must produce a project layout")
+            .config;
+        resolve_compatible_read_path(&config, label)
     }
 
     fn classify_source(
@@ -1400,9 +1406,6 @@ impl CatalogLoader {
                 if path_is_under(&path, &package_dir) {
                     return ("built-in".to_string(), None);
                 }
-            }
-            if path.to_string_lossy().contains("memory/long") {
-                return ("memory".to_string(), None);
             }
             for (project, workspace) in &self.known_workspaces {
                 if path_is_under(&path, workspace) {
@@ -1452,6 +1455,9 @@ impl CatalogLoader {
             let config_dir = home.join(".config").join("sase");
             if let Some(rel) = relative_display(&path, &config_dir) {
                 return Some(format!("~/.config/sase/{rel}"));
+            }
+            if let Some(rel) = relative_display(&path, home) {
+                return Some(format!("~/{rel}"));
             }
         }
         None
@@ -1514,13 +1520,21 @@ impl CatalogLoader {
             return self.default_config_path.clone();
         }
         if source == "local_config" {
-            return self.root_dir.as_ref().map(|root| root.join("sase.yml"));
+            return self.root_dir.as_ref().and_then(|root| {
+                self.project_config_read_path(root, "project config")
+                    .ok()
+                    .flatten()
+            });
         }
         if let Some(project) = source.strip_prefix("project_local_config:") {
-            return self
-                .known_workspaces
-                .get(project)
-                .map(|workspace| workspace.join("sase.yml"));
+            return self.known_workspaces.get(project).and_then(|workspace| {
+                self.project_config_read_path(
+                    workspace,
+                    &format!("project config for {project}"),
+                )
+                .ok()
+                .flatten()
+            });
         }
         if source == "config" {
             return self.home_dir.as_ref().map(|home| {
@@ -1558,6 +1572,37 @@ impl CatalogLoader {
         .flatten()
         .collect()
     }
+}
+
+fn resolve_compatible_read_path(
+    compatible: &CompatibleLayoutPathWire,
+    label: &str,
+) -> Result<Option<PathBuf>, XpromptCatalogLoadError> {
+    let candidates = std::iter::once(&compatible.canonical)
+        .chain(compatible.legacy.iter())
+        .map(|entry| PathBuf::from(&entry.path))
+        .collect::<Vec<_>>();
+    let resolution = resolve_layout_candidates(
+        compatible.read_policy,
+        &candidates
+            .iter()
+            .map(|path| path.exists())
+            .collect::<Vec<_>>(),
+    );
+    if resolution.collision {
+        let rendered = resolution
+            .existing_indices
+            .iter()
+            .map(|index| candidates[*index].to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(XpromptCatalogLoadError::LayoutCollision(format!(
+            "{label} exists in multiple canonical/legacy locations: {rendered}; migrate to the canonical path instead of merging split state"
+        )));
+    }
+    Ok(resolution
+        .selected_index
+        .map(|index| candidates[index].clone()))
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -2333,8 +2378,8 @@ mod tests {
     fn loads_markdown_and_workflow_with_canonical_insertions() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join(".xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("swarm.md"),
             "---\nname: swarm\ninput:\n  target: word\ntags: [mentor]\nskill: true\n---\nfirst\n---\nsecond",
@@ -2376,8 +2421,8 @@ mod tests {
     fn filters_step_inputs_and_formats_defaults() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("typed.yml"),
             "input:\n  required_word: word\n  string_default:\n    type: line\n    default: secret\n  null_default:\n    type: text\n    default:\n  count:\n    type: int\n    default: 3\n  enabled:\n    type: bool\n    default: false\nsteps:\n  - name: setup\n    bash: echo hi\n    output: {value: line}\n  - name: main\n    prompt_part: body\n",
@@ -2427,8 +2472,8 @@ mod tests {
     fn parses_xprompt_workflow_and_input_descriptions() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("long.md"),
             "---\ndescription: Long prompt\ninput:\n  - name: prompt\n    type: text\n    description: User request for the prompt.\n---\nBody {{ prompt }}",
@@ -2508,8 +2553,8 @@ mod tests {
     fn parses_markdown_frontmatter_local_xprompts_without_global_entry() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("reads.md"),
             "---\ndescription: Read articles\nxprompts:\n  _article_search_agent:\n    description: Local article helper summary.\n    input:\n      topic:\n        type: word\n        description: Search topic description.\n    content: Search {{ topic }}\n---\n#_article_search_agent(news)\n",
@@ -2559,8 +2604,8 @@ mod tests {
     fn loads_native_snippet_catalog_with_user_overrides() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join(".xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("review.md"),
             "---\nsnippet: true\ndescription: Review code\ninput:\n  language: word\n  focus:\n    type: line\n    default: correctness\n---\nReview this {{ language }} code for {{ focus }}.\nLegacy {2:done} {3}",
@@ -2572,7 +2617,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join("sase.yml"),
+            root.join("sase/sase.yml"),
             "ace:\n  snippets:\n    review: User review $0\n    plan: Plan $1$0\n",
         )
         .unwrap();
@@ -2602,8 +2647,8 @@ mod tests {
     fn converts_native_xprompt_snippet_templates() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("fix.md"),
             "---\nsnippet: fixit\ninput:\n  bug: word\n  area:\n    type: line\n    default: parser\n  empty:\n    type: line\n    default:\n---\nFix {{ bug }} in {{ area }}{{ empty }}. Then {2} or {3:done}.",
@@ -2746,8 +2791,8 @@ mod tests {
     fn native_snippet_catalog_resolves_references_after_user_merge() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let xprompts = root.join("xprompts");
-        fs::create_dir(&xprompts).unwrap();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("helper.md"),
             "---\nsnippet: true\ninput:\n  topic: word\n---\nHelp {{ topic }}",
@@ -2759,7 +2804,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join("sase.yml"),
+            root.join("sase/sase.yml"),
             "ace:\n  snippets:\n    user_snip: User $1$0\n    wrap: \"#[helper(World)] $1$0\"\n",
         )
         .unwrap();
@@ -2783,14 +2828,125 @@ mod tests {
     }
 
     #[test]
+    fn canonical_project_sources_win_with_legacy_read_compatibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("sase/xprompts")).unwrap();
+        fs::create_dir_all(root.join(".xprompts")).unwrap();
+        fs::create_dir_all(root.join("xprompts")).unwrap();
+
+        fs::write(root.join("sase/xprompts/shared.md"), "Canonical body")
+            .unwrap();
+        fs::write(root.join(".xprompts/shared.md"), "Hidden legacy body")
+            .unwrap();
+        fs::write(root.join("xprompts/shared.md"), "Visible legacy body")
+            .unwrap();
+        fs::write(root.join(".xprompts/hidden_only.md"), "Hidden only")
+            .unwrap();
+        fs::write(root.join("xprompts/visible_only.md"), "Visible only")
+            .unwrap();
+        fs::write(
+            root.join("sase/xprompts/flow.yml"),
+            "steps:\n  - name: main\n    prompt_part: Canonical workflow\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".xprompts/flow.yml"),
+            "steps:\n  - name: main\n    prompt_part: Legacy workflow\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase.yml"),
+            "xprompts:\n  legacy_config:\n    content: Legacy config body\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root.clone()),
+            home_dir: None,
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            known_workspaces: BTreeMap::from([(
+                "app".to_string(),
+                root.clone(),
+            )]),
+        };
+
+        let entries = loader.gather_structured_sources(Some("app")).unwrap();
+        let by_name = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(by_name["app/shared"].content, "Canonical body");
+        assert_eq!(by_name["app/hidden_only"].content, "Hidden only");
+        assert_eq!(by_name["app/visible_only"].content, "Visible only");
+        assert_eq!(
+            workflow_prompt_part(&by_name["app/flow"].workflow),
+            "Canonical workflow"
+        );
+        assert_eq!(
+            workflow_prompt_part(&by_name["app/legacy_config"].workflow),
+            "Legacy config body"
+        );
+
+        let shared = structured_entry(by_name["app/shared"], &loader);
+        assert_eq!(
+            shared.source_path_display.as_deref(),
+            Some("sase/xprompts/shared.md")
+        );
+        assert_eq!(
+            shared.definition_path.as_deref(),
+            Some(
+                root.join("sase/xprompts/shared.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn project_config_collision_reports_split_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("sase")).unwrap();
+        fs::write(root.join("sase/sase.yml"), "xprompts: {}\n").unwrap();
+        fs::write(root.join("sase.yml"), "xprompts: {}\n").unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            home_dir: None,
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            known_workspaces: BTreeMap::new(),
+        };
+
+        let error = loader.gather_structured_sources(None).unwrap_err();
+        assert!(matches!(
+            error,
+            XpromptCatalogLoadError::LayoutCollision(message)
+                if message.contains("multiple canonical/legacy")
+                    && message.contains("sase/sase.yml")
+                    && message.contains("sase.yml")
+        ));
+    }
+
+    #[test]
     fn parity_fixture_covers_supported_catalog_sources() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("workspace");
         let home = temp.path().join("home");
         let package = temp.path().join("package");
-        fs::create_dir_all(root.join(".xprompts")).unwrap();
-        fs::create_dir_all(root.join("memory/long")).unwrap();
-        fs::create_dir_all(home.join(".config/sase/xprompts/app")).unwrap();
+        fs::create_dir_all(root.join("sase/xprompts")).unwrap();
+        fs::create_dir_all(home.join("sase/xprompts/app")).unwrap();
         fs::create_dir_all(package.join("xprompts")).unwrap();
         fs::create_dir_all(package.join("xprompts/skills")).unwrap();
         fs::create_dir_all(package.join("default_xprompts")).unwrap();
@@ -2816,23 +2972,19 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join(".xprompts/local.md"),
+            root.join("sase/xprompts/local.md"),
             "---\ninput: {target: word}\n---\nLocal body",
         )
         .unwrap();
-        fs::write(root.join(".xprompts/swarm.md"), "one\n---\ntwo").unwrap();
+        fs::write(root.join("sase/xprompts/swarm.md"), "one\n---\ntwo")
+            .unwrap();
         fs::write(
-            root.join(".xprompts/flow.yml"),
+            root.join("sase/xprompts/flow.yml"),
             "input: {target: word}\nsteps:\n  - name: run\n    agent: Run {{ target }}\n",
         )
         .unwrap();
         fs::write(
-            root.join("memory/long/topic.md"),
-            "---\nkeywords: [topic]\n---\nMemory body",
-        )
-        .unwrap();
-        fs::write(
-            home.join(".config/sase/xprompts/app/project.md"),
+            home.join("sase/xprompts/app/project.md"),
             "---\ndescription: Project prompt\n---\nProject body",
         )
         .unwrap();
@@ -2863,7 +3015,6 @@ mod tests {
         assert!(by_name["sase_plan"].is_skill);
         assert_eq!(by_name["defaulted"].bucket, "built-in");
         assert_eq!(by_name["cfg"].bucket, "config");
-        assert_eq!(by_name["memory/long/topic"].bucket, "memory");
         assert_eq!(by_name["app/local"].project.as_deref(), Some("app"));
         assert_eq!(by_name["app/project"].bucket, "config");
 
@@ -2937,9 +3088,9 @@ mod tests {
         );
         assert_eq!(definition_line(wire_by_name["cfg"]), Some(1));
         assert_eq!(
-            wire_by_name["memory/long/topic"].definition_path.as_deref(),
+            wire_by_name["app/local"].definition_path.as_deref(),
             Some(
-                root.join("memory/long/topic.md")
+                root.join("sase/xprompts/local.md")
                     .canonicalize()
                     .unwrap()
                     .to_str()
@@ -2947,14 +3098,12 @@ mod tests {
             )
         );
         assert_eq!(
-            wire_by_name["app/local"].definition_path.as_deref(),
-            Some(
-                root.join(".xprompts/local.md")
-                    .canonicalize()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            )
+            wire_by_name["app/local"].source_path_display.as_deref(),
+            Some("sase/xprompts/local.md")
+        );
+        assert_eq!(
+            wire_by_name["app/project"].source_path_display.as_deref(),
+            Some("~/sase/xprompts/app/project.md")
         );
     }
 
@@ -2966,7 +3115,7 @@ mod tests {
         let package = temp.path().join("package");
         let plugin_prompts = temp.path().join("plugin").join("xprompts");
         let plugin_config = temp.path().join("plugin_config");
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("sase")).unwrap();
         fs::create_dir_all(home.join(".config/sase")).unwrap();
         fs::create_dir_all(package.join("xprompts")).unwrap();
         fs::create_dir_all(package.join("default_xprompts")).unwrap();
@@ -2991,7 +3140,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            root.join("sase.yml"),
+            root.join("sase/sase.yml"),
             "xprompts:\n  plug_cfg:\n    content: Local override body\n",
         )
         .unwrap();
@@ -3058,7 +3207,7 @@ mod tests {
         assert_eq!(
             wire_by_name["plug_cfg"].definition_path.as_deref(),
             Some(
-                root.join("sase.yml")
+                root.join("sase/sase.yml")
                     .canonicalize()
                     .unwrap()
                     .to_str()
@@ -3074,12 +3223,12 @@ mod tests {
         let root = temp.path().join("workspace");
         let home = temp.path().join("home");
         let project_workspace = temp.path().join("project");
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("sase")).unwrap();
         fs::create_dir_all(home.join(".config/sase")).unwrap();
-        fs::create_dir_all(project_workspace.join("xprompts")).unwrap();
+        fs::create_dir_all(project_workspace.join("sase/xprompts")).unwrap();
 
         fs::write(
-            root.join("sase.yml"),
+            root.join("sase/sase.yml"),
             "xprompts:\n  local_xp:\n    content: Local config xprompt body\nworkflows:\n  local_flow:\n    steps:\n      - name: run\n        prompt_part: Local config workflow body\n",
         )
         .unwrap();
@@ -3089,7 +3238,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            project_workspace.join("xprompts/file_flow.yml"),
+            project_workspace.join("sase/xprompts/file_flow.yml"),
             "steps:\n  - name: run\n    prompt_part: File-backed workflow body\n",
         )
         .unwrap();
@@ -3143,10 +3292,15 @@ mod tests {
     fn computes_known_project_local_config_definition_range() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("sase/xprompts")).unwrap();
         fs::write(
-            workspace.join("sase.yml"),
+            workspace.join("sase/sase.yml"),
             "xprompts:\n  project_cfg:\n    content: Project body\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("sase/xprompts/project_file.md"),
+            "Project file body",
         )
         .unwrap();
 
@@ -3173,12 +3327,16 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "app/project_cfg")
             .unwrap();
+        let file_entry = wire_entries
+            .iter()
+            .find(|entry| entry.name == "app/project_file")
+            .unwrap();
 
         assert_eq!(
             entry.definition_path.as_deref(),
             Some(
                 workspace
-                    .join("sase.yml")
+                    .join("sase/sase.yml")
                     .canonicalize()
                     .unwrap()
                     .to_str()
@@ -3186,6 +3344,21 @@ mod tests {
             )
         );
         assert_eq!(definition_line(entry), Some(1));
+        assert_eq!(
+            file_entry.source_path_display.as_deref(),
+            Some("sase/xprompts/project_file.md")
+        );
+        assert_eq!(
+            file_entry.definition_path.as_deref(),
+            Some(
+                workspace
+                    .join("sase/xprompts/project_file.md")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            )
+        );
     }
 
     #[test]

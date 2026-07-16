@@ -93,7 +93,7 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     ),
     (
         "keywords",
-        "Defines dynamic-memory keywords. They are matched when tags include `memory` or the file is under `memory/long`.",
+        "Defines dynamic-memory keywords. They are matched when tags include `memory` or the file is under `sase/memory/`.",
     ),
     (
         "xprompts",

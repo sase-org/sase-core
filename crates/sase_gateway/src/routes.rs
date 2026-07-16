@@ -3201,7 +3201,9 @@ mod tests {
                         }],
                         is_skill: false,
                         content_preview: Some("Use gh".to_string()),
-                        source_path_display: Some("xprompts/gh.md".to_string()),
+                        source_path_display: Some(
+                            "sase/xprompts/gh.md".to_string(),
+                        ),
                         definition_path: None,
                         definition_range: None,
                     }],

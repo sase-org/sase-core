@@ -42,7 +42,7 @@ impl DocumentSnapshot {
     pub fn has_implicit_memory_tag(&self) -> bool {
         self.source_path
             .as_deref()
-            .is_some_and(is_memory_long_markdown_path)
+            .is_some_and(is_memory_markdown_path)
     }
 
     pub fn line_count(&self) -> usize {
@@ -122,20 +122,14 @@ impl DocumentSnapshot {
     }
 }
 
-fn is_memory_long_markdown_path(path: &Path) -> bool {
+fn is_memory_markdown_path(path: &Path) -> bool {
     if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
         return false;
     }
     path.parent().is_some_and(|parent| {
-        let mut previous_was_memory = false;
-        for component in parent.components() {
-            let name = component_name(component);
-            if previous_was_memory && name == Some("long") {
-                return true;
-            }
-            previous_was_memory = name == Some("memory");
-        }
-        false
+        parent
+            .components()
+            .any(|component| component_name(component) == Some("memory"))
     })
 }
 
@@ -400,26 +394,26 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_memory_long_markdown_source_paths() {
+    fn recognizes_canonical_and_legacy_memory_markdown_source_paths() {
         assert!(DocumentSnapshot::with_source_path(
             "body",
-            "/repo/memory/long/generated_skills.md"
+            "/repo/sase/memory/generated_skills.md"
         )
         .has_implicit_memory_tag());
         assert!(DocumentSnapshot::with_source_path(
             "body",
-            "/repo/.sase/memory/long/generated_skills.md"
+            "/repo/memory/generated_skills.md"
         )
         .has_implicit_memory_tag());
         assert!(!DocumentSnapshot::new("body").has_implicit_memory_tag());
         assert!(!DocumentSnapshot::with_source_path(
             "body",
-            "/repo/memory/longer/generated_skills.md"
+            "/repo/memories/generated_skills.md"
         )
         .has_implicit_memory_tag());
         assert!(!DocumentSnapshot::with_source_path(
             "body",
-            "/repo/memory/long/generated_skills.txt"
+            "/repo/sase/memory/generated_skills.txt"
         )
         .has_implicit_memory_tag());
     }

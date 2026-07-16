@@ -451,7 +451,7 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
             "method": "textDocument/didOpen",
             "params": {
                 "textDocument": {
-                    "uri": "file:///tmp/xprompts/bad_pick_plan_xprompt.md",
+                    "uri": "file:///tmp/sase/xprompts/bad_pick_plan_xprompt.md",
                     "languageId": "markdown",
                     "version": 1,
                     "text": "---\nowner: me\ninput:\n  target: wordd\nsnippet: bad-trigger!\nkeywords: [topic]\nskill: true\n---\nBody"

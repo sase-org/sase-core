@@ -1937,7 +1937,13 @@ mod tests {
     fn document_eligibility_narrows_plain_markdown() {
         let temp = std::env::temp_dir();
         let config = ServerConfig::default();
-        let xprompts_uri =
+        let canonical_xprompts_uri = file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("xprompts")
+                .join("foo.md"),
+        );
+        let legacy_xprompts_uri =
             file_uri(temp.join("project").join("xprompts").join("foo.md"));
         let dot_xprompts_uri =
             file_uri(temp.join("project").join(".xprompts").join("foo.md"));
@@ -1958,7 +1964,12 @@ mod tests {
                 .join("memory_system_prior_art.md"),
         );
 
-        assert!(document_eligible(&xprompts_uri, "markdown", &config));
+        assert!(document_eligible(
+            &canonical_xprompts_uri,
+            "markdown",
+            &config
+        ));
+        assert!(document_eligible(&legacy_xprompts_uri, "markdown", &config));
         assert!(document_eligible(&dot_xprompts_uri, "markdown", &config));
         assert!(document_eligible(
             &default_xprompts_uri,
@@ -1982,7 +1993,13 @@ mod tests {
     #[test]
     fn catalog_invalidation_tracks_xprompt_source_dirs() {
         let temp = std::env::temp_dir();
-        let xprompts_uri =
+        let canonical_xprompts_uri = file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("xprompts")
+                .join("foo.md"),
+        );
+        let legacy_xprompts_uri =
             file_uri(temp.join("project").join("xprompts").join("foo.md"));
         let dot_xprompts_uri =
             file_uri(temp.join("project").join(".xprompts").join("foo.md"));
@@ -2001,7 +2018,8 @@ mod tests {
                 .join("memory_system_prior_art.md"),
         );
 
-        assert!(should_invalidate_for_uri(&xprompts_uri));
+        assert!(should_invalidate_for_uri(&canonical_xprompts_uri));
+        assert!(should_invalidate_for_uri(&legacy_xprompts_uri));
         assert!(should_invalidate_for_uri(&dot_xprompts_uri));
         assert!(should_invalidate_for_uri(&default_xprompts_uri));
         assert!(!should_invalidate_for_uri(&prose_uri));
@@ -2547,16 +2565,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diagnostics_for_uri_text_honors_memory_long_file_uri() {
+    async fn diagnostics_for_uri_text_honors_canonical_memory_file_uri() {
         let temp = tempfile::tempdir().unwrap();
-        let memory_dir = temp.path().join("memory").join("long");
+        let memory_dir = temp.path().join("sase/memory");
         fs::create_dir_all(&memory_dir).unwrap();
         let memory_uri =
             Uri::from_file_path(memory_dir.join("generated_skills.md"))
                 .unwrap();
-        let normal_uri =
-            Uri::from_file_path(temp.path().join("xprompts").join("foo.md"))
-                .unwrap();
+        let normal_uri = Uri::from_file_path(
+            temp.path().join("sase/xprompts").join("foo.md"),
+        )
+        .unwrap();
         let text = "---\nkeywords: [topic]\n---\nBody".to_string();
 
         let (service, _) = LspService::new(|client| {
@@ -2592,9 +2611,10 @@ mod tests {
     #[tokio::test]
     async fn diagnostics_for_uri_text_accepts_markdown_local_xprompts() {
         let temp = tempfile::tempdir().unwrap();
-        let uri =
-            Uri::from_file_path(temp.path().join("xprompts").join("reads.md"))
-                .unwrap();
+        let uri = Uri::from_file_path(
+            temp.path().join("sase/xprompts").join("reads.md"),
+        )
+        .unwrap();
         let text = "---\nxprompts:\n  _article_search_agent:\n    input:\n      topic: word\n    content: Search {{ topic }}\n---\n#_article_search_agent(news)\n"
             .to_string();
 
@@ -2656,7 +2676,8 @@ mod tests {
     #[tokio::test]
     async fn definition_preserves_catalog_definition_range() {
         let temp = tempfile::tempdir().unwrap();
-        let source_path = temp.path().join("sase.yml");
+        let source_path = temp.path().join("sase/sase.yml");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::write(&source_path, "xprompts:\n  foo:\n    content: body\n")
             .unwrap();
         let mut entry = catalog_entry(

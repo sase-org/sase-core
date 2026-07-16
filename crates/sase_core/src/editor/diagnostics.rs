@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_long_source_path_supplies_implicit_memory_tag() {
+    fn canonical_memory_source_path_supplies_implicit_memory_tag() {
         let text = "---\nkeywords: [topic]\n---\nBody";
         let diagnostics = diagnostics_for(text);
         assert_eq!(
@@ -1041,7 +1041,7 @@ mod tests {
 
         let doc = DocumentSnapshot::with_source_path(
             text,
-            "/repo/memory/long/generated_skills.md",
+            "/repo/sase/memory/generated_skills.md",
         );
         let diagnostics = analyze_document(&doc, &catalog());
         assert!(
@@ -1054,7 +1054,7 @@ mod tests {
 
         let invalid_doc = DocumentSnapshot::with_source_path(
             "---\nkeywords: [{}]\n---\nBody",
-            "/repo/memory/long/generated_skills.md",
+            "/repo/sase/memory/generated_skills.md",
         );
         let diagnostics = analyze_document(&invalid_doc, &catalog());
         assert_eq!(

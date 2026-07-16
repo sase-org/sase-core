@@ -1625,8 +1625,12 @@ mod tests {
                 ],
                 is_skill: false,
                 content_preview: Some("review body".to_string()),
-                source_path_display: Some("xprompts/review.md".to_string()),
-                definition_path: Some("/tmp/xprompts/review.md".to_string()),
+                source_path_display: Some(
+                    "sase/xprompts/review.md".to_string(),
+                ),
+                definition_path: Some(
+                    "/tmp/sase/xprompts/review.md".to_string(),
+                ),
                 definition_range: None,
             },
             EditorXpromptCatalogEntryWire {
