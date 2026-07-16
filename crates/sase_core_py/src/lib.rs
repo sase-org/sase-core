@@ -3862,6 +3862,39 @@ mod tests {
             assert_eq!(value["plan"]["title"], json!("Binding parity"));
             assert_eq!(value["plan"]["phases"][0]["depends_on"], json!([]));
 
+            let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\n---\n# Plan\nImplement it.\n";
+            let tale_result = py_plan_validate(py, tale, "tale").unwrap();
+            let tale_value = py_to_json_value(tale_result.bind(py)).unwrap();
+            assert_eq!(tale_value["ok"], json!(true));
+            assert_eq!(
+                tale_value["plan"]["title"],
+                json!("Tale binding parity")
+            );
+
+            for (tier, extra) in [
+                ("tale", ""),
+                (
+                    "epic",
+                    "phases:\n  - id: core\n    title: Core\n    depends_on: []\n",
+                ),
+            ] {
+                for title_line in ["", "title: ''\n", "title: 42\n"] {
+                    let invalid = format!(
+                        "---\ntier: {tier}\n{title_line}goal: outcome\n{extra}---\nbody\n"
+                    );
+                    let invalid_result =
+                        py_plan_validate(py, &invalid, tier).unwrap();
+                    let invalid_value =
+                        py_to_json_value(invalid_result.bind(py)).unwrap();
+                    assert_eq!(invalid_value["ok"], json!(false));
+                    assert!(invalid_value["diagnostics"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|diagnostic| diagnostic["field_path"] == "title"));
+                }
+            }
+
             let schema = py_plan_frontmatter_schema(py, "epic").unwrap();
             let schema_value = py_to_json_value(schema.bind(py)).unwrap();
             assert_eq!(schema_value[0]["name"], json!("tier"));
@@ -3871,6 +3904,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|field| { field["name"] == json!("phases[].model") }));
+            let tale_schema = py_plan_frontmatter_schema(py, "tale").unwrap();
+            let tale_schema_value =
+                py_to_json_value(tale_schema.bind(py)).unwrap();
+            assert_eq!(tale_schema_value[1]["name"], json!("title"));
+            assert_eq!(tale_schema_value[1]["required"], json!(true));
 
             let error = py_plan_validate(py, content, "story").unwrap_err();
             assert!(error.to_string().contains("unsupported plan tier"));

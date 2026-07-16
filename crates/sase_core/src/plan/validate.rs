@@ -16,9 +16,9 @@ use crate::bead::validate_model_value;
 use super::read::split_frontmatter;
 use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 
-const COMMON_FIELDS: &[&str] = &["tier", "goal", "model"];
+const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
 const SYSTEM_FIELDS: &[&str] = &["create_time", "status", "prompt", "bead_id"];
-const EPIC_FIELDS: &[&str] = &["title", "phases", "changespec", "bug_id"];
+const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id"];
 const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "model"];
 
@@ -124,6 +124,16 @@ pub fn plan_frontmatter_schema(
             json!(tier.as_str()),
         ),
         field_spec(
+            "title",
+            "non-empty string",
+            true,
+            "Human-readable plan title.",
+            json!(match tier {
+                PlanTier::Tale => "Ship the requested capability",
+                PlanTier::Epic => "Workspace GC rewrite",
+            }),
+        ),
+        field_spec(
             "goal",
             "non-empty string",
             true,
@@ -144,13 +154,6 @@ pub fn plan_frontmatter_schema(
 
     if tier == PlanTier::Epic {
         fields.extend([
-            field_spec(
-                "title",
-                "non-empty string",
-                true,
-                "Title used for the epic plan bead.",
-                json!("Workspace GC rewrite"),
-            ),
             field_spec(
                 "phases",
                 "non-empty list of phase mappings",
@@ -322,14 +325,13 @@ impl<'a> Validator<'a> {
 
         self.validate_top_level_keys(mapping, &index);
         let authored_tier = self.validate_tier(mapping, &index);
+        let title = self.required_non_empty_string(mapping, "title", &index);
         let goal = self.required_non_empty_string(mapping, "goal", &index);
         let model = self.optional_model(mapping, "model", &index);
 
-        let (title, phases, changespec, bug_id) = match self.tier {
-            PlanTier::Tale => (None, Vec::new(), None, None),
+        let (phases, changespec, bug_id) = match self.tier {
+            PlanTier::Tale => (Vec::new(), None, None),
             PlanTier::Epic => {
-                let title =
-                    self.required_non_empty_string(mapping, "title", &index);
                 let changespec = self.optional_non_empty_string(
                     mapping,
                     "changespec",
@@ -348,7 +350,7 @@ impl<'a> Validator<'a> {
                     );
                 }
                 let phases = self.validate_phases(mapping, &index);
-                (title, phases, changespec, bug_id)
+                (phases, changespec, bug_id)
             }
         };
 
@@ -1074,7 +1076,7 @@ mod tests {
     }
 
     fn valid_tale() -> &'static str {
-        "---\ntier: tale\ngoal: Ship the feature\n---\n# Plan\nDo it.\n"
+        "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n# Plan\nDo it.\n"
     }
 
     fn valid_epic() -> &'static str {
@@ -1083,7 +1085,7 @@ mod tests {
 
     #[test]
     fn valid_tale_returns_normalized_plan_and_accepts_system_fields() {
-        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead_id: 42\ntier: tale\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
+        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert!(result.diagnostics.is_empty());
@@ -1094,7 +1096,7 @@ mod tests {
                 tier: "tale".to_string(),
                 goal: "Ship the feature".to_string(),
                 model: Some("codex/gpt-5.6-sol".to_string()),
-                title: None,
+                title: Some("Ship the feature".to_string()),
                 phases: Vec::new(),
                 changespec: None,
                 bug_id: None,
@@ -1120,13 +1122,14 @@ mod tests {
         assert_eq!(codes(&not_mapping), ["frontmatter-not-mapping"]);
 
         let empty_body =
-            plan_validate("---\ntier: tale\ngoal: x\n---\n", "tale").unwrap();
+            plan_validate("---\ntier: tale\ntitle: x\ngoal: x\n---\n", "tale")
+                .unwrap();
         assert_eq!(codes(&empty_body), ["body-empty"]);
     }
 
     #[test]
     fn common_field_rules_report_together_with_locations() {
-        let content = "---\ntier: epic\ngoal: '   '\nmodel: |\n  bad\n  model\ntyop: value\n---\n# Plan\n";
+        let content = "---\ntier: epic\ntitle: Plan title\ngoal: '   '\nmodel: |\n  bad\n  model\ntyop: value\n---\n# Plan\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(!result.ok);
         assert_eq!(
@@ -1139,42 +1142,70 @@ mod tests {
             ]
         );
         assert_eq!(result.diagnostics[0].field_path, "tyop");
-        assert_eq!(result.diagnostics[0].line, Some(7));
+        assert_eq!(result.diagnostics[0].line, Some(8));
         assert!(result.plan.is_none());
     }
 
     #[test]
     fn missing_wrong_type_and_invalid_tier_are_distinct() {
-        let content = "---\ntier: story\ngoal: [not, text]\n---\nbody\n";
+        let content =
+            "---\ntier: story\ntitle: Plan title\ngoal: [not, text]\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert_eq!(codes(&result), ["tier-invalid", "type-mismatch"]);
 
         let missing =
             plan_validate("---\nstatus: wip\n---\nbody\n", "tale").unwrap();
-        assert_eq!(codes(&missing), ["required-missing", "required-missing"]);
+        assert_eq!(
+            codes(&missing),
+            ["required-missing", "required-missing", "required-missing"]
+        );
         assert_eq!(missing.diagnostics[0].field_path, "tier");
-        assert_eq!(missing.diagnostics[1].field_path, "goal");
+        assert_eq!(missing.diagnostics[1].field_path, "title");
+        assert_eq!(missing.diagnostics[2].field_path, "goal");
     }
 
     #[test]
     fn tale_epic_fields_are_inert_warnings() {
-        let content = "---\ntier: tale\ngoal: Small outcome\ntitle: Ignored\nphases: nonsense\nchangespec: ''\nbug_id: nope\n---\nbody\n";
+        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\nchangespec: ''\nbug_id: nope\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert_eq!(
             codes(&result),
-            [
-                "tale-inert-field",
-                "tale-inert-field",
-                "tale-inert-field",
-                "tale-inert-field"
-            ]
+            ["tale-inert-field", "tale-inert-field", "tale-inert-field"]
         );
         assert!(result
             .diagnostics
             .iter()
             .all(|diagnostic| diagnostic.severity == "warning"));
         assert!(result.plan.is_some());
+    }
+
+    #[test]
+    fn both_tiers_require_a_non_empty_string_title() {
+        for (tier, extra) in [
+            ("tale", ""),
+            (
+                "epic",
+                "phases:\n  - id: core\n    title: Core\n    depends_on: []\n",
+            ),
+        ] {
+            for (title_line, expected_code) in [
+                ("", "required-missing"),
+                ("title: '   '\n", "value-empty"),
+                ("title: [not, text]\n", "type-mismatch"),
+            ] {
+                let content = format!(
+                    "---\ntier: {tier}\n{title_line}goal: outcome\n{extra}---\nbody\n"
+                );
+                let result = plan_validate(&content, tier).unwrap();
+                assert!(!result.ok, "{tier}: {title_line:?}");
+                assert!(result.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.field_path == "title"
+                        && diagnostic.code == expected_code
+                        && diagnostic.line.is_some()
+                }));
+            }
+        }
     }
 
     #[test]
@@ -1297,6 +1328,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "tier",
+                "title",
                 "goal",
                 "model",
                 "create_time",
