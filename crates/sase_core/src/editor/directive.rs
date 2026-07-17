@@ -1,6 +1,18 @@
 use super::wire::{CompletionCandidate, CompletionList, DirectiveMetadata};
 use crate::effort::EFFORT_LEVELS_ORDERED;
 
+const AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS: &[(&str, &str)] = &[
+    ("plan", "Plan-gate compatibility alias for normal approval"),
+    (
+        "tale",
+        "Plan-gate compatibility alias for SDD tale approval",
+    ),
+    (
+        "epic",
+        "Plan-gate compatibility alias for SDD epic approval",
+    ),
+];
+
 pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "model",
@@ -37,7 +49,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         name: "auto",
         alias: Some("a"),
         description:
-            "Auto-approve the submitted plan as plan (default), tale, or epic",
+            "Request automatic gate resolution; arguments are interpreted by the gate kind",
         takes_argument: true,
         allows_multiple: false,
     },
@@ -154,11 +166,10 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("false", "Disable xprompt expansion"),
             ("true", "Enable xprompt expansion"),
         ],
-        "auto" => &[
-            ("plan", "Auto-approve as a normal plan"),
-            ("tale", "Auto-approve and commit as an SDD tale"),
-            ("epic", "Auto-approve and commit as an SDD epic"),
-        ],
+        // These are compatibility suggestions for plan workflows, not an
+        // exhaustive parser vocabulary. The runtime gate adapter owns argument
+        // validation and may accept a different value for another gate kind.
+        "auto" => AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS,
         "hide" => &[],
         "wait" => &[
             ("agent", "Wait for an agent or workflow"),
@@ -251,18 +262,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_is_the_advertised_auto_approve_directive() {
+    fn auto_metadata_describes_gate_owned_resolution_and_offers_compatibility_suggestions(
+    ) {
         let auto = directive_metadata("auto").expect("auto metadata");
         assert_eq!(auto.alias, Some("a"));
         assert!(auto.takes_argument);
         assert!(
-            auto.description.contains("plan")
-                && auto.description.contains("tale")
-                && auto.description.contains("epic"),
-            "auto description should describe plan/tale/epic modes: {}",
+            auto.description.contains("gate kind"),
+            "auto description should assign validation to the gate kind: {}",
             auto.description
         );
 
+        // These insertions stay aligned with Python's
+        // AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS. They are suggestions, not a
+        // universal runtime allowlist.
         let candidates = directive_argument_candidates("auto").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
