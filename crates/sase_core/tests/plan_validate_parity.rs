@@ -37,7 +37,15 @@ fn plan_validate_matches_python_facade_fixture() {
     let python_facade_fixture: Value = json!({
         "schema_version": 2,
         "ok": true,
-        "diagnostics": [],
+        "diagnostics": [
+            {
+                "severity": "warning",
+                "code": "phase-description-missing",
+                "field_path": "phases[0].description",
+                "message": "phase `core` has no `description`; add one naming its plan-body section and briefly summarizing that section",
+                "line": 9
+            }
+        ],
         "plan": {
             "tier": "epic",
             "goal": "Stale workspaces are collected safely",

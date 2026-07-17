@@ -22,6 +22,7 @@ const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id"];
 const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "model"];
 
+const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
 const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Only set this explicitly when the user's prompt requested a specific model, or when this phase's agent does not do real consequential work (for example, a phase that exercises or tests the feature's own functionality). Otherwise omit it so the configured `@phase_worker` role alias applies.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,8 +191,8 @@ pub fn plan_frontmatter_schema(
                 "phases[].description",
                 "string",
                 false,
-                "Phase bead description. A deterministic plan pointer is generated when omitted.",
-                json!("Implement the shared validation engine."),
+                PHASE_DESCRIPTION_DESCRIPTION,
+                json!("'Core validator' section: build the shared validation engine and its JSON wire."),
             ),
             field_spec(
                 "phases[].model",
@@ -576,6 +577,19 @@ impl<'a> Validator<'a> {
             let depends_on =
                 self.validate_dependencies(phase, phase_index, &ids, index);
             let description_path = format!("{phase_path}.description");
+            if mapping_value(phase, "description").is_none() {
+                let phase_id =
+                    ids[phase_index].as_deref().unwrap_or("<unknown>");
+                self.push(
+                    "warning",
+                    "phase-description-missing",
+                    &description_path,
+                    format!(
+                        "phase `{phase_id}` has no `description`; add one naming its plan-body section and briefly summarizing that section"
+                    ),
+                    index,
+                );
+            }
             let description = self.optional_string_at(
                 phase,
                 "description",
@@ -1080,7 +1094,7 @@ mod tests {
     }
 
     fn valid_epic() -> &'static str {
-        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Exercise the binding\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
+        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
     }
 
     #[test]
@@ -1212,6 +1226,7 @@ mod tests {
     fn valid_epic_returns_all_normalized_fields() {
         let result = plan_validate(valid_epic(), "epic").unwrap();
         assert!(result.ok, "{:?}", result.diagnostics);
+        assert!(result.diagnostics.is_empty());
         let plan = result.plan.unwrap();
         assert_eq!(plan.title.as_deref(), Some("Validation engine"));
         assert_eq!(plan.changespec.as_deref(), Some("plan_validate"));
@@ -1219,6 +1234,43 @@ mod tests {
         assert_eq!(plan.phases.len(), 2);
         assert_eq!(plan.phases[1].depends_on, ["core"]);
         assert_eq!(plan.phases[1].model.as_deref(), Some("claude/haiku"));
+    }
+
+    #[test]
+    fn missing_phase_description_warns_without_changing_the_plan() {
+        let content = "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n---\n# Plan\nImplement it.\n";
+        let result = plan_validate(content, "epic").unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.schema_version, PLAN_WIRE_SCHEMA_VERSION);
+        assert_eq!(
+            result.diagnostics,
+            [PlanDiagnosticWire {
+                severity: "warning".to_string(),
+                code: "phase-description-missing".to_string(),
+                field_path: "phases[0].description".to_string(),
+                message: "phase `core` has no `description`; add one naming its plan-body section and briefly summarizing that section".to_string(),
+                line: Some(6),
+            }]
+        );
+        assert_eq!(
+            result.plan,
+            Some(ValidatedPlanWire {
+                tier: "epic".to_string(),
+                goal: "Plans validate deterministically".to_string(),
+                model: None,
+                title: Some("Validation engine".to_string()),
+                phases: vec![PlanPhaseWire {
+                    id: "core".to_string(),
+                    title: "Core validator".to_string(),
+                    depends_on: Vec::new(),
+                    description: None,
+                    model: None,
+                }],
+                changespec: None,
+                bug_id: None,
+            })
+        );
     }
 
     #[test]
@@ -1253,7 +1305,8 @@ mod tests {
                 "phase-type-mismatch",
                 "unknown-key",
                 "required-missing",
-                "required-missing"
+                "required-missing",
+                "phase-description-missing"
             ]
         );
         assert_eq!(result.diagnostics[1].field_path, "phases[1].surprise");
@@ -1314,13 +1367,14 @@ mod tests {
                 "value-empty",
                 "type-mismatch",
                 "value-empty",
+                "phase-description-missing",
                 "value-empty"
             ]
         );
     }
 
     #[test]
-    fn schema_is_ordered_and_contains_exact_phase_model_guidance() {
+    fn schema_is_ordered_and_contains_exact_phase_guidance() {
         let tale = plan_frontmatter_schema("tale").unwrap();
         assert_eq!(
             tale.iter()
@@ -1338,6 +1392,18 @@ mod tests {
             ]
         );
         let epic = plan_frontmatter_schema("epic").unwrap();
+        let phase_description = epic
+            .iter()
+            .find(|field| field.name == "phases[].description")
+            .unwrap();
+        assert_eq!(
+            phase_description.description,
+            PHASE_DESCRIPTION_DESCRIPTION
+        );
+        assert_eq!(
+            phase_description.example,
+            json!("'Core validator' section: build the shared validation engine and its JSON wire.")
+        );
         let phase_model = epic
             .iter()
             .find(|field| field.name == "phases[].model")

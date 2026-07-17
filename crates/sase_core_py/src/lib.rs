@@ -4078,7 +4078,7 @@ mod tests {
     fn plan_validation_bindings_round_trip_json_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n---\n# Plan\nImplement it.\n";
+            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n    description: Core work section exercises binding parity.\n---\n# Plan\nImplement it.\n";
             let result = py_plan_validate(py, content, "epic").unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
             assert_eq!(value["schema_version"], json!(2));
@@ -4100,7 +4100,7 @@ mod tests {
                 ("tale", ""),
                 (
                     "epic",
-                    "phases:\n  - id: core\n    title: Core\n    depends_on: []\n",
+                    "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section exercises title validation.\n",
                 ),
             ] {
                 for title_line in ["", "title: ''\n", "title: 42\n"] {
