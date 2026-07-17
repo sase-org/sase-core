@@ -17,6 +17,7 @@
 //! - `rebuild_agent_artifact_index(index_path: str, projects_root: str, options: dict | None = None) -> dict`
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
+//! - `delete_agent_artifact_index_row_bounded(index_path: str, artifact_dir: str, busy_timeout_ms: int) -> dict`
 //! - `terminalize_stale_active_agent_artifact_index_rows(index_path: str, projects_root: str, stale_after_seconds: int, max_rows: int | None = None, options: dict | None = None) -> dict`
 //! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict]) -> dict`
 //! - `read_agent_artifact_index_meta(index_path: str, key: str) -> str | None`
@@ -182,6 +183,7 @@ use sase_core::agent_scan::{
     canonical_agent_artifact_path as core_canonical_agent_artifact_path,
     collect_workflow_artifact_candidates as core_collect_workflow_artifact_candidates,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
+    delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     query_agent_artifact_index as core_query_agent_artifact_index,
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
@@ -839,6 +841,32 @@ fn py_delete_agent_artifact_index_row<'py>(
     let update = py
         .allow_threads(|| {
             core_delete_agent_artifact_index_row(&index, &artifact)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Delete one artifact row using a bounded SQLite busy timeout.
+#[pyfunction]
+#[pyo3(name = "delete_agent_artifact_index_row_bounded")]
+fn py_delete_agent_artifact_index_row_bounded<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    artifact_dir: &str,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let artifact = PathBuf::from(artifact_dir);
+    let update = py
+        .allow_threads(|| {
+            core_delete_agent_artifact_index_row_with_busy_timeout(
+                &index,
+                &artifact,
+                Duration::from_millis(busy_timeout_ms),
+            )
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&update).map_err(|e| {
@@ -3794,6 +3822,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rebuild_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_index_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifact_index_row, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_delete_agent_artifact_index_row_bounded,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_terminalize_stale_active_agent_artifact_index_rows,
         m

@@ -45,6 +45,7 @@ const TERMINAL_WORKFLOW_STATUSES: &[&str] =
 const MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS: usize = 128;
 const MAX_RELATED_ARTIFACT_QUERY_ITERATIONS: usize = 32;
 const ABANDONED_DONE_OUTCOME: &str = "abandoned";
+const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Query knobs for the persistent artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +167,20 @@ pub fn delete_agent_artifact_index_row(
     index_path: &Path,
     artifact_dir: &Path,
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
-    let conn = open_index(index_path)?;
+    delete_agent_artifact_index_row_with_busy_timeout(
+        index_path,
+        artifact_dir,
+        DEFAULT_INDEX_BUSY_TIMEOUT,
+    )
+}
+
+/// Delete one artifact row with a caller-supplied SQLite contention window.
+pub fn delete_agent_artifact_index_row_with_busy_timeout(
+    index_path: &Path,
+    artifact_dir: &Path,
+    busy_timeout: Duration,
+) -> Result<AgentArtifactIndexUpdateWire, String> {
+    let conn = open_index_with_busy_timeout(index_path, busy_timeout)?;
     let artifact_dir =
         resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
     let deleted = conn
@@ -561,12 +575,18 @@ pub fn query_related_agent_artifact_dirs(
 }
 
 fn open_index(index_path: &Path) -> Result<Connection, String> {
+    open_index_with_busy_timeout(index_path, DEFAULT_INDEX_BUSY_TIMEOUT)
+}
+
+fn open_index_with_busy_timeout(
+    index_path: &Path,
+    busy_timeout: Duration,
+) -> Result<Connection, String> {
     if let Some(parent) = index_path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let mut conn = Connection::open(index_path).map_err(|e| e.to_string())?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
@@ -2226,6 +2246,45 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn bounded_artifact_index_delete_skips_locked_database() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260504121212");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "active", "pid": 123}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        upsert_agent_artifact_index_row(
+            &index,
+            &projects,
+            &artifact_dir,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let blocker = Connection::open(&index).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = delete_agent_artifact_index_row_with_busy_timeout(
+            &index,
+            &artifact_dir,
+            Duration::from_millis(10),
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+
+        assert!(result.is_err());
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire::default(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
     }
 
     #[test]

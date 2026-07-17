@@ -111,7 +111,8 @@ pub use agent_name_template::{
 pub use agent_scan::{
     agent_artifact_index_status, canonical_agent_artifact_path,
     collect_workflow_artifact_candidates, delete_agent_artifact_index_row,
-    is_artifact_timestamp, is_day_sharded_workflow, is_supported_workflow_dir,
+    delete_agent_artifact_index_row_with_busy_timeout, is_artifact_timestamp,
+    is_day_sharded_workflow, is_supported_workflow_dir,
     legacy_agent_artifact_path, parse_agent_artifact_path,
     query_agent_artifact_index, query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta, rebuild_agent_artifact_index,
