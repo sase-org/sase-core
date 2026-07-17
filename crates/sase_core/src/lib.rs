@@ -32,6 +32,7 @@ pub mod query;
 pub mod sections;
 pub mod status;
 pub mod suffix;
+pub mod telemetry;
 pub mod vcs_log;
 pub mod wire;
 pub mod xprompt_catalog;
@@ -354,6 +355,20 @@ pub use status::{
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
+pub use telemetry::{
+    prune as telemetry_prune, query_instant as telemetry_query_instant,
+    query_range as telemetry_query_range,
+    record_batch as telemetry_record_batch,
+    store_stats as telemetry_store_stats, TelemetryHistogramBucketWire,
+    TelemetryInstantQueryResultWire, TelemetryInstantQueryWire,
+    TelemetryInstantValueWire, TelemetryMetricKindWire, TelemetryPointWire,
+    TelemetryPruneReportWire, TelemetryPruneRequestWire,
+    TelemetryRangeQueryResultWire, TelemetryRangeQueryWire,
+    TelemetryRecordBatchResultWire, TelemetryRecordBatchWire,
+    TelemetryRetentionWire, TelemetrySampleWire, TelemetrySeriesWire,
+    TelemetryStoreStatsWire, TELEMETRY_MAX_BUSY_TIMEOUT,
+    TELEMETRY_WIRE_SCHEMA_VERSION,
+};
 pub use vcs_log::{
     aggregate_commit_log, parse_git_log, AggregatedCommitWire, VcsCommitWire,
     VCS_LOG_WIRE_SCHEMA_VERSION,

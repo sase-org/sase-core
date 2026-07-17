@@ -95,6 +95,11 @@
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
+//! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -293,6 +298,15 @@ use sase_core::status::{
     read_status_from_lines as core_read_status_from_lines,
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
+};
+use sase_core::telemetry::{
+    prune as core_telemetry_prune,
+    query_instant as core_telemetry_query_instant,
+    query_range as core_telemetry_query_range,
+    record_batch as core_telemetry_record_batch,
+    store_stats as core_telemetry_store_stats, TelemetryInstantQueryWire,
+    TelemetryPruneRequestWire, TelemetryRangeQueryWire,
+    TelemetryRecordBatchWire,
 };
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
@@ -3736,6 +3750,162 @@ fn terminate_child_gracefully(child: &mut Child) {
     let _ = child.kill();
 }
 
+/// Persist one telemetry accumulator flush in a single SQLite transaction.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_record_batch",
+    signature = (store_path, batch, busy_timeout_ms=250)
+)]
+fn py_telemetry_record_batch<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    batch: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let batch: TelemetryRecordBatchWire =
+        telemetry_request_from_pydict(batch, "TelemetryRecordBatchWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_record_batch(
+                &path,
+                batch,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Query current telemetry values with source-aware gauge staleness.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_query_instant",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_telemetry_query_instant<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: TelemetryInstantQueryWire =
+        telemetry_request_from_pydict(request, "TelemetryInstantQueryWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_query_instant(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Query grouped telemetry series across raw and rollup resolutions.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_query_range",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_telemetry_query_range<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: TelemetryRangeQueryWire =
+        telemetry_request_from_pydict(request, "TelemetryRangeQueryWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_query_range(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Fold and prune telemetry rows using a caller-supplied retention policy.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_prune",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_telemetry_prune<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: TelemetryPruneRequestWire =
+        telemetry_request_from_pydict(request, "TelemetryPruneRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_prune(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Return telemetry database size, tier counts, and write freshness.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_store_stats",
+    signature = (store_path, busy_timeout_ms=250)
+)]
+fn py_telemetry_store_stats<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_store_stats(
+                &path,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
+fn telemetry_request_from_pydict<T>(
+    request: &Bound<'_, PyDict>,
+    wire_name: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = py_to_json_value(request.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid {wire_name} dict: {error}"
+        ))
+    })
+}
+
+fn telemetry_result_to_py<T>(py: Python<'_>, result: &T) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 fn workspace_claim_request_from_pydict(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<WorkspaceClaimRequestWire> {
@@ -3977,6 +4147,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_allocate_and_claim_workspace_from_content,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_record_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_query_instant, m)?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_query_range, m)?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_prune, m)?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_store_stats, m)?)?;
     Ok(())
 }
 
@@ -4204,6 +4379,19 @@ mod tests {
         let beads_dir = dir.join("sdd/beads");
         fs::create_dir_all(&beads_dir).unwrap();
         beads_dir
+    }
+
+    fn temp_telemetry_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "sase-core-py-telemetry-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("metrics.sqlite")
     }
 
     #[test]
@@ -4723,6 +4911,119 @@ mod tests {
                 path.with_file_name("notifications.jsonl.lock"),
             );
             let _ = fs::remove_dir(path.parent().unwrap());
+        });
+    }
+
+    #[test]
+    fn telemetry_bindings_round_trip_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let path = temp_telemetry_path();
+            let batch_obj = json_value_to_py(
+                py,
+                &json!({
+                    "samples": [{
+                        "ts": 100,
+                        "metric": "sase_agent_runs_total",
+                        "kind": "counter",
+                        "labels": {"provider": "codex"},
+                        "source": "runner-1",
+                        "value": 3.0
+                    }],
+                    "now_ts": 110
+                }),
+            )
+            .unwrap();
+            let batch = batch_obj.bind(py).downcast::<PyDict>().unwrap();
+            let recorded = py_telemetry_record_batch(
+                py,
+                path.to_str().unwrap(),
+                batch,
+                1_000,
+            )
+            .unwrap();
+            let recorded = py_to_json_value(recorded.bind(py)).unwrap();
+            assert_eq!(recorded["samples_recorded"], json!(1));
+
+            let instant_obj = json_value_to_py(
+                py,
+                &json!({
+                    "metric": "sase_agent_runs_total",
+                    "group_by": [],
+                    "now_ts": 110
+                }),
+            )
+            .unwrap();
+            let instant_request =
+                instant_obj.bind(py).downcast::<PyDict>().unwrap();
+            let instant = py_telemetry_query_instant(
+                py,
+                path.to_str().unwrap(),
+                instant_request,
+                1_000,
+            )
+            .unwrap();
+            let instant = py_to_json_value(instant.bind(py)).unwrap();
+            assert_eq!(instant["values"][0]["value"], json!(3.0));
+
+            let range_obj = json_value_to_py(
+                py,
+                &json!({
+                    "metric": "sase_agent_runs_total",
+                    "start_ts": 100,
+                    "end_ts": 159,
+                    "step_seconds": 60,
+                    "group_by": [],
+                    "aggregation": "sum"
+                }),
+            )
+            .unwrap();
+            let range_request =
+                range_obj.bind(py).downcast::<PyDict>().unwrap();
+            let range = py_telemetry_query_range(
+                py,
+                path.to_str().unwrap(),
+                range_request,
+                1_000,
+            )
+            .unwrap();
+            let range = py_to_json_value(range.bind(py)).unwrap();
+            assert_eq!(range["series"][0]["points"][0]["value"], json!(3.0));
+
+            let prune_obj = json_value_to_py(
+                py,
+                &json!({
+                    "now_ts": 1_000,
+                    "retention": {
+                        "raw_seconds": 100,
+                        "rollup_5m_seconds": 10_000,
+                        "rollup_1h_seconds": 100_000
+                    }
+                }),
+            )
+            .unwrap();
+            let prune_request =
+                prune_obj.bind(py).downcast::<PyDict>().unwrap();
+            let pruned = py_telemetry_prune(
+                py,
+                path.to_str().unwrap(),
+                prune_request,
+                1_000,
+            )
+            .unwrap();
+            let pruned = py_to_json_value(pruned.bind(py)).unwrap();
+            assert_eq!(pruned["raw_rows_folded"], json!(1));
+
+            let stats =
+                py_telemetry_store_stats(py, path.to_str().unwrap(), 1_000)
+                    .unwrap();
+            let stats = py_to_json_value(stats.bind(py)).unwrap();
+            assert_eq!(stats["raw_sample_count"], json!(0));
+            assert_eq!(stats["rollup_5m_count"], json!(1));
+            assert_eq!(stats["last_write_by_subsystem"]["agent"], json!(100));
+
+            let parent = path.parent().unwrap().to_path_buf();
+            let _ = fs::remove_dir_all(parent);
         });
     }
 }
