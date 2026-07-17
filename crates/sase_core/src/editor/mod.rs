@@ -13,7 +13,7 @@ mod xprompt_args;
 pub use completion::{
     apply_vcs_project_selection, apply_vcs_ref_selection,
     apply_vcs_repo_selection, assist_entries_from_catalog,
-    build_snippet_completion_candidates,
+    build_agent_completion_candidates, build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     build_xprompt_arg_name_candidates, build_xprompt_completion_candidates,
@@ -52,13 +52,14 @@ pub use token::{
     vcs_project_trigger_token, xprompt_reference_name, DocumentSnapshot,
 };
 pub use wire::{
+    AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, DiagnosticSeverity, DirectiveMetadata, EditorDiagnostic,
     EditorPosition, EditorRange, EditorTextEdit, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
     VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
     VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, EDITOR_WIRE_SCHEMA_VERSION,
+    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
     VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{

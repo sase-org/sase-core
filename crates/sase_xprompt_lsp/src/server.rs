@@ -22,7 +22,8 @@ use lsp_types::{
     WorkDoneProgressOptions, WorkspaceEdit,
 };
 use sase_core::{
-    editor_analyze_document, editor_build_directive_completion_candidates,
+    editor_analyze_document, editor_build_agent_completion_candidates,
+    editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
     editor_build_placeholder_completion_candidates,
@@ -214,6 +215,9 @@ impl XpromptLspServer {
                 &vcs_catalog,
             ));
         }
+        if context.kind == CompletionContextKind::XpromptArgumentAgent {
+            return Some(self.agent_completion(&context).await);
+        }
         let list = self.completion_list_for_context(
             &context, &entries, &config, &document, position,
         );
@@ -376,6 +380,41 @@ impl XpromptLspServer {
             document, context, &entries,
         );
         vcs_repo_completion_response(list, context.replacement_range, &entries)
+    }
+
+    async fn agent_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+    ) -> CompletionResponse {
+        let response =
+            match self.catalog_cache.agent_catalog_for_completion().await {
+                Ok(response) => response,
+                Err(error) => {
+                    self.warn_once(&error).await;
+                    return empty_completion_response();
+                }
+            };
+        if response.status != "ok" {
+            if !response.message.is_empty() {
+                warn!(
+                    "agent catalog returned no entries: {}",
+                    response.message
+                );
+            }
+            return empty_completion_response();
+        }
+        let token = context
+            .token
+            .as_ref()
+            .map(|token| token.text.as_str())
+            .unwrap_or_default();
+        let list = editor_build_agent_completion_candidates(
+            token,
+            None,
+            &response.entries,
+            &context.selected_values,
+        );
+        completion_response(list, context.replacement_range)
     }
 
     async fn vcs_repo_catalog_for_completion(
@@ -731,6 +770,9 @@ impl XpromptLspServer {
                 .unwrap_or_else(empty_completion_list),
             CompletionContextKind::XpromptArgumentValue => {
                 bool_completion_list()
+            }
+            CompletionContextKind::XpromptArgumentAgent => {
+                empty_completion_list()
             }
             CompletionContextKind::XpromptArgumentTypeHint => {
                 empty_completion_list()
@@ -1746,6 +1788,15 @@ mod tests {
         let total_count = entries.len() as u64;
         let snippet_total_count = snippets.len() as u64;
         StaticHelperHostBridge {
+            agent_catalog_response: serde_json::from_value(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "status": "ok",
+                    "message": "",
+                    "entries": []
+                }),
+            )
+            .unwrap(),
             changespec_tags_response: serde_json::from_value(
                 serde_json::json!({
                     "schema_version": 1,

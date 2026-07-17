@@ -13,10 +13,11 @@ use super::token::{
     DocumentSnapshot,
 };
 use super::wire::{
-    CompletionCandidate, CompletionContext, CompletionContextKind,
-    CompletionList, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoEntry,
-    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    AgentCompletionEntry, CompletionCandidate, CompletionContext,
+    CompletionContextKind, CompletionList, EditorPosition, EditorRange,
+    EditorTextEdit, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
+    VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint,
 };
 
 pub fn assist_entries_from_catalog(
@@ -93,6 +94,7 @@ pub fn classify_completion_context_with_workflows(
             active_xprompt: None,
             active_input: None,
             directive_name: None,
+            selected_values: Vec::new(),
             vcs_repo: None,
             vcs_ref: None,
             replacement_range: placeholder.replacement_range,
@@ -141,6 +143,7 @@ pub fn classify_completion_context_with_workflows(
                 active_xprompt: None,
                 active_input: None,
                 directive_name: None,
+                selected_values: Vec::new(),
                 vcs_repo: None,
                 vcs_ref: None,
                 replacement_range: document.byte_range_to_range(byte, byte)?,
@@ -260,6 +263,63 @@ pub fn build_xprompt_arg_name_candidates(
     CompletionList {
         candidates,
         shared_extension: String::new(),
+    }
+}
+
+pub fn build_agent_completion_candidates(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+) -> CompletionList {
+    if token.contains('=') {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    }
+
+    let partial = token.to_lowercase();
+    let selected = selected_values.iter().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for entry in entries {
+        if entry.name.is_empty()
+            || selected.contains(&entry.name)
+            || !seen.insert(entry.name.clone())
+            || !entry.name.to_lowercase().starts_with(&partial)
+        {
+            continue;
+        }
+        let detail = match (entry.status.is_empty(), entry.project.is_empty()) {
+            (false, false) => {
+                Some(format!("{} · {}", entry.status, entry.project))
+            }
+            (false, true) => Some(entry.status.clone()),
+            (true, false) => Some(entry.project.clone()),
+            (true, true) => None,
+        };
+        candidates.push(CompletionCandidate {
+            display: entry.name.clone(),
+            insertion: entry.name.clone(),
+            detail,
+            documentation: None,
+            is_dir: false,
+            name: entry.name.clone(),
+            replacement: replacement_range.map(|range| EditorTextEdit {
+                range,
+                new_text: entry.name.clone(),
+            }),
+            additional_edits: Vec::new(),
+            kind: "agent".to_string(),
+            project: entry.project.clone(),
+            status: entry.status.clone(),
+        });
+    }
+    candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
     }
 }
 
@@ -490,6 +550,7 @@ pub fn detect_vcs_repo_context_at_position(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        selected_values: Vec::new(),
         vcs_repo: Some(trigger),
         vcs_ref: None,
         replacement_range,
@@ -789,6 +850,7 @@ pub fn detect_vcs_ref_context_at_position(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: Some(trigger),
         replacement_range,
@@ -939,6 +1001,7 @@ fn detect_vcs_project_context_at_position(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: None,
     })
@@ -1218,40 +1281,34 @@ fn detect_xprompt_arg_completion_at_position(
         let base_end = whole.end();
         let suffix = text.get(base_end..cursor)?;
         if suffix.starts_with(':') {
-            let (kind, active_input, token_start) =
-                colon_arg_context(entry, base_end, suffix)?;
-            return arg_context(
-                document,
-                kind,
-                cursor,
-                token_start,
-                entry,
-                active_input,
-                BTreeSet::new(),
-            );
+            let target =
+                colon_arg_context(entry, text, base_end, cursor, suffix)?;
+            return arg_context(document, cursor, entry, target);
         }
         if suffix.starts_with('(') {
-            let (kind, active_input, token_start, used) =
-                paren_arg_context(entry, base_end, suffix)?;
-            return arg_context(
-                document,
-                kind,
-                cursor,
-                token_start,
-                entry,
-                active_input,
-                used,
-            );
+            let target =
+                paren_arg_context(entry, text, base_end, cursor, suffix)?;
+            return arg_context(document, cursor, entry, target);
         }
     }
     None
 }
 
+struct XpromptArgCompletionTarget {
+    kind: CompletionContextKind,
+    active_input: XpromptInputHint,
+    token_start: usize,
+    token_end: usize,
+    selected_values: Vec<String>,
+}
+
 fn colon_arg_context(
     entry: &XpromptAssistEntry,
+    text: &str,
     base_end: usize,
+    cursor: usize,
     suffix: &str,
-) -> Option<(CompletionContextKind, XpromptInputHint, usize)> {
+) -> Option<XpromptArgCompletionTarget> {
     let value = suffix.strip_prefix(':')?;
     if value.chars().any(char::is_whitespace)
         || value.contains('+')
@@ -1262,38 +1319,63 @@ fn colon_arg_context(
     }
     let index = value.matches(',').count().min(entry.inputs.len() - 1);
     let active_input = entry.inputs.get(index)?.clone();
-    let token_start =
-        base_end + 1 + value.rfind(',').map(|idx| idx + 1).unwrap_or(0);
-    Some((
-        completion_kind_for_input(&active_input),
+    let body_start = base_end + 1;
+    let cursor_in_body = cursor.checked_sub(body_start)?;
+    let clause_start = value.rfind(',').map(|idx| idx + 1).unwrap_or(0);
+    let body_end = if cursor_in_body == clause_start {
+        cursor
+    } else {
+        text[cursor..]
+            .find(char::is_whitespace)
+            .map(|offset| cursor + offset)
+            .unwrap_or(text.len())
+    };
+    let body = text.get(body_start..body_end)?;
+    let clause_end = body[cursor_in_body..]
+        .find(',')
+        .map(|offset| cursor_in_body + offset)
+        .unwrap_or(body.len());
+    let token_start = body_start + clause_start;
+    let token_end = body_start + clause_end;
+    Some(XpromptArgCompletionTarget {
+        kind: completion_kind_for_input(&active_input),
         active_input,
         token_start,
-    ))
+        token_end,
+        selected_values: selected_positional_values(body, clause_start),
+    })
 }
 
 fn paren_arg_context(
     entry: &XpromptAssistEntry,
+    text: &str,
     base_end: usize,
+    cursor: usize,
     suffix: &str,
-) -> Option<(
-    CompletionContextKind,
-    XpromptInputHint,
-    usize,
-    BTreeSet<String>,
-)> {
-    let body = suffix.strip_prefix('(')?;
-    if body.contains(')') {
+) -> Option<XpromptArgCompletionTarget> {
+    let prefix_body = suffix.strip_prefix('(')?;
+    if prefix_body.contains(')') {
         return None;
     }
-    let clause_start = body.rfind(',').map(|idx| idx + 1).unwrap_or(0);
-    let clause = &body[clause_start..];
+    let body_start = base_end + 1;
+    let cursor_in_body = cursor.checked_sub(body_start)?;
+    let body_end = find_matching_paren(text, base_end).unwrap_or(cursor);
+    let body = text.get(body_start..body_end)?;
+    let clause_start = prefix_body.rfind(',').map(|idx| idx + 1).unwrap_or(0);
+    let clause_end = body[cursor_in_body..]
+        .find(',')
+        .map(|offset| cursor_in_body + offset)
+        .unwrap_or(body.len());
+    let clause = &body[clause_start..clause_end];
     let stripped = clause.trim_start();
     let leading_ws = clause.len() - stripped.len();
     let value_start = base_end + 1 + clause_start + leading_ws;
-    let used = used_named_arg_names(&body[..clause_start]);
+    let value_end = trim_end(text, value_start, body_start + clause_end);
+    let selected = selected_positional_values(body, clause_start);
 
     if !stripped.contains('=') {
-        if stripped.chars().any(char::is_whitespace) {
+        let token = text.get(value_start..cursor)?;
+        if token.chars().any(char::is_whitespace) {
             return None;
         }
         let positional_index = body[..clause_start]
@@ -1307,12 +1389,13 @@ fn paren_arg_context(
             .filter(|input| input.repeatable)
             .cloned()
         {
-            return Some((
-                completion_kind_for_input(&active_input),
+            return Some(XpromptArgCompletionTarget {
+                kind: completion_kind_for_input(&active_input),
                 active_input,
-                value_start,
-                used,
-            ));
+                token_start: value_start,
+                token_end: value_end,
+                selected_values: selected,
+            });
         }
         let placeholder = XpromptInputHint {
             name: String::new(),
@@ -1323,12 +1406,13 @@ fn paren_arg_context(
             position: 0,
             repeatable: false,
         };
-        return Some((
-            CompletionContextKind::XpromptArgumentName,
-            placeholder,
-            value_start,
-            used,
-        ));
+        return Some(XpromptArgCompletionTarget {
+            kind: CompletionContextKind::XpromptArgumentName,
+            active_input: placeholder,
+            token_start: value_start,
+            token_end: value_end,
+            selected_values: selected,
+        });
     }
 
     let (name_part, value_part) = stripped.split_once('=')?;
@@ -1340,40 +1424,87 @@ fn paren_arg_context(
         .clone();
     let value_leading_ws = value_part.len() - value_part.trim_start().len();
     let token_start = value_start + name_part.len() + 1 + value_leading_ws;
-    Some((
-        completion_kind_for_input(&active_input),
+    Some(XpromptArgCompletionTarget {
+        kind: completion_kind_for_input(&active_input),
         active_input,
         token_start,
-        used,
-    ))
+        token_end: value_end,
+        selected_values: Vec::new(),
+    })
 }
 
 fn arg_context(
     document: &DocumentSnapshot,
-    kind: CompletionContextKind,
     cursor: usize,
-    token_start: usize,
     entry: &XpromptAssistEntry,
-    active_input: XpromptInputHint,
-    _used: BTreeSet<String>,
+    target: XpromptArgCompletionTarget,
 ) -> Option<CompletionContext> {
-    let range = document.byte_range_to_range(token_start, cursor)?;
+    let token_range =
+        document.byte_range_to_range(target.token_start, cursor)?;
+    let replacement_range =
+        document.byte_range_to_range(target.token_start, target.token_end)?;
     Some(CompletionContext {
-        kind,
+        kind: target.kind,
         token: Some(TokenInfo {
-            text: document.text().get(token_start..cursor)?.to_string(),
-            range,
-            byte_start: token_start,
+            text: document.text().get(target.token_start..cursor)?.to_string(),
+            range: token_range,
+            byte_start: target.token_start,
             byte_end: cursor,
         }),
         active_xprompt: Some(entry.name.clone()),
-        active_input: (!active_input.name.is_empty())
-            .then_some(active_input.name),
+        active_input: (!target.active_input.name.is_empty())
+            .then_some(target.active_input.name),
         directive_name: None,
+        selected_values: target.selected_values,
         vcs_repo: None,
         vcs_ref: None,
-        replacement_range: range,
+        replacement_range,
     })
+}
+
+fn find_matching_paren(text: &str, open: usize) -> Option<usize> {
+    if text.as_bytes().get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 1usize;
+    for (offset, byte) in text.as_bytes()[open + 1..].iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + 1 + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn trim_end(text: &str, start: usize, mut end: usize) -> usize {
+    while end > start && text.as_bytes()[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end
+}
+
+fn selected_positional_values(
+    body: &str,
+    active_clause_start: usize,
+) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut clause_start = 0usize;
+    for clause in body.split(',') {
+        if clause_start != active_clause_start && !clause.contains('=') {
+            let value = clause.trim();
+            if !value.is_empty() {
+                values.push(value.to_string());
+            }
+        }
+        clause_start += clause.len() + 1;
+    }
+    values
 }
 
 fn detect_directive_context_at_position(
@@ -1403,6 +1534,7 @@ fn detect_directive_context_at_position(
             active_xprompt: None,
             active_input: None,
             directive_name: None,
+            selected_values: Vec::new(),
             vcs_repo: None,
             vcs_ref: None,
             replacement_range: range,
@@ -1438,6 +1570,7 @@ fn detect_directive_context_at_position(
             active_xprompt: None,
             active_input: None,
             directive_name: Some(directive_name.to_string()),
+            selected_values: Vec::new(),
             vcs_repo: None,
             vcs_ref: None,
             replacement_range: range,
@@ -1487,6 +1620,7 @@ fn context_for_token(
         active_xprompt: None,
         active_input: None,
         directive_name: None,
+        selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: None,
     }
@@ -1498,6 +1632,7 @@ fn completion_kind_for_input(
     match input.r#type.as_str() {
         "path" => CompletionContextKind::XpromptArgumentPath,
         "bool" => CompletionContextKind::XpromptArgumentValue,
+        "agent" => CompletionContextKind::XpromptArgumentAgent,
         _ => CompletionContextKind::XpromptArgumentTypeHint,
     }
 }
@@ -1548,17 +1683,6 @@ fn snippet_documentation(entry: &EditorSnippetEntryWire) -> Option<String> {
     } else {
         Some(parts.join("\n\n"))
     }
-}
-
-fn used_named_arg_names(body_prefix: &str) -> BTreeSet<String> {
-    body_prefix
-        .split(',')
-        .filter_map(|clause| {
-            clause.split_once('=').map(|(name, _)| name.trim())
-        })
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 fn shared_extension(
@@ -1931,7 +2055,7 @@ mod tests {
                     .unwrap();
             assert_eq!(
                 context.kind,
-                CompletionContextKind::XpromptArgumentTypeHint
+                CompletionContextKind::XpromptArgumentAgent
             );
             assert_eq!(context.active_input.as_deref(), Some("names"));
             let token_start = text.rfind("co").unwrap();
@@ -1939,7 +2063,76 @@ mod tests {
                 context.replacement_range,
                 doc.byte_range_to_range(token_start, text.len()).unwrap()
             );
+            assert_eq!(context.selected_values, vec!["planner"]);
         }
+    }
+
+    #[test]
+    fn repeatable_agent_context_replaces_earlier_element_and_filters_selected()
+    {
+        let mut fork = entries()[0].clone();
+        fork.name = "fork".to_string();
+        fork.inputs = vec![XpromptInputHint {
+            name: "names".to_string(),
+            r#type: "agent".to_string(),
+            description: None,
+            required: false,
+            default_display: None,
+            position: 0,
+            repeatable: true,
+        }];
+        let text = "😀 #fork(co, planner)";
+        let doc = DocumentSnapshot::new(text);
+        let cursor = doc
+            .byte_offset_to_position(text.find("co").unwrap() + 2)
+            .unwrap();
+        let context =
+            classify_completion_context(&doc, cursor, &[fork]).unwrap();
+        assert_eq!(context.kind, CompletionContextKind::XpromptArgumentAgent);
+        assert_eq!(context.selected_values, vec!["planner"]);
+        assert_eq!(
+            context.replacement_range,
+            doc.byte_range_to_range(
+                text.find("co").unwrap(),
+                text.find(", planner").unwrap(),
+            )
+            .unwrap()
+        );
+
+        let entries = vec![
+            AgentCompletionEntry {
+                name: "planner".to_string(),
+                status: "RUNNING".to_string(),
+                project: "sase".to_string(),
+            },
+            AgentCompletionEntry {
+                name: "coder".to_string(),
+                status: "DONE".to_string(),
+                project: "sase-core".to_string(),
+            },
+            AgentCompletionEntry {
+                name: "reviewer.@".to_string(),
+                status: "DONE".to_string(),
+                project: "sase".to_string(),
+            },
+        ];
+        let list = build_agent_completion_candidates(
+            "",
+            Some(context.replacement_range),
+            &entries,
+            &context.selected_values,
+        );
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["coder", "reviewer.@"]
+        );
+        assert_eq!(
+            list.candidates[0].detail.as_deref(),
+            Some("DONE · sase-core")
+        );
     }
 
     #[test]

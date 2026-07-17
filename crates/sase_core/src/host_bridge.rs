@@ -16,7 +16,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::editor::wire::{
-    EditorRange, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    AgentCatalogRequest, AgentCatalogResponse, EditorRange,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse,
 };
 
 #[derive(Clone)]
@@ -46,6 +47,13 @@ impl DynHelperHostBridge {
         request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         self.0.snippet_catalog(request)
+    }
+
+    pub fn agent_catalog(
+        &self,
+        request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        self.0.agent_catalog(request)
     }
 
     pub fn vcs_repo_catalog(
@@ -114,6 +122,15 @@ pub trait HelperHostBridge: Send + Sync {
         &self,
         _request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn agent_catalog(
+        &self,
+        _request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
@@ -312,6 +329,13 @@ impl CommandHelperHostBridge {
 }
 
 impl HelperHostBridge for CommandHelperHostBridge {
+    fn agent_catalog(
+        &self,
+        request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        self.invoke_editor("agent-catalog", request)
+    }
+
     fn list_changespec_tags(
         &self,
         request: &MobileChangeSpecTagListRequestWire,
@@ -371,6 +395,7 @@ impl HelperHostBridge for CommandHelperHostBridge {
 
 #[derive(Debug, Clone)]
 pub struct StaticHelperHostBridge {
+    pub agent_catalog_response: AgentCatalogResponse,
     pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
     pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
     pub snippet_catalog_response: EditorSnippetCatalogResponseWire,
@@ -382,6 +407,13 @@ pub struct StaticHelperHostBridge {
 }
 
 impl HelperHostBridge for StaticHelperHostBridge {
+    fn agent_catalog(
+        &self,
+        _request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        Ok(self.agent_catalog_response.clone())
+    }
+
     fn list_changespec_tags(
         &self,
         _request: &MobileChangeSpecTagListRequestWire,
@@ -869,6 +901,12 @@ mod tests {
 
     fn static_bridge() -> StaticHelperHostBridge {
         StaticHelperHostBridge {
+            agent_catalog_response: AgentCatalogResponse {
+                schema_version: 1,
+                status: "ok".to_string(),
+                message: String::new(),
+                entries: Vec::new(),
+            },
             changespec_tags_response: MobileChangeSpecTagListResponseWire {
                 schema_version: 1,
                 result: helper_result(),

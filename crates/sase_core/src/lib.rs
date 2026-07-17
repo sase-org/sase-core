@@ -195,6 +195,7 @@ pub use editor::{
     apply_vcs_ref_selection as editor_apply_vcs_ref_selection,
     apply_vcs_repo_selection as editor_apply_vcs_repo_selection,
     assist_entries_from_catalog as editor_assist_entries_from_catalog,
+    build_agent_completion_candidates as editor_build_agent_completion_candidates,
     build_directive_completion_candidates as editor_build_directive_completion_candidates,
     build_file_completion_candidates as editor_build_file_completion_candidates,
     build_file_completion_candidates_with_base as editor_build_file_completion_candidates_with_base,
@@ -230,6 +231,7 @@ pub use editor::{
     validate_frontmatter as editor_validate_frontmatter,
     validate_frontmatter_field as editor_validate_frontmatter_field,
     vcs_project_trigger_token as editor_vcs_project_trigger_token,
+    AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, DefinitionTarget, DiagnosticSeverity, DirectiveMetadata,
     DocumentSnapshot, EditorDiagnostic, EditorPosition, EditorRange,
@@ -238,9 +240,9 @@ pub use editor::{
     PlaceholderContext, PlaceholderSpan, TokenInfo, VcsNamespaceEntry,
     VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
     VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, DIRECTIVES as EDITOR_DIRECTIVES,
-    EDITOR_WIRE_SCHEMA_VERSION, PLACEHOLDER_MAX_INNER_CHARS,
-    VCS_REPO_CATALOG_SCHEMA_VERSION,
+    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION,
+    DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
+    PLACEHOLDER_MAX_INNER_CHARS, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{is_valid_effort, split_model_effort, EFFORT_LEVELS_ORDERED};
 pub use git_query::{

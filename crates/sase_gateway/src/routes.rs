@@ -3269,6 +3269,15 @@ mod tests {
                 push_config: PushConfig::default(),
             },
             Arc::new(crate::host_bridge::StaticHelperHostBridge {
+                agent_catalog_response: serde_json::from_value(
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "status": "ok",
+                        "message": "",
+                        "entries": []
+                    }),
+                )
+                .unwrap(),
                 changespec_tags_response: MobileChangeSpecTagListResponseWire {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                     result: result.clone(),

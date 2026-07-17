@@ -8,7 +8,8 @@ use std::{
 
 use sase_core::{
     editor_assist_entries_from_catalog, load_editor_snippet_catalog,
-    load_editor_xprompt_catalog, CommandHelperHostBridge, DynHelperHostBridge,
+    load_editor_xprompt_catalog, AgentCatalogRequest, AgentCatalogResponse,
+    CommandHelperHostBridge, DynHelperHostBridge,
     EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
     EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
     VcsRepoCatalogRequest, VcsRepoCatalogResponse, XpromptAssistEntry,
@@ -234,6 +235,29 @@ impl CatalogCache {
             Err(error) => self
                 .cached_vcs_repo_catalog(&workflow, &namespace)
                 .ok_or(error),
+        }
+    }
+
+    pub async fn agent_catalog_for_completion(
+        &self,
+    ) -> Result<AgentCatalogResponse, CatalogFailure> {
+        let request = AgentCatalogRequest { schema_version: 1 };
+        let bridge = self.bridge.clone();
+        let task =
+            tokio::task::spawn_blocking(move || bridge.agent_catalog(&request));
+        match time::timeout(COMPLETION_REFRESH_TIMEOUT, task).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Ok(Ok(Err(error))) => {
+                Err(failure_from_bridge_error(error, "agent catalog"))
+            }
+            Ok(Err(error)) => Err(CatalogFailure {
+                class: "helper_join".to_string(),
+                message: format!("agent catalog helper failed: {error}"),
+            }),
+            Err(_) => Err(CatalogFailure {
+                class: "helper_timeout".to_string(),
+                message: "agent catalog helper timed out".to_string(),
+            }),
         }
     }
 

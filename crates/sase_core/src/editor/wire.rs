@@ -39,6 +39,7 @@ pub enum CompletionContextKind {
     XpromptArgumentName,
     XpromptArgumentValue,
     XpromptArgumentPath,
+    XpromptArgumentAgent,
     XpromptArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,
@@ -58,6 +59,8 @@ pub struct CompletionContext {
     pub active_input: Option<String>,
     #[serde(default)]
     pub directive_name: Option<String>,
+    #[serde(default)]
+    pub selected_values: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_repo: Option<VcsRepoTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +215,35 @@ pub struct VcsRepoEntry {
     pub is_archived: bool,
     #[serde(default)]
     pub pushed_at: Option<String>,
+}
+
+/// One prompt-referenceable agent returned by the editor helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCompletionEntry {
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+pub const AGENT_CATALOG_SCHEMA_VERSION: u32 = 1;
+
+/// Fresh agent catalog request sent to the Python editor helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCatalogRequest {
+    pub schema_version: u32,
+}
+
+/// Fresh agent catalog returned by the Python editor helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCatalogResponse {
+    pub schema_version: u32,
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub entries: Vec<AgentCompletionEntry>,
 }
 
 pub const VCS_REPO_CATALOG_SCHEMA_VERSION: u32 = 1;

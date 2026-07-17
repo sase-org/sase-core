@@ -2,6 +2,7 @@ use std::{fs, sync::Arc};
 
 use lsp_types::Uri;
 use sase_core::{
+    AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
     EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
     EditorSnippetCatalogStatsWire, EditorSnippetEntryWire, HelperHostBridge,
     HostBridgeError, MobileHelperProjectContextWire,
@@ -22,6 +23,29 @@ struct FixtureBridge {
 }
 
 impl HelperHostBridge for FixtureBridge {
+    fn agent_catalog(
+        &self,
+        _request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        Ok(AgentCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![
+                AgentCompletionEntry {
+                    name: "planner".to_string(),
+                    status: "RUNNING".to_string(),
+                    project: "sase".to_string(),
+                },
+                AgentCompletionEntry {
+                    name: "coder".to_string(),
+                    status: "DONE".to_string(),
+                    project: "sase-core".to_string(),
+                },
+            ],
+        })
+    }
+
     fn xprompt_catalog(
         &self,
         _request: &MobileXpromptCatalogRequestWire,
@@ -229,7 +253,7 @@ async fn stdio_jsonrpc_initialize_and_completion() {
                     "uri": "file:///tmp/sase_prompt_rpc.md",
                     "version": 2
                 },
-                "contentChanges": [{"text": "#fork:planner,coder"}]
+                "contentChanges": [{"text": "#fork:planner,co"}]
             }
         }),
     )
@@ -253,6 +277,47 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         }
     }
     assert!(saw_repeatable_diagnostics);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
+                "position": {"line": 0, "character": 16}
+            }
+        }),
+    )
+    .await;
+    let mut saw_agent_completion = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            let items = message["result"]
+                .as_array()
+                .or_else(|| message["result"]["items"].as_array())
+                .unwrap_or_else(|| {
+                    panic!("unexpected agent completion response: {message}")
+                });
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["label"], "coder");
+            assert_eq!(items[0]["detail"], "DONE · sase-core");
+            assert_eq!(
+                items[0]["textEdit"]["range"],
+                json!({
+                    "start": {"line": 0, "character": 14},
+                    "end": {"line": 0, "character": 16}
+                })
+            );
+            assert_eq!(items[0]["textEdit"]["newText"], "coder");
+            saw_agent_completion = true;
+            break;
+        }
+    }
+    assert!(saw_agent_completion);
+
     write_message(
         &mut client_writer,
         json!({
