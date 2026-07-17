@@ -172,6 +172,50 @@ fn classify_kill_kind(target: &AgentCleanupTargetWire) -> Option<&'static str> {
     None
 }
 
+fn parallel_members_by_parent(
+    targets: &[AgentCleanupTargetWire],
+) -> BTreeMap<String, Vec<&AgentCleanupTargetWire>> {
+    let mut members: BTreeMap<String, Vec<&AgentCleanupTargetWire>> =
+        BTreeMap::new();
+    for target in targets {
+        if !target.agent_family_parallel || target.parent_workflow.is_some() {
+            continue;
+        }
+        let Some(parent_timestamp) = &target.parent_timestamp else {
+            continue;
+        };
+        members
+            .entry(parent_timestamp.clone())
+            .or_default()
+            .push(target);
+    }
+    members
+}
+
+fn parallel_family_members<'a>(
+    root: &AgentCleanupTargetWire,
+    members_by_parent: &'a BTreeMap<String, Vec<&'a AgentCleanupTargetWire>>,
+) -> &'a [&'a AgentCleanupTargetWire] {
+    if !root.agent_family_parallel || is_workflow_child(root) {
+        return &[];
+    }
+    let Some(raw_suffix) = &root.raw_suffix else {
+        return &[];
+    };
+    members_by_parent
+        .get(raw_suffix)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn target_is_dismissable(
+    target: &AgentCleanupTargetWire,
+    request: &AgentCleanupRequestWire,
+) -> bool {
+    is_dismissable_status(&target.status)
+        || (request.include_pidless_as_dismissable && target.pid.is_none())
+}
+
 fn workflow_children_by_parent(
     targets: &[AgentCleanupTargetWire],
 ) -> BTreeMap<(String, Option<String>), Vec<&AgentCleanupTargetWire>> {
@@ -513,6 +557,7 @@ pub fn plan_agent_cleanup(
         request.identities.iter().cloned().collect();
     let parent_tags = parent_tags_by_suffix(targets);
     let children_by_parent = workflow_children_by_parent(targets);
+    let parallel_members_by_parent = parallel_members_by_parent(targets);
 
     let mut seen_live = BTreeSet::new();
     let mut selected = Vec::new();
@@ -575,13 +620,27 @@ pub fn plan_agent_cleanup(
             continue;
         }
 
-        let dismissable = is_dismissable_status(&target.status)
-            || (request.include_pidless_as_dismissable && target.pid.is_none());
+        let dismissable = target_is_dismissable(target, request);
         let killable =
             target.pid.is_some() && !is_dismissable_status(&target.status);
 
         if request.mode == CLEANUP_MODE_DISMISS_COMPLETED {
             if dismissable {
+                let family_still_active = parallel_family_members(
+                    target,
+                    &parallel_members_by_parent,
+                )
+                .iter()
+                .any(|member| !target_is_dismissable(member, request));
+                if family_still_active {
+                    add_skip(
+                        &mut skipped_items,
+                        target,
+                        SKIPPED_NOT_DISMISSABLE,
+                        Some("parallel family still active".to_string()),
+                    );
+                    continue;
+                }
                 dismiss_items.push(AgentCleanupDismissItemWire {
                     identity: target.identity.clone(),
                     display_name: target.display_name.clone(),
@@ -644,6 +703,46 @@ pub fn plan_agent_cleanup(
                     }
                 }
             }
+        }
+    }
+
+    let mut action_identities: BTreeSet<AgentCleanupIdentityWire> = kill_items
+        .iter()
+        .map(|item| item.identity.clone())
+        .chain(dismiss_items.iter().map(|item| item.identity.clone()))
+        .collect();
+    for root in targets {
+        if !action_identities.contains(&root.identity) {
+            continue;
+        }
+        for member in parallel_family_members(root, &parallel_members_by_parent)
+        {
+            if action_identities.contains(&member.identity) {
+                continue;
+            }
+            if target_is_dismissable(member, request) {
+                dismiss_items.push(AgentCleanupDismissItemWire {
+                    identity: member.identity.clone(),
+                    display_name: member.display_name.clone(),
+                });
+                action_identities.insert(member.identity.clone());
+                continue;
+            }
+            if request.mode != CLEANUP_MODE_KILL_AND_DISMISS
+                || member.pid.is_none()
+            {
+                continue;
+            }
+            let Some(kind) = classify_kill_kind(member) else {
+                continue;
+            };
+            kill_items.push(AgentCleanupKillItemWire {
+                identity: member.identity.clone(),
+                kind: kind.to_string(),
+                pid: member.pid,
+                display_name: member.display_name.clone(),
+            });
+            action_identities.insert(member.identity.clone());
         }
     }
 
@@ -737,6 +836,7 @@ mod tests {
             start_time: None,
             stop_time: None,
             is_workflow_child: false,
+            agent_family_parallel: false,
             appears_as_agent: false,
             step_type: None,
         }
@@ -907,6 +1007,137 @@ mod tests {
         assert_eq!(
             plan.cascaded_workflow_children[0].raw_suffix.as_deref(),
             Some("child")
+        );
+    }
+
+    #[test]
+    fn parallel_family_root_kill_cascades_to_live_members_only() {
+        let mut root =
+            target("run", "sase-6g", Some("root-ts"), "RUNNING", Some(10));
+        root.agent_family_parallel = true;
+        let mut phase_one = target(
+            "run",
+            "sase-6g.1",
+            Some("phase-one-ts"),
+            "RUNNING",
+            Some(11),
+        );
+        phase_one.agent_family_parallel = true;
+        phase_one.parent_timestamp = Some("root-ts".to_string());
+        let mut phase_two = target(
+            "run",
+            "sase-6g.2",
+            Some("phase-two-ts"),
+            "RUNNING",
+            Some(12),
+        );
+        phase_two.agent_family_parallel = true;
+        phase_two.parent_timestamp = Some("root-ts".to_string());
+        let mut serial_child = target(
+            "run",
+            "sase-6g--code",
+            Some("serial-ts"),
+            "RUNNING",
+            Some(13),
+        );
+        serial_child.parent_timestamp = Some("root-ts".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![root.identity.clone()];
+
+        let plan = plan_agent_cleanup(
+            &[root, phase_one, phase_two, serial_child],
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-6g", "sase-6g.1", "sase-6g.2"]
+        );
+        assert!(!plan
+            .kill_items
+            .iter()
+            .any(|item| item.identity.cl_name == "sase-6g--code"));
+    }
+
+    #[test]
+    fn killing_one_parallel_member_leaves_root_and_siblings_untouched() {
+        let mut root =
+            target("run", "sase-6g", Some("root-ts"), "RUNNING", Some(10));
+        root.agent_family_parallel = true;
+        let mut selected = target(
+            "run",
+            "sase-6g.1",
+            Some("phase-one-ts"),
+            "RUNNING",
+            Some(11),
+        );
+        selected.agent_family_parallel = true;
+        selected.parent_timestamp = Some("root-ts".to_string());
+        let mut sibling = target(
+            "run",
+            "sase-6g.2",
+            Some("phase-two-ts"),
+            "RUNNING",
+            Some(12),
+        );
+        sibling.agent_family_parallel = true;
+        sibling.parent_timestamp = Some("root-ts".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![selected.identity.clone()];
+
+        let plan =
+            plan_agent_cleanup(&[root, selected, sibling], &request).unwrap();
+
+        assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].identity.cl_name, "sase-6g.1");
+    }
+
+    #[test]
+    fn dismissing_parallel_root_cascades_only_after_members_finish() {
+        let mut root = target("run", "root", Some("root-ts"), "DONE", None);
+        root.agent_family_parallel = true;
+        let mut member =
+            target("run", "member", Some("member-ts"), "RUNNING", Some(11));
+        member.agent_family_parallel = true;
+        member.parent_timestamp = Some("root-ts".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_DISMISS_COMPLETED,
+        );
+        request.identities = vec![root.identity.clone()];
+
+        let active_plan =
+            plan_agent_cleanup(&[root.clone(), member.clone()], &request)
+                .unwrap();
+        assert!(active_plan.dismiss_items.is_empty());
+        assert!(active_plan.skipped_items.iter().any(|item| {
+            item.identity == root.identity
+                && item.reason == SKIPPED_NOT_DISMISSABLE
+                && item.detail.as_deref()
+                    == Some("parallel family still active")
+        }));
+
+        member.status = "DONE".to_string();
+        member.pid = None;
+        let finished_plan =
+            plan_agent_cleanup(&[root, member], &request).unwrap();
+        assert_eq!(
+            finished_plan
+                .dismiss_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "member"]
         );
     }
 

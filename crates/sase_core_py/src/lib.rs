@@ -4368,6 +4368,7 @@ mod tests {
                     "start_time": null,
                     "stop_time": null,
                     "is_workflow_child": false,
+                    "agent_family_parallel": false,
                     "appears_as_agent": false,
                     "step_type": null
                 }),
@@ -4375,7 +4376,7 @@ mod tests {
             let request_obj = json_value_to_py(
                 py,
                 &json!({
-                    "schema_version": 1,
+                    "schema_version": sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
                     "scope": "all_panels",
                     "mode": "dismiss_completed",
                     "focused_panel_tag": null,
@@ -4390,7 +4391,10 @@ mod tests {
             let result = py_plan_agent_cleanup(py, &targets, request).unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
 
-            assert_eq!(value["schema_version"], json!(1));
+            assert_eq!(
+                value["schema_version"],
+                json!(sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION)
+            );
             assert_eq!(
                 value["dismiss_items"][0]["identity"]["cl_name"],
                 json!("done")

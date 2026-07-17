@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const CLEANUP_SCOPE_FOCUSED_PANEL: &str = "focused_panel";
 pub const CLEANUP_SCOPE_ALL_PANELS: &str = "all_panels";
@@ -87,6 +87,8 @@ pub struct AgentCleanupTargetWire {
     pub stop_time: Option<String>,
     #[serde(default)]
     pub is_workflow_child: bool,
+    #[serde(default)]
+    pub agent_family_parallel: bool,
     #[serde(default)]
     pub appears_as_agent: bool,
     #[serde(default)]

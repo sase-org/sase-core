@@ -39,9 +39,9 @@
 //! byte ordered comparison.
 
 use sase_core::{
-    AgentMetaWire, ChangeSpecWire, CommentWire, CommitWire, DeltaWire,
-    HookStatusLineWire, HookWire, MentorStatusLineWire, MentorWire,
-    SourceSpanWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    AgentCleanupTargetWire, AgentMetaWire, ChangeSpecWire, CommentWire,
+    CommitWire, DeltaWire, HookStatusLineWire, HookWire, MentorStatusLineWire,
+    MentorWire, SourceSpanWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -232,5 +232,42 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     );
 
     let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
+    assert!(!legacy.agent_family_parallel);
+}
+
+#[test]
+fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
+    let identity = serde_json::json!({
+        "agent_type": "run",
+        "cl_name": "sase-6g.4",
+        "raw_suffix": "member-ts"
+    });
+    let python_fixture = serde_json::json!({
+        "identity": identity,
+        "agent_type": "run",
+        "status": "RUNNING",
+        "parent_timestamp": "root-ts",
+        "agent_family_parallel": true
+    });
+    let target: AgentCleanupTargetWire =
+        serde_json::from_value(python_fixture.clone()).unwrap();
+
+    assert!(target.agent_family_parallel);
+    assert_eq!(
+        serde_json::to_value(target).unwrap()["agent_family_parallel"],
+        python_fixture["agent_family_parallel"]
+    );
+
+    let legacy: AgentCleanupTargetWire =
+        serde_json::from_value(serde_json::json!({
+            "identity": {
+                "agent_type": "run",
+                "cl_name": "legacy",
+                "raw_suffix": "legacy-ts"
+            },
+            "agent_type": "run",
+            "status": "RUNNING"
+        }))
+        .unwrap();
     assert!(!legacy.agent_family_parallel);
 }
