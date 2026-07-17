@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/sase-org/sase-core/compare/v0.5.0...v0.6.0) - 2026-07-17
+
+### Added
+
+- *(lsp)* complete repeatable agent arguments (sase-6m.3)
+- *(xprompt)* add repeatable input metadata (sase-6m.1)
+- *(telemetry)* add SQLite metric store and queries (sase-6k.1)
+- *(plan)* guide phase description authoring
+- *(agent-scan)* add bounded artifact index deletion (sase-6j.3)
+- *(notifications)* add custom gate wire support (sase-6i.1)
+- *(editor)* expose family directive completions (sase-6g)
+- *(cleanup)* cascade parallel family members (sase-6g.4)
+- *(agent-scan)* expose parallel family membership (sase-6g.2)
+- *(notifications)* add typed epic approval projection (sase-6e.2)
+- *(agent-scan)* [**breaking**] drop custom role metadata (sase-6e.1)
+- align catalog with canonical SASE paths (sase-6d.4)
+- add structured commit footer API
+- define canonical SASE content layout contract (sase-6d.1)
+
+### Fixed
+
+- *(editor)* describe auto arguments as gate-owned (sase-6e)
+
 ## [0.5.0](https://github.com/sase-org/sase-core/compare/v0.4.1...v0.5.0) - 2026-07-16
 
 ### Added
