@@ -233,6 +233,25 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
 
     let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
     assert!(!legacy.agent_family_parallel);
+    assert!(legacy.agent_clan.is_none());
+
+    let clan: AgentMetaWire =
+        serde_json::from_str(r#"{"agent_clan":"alpha"}"#).unwrap();
+    assert_eq!(clan.agent_clan.as_deref(), Some("alpha"));
+}
+
+#[test]
+fn agent_meta_clan_field_order_matches_python_wire() {
+    let encoded = serde_json::to_string(&AgentMetaWire::default()).unwrap();
+    let workflow = encoded.find("\"workflow_name\"").unwrap();
+    let clan = encoded.find("\"agent_clan\"").unwrap();
+    let family = encoded.find("\"agent_family\"").unwrap();
+    let role = encoded.find("\"agent_family_role\"").unwrap();
+    let parallel = encoded.find("\"agent_family_parallel\"").unwrap();
+    assert!(workflow < clan);
+    assert!(clan < family);
+    assert!(family < role);
+    assert!(role < parallel);
 }
 
 #[test]

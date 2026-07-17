@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 10;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 11;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -603,6 +603,7 @@ fn open_index_with_busy_timeout(
             project_file TEXT NOT NULL,
             workflow_dir_name TEXT NOT NULL,
             workflow_name TEXT,
+            agent_clan TEXT,
             agent_family TEXT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -714,6 +715,15 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 10) {
         migrate_record_json_refresh_v10(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 11) {
+        ensure_agent_artifacts_column(&conn, "agent_clan", "TEXT")?;
+        migrate_record_json_refresh_v11(&mut conn)?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
+         ON agent_artifacts(agent_clan, timestamp);",
+    )
+    .map_err(|e| e.to_string())?;
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
@@ -945,6 +955,14 @@ fn migrate_record_json_refresh_v10(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v11 adds the denormalized `agent_clan` projection and refreshes
+/// `record_json` with `agent_meta.agent_clan`.
+fn migrate_record_json_refresh_v11(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
 fn upsert_record(
     conn: &Connection,
     projects_root: &Path,
@@ -958,7 +976,7 @@ fn upsert_record(
         r#"
         INSERT INTO agent_artifacts (
             artifact_dir, projects_root, project_name, project_dir, project_file,
-            workflow_dir_name, workflow_name, agent_family, timestamp,
+            workflow_dir_name, workflow_name, agent_clan, agent_family, timestamp,
             status, agent_type, cl_name,
             agent_name, model, llm_provider, started_at, finished_at,
             has_done_marker, has_running_marker, has_waiting_marker,
@@ -972,7 +990,8 @@ fn upsert_record(
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, CURRENT_TIMESTAMP
+            ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
+            CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -981,6 +1000,7 @@ fn upsert_record(
             project_file = excluded.project_file,
             workflow_dir_name = excluded.workflow_dir_name,
             workflow_name = excluded.workflow_name,
+            agent_clan = excluded.agent_clan,
             agent_family = excluded.agent_family,
             timestamp = excluded.timestamp,
             status = excluded.status,
@@ -1023,6 +1043,7 @@ fn upsert_record(
             record.project_file,
             record.workflow_dir_name,
             summary.workflow_name,
+            summary.agent_clan,
             summary.agent_family,
             record.timestamp,
             summary.status,
@@ -1849,6 +1870,7 @@ struct RecordSummary {
     cl_name: Option<String>,
     agent_name: Option<String>,
     workflow_name: Option<String>,
+    agent_clan: Option<String>,
     agent_family: Option<String>,
     model: Option<String>,
     llm_provider: Option<String>,
@@ -1912,6 +1934,7 @@ impl RecordSummary {
             workflow_name: meta
                 .and_then(|m| m.workflow_name.clone())
                 .or_else(|| workflow_state.map(|w| w.workflow_name.clone())),
+            agent_clan: meta.and_then(|m| m.agent_clan.clone()),
             agent_family: meta.and_then(|m| m.agent_family.clone()),
             model: meta
                 .and_then(|m| m.model.clone())

@@ -13,6 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use sase_core::agent_cleanup::AgentCleanupIdentityWire;
 use sase_core::agent_scan::{
     agent_artifact_index_status, query_agent_artifact_index,
@@ -132,6 +133,8 @@ fn build_ace_run_running(root: &Path) {
         &json!({
             "name": "running_alpha",
             "workflow_name": "wf_alpha",
+            "agent_family": "legacy_clan",
+            "agent_family_role": "phase",
             "agent_family_parallel": true,
             "pid": 22222,
             "model": "claude-sonnet-4-6",
@@ -650,6 +653,9 @@ fn running_record_carries_agent_meta() {
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.name.as_deref(), Some("running_alpha"));
     assert_eq!(meta.workflow_name.as_deref(), Some("wf_alpha"));
+    assert_eq!(meta.agent_clan.as_deref(), Some("legacy_clan"));
+    assert!(meta.agent_family.is_none());
+    assert!(meta.agent_family_role.is_none());
     assert!(meta.agent_family_parallel);
     assert_eq!(meta.pid, Some(22222));
     assert!(meta.plan);
@@ -781,6 +787,59 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             .unwrap()
             .agent_family_parallel
     );
+    let indexed_meta = record_by_timestamp(&indexed, TS_ACE_RUN_RUNNING)
+        .agent_meta
+        .as_ref()
+        .unwrap();
+    assert_eq!(indexed_meta.agent_clan.as_deref(), Some("legacy_clan"));
+    assert!(indexed_meta.agent_family.is_none());
+
+    let conn = Connection::open(index).unwrap();
+    let indexed_clan: Option<String> = conn
+        .query_row(
+            "SELECT agent_clan FROM agent_artifacts WHERE timestamp = ?1",
+            [TS_ACE_RUN_RUNNING],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed_clan.as_deref(), Some("legacy_clan"));
+    let clan_index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_agent_artifacts_agent_clan'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(clan_index_count, 1);
+}
+
+#[test]
+fn explicit_agent_clan_preserves_sequential_family_fields() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260717170000");
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "alpha.family--code",
+            "agent_clan": "alpha",
+            "agent_family": "alpha.family",
+            "agent_family_role": "code",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+    assert_eq!(meta.agent_clan.as_deref(), Some("alpha"));
+    assert_eq!(meta.agent_family.as_deref(), Some("alpha.family"));
+    assert_eq!(meta.agent_family_role.as_deref(), Some("code"));
+    assert!(!meta.agent_family_parallel);
 }
 
 #[test]

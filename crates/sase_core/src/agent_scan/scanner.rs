@@ -816,6 +816,22 @@ fn coerce_strict_int(value: Option<&Value>) -> Option<i64> {
 // ---------------------------------------------------------------------------
 
 fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
+    let legacy_parallel = coerce_bool_truthy(data.get("agent_family_parallel"));
+    let raw_family = coerce_str(data.get("agent_family"));
+    let agent_clan = coerce_str(data.get("agent_clan")).or_else(|| {
+        if legacy_parallel {
+            raw_family.clone()
+        } else {
+            None
+        }
+    });
+    let agent_family = if legacy_parallel { None } else { raw_family };
+    let agent_family_role = if legacy_parallel {
+        None
+    } else {
+        coerce_str(data.get("agent_family_role"))
+    };
+
     AgentMetaWire {
         name: coerce_str(data.get("name")),
         artifact_agent_id: coerce_str(data.get("artifact_agent_id")),
@@ -838,11 +854,10 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         parent_agent_timestamp: coerce_str(data.get("parent_agent_timestamp")),
         parent_agent_name: coerce_str(data.get("parent_agent_name")),
         workflow_name: coerce_str(data.get("workflow_name")),
-        agent_family: coerce_str(data.get("agent_family")),
-        agent_family_role: coerce_str(data.get("agent_family_role")),
-        agent_family_parallel: coerce_bool_truthy(
-            data.get("agent_family_parallel"),
-        ),
+        agent_clan,
+        agent_family,
+        agent_family_role,
+        agent_family_parallel: legacy_parallel,
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tag: coerce_str(data.get("tag")),
         output_variables: coerce_str_str_map(data.get("output_variables"))

@@ -14,6 +14,7 @@ pub mod agent_family;
 pub mod agent_group_archive;
 pub mod agent_launch;
 pub mod agent_name_template;
+pub mod agent_runtime;
 pub mod agent_scan;
 pub mod bead;
 pub mod commit_footer;
@@ -108,6 +109,10 @@ pub use agent_name_template::{
     render_agent_name_template, validate_agent_name_template_token,
     AgentNameTemplate, AgentNameTemplateError, AGENT_NAME_TEMPLATE_ALPHABET,
     AGENT_NAME_TEMPLATE_MARKER,
+};
+pub use agent_runtime::{
+    aggregate_clan_runtime, aggregate_clan_runtime_records,
+    ClanRuntimeMemberWire, ClanRuntimeWire,
 };
 pub use agent_scan::{
     agent_artifact_index_status, canonical_agent_artifact_path,

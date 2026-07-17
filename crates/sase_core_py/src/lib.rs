@@ -14,6 +14,7 @@
 //! - `evaluate_query_many(query: str, specs: list[dict]) -> list[bool]`
 //! - `scan_agent_artifacts(projects_root: str, options: dict | None = None) -> dict`
 //! - `scan_agent_artifact_dirs(projects_root: str, artifact_dirs: list[str], options: dict | None = None) -> dict`
+//! - `aggregate_clan_runtime(members: list[dict], now_epoch_seconds: float) -> dict`
 //! - `rebuild_agent_artifact_index(index_path: str, projects_root: str, options: dict | None = None) -> dict`
 //! - `upsert_agent_artifact_index_row(index_path: str, projects_root: str, artifact_dir: str, options: dict | None = None) -> dict`
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
@@ -182,6 +183,10 @@ use sase_core::agent_name_template::{
     match_agent_name_template as core_match_agent_name_template,
     parse_agent_name_template as core_parse_agent_name_template,
     render_agent_name_template as core_render_agent_name_template,
+};
+use sase_core::agent_runtime::{
+    aggregate_clan_runtime as core_aggregate_clan_runtime,
+    ClanRuntimeMemberWire,
 };
 use sase_core::agent_scan::{
     agent_artifact_index_status as core_agent_artifact_index_status,
@@ -669,6 +674,24 @@ fn py_scan_agent_artifact_dirs<'py>(
     });
     let value = serde_json::to_value(&snapshot).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return wall-clock union runtime for clan/family members.
+#[pyfunction]
+#[pyo3(name = "aggregate_clan_runtime")]
+fn py_aggregate_clan_runtime<'py>(
+    py: Python<'py>,
+    members: &Bound<'py, PyList>,
+    now_epoch_seconds: f64,
+) -> PyResult<PyObject> {
+    let members = clan_runtime_members_from_py_list(members)?;
+    let runtime = py.allow_threads(|| {
+        core_aggregate_clan_runtime(&members, now_epoch_seconds)
+    });
+    let value = serde_json::to_value(&runtime).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
 }
@@ -2898,6 +2921,22 @@ fn agent_scan_options_from_pydict(
     })
 }
 
+fn clan_runtime_members_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ClanRuntimeMemberWire>> {
+    let mut members = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let member = serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "members[{index}] is not a valid ClanRuntimeMemberWire dict: {error}"
+            ))
+        })?;
+        members.push(member);
+    }
+    Ok(members)
+}
+
 fn notification_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<NotificationWire> {
@@ -3981,6 +4020,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_query_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dirs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_aggregate_clan_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_agent_artifact_path, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_artifact_path, m)?)?;
     m.add_function(wrap_pyfunction!(
