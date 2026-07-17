@@ -39,6 +39,14 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         allows_multiple: false,
     },
     DirectiveMetadata {
+        name: "family",
+        alias: Some("f"),
+        description:
+            "join a parallel agent family rooted at another launch segment",
+        takes_argument: true,
+        allows_multiple: false,
+    },
+    DirectiveMetadata {
         name: "wait",
         alias: Some("w"),
         description: "Wait for another agent/workflow and/or a time floor",
@@ -218,6 +226,7 @@ mod tests {
             ("m", "model"),
             ("e", "effort"),
             ("n", "name"),
+            ("f", "family"),
             ("w", "wait"),
             ("a", "auto"),
             ("g", "group"),
@@ -236,6 +245,37 @@ mod tests {
 
         let model = directive_metadata("model").expect("model metadata");
         assert!(!model.allows_multiple);
+    }
+
+    #[test]
+    fn family_metadata_matches_the_execution_neutral_editor_contract() {
+        let family = directive_metadata("family").expect("family metadata");
+        assert_eq!(family.alias, Some("f"));
+        assert!(family.takes_argument);
+        assert!(!family.allows_multiple);
+        assert_eq!(canonical_directive_name("f"), Some("family"));
+        assert_eq!(directive_metadata("f").map(|d| d.name), Some("family"));
+        assert_eq!(
+            family.description,
+            "join a parallel agent family rooted at another launch segment"
+        );
+
+        for token in ["%fam", "%f"] {
+            let completions = build_directive_completion_candidates(token);
+            assert_eq!(completions.candidates.len(), 1, "{token} completion");
+            let candidate = &completions.candidates[0];
+            assert_eq!(candidate.insertion, "%family");
+            assert_eq!(candidate.detail.as_deref(), Some("alias %f"));
+            assert_eq!(
+                candidate.documentation.as_deref(),
+                Some(family.description)
+            );
+        }
+
+        assert!(directive_argument_candidates("family")
+            .candidates
+            .is_empty());
+        assert!(directive_argument_candidates("f").candidates.is_empty());
     }
 
     #[test]

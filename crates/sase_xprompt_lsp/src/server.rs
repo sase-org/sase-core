@@ -2052,6 +2052,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completes_family_directive_from_the_public_editor_surface() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text("%fa".to_string(), Position::new(0, 3))
+            .await
+            .unwrap();
+
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items.len(), 1);
+        let family = &items[0];
+        assert_eq!(family.label, "%family");
+        assert_eq!(family.kind, Some(CompletionItemKind::TEXT));
+        assert_eq!(family.filter_text.as_deref(), Some("family"));
+        assert_eq!(family.detail.as_deref(), Some("alias %f"));
+        let Some(CompletionTextEdit::Edit(edit)) = family.text_edit.as_ref()
+        else {
+            panic!("expected family completion text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 0));
+        assert_eq!(edit.range.end, Position::new(0, 3));
+        assert_eq!(edit.new_text, "%family");
+        let Some(Documentation::MarkupContent(documentation)) =
+            family.documentation.as_ref()
+        else {
+            panic!("expected family completion documentation");
+        };
+        assert_eq!(
+            documentation.value,
+            "join a parallel agent family rooted at another launch segment"
+        );
+    }
+
+    #[tokio::test]
     async fn completes_directive_argument_values() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
