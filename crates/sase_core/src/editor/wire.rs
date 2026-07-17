@@ -251,6 +251,8 @@ pub struct XpromptInputHint {
     pub required: bool,
     pub default_display: Option<String>,
     pub position: u32,
+    #[serde(default)]
+    pub repeatable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

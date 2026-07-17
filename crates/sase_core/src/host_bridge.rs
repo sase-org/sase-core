@@ -683,6 +683,8 @@ pub struct MobileXpromptInputWire {
     pub required: bool,
     pub default_display: Option<String>,
     pub position: u32,
+    #[serde(default)]
+    pub repeatable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -898,6 +900,7 @@ mod tests {
                         required: true,
                         default_display: None,
                         position: 0,
+                        repeatable: false,
                     }],
                     is_skill: false,
                     content_preview: Some("Complete the bead".to_string()),
@@ -1048,7 +1051,8 @@ mod tests {
                         "description": null,
                         "required": true,
                         "default_display": null,
-                        "position": 0
+                        "position": 0,
+                        "repeatable": false
                     }],
                     "is_skill": false,
                     "content_preview": "Complete the bead",
@@ -1288,6 +1292,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
         assert_eq!(old_entry.definition_path, None);
         assert_eq!(old_entry.definition_range, None);
         assert_eq!(old_entry.inputs[0].description, None);
+        assert!(!old_entry.inputs[0].repeatable);
         assert_eq!(
             serde_json::to_value(&old_entry).unwrap(),
             json!({
@@ -1307,7 +1312,8 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
                     "description": null,
                     "required": true,
                     "default_display": null,
-                    "position": 0
+                    "position": 0,
+                    "repeatable": false
                 }],
                 "is_skill": false,
                 "content_preview": null,

@@ -58,6 +58,7 @@ struct CatalogInput {
     default_display: Option<String>,
     default_snippet_value: Option<String>,
     is_step_input: bool,
+    repeatable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +385,7 @@ fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileXpromptInputWire> {
             required: input.required,
             default_display: input.default_display.clone(),
             position: position as u32,
+            repeatable: input.repeatable,
         })
         .collect()
 }
@@ -394,7 +396,8 @@ fn format_inputs(inputs: &[CatalogInput]) -> Option<String> {
         .filter(|input| !input.is_step_input)
         .map(|input| {
             let optional = if input.required { "" } else { "?" };
-            format!("{}{optional}: {}", input.name, input.type_name)
+            let repeatable = if input.repeatable { "…" } else { "" };
+            format!("{}{repeatable}{optional}: {}", input.name, input.type_name)
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -1885,6 +1888,7 @@ fn workflow_from_mapping(
                 default_display: None,
                 default_snippet_value: None,
                 is_step_input: true,
+                repeatable: false,
             });
         }
     }
@@ -2005,6 +2009,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     default_display,
                     default_snippet_value,
                     is_step_input: false,
+                    repeatable: repeatable_input_value(raw),
                 })
             })
             .collect();
@@ -2031,6 +2036,9 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     default_display: default.and_then(default_display),
                     default_snippet_value: default.map(snippet_default_value),
                     is_step_input: false,
+                    repeatable: mapping_get(mapping, "repeatable")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 })
             })
             .collect();
@@ -2072,6 +2080,7 @@ fn parse_short_input_value(
 fn parse_input_type(raw: &str) -> String {
     match raw.to_lowercase().as_str() {
         "word" => "word",
+        "agent" => "agent",
         "text" => "text",
         "path" => "path",
         "int" | "integer" => "int",
@@ -2080,6 +2089,14 @@ fn parse_input_type(raw: &str) -> String {
         _ => "line",
     }
     .to_string()
+}
+
+fn repeatable_input_value(value: &Value) -> bool {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping_get(mapping, "repeatable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn default_display(value: &Value) -> Option<String> {
@@ -2415,6 +2432,34 @@ mod tests {
             by_name["ship"].kind.as_deref(),
             Some("standalone_workflow")
         );
+    }
+
+    #[test]
+    fn projects_repeatable_agent_input_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let xprompts = root.join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("merge.yml"),
+            "input:\n  names:\n    type: agent\n    default:\n    repeatable: true\nsteps:\n  - name: main\n    prompt_part: '{{ names }}'\n",
+        )
+        .unwrap();
+
+        let response = load_editor_xprompt_catalog(
+            &request(),
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let entry = response
+            .entries
+            .iter()
+            .find(|entry| entry.name == "merge")
+            .unwrap();
+
+        assert_eq!(entry.input_signature.as_deref(), Some("(names…?: agent)"));
+        assert_eq!(entry.inputs[0].r#type, "agent");
+        assert!(entry.inputs[0].repeatable);
     }
 
     #[test]

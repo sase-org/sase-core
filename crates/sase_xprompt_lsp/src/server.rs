@@ -1898,6 +1898,7 @@ mod tests {
             required,
             default_display: None,
             position,
+            repeatable: false,
         }
     }
 

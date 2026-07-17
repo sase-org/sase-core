@@ -1339,6 +1339,7 @@ mod tests {
                         required: true,
                         default_display: None,
                         position: 0,
+                        repeatable: false,
                     }],
                     is_skill: false,
                     content_preview: Some("Use this workflow...".to_string()),
@@ -1396,7 +1397,8 @@ mod tests {
                         "description": "Workflow topic",
                         "required": true,
                         "default_display": null,
-                        "position": 0
+                        "position": 0,
+                        "repeatable": false
                     }],
                     "is_skill": false,
                     "content_preview": "Use this workflow...",

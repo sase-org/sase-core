@@ -512,6 +512,7 @@
       "description": "string|null; default null when absent",
       "name": "string",
       "position": "u32",
+      "repeatable": "bool; default false when absent",
       "required": "bool",
       "type": "string"
     },

@@ -697,7 +697,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "description": "string|null; default null when absent",
                 "required": "bool",
                 "default_display": "string|null",
-                "position": "u32"
+                "position": "u32",
+                "repeatable": "bool; default false when absent"
             },
             "MobileXpromptCatalogStatsWire": {
                 "total_count": "u64",

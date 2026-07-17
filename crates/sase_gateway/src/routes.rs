@@ -3308,6 +3308,7 @@ mod tests {
                             required: true,
                             default_display: None,
                             position: 0,
+                            repeatable: false,
                         }],
                         is_skill: false,
                         content_preview: Some("Use gh".to_string()),

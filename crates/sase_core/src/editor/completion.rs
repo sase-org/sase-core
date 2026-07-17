@@ -51,6 +51,7 @@ pub fn assist_entries_from_catalog(
                         required: input.required,
                         default_display: input.default_display.clone(),
                         position: input.position,
+                        repeatable: input.repeatable,
                     })
                     .collect(),
                 content_preview: entry.content_preview.clone(),
@@ -1295,6 +1296,24 @@ fn paren_arg_context(
         if stripped.chars().any(char::is_whitespace) {
             return None;
         }
+        let positional_index = body[..clause_start]
+            .split(',')
+            .filter(|clause| !clause.trim().is_empty() && !clause.contains('='))
+            .count();
+        if let Some(active_input) = entry
+            .inputs
+            .get(positional_index)
+            .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
+            .filter(|input| input.repeatable)
+            .cloned()
+        {
+            return Some((
+                completion_kind_for_input(&active_input),
+                active_input,
+                value_start,
+                used,
+            ));
+        }
         let placeholder = XpromptInputHint {
             name: String::new(),
             r#type: String::new(),
@@ -1302,6 +1321,7 @@ fn paren_arg_context(
             required: false,
             default_display: None,
             position: 0,
+            repeatable: false,
         };
         return Some((
             CompletionContextKind::XpromptArgumentName,
@@ -1484,7 +1504,8 @@ fn completion_kind_for_input(
 
 fn input_label(input: &XpromptInputHint) -> String {
     let suffix = if input.required { "" } else { "?" };
-    format!("{}{suffix}: {}", input.name, input.r#type)
+    let repeatable = if input.repeatable { "…" } else { "" };
+    format!("{}{repeatable}{suffix}: {}", input.name, input.r#type)
 }
 
 fn input_documentation(input: &XpromptInputHint) -> Option<String> {
@@ -1613,6 +1634,7 @@ mod tests {
                         required: true,
                         default_display: None,
                         position: 0,
+                        repeatable: false,
                     },
                     MobileXpromptInputWire {
                         name: "deep".to_string(),
@@ -1621,6 +1643,7 @@ mod tests {
                         required: false,
                         default_display: Some("false".to_string()),
                         position: 1,
+                        repeatable: false,
                     },
                 ],
                 is_skill: false,
@@ -1870,6 +1893,7 @@ mod tests {
                 required: true,
                 default_display: None,
                 position: 0,
+                repeatable: false,
             }],
             content_preview: None,
             description: None,
@@ -1881,6 +1905,41 @@ mod tests {
         assert!(
             classify_completion_context(&doc, pos(13), &[ns_entry]).is_some()
         );
+    }
+
+    #[test]
+    fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
+        let mut fork = entries()[0].clone();
+        fork.name = "fork".to_string();
+        fork.display_label = "fork".to_string();
+        fork.insertion = "#fork".to_string();
+        fork.inputs = vec![XpromptInputHint {
+            name: "names".to_string(),
+            r#type: "agent".to_string(),
+            description: None,
+            required: false,
+            default_display: None,
+            position: 0,
+            repeatable: true,
+        }];
+
+        for text in ["😀 #fork:planner,co", "😀 #fork(planner, co"] {
+            let doc = DocumentSnapshot::new(text);
+            let cursor = doc.byte_offset_to_position(text.len()).unwrap();
+            let context =
+                classify_completion_context(&doc, cursor, &[fork.clone()])
+                    .unwrap();
+            assert_eq!(
+                context.kind,
+                CompletionContextKind::XpromptArgumentTypeHint
+            );
+            assert_eq!(context.active_input.as_deref(), Some("names"));
+            let token_start = text.rfind("co").unwrap();
+            assert_eq!(
+                context.replacement_range,
+                doc.byte_range_to_range(token_start, text.len()).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -1959,6 +2018,7 @@ mod tests {
                 required: true,
                 default_display: None,
                 position: 0,
+                repeatable: false,
             }],
             content_preview: None,
             description: None,

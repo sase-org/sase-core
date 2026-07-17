@@ -39,33 +39,62 @@ impl HelperHostBridge for FixtureBridge {
                 project: Some("sase".to_string()),
                 scope: MobileHelperProjectScopeWire::Explicit,
             },
-            entries: vec![MobileXpromptCatalogEntryWire {
-                name: "foo".to_string(),
-                display_label: "foo".to_string(),
-                insertion: Some("#foo".to_string()),
-                reference_prefix: Some("#".to_string()),
-                kind: Some("prompt".to_string()),
-                description: Some("Foo prompt".to_string()),
-                source_bucket: "builtin".to_string(),
-                project: None,
-                tags: Vec::new(),
-                input_signature: None,
-                inputs: vec![MobileXpromptInputWire {
-                    name: "path".to_string(),
-                    r#type: "path".to_string(),
-                    description: Some("File to process".to_string()),
-                    required: true,
-                    default_display: None,
-                    position: 0,
-                }],
-                is_skill: false,
-                content_preview: None,
-                source_path_display: None,
-                definition_path: Some(self.definition_path.clone()),
-                definition_range: None,
-            }],
+            entries: vec![
+                MobileXpromptCatalogEntryWire {
+                    name: "foo".to_string(),
+                    display_label: "foo".to_string(),
+                    insertion: Some("#foo".to_string()),
+                    reference_prefix: Some("#".to_string()),
+                    kind: Some("prompt".to_string()),
+                    description: Some("Foo prompt".to_string()),
+                    source_bucket: "builtin".to_string(),
+                    project: None,
+                    tags: Vec::new(),
+                    input_signature: None,
+                    inputs: vec![MobileXpromptInputWire {
+                        name: "path".to_string(),
+                        r#type: "path".to_string(),
+                        description: Some("File to process".to_string()),
+                        required: true,
+                        default_display: None,
+                        position: 0,
+                        repeatable: false,
+                    }],
+                    is_skill: false,
+                    content_preview: None,
+                    source_path_display: None,
+                    definition_path: Some(self.definition_path.clone()),
+                    definition_range: None,
+                },
+                MobileXpromptCatalogEntryWire {
+                    name: "fork".to_string(),
+                    display_label: "fork".to_string(),
+                    insertion: Some("#fork".to_string()),
+                    reference_prefix: Some("#".to_string()),
+                    kind: Some("workflow".to_string()),
+                    description: Some("Fork conversations".to_string()),
+                    source_bucket: "builtin".to_string(),
+                    project: None,
+                    tags: Vec::new(),
+                    input_signature: Some("(names…?: agent)".to_string()),
+                    inputs: vec![MobileXpromptInputWire {
+                        name: "names".to_string(),
+                        r#type: "agent".to_string(),
+                        description: None,
+                        required: false,
+                        default_display: None,
+                        position: 0,
+                        repeatable: true,
+                    }],
+                    is_skill: false,
+                    content_preview: None,
+                    source_path_display: None,
+                    definition_path: None,
+                    definition_range: None,
+                },
+            ],
             stats: MobileXpromptCatalogStatsWire {
-                total_count: 1,
+                total_count: 2,
                 project_count: 0,
                 skill_count: 0,
                 pdf_requested: false,
@@ -189,6 +218,64 @@ async fn stdio_jsonrpc_initialize_and_completion() {
         }
     }
     assert!(saw_missing_arg_diagnostic);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "version": 2
+                },
+                "contentChanges": [{"text": "#fork:planner,coder"}]
+            }
+        }),
+    )
+    .await;
+    let mut saw_repeatable_diagnostics = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            let diagnostics = message["params"]["diagnostics"]
+                .as_array()
+                .expect("diagnostic array");
+            saw_repeatable_diagnostics = diagnostics.iter().all(|diagnostic| {
+                diagnostic["code"] != "too_many_args"
+                    && diagnostic["code"] != "invalid_xprompt_arg_type"
+            });
+            if saw_repeatable_diagnostics {
+                break;
+            }
+        }
+    }
+    assert!(saw_repeatable_diagnostics);
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "version": 3
+                },
+                "contentChanges": [{"text": "#foo"}]
+            }
+        }),
+    )
+    .await;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
 
     write_message(
         &mut client_writer,

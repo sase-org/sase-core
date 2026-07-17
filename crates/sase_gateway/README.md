@@ -97,7 +97,8 @@ update worker.
 
 `GET /api/v1/xprompts/catalog` preserves the Python helper bridge's xprompt editor metadata. Entries may include
 `insertion`, `reference_prefix`, `kind`, and structured `inputs` records with `name`, `type`, `required`,
-`default_display`, and `position`; clients should tolerate older helper output where those additive fields are absent.
+`default_display`, `position`, and `repeatable`; clients should tolerate older helper output where those additive fields
+are absent (`repeatable` defaults to false).
 The Rust gateway does not parse xprompt arguments itself.
 
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state

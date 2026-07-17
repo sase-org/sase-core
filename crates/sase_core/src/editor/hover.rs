@@ -199,6 +199,7 @@ mod tests {
                 required: true,
                 default_display: None,
                 position: 0,
+                repeatable: false,
             }],
             content_preview: Some("Body preview".to_string()),
             description: Some("Review code".to_string()),

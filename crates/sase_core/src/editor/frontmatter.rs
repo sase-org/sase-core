@@ -8,7 +8,7 @@ use super::wire::{
 };
 
 const XPROMPT_INPUT_TYPE_EXPECTED: &str =
-    "word, line, text, path, int/integer, bool/boolean, float";
+    "word, line, text, path, agent, int/integer, bool/boolean, float";
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
 ///
@@ -161,6 +161,7 @@ struct LongInputSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputType {
     Word,
+    Agent,
     Line,
     Text,
     Path,
@@ -572,6 +573,15 @@ fn validate_shortform_inputs(
                     .and_then(|source| source.field("description")),
                 item_range,
             );
+            validate_input_repeatable(
+                builder,
+                yaml_mapping_get(mapping, "repeatable"),
+                source
+                    .as_ref()
+                    .and_then(|source| source.field("repeatable")),
+                item_range,
+                idx + 1 == inputs.len(),
+            );
         }
         validate_nested_input_unknown_keys(builder, source.as_ref());
     }
@@ -668,6 +678,15 @@ fn validate_longform_inputs(
                 .as_ref()
                 .and_then(|source| source.field("description")),
             item_range,
+        );
+        validate_input_repeatable(
+            builder,
+            yaml_mapping_get(mapping, "repeatable"),
+            source
+                .as_ref()
+                .and_then(|source| source.field("repeatable")),
+            item_range,
+            idx + 1 == inputs.len(),
         );
         validate_longform_unknown_keys(builder, source.as_ref());
     }
@@ -826,9 +845,10 @@ fn validate_input_default(
         return;
     };
     let valid = match declared_type {
-        InputType::Word | InputType::Path => {
-            !raw.chars().any(char::is_whitespace)
+        InputType::Word | InputType::Agent => {
+            !raw.is_empty() && !raw.chars().any(char::is_whitespace)
         }
+        InputType::Path => !raw.chars().any(char::is_whitespace),
         InputType::Line => !raw.contains('\n'),
         InputType::Text => true,
         InputType::Int => raw.parse::<i64>().is_ok(),
@@ -844,6 +864,40 @@ fn validate_input_default(
                 "Default value does not match input type `{}`",
                 declared_type_name(declared_type)
             ),
+        );
+    }
+}
+
+fn validate_input_repeatable(
+    builder: &mut FrontmatterDiagnosticBuilder<'_>,
+    repeatable: Option<&Value>,
+    source: Option<&KeyValueSource>,
+    fallback_range: (usize, usize),
+    is_final: bool,
+) {
+    let Some(repeatable) = repeatable else {
+        return;
+    };
+    let range = source
+        .and_then(|field| field.scalar.as_ref())
+        .map(|scalar| scalar.range)
+        .or_else(|| source.map(|field| field.value_range))
+        .unwrap_or(fallback_range);
+    let Some(enabled) = repeatable.as_bool() else {
+        builder.push(
+            range,
+            DiagnosticSeverity::Error,
+            "invalid_xprompt_frontmatter_input_repeatable",
+            "Xprompt input repeatable must be true or false",
+        );
+        return;
+    };
+    if enabled && !is_final {
+        builder.push(
+            range,
+            DiagnosticSeverity::Error,
+            "non_final_xprompt_frontmatter_repeatable_input",
+            "A repeatable xprompt input must be the final positional input",
         );
     }
 }
@@ -889,7 +943,10 @@ fn validate_nested_input_unknown_keys(
         return;
     };
     for field in source.fields {
-        if matches!(field.key.as_str(), "type" | "default" | "description") {
+        if matches!(
+            field.key.as_str(),
+            "type" | "default" | "description" | "repeatable"
+        ) {
             continue;
         }
         builder.push(
@@ -914,7 +971,7 @@ fn validate_longform_unknown_keys(
     for field in source.fields {
         if matches!(
             field.key.as_str(),
-            "name" | "type" | "default" | "description"
+            "name" | "type" | "default" | "description" | "repeatable"
         ) {
             continue;
         }
@@ -2173,8 +2230,9 @@ fn yaml_scalar_to_string(value: &Value) -> Option<String> {
 
 impl InputType {
     /// Every input type, in catalog order, for schema enumeration.
-    const ALL: [InputType; 7] = [
+    const ALL: [InputType; 8] = [
         InputType::Word,
+        InputType::Agent,
         InputType::Line,
         InputType::Text,
         InputType::Path,
@@ -2198,6 +2256,7 @@ impl InputType {
     fn rule(self) -> &'static str {
         match self {
             InputType::Word => "A single word with no whitespace.",
+            InputType::Agent => "A non-empty agent name with no whitespace.",
             InputType::Line => "A single line of text with no line breaks.",
             InputType::Text => "Free-form text that may span multiple lines.",
             InputType::Path => "A filesystem path with no whitespace.",
@@ -2213,6 +2272,7 @@ impl InputType {
 fn parse_input_type(raw: &str) -> Option<InputType> {
     match raw.to_ascii_lowercase().as_str() {
         "word" => Some(InputType::Word),
+        "agent" => Some(InputType::Agent),
         "line" => Some(InputType::Line),
         "text" => Some(InputType::Text),
         "path" => Some(InputType::Path),
@@ -2226,6 +2286,7 @@ fn parse_input_type(raw: &str) -> Option<InputType> {
 fn declared_type_name(input_type: InputType) -> &'static str {
     match input_type {
         InputType::Word => "word",
+        InputType::Agent => "agent",
         InputType::Line => "line",
         InputType::Text => "text",
         InputType::Path => "path",
@@ -2344,7 +2405,7 @@ mod tests {
             schema.iter().map(|input| input.name.as_str()).collect();
         assert_eq!(
             names,
-            ["word", "line", "text", "path", "int", "float", "bool"]
+            ["word", "agent", "line", "text", "path", "int", "float", "bool"]
         );
         for input in &schema {
             assert!(!input.rule.is_empty(), "{} has no rule", input.name);
@@ -2362,6 +2423,28 @@ mod tests {
         let bool_type =
             schema.iter().find(|input| input.name == "bool").unwrap();
         assert_eq!(bool_type.aliases, vec!["boolean".to_string()]);
+    }
+
+    #[test]
+    fn validates_repeatable_input_metadata_and_final_position() {
+        let valid = validate(
+            "---\ninput:\n  names:\n    type: agent\n    repeatable: true\n---\n",
+        );
+        assert!(!has_error(&valid), "{valid:?}");
+
+        let non_final = validate(
+            "---\ninput:\n  names:\n    type: agent\n    repeatable: true\n  mode: word\n---\n",
+        );
+        assert!(non_final.iter().any(|diagnostic| {
+            diagnostic.code == "non_final_xprompt_frontmatter_repeatable_input"
+        }));
+
+        let non_boolean = validate(
+            "---\ninput:\n  names:\n    type: agent\n    repeatable: yes\n---\n",
+        );
+        assert!(non_boolean.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_repeatable"
+        }));
     }
 
     #[test]

@@ -284,6 +284,7 @@ fn decoded_value(text: &str, start: usize, end: usize) -> String {
 fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut token_start = start;
+    let mut saw_separator = false;
     let mut scan = ArgScanner::default();
     let mut i = start;
     while i < end {
@@ -293,15 +294,14 @@ fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
         }
         if text.as_bytes()[i] == b',' && scan.is_top_level() {
             let trimmed = trim_span(text, token_start, i);
-            if trimmed.0 < trimmed.1 {
-                spans.push(trimmed);
-            }
+            spans.push(trimmed);
+            saw_separator = true;
             token_start = i + 1;
         }
         i += 1;
     }
     let trimmed = trim_span(text, token_start, end);
-    if trimmed.0 < trimmed.1 {
+    if trimmed.0 < trimmed.1 || saw_separator {
         spans.push(trimmed);
     }
     spans
@@ -546,6 +546,28 @@ mod tests {
         let call = one("#foo(text=[[a,b=c]], other=\"x,y=z\")");
         assert_eq!(call.args[0].value, "a,b=c");
         assert_eq!(call.args[1].value, "x,y=z");
+    }
+
+    #[test]
+    fn preserves_empty_elements_for_contract_validation() {
+        let paren = one("#foo(planner,,coder,)");
+        assert_eq!(
+            paren
+                .args
+                .iter()
+                .map(|arg| arg.value.as_str())
+                .collect::<Vec<_>>(),
+            ["planner", "", "coder", ""]
+        );
+        let colon = one("#foo:planner,,coder,");
+        assert_eq!(
+            colon
+                .args
+                .iter()
+                .map(|arg| arg.value.as_str())
+                .collect::<Vec<_>>(),
+            ["planner", "", "coder", ""]
+        );
     }
 
     #[test]

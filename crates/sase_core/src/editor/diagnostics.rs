@@ -182,7 +182,6 @@ fn validate_call_args(
     out: &mut Vec<EditorDiagnostic>,
 ) {
     let mut supplied_inputs = HashSet::new();
-    let mut positional_inputs = HashSet::new();
     let mut seen_named_args = HashSet::new();
     let mut positional_index = 0usize;
 
@@ -215,23 +214,11 @@ fn validate_call_args(
                 );
                 continue;
             };
-            if positional_inputs.contains(&input.name) {
-                push_diagnostic(
-                    document,
-                    out,
-                    name.span.0,
-                    name.span.1,
-                    "conflicting_xprompt_arg",
-                    format!(
-                        "Argument `{}` was already provided positionally",
-                        input.name
-                    ),
-                );
-            }
             supplied_inputs.insert(input.name.clone());
             validate_type(document, entry, input, arg, out);
         } else {
-            let Some(input) = entry.inputs.get(positional_index) else {
+            let Some(input) = input_for_position(entry, positional_index)
+            else {
                 push_diagnostic(
                     document,
                     out,
@@ -246,7 +233,6 @@ fn validate_call_args(
                 positional_index += 1;
                 continue;
             };
-            positional_inputs.insert(input.name.clone());
             supplied_inputs.insert(input.name.clone());
             validate_type(document, entry, input, arg, out);
             positional_index += 1;
@@ -296,7 +282,10 @@ fn validate_type(
 
 fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
     match input.r#type.as_str() {
-        "word" | "path" => !value.chars().any(char::is_whitespace),
+        "word" | "agent" => {
+            !value.is_empty() && !value.chars().any(char::is_whitespace)
+        }
+        "path" => !value.chars().any(char::is_whitespace),
         "line" => !value.contains('\n'),
         "text" => true,
         "int" | "integer" => value.parse::<i64>().is_ok(),
@@ -307,6 +296,16 @@ fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
         ),
         _ => true,
     }
+}
+
+fn input_for_position(
+    entry: &XpromptAssistEntry,
+    position: usize,
+) -> Option<&XpromptInputHint> {
+    entry
+        .inputs
+        .get(position)
+        .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
 }
 
 fn local_xprompt_entries(
@@ -374,7 +373,7 @@ fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
             .enumerate()
             .filter_map(|(position, (name, raw))| {
                 let name = value_as_string(name)?;
-                let (type_name, required, default_display) =
+                let (type_name, required, default_display, repeatable) =
                     parse_short_input_hint(raw);
                 Some(XpromptInputHint {
                     name,
@@ -383,6 +382,7 @@ fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
                     required,
                     default_display,
                     position: position as u32,
+                    repeatable,
                 })
             })
             .collect();
@@ -408,6 +408,9 @@ fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
                     required: default.is_none(),
                     default_display: default.and_then(default_display),
                     position: position as u32,
+                    repeatable: mapping_get(mapping, "repeatable")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 })
             })
             .collect();
@@ -415,7 +418,9 @@ fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
     Vec::new()
 }
 
-fn parse_short_input_hint(value: &Value) -> (String, bool, Option<String>) {
+fn parse_short_input_hint(
+    value: &Value,
+) -> (String, bool, Option<String>, bool) {
     if let Some(mapping) = value.as_mapping() {
         let type_name = mapping_get(mapping, "type")
             .and_then(value_as_string)
@@ -426,6 +431,9 @@ fn parse_short_input_hint(value: &Value) -> (String, bool, Option<String>) {
             type_name,
             default.is_none(),
             default.and_then(default_display),
+            mapping_get(mapping, "repeatable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         )
     } else {
         (
@@ -434,6 +442,7 @@ fn parse_short_input_hint(value: &Value) -> (String, bool, Option<String>) {
             ),
             true,
             None,
+            false,
         )
     }
 }
@@ -448,6 +457,7 @@ fn input_description(value: &Value) -> Option<String> {
 fn parse_input_type_name(raw: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "word" => "word",
+        "agent" => "agent",
         "text" => "text",
         "path" => "path",
         "int" | "integer" => "int",
@@ -656,6 +666,24 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
             },
+            XpromptAssistEntry {
+                name: "merge".to_string(),
+                display_label: "merge".to_string(),
+                insertion: "#merge".to_string(),
+                reference_prefix: "#".to_string(),
+                kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: vec![repeatable_input("names", "agent", false, 0)],
+                content_preview: None,
+                description: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+                is_skill: false,
+            },
         ]
     }
 
@@ -672,6 +700,19 @@ mod tests {
             required,
             default_display: None,
             position,
+            repeatable: false,
+        }
+    }
+
+    fn repeatable_input(
+        name: &str,
+        r#type: &str,
+        required: bool,
+        position: u32,
+    ) -> XpromptInputHint {
+        XpromptInputHint {
+            repeatable: true,
+            ..input(name, r#type, required, position)
         }
     }
 
@@ -728,10 +769,6 @@ mod tests {
             ),
             ("#typed(path=a, path=b, count=3)", "duplicate_xprompt_arg"),
             (
-                "#typed(src/main.rs, path=other, count=3)",
-                "conflicting_xprompt_arg",
-            ),
-            (
                 "#typed(path=\"bad value\", count=3)",
                 "invalid_xprompt_arg_type",
             ),
@@ -746,6 +783,34 @@ mod tests {
             assert!(
                 diagnostics.iter().any(|d| d.code == code),
                 "{text}: {diagnostics:?}"
+            );
+        }
+
+        let diagnostics =
+            diagnostics_for("#typed(src/main.rs, path=other, count=3)");
+        assert_eq!(
+            diagnostic_count(&diagnostics, "conflicting_xprompt_arg"),
+            0
+        );
+    }
+
+    #[test]
+    fn repeatable_tail_accepts_and_validates_every_element() {
+        for text in ["#merge:planner,coder", "#merge(planner, coder)"] {
+            let diagnostics = diagnostics_for(text);
+            assert_eq!(diagnostic_count(&diagnostics, "too_many_args"), 0);
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                0
+            );
+        }
+
+        for text in ["#merge:planner,,coder", "#merge(planner,,coder)"] {
+            let diagnostics = diagnostics_for(text);
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                1,
+                "{diagnostics:?}"
             );
         }
     }
