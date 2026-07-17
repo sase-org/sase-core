@@ -403,6 +403,14 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("launch_request.json")).exists())
         }
+        MobileActionKindWire::CustomGate => {
+            let Some(bundle_path) = action_path(notification, "bundle_path")
+            else {
+                return false;
+            };
+            (bundle_path.join("response.json")).exists()
+                || (bundle_path.join("cancellation.json")).exists()
+        }
         MobileActionKindWire::NonAction | MobileActionKindWire::Unsupported => {
             false
         }
@@ -421,6 +429,9 @@ fn required_target_missing(notification: &NotificationWire) -> bool {
         }
         MobileActionKindWire::Hitl => {
             action_path(notification, "artifacts_dir").is_none()
+        }
+        MobileActionKindWire::CustomGate => {
+            action_path(notification, "bundle_path").is_none()
         }
         MobileActionKindWire::NonAction | MobileActionKindWire::Unsupported => {
             false
@@ -490,6 +501,7 @@ mod tests {
             id: id.to_string(),
             timestamp: "2026-05-06T12:00:00+00:00".to_string(),
             sender: "test".to_string(),
+            icon: None,
             notes: Vec::new(),
             files: Vec::new(),
             tags: Vec::new(),
@@ -639,6 +651,69 @@ mod tests {
             "epic-missing",
             "EpicApproval",
             "response_dir",
+            Path::new("/tmp/unused"),
+        );
+        n.action_data.clear();
+        let pending = pending_action_from_notification(&n, 10.0).unwrap();
+
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::MissingTarget
+        );
+    }
+
+    #[test]
+    fn custom_gate_uses_only_neutral_terminal_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("custom");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(bundle.join("request.json"), "{}").unwrap();
+        let n = notification(
+            "custom1234-full",
+            "CustomGate",
+            "bundle_path",
+            &bundle,
+        );
+        let pending = pending_action_from_notification(&n, 10.0).unwrap();
+        let store_path = pending_action_store_path(tmp.path());
+        register_pending_action(&store_path, &pending).unwrap();
+        let store = read_pending_action_store(&store_path, None).unwrap();
+
+        assert_eq!(pending.action_kind, MobileActionKindWire::CustomGate);
+        assert_eq!(
+            resolve_pending_action_prefix(&store, "custom12").resolution,
+            PendingActionPrefixResolutionWire::UniquePrefix
+        );
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::Available
+        );
+
+        fs::write(bundle.join("hitl_response.json"), "{}").unwrap();
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::Available
+        );
+
+        fs::write(bundle.join("cancellation.json"), "{}").unwrap();
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::AlreadyHandled
+        );
+        fs::remove_file(bundle.join("cancellation.json")).unwrap();
+        fs::write(bundle.join("response.json"), "{}").unwrap();
+        assert_eq!(
+            pending_action_state_for_notification(&n, Some(&pending), 11.0),
+            MobileActionStateWire::AlreadyHandled
+        );
+    }
+
+    #[test]
+    fn custom_gate_without_bundle_path_has_missing_target_state() {
+        let mut n = notification(
+            "custom-missing",
+            "CustomGate",
+            "bundle_path",
             Path::new("/tmp/unused"),
         );
         n.action_data.clear();

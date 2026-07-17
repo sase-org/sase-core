@@ -1,0 +1,64 @@
+{
+  "schema_version": 3,
+  "notification": {
+    "id": "custom1234567890",
+    "timestamp": "2026-07-16T23:00:00Z",
+    "sender": "security-agent",
+    "icon": "🛡️",
+    "tags": [
+      "custom",
+      "gate"
+    ],
+    "priority": false,
+    "actionable": true,
+    "read": false,
+    "dismissed": false,
+    "silent": false,
+    "muted": false,
+    "notes_summary": "Confirm the guarded operation",
+    "file_count": 0,
+    "action_summary": {
+      "kind": "custom_gate",
+      "state": "available",
+      "label": "Custom gate"
+    }
+  },
+  "notes": [
+    "Confirm the guarded operation"
+  ],
+  "attachments": [],
+  "action": {
+    "kind": "custom_gate",
+    "identity": {
+      "notification_id": "custom1234567890",
+      "prefix": "custom12",
+      "prefix_len": 8,
+      "resolution": "unique_prefix"
+    },
+    "state": "available",
+    "request_id": "custom-demo",
+    "choices": [
+      {
+        "id": "proceed",
+        "label": "Proceed safely",
+        "icon": "✅",
+        "feedback": "required",
+        "extras": [
+          {
+            "id": "open_report",
+            "label": "Open the report",
+            "icon": "📄",
+            "default_selected": true
+          }
+        ]
+      },
+      {
+        "id": "cancel",
+        "label": "Cancel",
+        "icon": null,
+        "feedback": "optional",
+        "extras": []
+      }
+    ]
+  }
+}

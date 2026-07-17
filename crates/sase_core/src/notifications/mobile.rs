@@ -45,6 +45,8 @@ pub struct MobileNotificationCardWire {
     pub timestamp: String,
     pub sender: String,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     pub priority: bool,
     pub actionable: bool,
@@ -90,6 +92,7 @@ pub enum MobileActionKindWire {
     Hitl,
     UserQuestion,
     LaunchApproval,
+    CustomGate,
     NonAction,
     Unsupported,
 }
@@ -102,6 +105,7 @@ impl MobileActionKindWire {
             Some("HITL") => Self::Hitl,
             Some("UserQuestion") => Self::UserQuestion,
             Some("LaunchApproval") => Self::LaunchApproval,
+            Some("CustomGate") => Self::CustomGate,
             None => Self::NonAction,
             Some(_) => Self::Unsupported,
         }
@@ -114,6 +118,7 @@ impl MobileActionKindWire {
             Self::Hitl => Some("HITL"),
             Self::UserQuestion => Some("UserQuestion"),
             Self::LaunchApproval => Some("LaunchApproval"),
+            Self::CustomGate => Some("CustomGate"),
             Self::NonAction | Self::Unsupported => None,
         }
     }
@@ -126,6 +131,7 @@ impl MobileActionKindWire {
                 | Self::Hitl
                 | Self::UserQuestion
                 | Self::LaunchApproval
+                | Self::CustomGate
         )
     }
 
@@ -146,6 +152,7 @@ impl MobileActionKindWire {
                 | Self::EpicApproval
                 | Self::UserQuestion
                 | Self::LaunchApproval
+                | Self::CustomGate
         )
     }
 
@@ -156,6 +163,7 @@ impl MobileActionKindWire {
             Self::Hitl => "HITL",
             Self::UserQuestion => "Question",
             Self::LaunchApproval => "Launch approval",
+            Self::CustomGate => "Custom gate",
             Self::NonAction => "Notification",
             Self::Unsupported => "Unsupported action",
         }
@@ -213,6 +221,12 @@ pub enum MobileActionDetailWire {
         slot_count: u32,
         choices: Vec<LaunchActionChoiceWire>,
     },
+    CustomGate {
+        identity: PendingActionIdentityWire,
+        state: MobileActionStateWire,
+        request_id: Option<String>,
+        choices: Vec<CustomGateChoiceWire>,
+    },
     NonAction {
         state: MobileActionStateWire,
     },
@@ -221,6 +235,45 @@ pub enum MobileActionDetailWire {
         state: MobileActionStateWire,
         action: Option<String>,
     },
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomGateFeedbackModeWire {
+    Disabled,
+    #[default]
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomGateExtraWire {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub default_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomGateChoiceWire {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub feedback: CustomGateFeedbackModeWire,
+    #[serde(default)]
+    pub extras: Vec<CustomGateExtraWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CustomGateEnvelopeWire {
+    #[serde(default)]
+    choices: Vec<CustomGateChoiceWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,6 +496,7 @@ pub fn mobile_notification_card_from_wire(
         id: notification.id.clone(),
         timestamp: notification.timestamp.clone(),
         sender: notification.sender.clone(),
+        icon: notification.icon.clone(),
         tags: notification.tags.clone(),
         priority,
         actionable,
@@ -587,6 +641,14 @@ pub fn mobile_action_detail_from_notification(
                 ],
             }
         }
+        MobileActionKindWire::CustomGate => {
+            MobileActionDetailWire::CustomGate {
+                identity,
+                state,
+                request_id: notification.action_data.get("request_id").cloned(),
+                choices: custom_gate_choices_from_notification(notification),
+            }
+        }
         MobileActionKindWire::NonAction => MobileActionDetailWire::NonAction {
             state: MobileActionStateWire::Unsupported,
         },
@@ -598,6 +660,21 @@ pub fn mobile_action_detail_from_notification(
             }
         }
     }
+}
+
+fn custom_gate_choices_from_notification(
+    notification: &NotificationWire,
+) -> Vec<CustomGateChoiceWire> {
+    let Some(request_path) = notification.action_data.get("request_path")
+    else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(request_path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<CustomGateEnvelopeWire>(&bytes)
+        .map(|envelope| envelope.choices)
+        .unwrap_or_default()
 }
 
 pub fn mobile_attachment_manifest_from_path(
@@ -1103,6 +1180,7 @@ mod tests {
             id: "abcdef1234567890".to_string(),
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "planner".to_string(),
+            icon: None,
             notes: vec!["Plan ready for review".to_string()],
             files: vec!["/tmp/plan.md".to_string()],
             tags: vec!["plan".to_string(), "review".to_string()],
@@ -1124,6 +1202,7 @@ mod tests {
             id: "epic1234567890".to_string(),
             timestamp: "2026-07-16T15:30:00Z".to_string(),
             sender: "planner".to_string(),
+            icon: None,
             notes: vec!["Epic ready for review".to_string()],
             files: vec!["/tmp/epic.md".to_string()],
             tags: vec!["epic".to_string(), "review".to_string()],
@@ -1199,11 +1278,89 @@ mod tests {
     }
 
     #[test]
+    fn custom_gate_notification_contract_snapshot_is_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "request_id": "custom-demo",
+                "kind": "custom",
+                "choices": [
+                    {
+                        "id": "proceed",
+                        "label": "Proceed safely",
+                        "icon": "✅",
+                        "feedback": "required",
+                        "command": {"argv": ["commands/proceed"]},
+                        "extras": [
+                            {
+                                "id": "open_report",
+                                "label": "Open the report",
+                                "icon": "📄",
+                                "default_selected": true,
+                                "command": {"argv": ["commands/open-report"]}
+                            }
+                        ]
+                    },
+                    {
+                        "id": "cancel",
+                        "label": "Cancel",
+                        "command": {"argv": ["commands/cancel"]}
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let notification = NotificationWire {
+            id: "custom1234567890".to_string(),
+            timestamp: "2026-07-16T23:00:00Z".to_string(),
+            sender: "security-agent".to_string(),
+            icon: Some("🛡️".to_string()),
+            notes: vec!["Confirm the guarded operation".to_string()],
+            tags: vec!["custom".to_string(), "gate".to_string()],
+            action: Some("CustomGate".to_string()),
+            action_data: _action_data(&[
+                ("request_id", "custom-demo"),
+                ("bundle_path", tmp.path().to_str().unwrap()),
+                ("request_path", request_path.to_str().unwrap()),
+            ]),
+            ..Default::default()
+        };
+        let priority = mobile_notification_priority_from_wire(&notification);
+        let card = mobile_notification_card_from_wire(
+            &notification,
+            MobileActionStateWire::Available,
+            priority,
+        );
+        let detail = MobileNotificationDetailResponseWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            notification: card,
+            notes: notification.notes.clone(),
+            attachments: Vec::new(),
+            action: mobile_action_detail_from_notification(
+                &notification,
+                MobileActionStateWire::Available,
+            ),
+        };
+        let expected: JsonValue = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mobile/mobile_custom_gate_notification_contract.json"
+        ))
+        .unwrap();
+
+        assert!(!priority);
+        assert_eq!(serde_json::to_value(detail).unwrap(), expected);
+    }
+
+    #[test]
     fn launch_approval_detail_exposes_preview_identity() {
         let notification = NotificationWire {
             id: "launch1234567890".to_string(),
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "launch".to_string(),
+            icon: None,
             notes: vec!["Launch request ready".to_string()],
             files: vec![
                 "/tmp/launch_preview.md".to_string(),
@@ -1628,6 +1785,7 @@ mod tests {
             ("HITL", MobileActionKindWire::Hitl),
             ("UserQuestion", MobileActionKindWire::UserQuestion),
             ("LaunchApproval", MobileActionKindWire::LaunchApproval),
+            ("CustomGate", MobileActionKindWire::CustomGate),
         ];
         for (action, kind) in expected {
             assert_eq!(

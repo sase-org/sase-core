@@ -394,11 +394,11 @@ pub fn api_v1_contract_snapshot() -> Value {
             "ActionResultWire": {
                 "defined_by": "sase_core::notifications::mobile",
                 "schema_version": "u32",
-                "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|non_action|unsupported",
+                "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|non_action|unsupported",
                 "prefix": "string",
                 "notification_id": "string|null",
                 "state": "available|already_handled|stale|missing_request|missing_target|unsupported",
-                "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json",
+                "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json|response.json",
                 "response_json": "json",
                 "message": "string|null"
             },
@@ -804,6 +804,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "id": "string",
                 "timestamp": "rfc3339",
                 "sender": "string",
+                "icon": "string|null",
                 "priority": "bool",
                 "actionable": "bool",
                 "read": "bool",
@@ -813,6 +814,21 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "notes_summary": "string",
                 "file_count": "u64",
                 "action_summary": "MobileActionSummaryWire|null"
+            },
+            "CustomGateChoiceWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "id": "string",
+                "label": "string",
+                "icon": "string|null",
+                "feedback": "disabled|optional|required",
+                "extras": "CustomGateExtraWire[]"
+            },
+            "CustomGateExtraWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "id": "string",
+                "label": "string",
+                "icon": "string|null",
+                "default_selected": "bool"
             },
             "MobileNotificationDetailResponseWire": {
                 "defined_by": "sase_core::notifications::mobile",

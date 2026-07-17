@@ -29,12 +29,12 @@
   },
   "records": {
     "ActionResultWire": {
-      "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|non_action|unsupported",
+      "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|non_action|unsupported",
       "defined_by": "sase_core::notifications::mobile",
       "message": "string|null",
       "notification_id": "string|null",
       "prefix": "string",
-      "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json",
+      "response_file": "plan_response.json|hitl_response.json|question_response.json|launch_response.json|response.json",
       "response_json": "json",
       "schema_version": "u32",
       "state": "available|already_handled|stale|missing_request|missing_target|unsupported"
@@ -66,6 +66,21 @@
       "message": "string",
       "schema_version": "u32",
       "target": "string|null"
+    },
+    "CustomGateChoiceWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "extras": "CustomGateExtraWire[]",
+      "feedback": "disabled|optional|required",
+      "icon": "string|null",
+      "id": "string",
+      "label": "string"
+    },
+    "CustomGateExtraWire": {
+      "default_selected": "bool",
+      "defined_by": "sase_core::notifications::mobile",
+      "icon": "string|null",
+      "id": "string",
+      "label": "string"
     },
     "DeviceRecordWire": {
       "app_version": "string|null",
@@ -382,6 +397,7 @@
       "defined_by": "sase_core::notifications::mobile",
       "dismissed": "bool",
       "file_count": "u64",
+      "icon": "string|null",
       "id": "string",
       "muted": "bool",
       "notes_summary": "string",

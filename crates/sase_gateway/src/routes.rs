@@ -2378,6 +2378,7 @@ fn attachment_candidates(
             }
         }
         MobileActionKindWire::LaunchApproval
+        | MobileActionKindWire::CustomGate
         | MobileActionKindWire::NonAction
         | MobileActionKindWire::Unsupported => {}
     }
@@ -3013,6 +3014,7 @@ mod tests {
             } else {
                 "user-workflow".to_string()
             },
+            icon: None,
             notes: vec![format!("note {id}")],
             files: Vec::new(),
             tags: Vec::new(),

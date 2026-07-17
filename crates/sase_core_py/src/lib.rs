@@ -4436,6 +4436,7 @@ mod tests {
                     "id": "n1",
                     "timestamp": "2026-04-30T12:00:00+00:00",
                     "sender": "axe",
+                    "icon": "🚀",
                     "notes": ["hello"],
                     "files": [],
                     "action": "EpicApproval",
@@ -4470,6 +4471,7 @@ mod tests {
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["schema_version"], json!(1));
             assert_eq!(snapshot_value["notifications"][0]["id"], json!("n1"));
+            assert_eq!(snapshot_value["notifications"][0]["icon"], json!("🚀"));
             assert_eq!(
                 snapshot_value["notifications"][0]["action"],
                 json!("EpicApproval")

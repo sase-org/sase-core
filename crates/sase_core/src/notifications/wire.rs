@@ -10,6 +10,8 @@ pub struct NotificationWire {
     pub timestamp: String,
     pub sender: String,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
     pub notes: Vec<String>,
     #[serde(default)]
     pub files: Vec<String>,

@@ -25,6 +25,7 @@ fn notification(id: &str) -> NotificationWire {
         id: id.to_string(),
         timestamp: "2026-05-01T01:02:03+00:00".to_string(),
         sender: "test-sender".to_string(),
+        icon: None,
         notes: Vec::new(),
         files: Vec::new(),
         tags: Vec::new(),
@@ -106,6 +107,7 @@ fn notification_phase1_contract_fixture_loads_with_expected_counts() {
     assert!(legacy.notes.is_empty());
     assert!(legacy.files.is_empty());
     assert!(legacy.tags.is_empty());
+    assert_eq!(legacy.icon, None);
     assert!(legacy.action_data.is_empty());
     assert!(!legacy.read);
     assert!(!legacy.dismissed);
@@ -119,6 +121,7 @@ fn notification_phase1_contract_fixture_loads_with_expected_counts() {
         .find(|n| n.id == "valid-full")
         .unwrap();
     assert_eq!(tagged.tags, vec!["done", "review"]);
+    assert_eq!(tagged.icon.as_deref(), Some("🔔"));
 
     assert_eq!(active.counts.priority, 4);
     assert_eq!(active.counts.errors, 2);
@@ -163,6 +166,25 @@ fn notification_tags_round_trip_through_append_load_and_rewrite() {
     let snapshot = read_notifications_snapshot(&path, true).unwrap();
     assert_eq!(snapshot.notifications[0].tags, vec!["done", "review"]);
     assert!(snapshot.notifications[0].read);
+}
+
+#[test]
+fn notification_icon_round_trips_through_append_load_and_rewrite() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut n = notification("icon");
+    n.icon = Some("🧭".to_string());
+
+    append_notification(&path, &n).unwrap();
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications[0].icon.as_deref(), Some("🧭"));
+
+    let mut rewritten = snapshot.notifications[0].clone();
+    rewritten.icon = Some("✨".to_string());
+    rewrite_notifications(&path, &[rewritten]).unwrap();
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(snapshot.notifications[0].icon.as_deref(), Some("✨"));
 }
 
 #[test]
@@ -651,6 +673,36 @@ fn notification_dismiss_matching_agents_matches_question_child_identity() {
 }
 
 #[test]
+fn notification_dismiss_matching_agents_covers_custom_gates() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut custom = notification("custom-gate");
+    custom.action = Some("CustomGate".to_string());
+    custom
+        .action_data
+        .insert("agent_cl_name".to_string(), "feature".to_string());
+    custom
+        .action_data
+        .insert("agent_timestamp".to_string(), "260501_010203".to_string());
+    rewrite_notifications(&path, &[custom]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "feature".to_string(),
+                raw_suffix: Some("20260501010203".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(outcome.notifications[0].dismissed);
+}
+
+#[test]
 fn notification_dismiss_matching_agents_covers_user_agent_view_error_report() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
@@ -956,6 +1008,7 @@ fn notification_json_shape_uses_expected_wire_keys() {
             "id": "shape",
             "timestamp": "2026-05-01T01:02:03+00:00",
             "sender": "test-sender",
+            "icon": null,
             "notes": [],
             "files": [],
             "tags": [],
