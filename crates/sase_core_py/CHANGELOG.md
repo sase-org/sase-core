@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/sase-org/sase-core/compare/v0.5.0...v0.6.0) - 2026-07-17
+
+### Added
+
+- *(telemetry)* add SQLite metric store and queries (sase-6k.1)
+- *(plan)* guide phase description authoring
+- *(agent-scan)* add bounded artifact index deletion (sase-6j.3)
+- *(notifications)* add custom gate wire support (sase-6i.1)
+- *(cleanup)* cascade parallel family members (sase-6g.4)
+- *(notifications)* add typed epic approval projection (sase-6e.2)
+- add structured commit footer API
+- define canonical SASE content layout contract (sase-6d.1)
+
 ## [0.5.0](https://github.com/sase-org/sase-core/compare/v0.4.1...v0.5.0) - 2026-07-16
 
 ### Added
