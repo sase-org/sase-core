@@ -112,6 +112,7 @@
 //! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
+//! - `agent_stats_query_runs(index_path: str, request: dict) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -223,6 +224,9 @@ use sase_core::agent_scan::{
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
+};
+use sase_core::agent_stats::{
+    query_run_stats as core_query_run_stats, AgentRunStatsRequestWire,
 };
 use sase_core::axe_chop::{
     apply_checkpoint_update as core_apply_checkpoint_update,
@@ -4157,6 +4161,23 @@ fn py_telemetry_store_stats<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Aggregate run-backed Statistics views over a caller-supplied time range.
+#[pyfunction]
+#[pyo3(name = "agent_stats_query_runs")]
+fn py_agent_stats_query_runs<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentRunStatsRequestWire =
+        telemetry_request_from_pydict(request, "AgentRunStatsRequestWire")?;
+    let path = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| core_query_run_stats(&path, request))
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
 fn telemetry_request_from_pydict<T>(
     request: &Bound<'_, PyDict>,
     wire_name: &str,
@@ -4443,6 +4464,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_query_range, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_prune, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_store_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
     Ok(())
 }
 
@@ -4683,6 +4705,19 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir.join("metrics.sqlite")
+    }
+
+    fn temp_agent_stats_root() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "sase-core-py-agent-stats-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
@@ -5315,6 +5350,73 @@ mod tests {
 
             let parent = path.parent().unwrap().to_path_buf();
             let _ = fs::remove_dir_all(parent);
+        });
+    }
+
+    #[test]
+    fn agent_stats_binding_round_trips_python_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let root = temp_agent_stats_root();
+            let projects = root.join("projects");
+            let artifact =
+                projects.join("proj/artifacts/ace-run/20260710010000");
+            fs::create_dir_all(&artifact).unwrap();
+            fs::write(
+                artifact.join("agent_meta.json"),
+                serde_json::to_vec(&json!({
+                    "name": "binding-agent",
+                    "run_started_at": "100",
+                    "llm_provider": "codex",
+                    "model": "gpt-5",
+                    "reasoning_effort": "high"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                artifact.join("done.json"),
+                serde_json::to_vec(&json!({
+                    "outcome": "completed",
+                    "finished_at": 160.0
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let index = root.join("agent_artifact_index.sqlite");
+            sase_core::rebuild_agent_artifact_index(
+                &index,
+                &projects,
+                sase_core::AgentArtifactScanOptionsWire::default(),
+            )
+            .unwrap();
+
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "start_ts": 0,
+                    "end_ts": 200,
+                    "runtime_group_by": "agent",
+                    "bucket_seconds": 100,
+                    "top_n": 5
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_agent_stats_query_runs(py, index.to_str().unwrap(), request)
+                    .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["totals"]["runs"], json!(1));
+            assert_eq!(result["totals"]["completed"], json!(1));
+            assert_eq!(result["providers"][0]["effort"], json!("high"));
+            assert_eq!(
+                result["runtime_groups"][0]["total_seconds"],
+                json!(60.0)
+            );
+
+            let _ = fs::remove_dir_all(root);
         });
     }
 }

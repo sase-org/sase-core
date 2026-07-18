@@ -17,6 +17,7 @@ pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_runtime;
 pub mod agent_scan;
+pub mod agent_stats;
 pub mod axe_chop;
 pub mod bead;
 pub mod commit_footer;
@@ -144,6 +145,14 @@ pub use agent_scan::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION, DAY_SHARDED_LAYOUT_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use agent_stats::{
+    query_run_stats, AgentCommitDistributionWire, AgentCommitStatsWire,
+    AgentPlanStatsWire, AgentProviderStatsWire, AgentQuestionStatsWire,
+    AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
+    AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
+    AgentStatsCountWire, AgentStatsRuntimeGroupByWire, AgentWorkspaceStatsWire,
+    AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{
     apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,
