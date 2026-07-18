@@ -23,6 +23,7 @@ pub struct PhaseAssignmentWire {
 pub struct EpicWorkPlanWire {
     pub epic_id: String,
     pub launch_tag_id: String,
+    pub total_phase_count: usize,
     pub waves: Vec<Vec<PhaseAssignmentWire>>,
     pub land_agent_name: String,
     pub land_model: String,
@@ -62,6 +63,10 @@ pub fn build_epic_work_plan_from_issues(
         .iter()
         .filter(|issue| issue.parent_id.as_deref() == Some(epic_id))
         .collect();
+    let total_phase_count = children
+        .iter()
+        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
+        .count();
     let open_phases: Vec<&IssueWire> = children
         .iter()
         .copied()
@@ -189,6 +194,7 @@ pub fn build_epic_work_plan_from_issues(
     Ok(EpicWorkPlanWire {
         epic_id: epic_id.to_string(),
         launch_tag_id: epic_id.to_string(),
+        total_phase_count,
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
         land_model: epic.model.clone(),
@@ -310,6 +316,22 @@ mod tests {
 
         assert_eq!(plan.epic_id, "e1");
         assert_eq!(plan.launch_tag_id, "e1");
+    }
+
+    #[test]
+    fn total_phase_count_includes_closed_phases() {
+        let mut closed = phase("p1", "e1");
+        closed.status = StatusWire::Closed;
+
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), closed, phase("p2", "e1")],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.total_phase_count, 2);
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0][0].bead_id, "p2");
     }
 
     #[test]
