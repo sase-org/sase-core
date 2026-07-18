@@ -113,6 +113,7 @@
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
 //! - `agent_stats_query_runs(index_path: str, request: dict) -> dict`
+//! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -226,7 +227,9 @@ use sase_core::agent_scan::{
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
 };
 use sase_core::agent_stats::{
-    query_run_stats as core_query_run_stats, AgentRunStatsRequestWire,
+    query_activity_stats as core_query_activity_stats,
+    query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
+    AgentRunStatsRequestWire,
 };
 use sase_core::axe_chop::{
     apply_checkpoint_update as core_apply_checkpoint_update,
@@ -4178,6 +4181,29 @@ fn py_agent_stats_query_runs<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Aggregate durable skill, memory, question, and plan activity.
+#[pyfunction]
+#[pyo3(name = "agent_stats_query_activity")]
+fn py_agent_stats_query_activity<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    sase_home: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentActivityStatsRequestWire = telemetry_request_from_pydict(
+        request,
+        "AgentActivityStatsRequestWire",
+    )?;
+    let index_path = PathBuf::from(index_path);
+    let sase_home = PathBuf::from(sase_home);
+    let result = py
+        .allow_threads(|| {
+            core_query_activity_stats(&index_path, &sase_home, request)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
 fn telemetry_request_from_pydict<T>(
     request: &Bound<'_, PyDict>,
     wire_name: &str,
@@ -4465,6 +4491,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_prune, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_store_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_stats_query_activity, m)?)?;
     Ok(())
 }
 
@@ -5415,6 +5442,64 @@ mod tests {
                 result["runtime_groups"][0]["total_seconds"],
                 json!(60.0)
             );
+
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn agent_activity_stats_binding_round_trips_python_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let root = temp_agent_stats_root();
+            let projects = root.join("projects");
+            let project = projects.join("proj");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(
+                project.join("skill_uses.jsonl"),
+                concat!(
+                    "{\"timestamp\":\"100\",\"skill_name\":\"review\",",
+                    "\"agent_name\":\"binding-agent\"}\n"
+                ),
+            )
+            .unwrap();
+            fs::create_dir_all(root.join("user_question/session")).unwrap();
+            fs::write(
+                root.join("user_question/session/question_request.json"),
+                serde_json::to_vec(&json!({
+                    "timestamp": 120.0,
+                    "questions": [{"question": "Continue?"}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let index = root.join("agent_artifact_index.sqlite");
+            sase_core::rebuild_agent_artifact_index(
+                &index,
+                &projects,
+                sase_core::AgentArtifactScanOptionsWire::default(),
+            )
+            .unwrap();
+
+            let request_obj = json_value_to_py(
+                py,
+                &json!({"start_ts": 0, "end_ts": 200, "top_n": 5}),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_agent_stats_query_activity(
+                py,
+                index.to_str().unwrap(),
+                root.to_str().unwrap(),
+                request,
+            )
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["skills"][0]["name"], json!("review"));
+            assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
+            assert_eq!(result["questions"]["sessions"], json!(1));
+            assert_eq!(result["questions"]["questions"], json!(1));
 
             let _ = fs::remove_dir_all(root);
         });

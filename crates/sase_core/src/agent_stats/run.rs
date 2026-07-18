@@ -255,7 +255,7 @@ fn launch_timestamp(row: &IndexRunRow) -> Option<f64> {
         .or_else(|| parse_artifact_timestamp(&row.timestamp))
 }
 
-fn parse_timestamp(value: &str) -> Option<f64> {
+pub(super) fn parse_timestamp(value: &str) -> Option<f64> {
     if let Ok(seconds) = value.parse::<f64>() {
         return seconds.is_finite().then_some(seconds);
     }

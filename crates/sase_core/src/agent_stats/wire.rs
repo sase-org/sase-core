@@ -41,10 +41,36 @@ pub struct AgentRunStatsRequestWire {
     pub top_n: u32,
 }
 
+/// Query controls for durable activity-log and plan statistics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentActivityStatsRequestWire {
+    /// Inclusive Unix event/launch timestamp.
+    pub start_ts: i64,
+    /// Exclusive Unix event/launch timestamp.
+    pub end_ts: i64,
+    #[serde(default = "default_top_n")]
+    pub top_n: u32,
+}
+
 /// Exact count for one named category.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStatsCountWire {
     pub name: String,
+    pub count: u64,
+}
+
+/// Exact activity count plus the number of agents that contributed to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentActivityCountWire {
+    pub name: String,
+    pub count: u64,
+    pub distinct_agents: u64,
+}
+
+/// One numeric value in a discrete distribution.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStatsDistributionWire {
+    pub value: u64,
     pub count: u64,
 }
 
@@ -175,4 +201,51 @@ pub struct AgentRunStatsResponseWire {
     pub runtime_groups: Vec<AgentRuntimeGroupStatsWire>,
     /// In-window rows whose cached `record_json` could not be decoded.
     pub malformed_rows_skipped: u64,
+}
+
+/// Plan-file statistics for runs that submitted plans in the selected window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentPlanActivityStatsWire {
+    /// Number of entries across all in-window `plan_submitted_at` lists.
+    pub proposed: u64,
+    #[serde(default)]
+    pub tiers: Vec<AgentStatsCountWire>,
+    pub approved: u64,
+    pub rejected: u64,
+    pub pending: u64,
+    #[serde(default)]
+    pub phases_per_epic: Vec<AgentStatsDistributionWire>,
+    pub mean_phases_per_epic: f64,
+}
+
+/// Durable user-question session sizes for the selected window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentQuestionActivityStatsWire {
+    pub sessions: u64,
+    pub questions: u64,
+    #[serde(default)]
+    pub questions_per_session: Vec<AgentStatsDistributionWire>,
+    pub mean_questions_per_session: f64,
+}
+
+/// Everything backed by durable activity logs, question requests, and plans.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentActivityStatsResponseWire {
+    pub schema_version: u32,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    #[serde(default)]
+    pub skills: Vec<AgentActivityCountWire>,
+    #[serde(default)]
+    pub memories: Vec<AgentActivityCountWire>,
+    pub plans: AgentPlanActivityStatsWire,
+    pub questions: AgentQuestionActivityStatsWire,
+    /// Invalid JSONL rows across the skill and memory logs.
+    pub malformed_log_lines_skipped: u64,
+    /// Invalid question request files or request payloads.
+    pub malformed_question_files_skipped: u64,
+    /// In-window index rows whose cached `record_json` could not be decoded.
+    pub malformed_rows_skipped: u64,
+    /// Plan proposals whose referenced or mirrored markdown could not be read.
+    pub unresolved_plan_files: u64,
 }

@@ -186,7 +186,7 @@ fn plan_kind_from_tier(
 /// Split a document into its YAML frontmatter text (if a complete `---` block
 /// is present) and the remaining body. Line-oriented and `\r`-tolerant, mirror
 /// of the editor module's `extract_frontmatter`.
-pub(super) fn split_frontmatter(content: &str) -> (Option<String>, String) {
+pub(crate) fn split_frontmatter(content: &str) -> (Option<String>, String) {
     let mut lines = content.split_inclusive('\n');
     let Some(first) = lines.next() else {
         return (None, String::new());

@@ -147,11 +147,15 @@ pub use agent_scan::{
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };
 pub use agent_stats::{
-    query_run_stats, AgentCommitDistributionWire, AgentCommitStatsWire,
-    AgentPlanStatsWire, AgentProviderStatsWire, AgentQuestionStatsWire,
+    query_activity_stats, query_run_stats, AgentActivityCountWire,
+    AgentActivityStatsRequestWire, AgentActivityStatsResponseWire,
+    AgentCommitDistributionWire, AgentCommitStatsWire,
+    AgentPlanActivityStatsWire, AgentPlanStatsWire, AgentProviderStatsWire,
+    AgentQuestionActivityStatsWire, AgentQuestionStatsWire,
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
     AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
-    AgentStatsCountWire, AgentStatsRuntimeGroupByWire, AgentWorkspaceStatsWire,
+    AgentStatsCountWire, AgentStatsDistributionWire,
+    AgentStatsRuntimeGroupByWire, AgentWorkspaceStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{
