@@ -91,6 +91,16 @@
 //! - `config_inventory(request: dict) -> dict`
 //! - `config_plan_edit(request: dict) -> dict`
 //! - `config_validate(request: dict) -> list[dict]`
+//! - `parse_chop_result(document: str) -> dict`
+//! - `validate_chop_result(result: dict) -> dict`
+//! - `validate_chop_proposal(proposal: dict, index: int, prior_ids: list[str]) -> dict`
+//! - `derive_chop_agent_name(chop_name: str, target_key: str | None, proposal_index: int) -> str`
+//! - `evaluate_chop_decision(request: dict) -> dict`
+//! - `apply_chop_checkpoint_update(request: dict) -> dict`
+//! - `check_and_record_chop_once_per(request: dict) -> dict`
+//! - `expand_chop_targets(request: dict) -> dict`
+//! - `parse_chop_duration(value: str) -> int`
+//! - `validate_axe_config(request: dict) -> list[dict]`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str) -> dict`
@@ -213,6 +223,23 @@ use sase_core::agent_scan::{
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
+};
+use sase_core::axe_chop::{
+    apply_checkpoint_update as core_apply_checkpoint_update,
+    check_and_record_once_per as core_check_and_record_once_per,
+    derive_chop_agent_name as core_derive_chop_agent_name,
+    evaluate_chop_decision as core_evaluate_chop_decision,
+    expand_chop_targets as core_expand_chop_targets,
+    parse_chop_duration as core_parse_chop_duration,
+    parse_chop_result as core_parse_chop_result,
+    validate_axe_config as core_validate_axe_config,
+    validate_chop_proposal as core_validate_chop_proposal,
+    validate_chop_result as core_validate_chop_result,
+    AxeConfigValidationRequestWire, ChopCheckpointUpdateRequestWire,
+    ChopDecisionRequestWire, ChopEngineError, ChopLaunchProposalWire,
+    ChopOncePerRequestWire, ChopResultDocumentWire,
+    ChopTargetExpansionRequestWire, CHOP_ENGINE_SCHEMA_VERSION,
+    CHOP_RESULT_SCHEMA_VERSION, CHOP_STATE_SCHEMA_VERSION,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -3368,6 +3395,191 @@ fn py_placeholder_spans(py: Python<'_>, text: &str) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+// --- Axe chop engine bindings --------------------------------------------
+
+fn chop_error_to_pyerr(error: ChopEngineError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn chop_request_from_pydict<T>(
+    request: &Bound<'_, PyDict>,
+    label: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value = py_to_json_value(request.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid {label} dict: {error}"
+        ))
+    })
+}
+
+fn chop_result_to_py<T>(py: Python<'_>, result: &T) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "chop_engine_schema_version")]
+fn py_chop_engine_schema_version() -> u32 {
+    CHOP_ENGINE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "chop_result_schema_version")]
+fn py_chop_result_schema_version() -> u32 {
+    CHOP_RESULT_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "chop_state_schema_version")]
+fn py_chop_state_schema_version() -> u32 {
+    CHOP_STATE_SCHEMA_VERSION
+}
+
+/// Parse and validate a script-written chop result JSON document.
+#[pyfunction]
+#[pyo3(name = "parse_chop_result")]
+fn py_parse_chop_result<'py>(
+    py: Python<'py>,
+    document: &str,
+) -> PyResult<PyObject> {
+    let result =
+        core_parse_chop_result(document).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Validate and normalize an already-decoded chop result dict.
+#[pyfunction]
+#[pyo3(name = "validate_chop_result")]
+fn py_validate_chop_result<'py>(
+    py: Python<'py>,
+    result: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let result: ChopResultDocumentWire =
+        chop_request_from_pydict(result, "chop result")?;
+    core_validate_chop_result(&result).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Validate and normalize one launch proposal.
+#[pyfunction]
+#[pyo3(name = "validate_chop_proposal")]
+#[pyo3(signature = (proposal, index = 0, prior_ids = None))]
+fn py_validate_chop_proposal<'py>(
+    py: Python<'py>,
+    proposal: &Bound<'py, PyDict>,
+    index: usize,
+    prior_ids: Option<&Bound<'py, PyList>>,
+) -> PyResult<PyObject> {
+    let proposal: ChopLaunchProposalWire =
+        chop_request_from_pydict(proposal, "chop launch proposal")?;
+    let prior_ids = match prior_ids {
+        Some(items) => strings_from_py_list(items, "prior_ids")?,
+        None => Vec::new(),
+    };
+    core_validate_chop_proposal(&proposal, index, &prior_ids)
+        .map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &proposal)
+}
+
+/// Derive the default agent name scaffold for one proposal.
+#[pyfunction]
+#[pyo3(name = "derive_chop_agent_name")]
+#[pyo3(signature = (chop_name, target_key = None, proposal_index = 0))]
+fn py_derive_chop_agent_name(
+    chop_name: &str,
+    target_key: Option<&str>,
+    proposal_index: usize,
+) -> PyResult<String> {
+    core_derive_chop_agent_name(chop_name, target_key, proposal_index)
+        .map_err(chop_error_to_pyerr)
+}
+
+/// Evaluate inhibit guards followed by the configured trigger.
+#[pyfunction]
+#[pyo3(name = "evaluate_chop_decision")]
+fn py_evaluate_chop_decision<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopDecisionRequestWire =
+        chop_request_from_pydict(request, "chop decision request")?;
+    let result =
+        core_evaluate_chop_decision(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Transform a runner-owned checkpoint document.
+#[pyfunction]
+#[pyo3(name = "apply_chop_checkpoint_update")]
+fn py_apply_chop_checkpoint_update<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopCheckpointUpdateRequestWire =
+        chop_request_from_pydict(request, "chop checkpoint update request")?;
+    let result =
+        core_apply_checkpoint_update(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Test and record one key in a bounded runner-owned seen store.
+#[pyfunction]
+#[pyo3(name = "check_and_record_chop_once_per")]
+fn py_check_and_record_chop_once_per<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopOncePerRequestWire =
+        chop_request_from_pydict(request, "chop once-per request")?;
+    let result = core_check_and_record_once_per(&request)
+        .map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Expand literal or host-provided source targets into stable instances.
+#[pyfunction]
+#[pyo3(name = "expand_chop_targets")]
+fn py_expand_chop_targets<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopTargetExpansionRequestWire =
+        chop_request_from_pydict(request, "chop target expansion request")?;
+    let result =
+        core_expand_chop_targets(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
+/// Parse one strict positive compound duration into seconds.
+#[pyfunction]
+#[pyo3(name = "parse_chop_duration")]
+fn py_parse_chop_duration(value: &str) -> PyResult<u64> {
+    core_parse_chop_duration(value).map_err(chop_error_to_pyerr)
+}
+
+/// Return provenance-aware diagnostics for the new axe config shape.
+#[pyfunction]
+#[pyo3(name = "validate_axe_config")]
+fn py_validate_axe_config<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AxeConfigValidationRequestWire =
+        chop_request_from_pydict(request, "axe config validation request")?;
+    let result =
+        core_validate_axe_config(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
 // --- Config Center backend bindings ---------------------------------------
 //
 // JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
@@ -4187,6 +4399,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chop_result_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_chop_state_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_chop_result, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_chop_result, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_chop_proposal, m)?)?;
+    m.add_function(wrap_pyfunction!(py_derive_chop_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_chop_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_chop_checkpoint_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_check_and_record_chop_once_per, m)?)?;
+    m.add_function(wrap_pyfunction!(py_expand_chop_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_chop_duration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_axe_config, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;

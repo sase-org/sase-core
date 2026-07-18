@@ -17,6 +17,7 @@ pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_runtime;
 pub mod agent_scan;
+pub mod axe_chop;
 pub mod bead;
 pub mod commit_footer;
 pub mod config;
@@ -143,6 +144,24 @@ pub use agent_scan::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION, DAY_SHARDED_LAYOUT_VERSION,
     DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use axe_chop::{
+    apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,
+    evaluate_chop_decision, expand_chop_targets, parse_chop_duration,
+    parse_chop_result, validate_axe_config, validate_chop_proposal,
+    validate_chop_result, AxeConfigValidationRequestWire,
+    ChopAgentSnapshotWire, ChopChangespecSnapshotWire,
+    ChopCheckpointDocumentWire, ChopCheckpointEntryWire,
+    ChopCheckpointEventWire, ChopCheckpointPolicyWire,
+    ChopCheckpointUpdateRequestWire, ChopDecisionRequestWire, ChopDecisionWire,
+    ChopEngineError, ChopForEachConfigWire, ChopGitSnapshotWire,
+    ChopGuardConfigWire, ChopLaunchProposalWire, ChopOncePerConfigWire,
+    ChopOncePerDecisionWire, ChopOncePerRequestWire, ChopResultDocumentWire,
+    ChopResultStatusWire, ChopSeenEntryWire, ChopSeenStoreDocumentWire,
+    ChopTargetExpansionRequestWire, ChopTargetExpansionWire,
+    ChopTargetInstanceWire, ChopTargetSourceFiltersWire, ChopTriggerConfigWire,
+    ProposalWaitOnWire, CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
+    CHOP_STATE_SCHEMA_VERSION,
 };
 pub use bead::{
     add_dependency as bead_add_dependency,
