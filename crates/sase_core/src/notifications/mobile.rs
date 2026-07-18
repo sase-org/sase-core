@@ -5,7 +5,7 @@ use serde_json::{json, Value as JsonValue};
 
 use super::wire::NotificationWire;
 
-pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileNotificationListRequestWire {
@@ -189,21 +189,21 @@ pub enum MobileActionDetailWire {
         state: MobileActionStateWire,
         response_dir: Option<String>,
         plan_file: Option<String>,
-        choices: Vec<PlanActionChoiceWire>,
+        branches: Vec<GateBranchWire>,
     },
     EpicApproval {
         identity: PendingActionIdentityWire,
         state: MobileActionStateWire,
         response_dir: Option<String>,
         plan_file: Option<String>,
-        choices: Vec<PlanActionChoiceWire>,
+        branches: Vec<GateBranchWire>,
     },
     Hitl {
         identity: PendingActionIdentityWire,
         state: MobileActionStateWire,
         artifacts_dir: Option<String>,
         workflow_name: Option<String>,
-        choices: Vec<HitlActionChoiceWire>,
+        branches: Vec<GateBranchWire>,
     },
     UserQuestion {
         identity: PendingActionIdentityWire,
@@ -219,13 +219,13 @@ pub enum MobileActionDetailWire {
         request_id: Option<String>,
         source_surface: Option<String>,
         slot_count: u32,
-        choices: Vec<LaunchActionChoiceWire>,
+        branches: Vec<GateBranchWire>,
     },
     CustomGate {
         identity: PendingActionIdentityWire,
         state: MobileActionStateWire,
         request_id: Option<String>,
-        choices: Vec<CustomGateChoiceWire>,
+        branches: Vec<GateBranchWire>,
     },
     NonAction {
         state: MobileActionStateWire,
@@ -241,7 +241,7 @@ pub enum MobileActionDetailWire {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum CustomGateFeedbackModeWire {
+pub enum GateFeedbackModeWire {
     Disabled,
     #[default]
     Optional,
@@ -249,31 +249,49 @@ pub enum CustomGateFeedbackModeWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CustomGateExtraWire {
+pub struct GateOptionWire {
     pub id: String,
     pub label: String,
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
     pub default_selected: bool,
+    #[serde(default)]
+    pub feedback: GateFeedbackModeWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CustomGateChoiceWire {
-    pub id: String,
+pub struct GateSubmitWire {
     pub label: String,
     #[serde(default)]
     pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateBranchWire {
+    pub options: Vec<GateOptionWire>,
     #[serde(default)]
-    pub feedback: CustomGateFeedbackModeWire,
+    pub submit: Option<GateSubmitWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GateGroupEnvelopeWire {
+    options: Vec<String>,
     #[serde(default)]
-    pub extras: Vec<CustomGateExtraWire>,
+    label: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CustomGateEnvelopeWire {
+struct GateEnvelopeWire {
+    schema_version: u32,
     #[serde(default)]
-    choices: Vec<CustomGateChoiceWire>,
+    options: Vec<GateOptionWire>,
+    #[serde(default)]
+    groups: Vec<GateGroupEnvelopeWire>,
+    #[serde(default)]
+    branches: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,46 +322,11 @@ pub enum MobileAttachmentKindWire {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanActionChoiceWire {
-    Approve,
-    Run,
-    Reject,
-    Epic,
-    Feedback,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanActionRequestWire {
+pub struct GateActionRequestWire {
     pub schema_version: u32,
     pub prefix: String,
-    pub choice: PlanActionChoiceWire,
-    #[serde(default)]
-    pub feedback: Option<String>,
-    #[serde(default)]
-    pub commit_plan: Option<bool>,
-    #[serde(default)]
-    pub run_coder: Option<bool>,
-    #[serde(default)]
-    pub coder_prompt: Option<String>,
-    #[serde(default)]
-    pub coder_model: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HitlActionChoiceWire {
-    Accept,
-    Reject,
-    Feedback,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HitlActionRequestWire {
-    pub schema_version: u32,
-    pub prefix: String,
-    pub choice: HitlActionChoiceWire,
+    pub selected_option_ids: Vec<String>,
     #[serde(default)]
     pub feedback: Option<String>,
 }
@@ -372,23 +355,6 @@ pub struct QuestionActionRequestWire {
     pub custom_answer: Option<String>,
     #[serde(default)]
     pub global_note: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchActionChoiceWire {
-    Approve,
-    Reject,
-    Feedback,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchActionRequestWire {
-    pub schema_version: u32,
-    pub prefix: String,
-    pub choice: LaunchActionChoiceWire,
-    #[serde(default)]
-    pub feedback: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -555,13 +521,7 @@ pub fn mobile_action_detail_from_notification(
                     .get("response_dir")
                     .cloned(),
                 plan_file: notification.files.first().cloned(),
-                choices: vec![
-                    PlanActionChoiceWire::Approve,
-                    PlanActionChoiceWire::Run,
-                    PlanActionChoiceWire::Reject,
-                    PlanActionChoiceWire::Epic,
-                    PlanActionChoiceWire::Feedback,
-                ],
+                branches: gate_branches_from_notification(notification),
             }
         }
         MobileActionKindWire::EpicApproval => {
@@ -573,11 +533,7 @@ pub fn mobile_action_detail_from_notification(
                     .get("response_dir")
                     .cloned(),
                 plan_file: notification.files.first().cloned(),
-                choices: vec![
-                    PlanActionChoiceWire::Approve,
-                    PlanActionChoiceWire::Reject,
-                    PlanActionChoiceWire::Feedback,
-                ],
+                branches: gate_branches_from_notification(notification),
             }
         }
         MobileActionKindWire::Hitl => MobileActionDetailWire::Hitl {
@@ -591,11 +547,7 @@ pub fn mobile_action_detail_from_notification(
                 .action_data
                 .get("workflow_name")
                 .cloned(),
-            choices: vec![
-                HitlActionChoiceWire::Accept,
-                HitlActionChoiceWire::Reject,
-                HitlActionChoiceWire::Feedback,
-            ],
+            branches: gate_branches_from_notification(notification),
         },
         MobileActionKindWire::UserQuestion => {
             MobileActionDetailWire::UserQuestion {
@@ -634,11 +586,7 @@ pub fn mobile_action_detail_from_notification(
                     .get("slot_count")
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0),
-                choices: vec![
-                    LaunchActionChoiceWire::Approve,
-                    LaunchActionChoiceWire::Reject,
-                    LaunchActionChoiceWire::Feedback,
-                ],
+                branches: gate_branches_from_notification(notification),
             }
         }
         MobileActionKindWire::CustomGate => {
@@ -646,7 +594,7 @@ pub fn mobile_action_detail_from_notification(
                 identity,
                 state,
                 request_id: notification.action_data.get("request_id").cloned(),
-                choices: custom_gate_choices_from_notification(notification),
+                branches: gate_branches_from_notification(notification),
             }
         }
         MobileActionKindWire::NonAction => MobileActionDetailWire::NonAction {
@@ -662,9 +610,9 @@ pub fn mobile_action_detail_from_notification(
     }
 }
 
-fn custom_gate_choices_from_notification(
+fn gate_branches_from_notification(
     notification: &NotificationWire,
-) -> Vec<CustomGateChoiceWire> {
+) -> Vec<GateBranchWire> {
     let Some(request_path) = notification.action_data.get("request_path")
     else {
         return Vec::new();
@@ -672,9 +620,51 @@ fn custom_gate_choices_from_notification(
     let Ok(bytes) = std::fs::read(request_path) else {
         return Vec::new();
     };
-    serde_json::from_slice::<CustomGateEnvelopeWire>(&bytes)
-        .map(|envelope| envelope.choices)
-        .unwrap_or_default()
+    let Ok(envelope) = serde_json::from_slice::<GateEnvelopeWire>(&bytes)
+    else {
+        return Vec::new();
+    };
+    if envelope.schema_version != 2 {
+        return Vec::new();
+    }
+    let options_by_id: BTreeMap<String, GateOptionWire> = envelope
+        .options
+        .into_iter()
+        .map(|option| (option.id.clone(), option))
+        .collect();
+    let groups: BTreeMap<Vec<String>, GateGroupEnvelopeWire> = envelope
+        .groups
+        .into_iter()
+        .map(|group| (group.options.clone(), group))
+        .collect();
+    envelope
+        .branches
+        .into_iter()
+        .filter_map(|option_ids| {
+            let options = option_ids
+                .iter()
+                .map(|option_id| options_by_id.get(option_id).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            if options.is_empty() {
+                return None;
+            }
+            let submit = if options.len() > 1 {
+                let group = groups.get(&option_ids);
+                let first = &options[0];
+                Some(GateSubmitWire {
+                    label: group
+                        .and_then(|value| value.label.clone())
+                        .unwrap_or_else(|| first.label.clone()),
+                    icon: group
+                        .and_then(|value| value.icon.clone())
+                        .or_else(|| first.icon.clone()),
+                })
+            } else {
+                None
+            };
+            Some(GateBranchWire { options, submit })
+        })
+        .collect()
 }
 
 pub fn mobile_attachment_manifest_from_path(
@@ -700,155 +690,6 @@ pub fn mobile_attachment_manifest_from_path(
         can_inline,
         path_available,
     }
-}
-
-pub fn plan_plan_action_response(
-    request: &PlanActionRequestWire,
-) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
-    validate_schema(request.schema_version)?;
-    let mut response = serde_json::Map::new();
-    let message = match request.choice {
-        PlanActionChoiceWire::Approve => {
-            response.insert("action".to_string(), json!("approve"));
-            insert_plan_options(&mut response, request);
-            "Plan approved"
-        }
-        PlanActionChoiceWire::Run => {
-            response.insert("action".to_string(), json!("approve"));
-            response.insert("commit_plan".to_string(), json!(false));
-            response.insert("run_coder".to_string(), json!(true));
-            if let Some(value) = &request.coder_prompt {
-                response.insert("coder_prompt".to_string(), json!(value));
-            }
-            if let Some(value) = &request.coder_model {
-                response.insert("coder_model".to_string(), json!(value));
-            }
-            "Running coder"
-        }
-        PlanActionChoiceWire::Reject => {
-            response.insert("action".to_string(), json!("reject"));
-            if let Some(value) = &request.feedback {
-                response.insert("feedback".to_string(), json!(value));
-            }
-            "Plan rejected"
-        }
-        PlanActionChoiceWire::Epic => {
-            response.insert("action".to_string(), json!("epic"));
-            "Epic created"
-        }
-        PlanActionChoiceWire::Feedback => {
-            let feedback = request.feedback.as_deref().ok_or_else(|| {
-                plan_error(
-                    MobileActionPlanErrorCodeWire::InvalidRequest,
-                    "plan feedback requires feedback text",
-                    Some("feedback"),
-                )
-            })?;
-            response.insert("action".to_string(), json!("reject"));
-            response.insert("feedback".to_string(), json!(feedback));
-            "Feedback received"
-        }
-    };
-
-    Ok(ActionResultWire {
-        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-        action_kind: MobileActionKindWire::PlanApproval,
-        prefix: request.prefix.clone(),
-        notification_id: None,
-        state: MobileActionStateWire::Available,
-        response_file: "plan_response.json".to_string(),
-        response_json: JsonValue::Object(response),
-        message: Some(message.to_string()),
-    })
-}
-
-pub fn plan_epic_action_response(
-    request: &PlanActionRequestWire,
-) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
-    validate_schema(request.schema_version)?;
-    let (response_json, message) = match request.choice {
-        PlanActionChoiceWire::Approve => {
-            (json!({"action": "epic"}), "Epic approved")
-        }
-        PlanActionChoiceWire::Reject => {
-            let mut response = serde_json::Map::new();
-            response.insert("action".to_string(), json!("reject"));
-            if let Some(feedback) = &request.feedback {
-                response.insert("feedback".to_string(), json!(feedback));
-            }
-            (JsonValue::Object(response), "Epic rejected")
-        }
-        PlanActionChoiceWire::Feedback => {
-            let feedback = request.feedback.as_deref().ok_or_else(|| {
-                plan_error(
-                    MobileActionPlanErrorCodeWire::InvalidRequest,
-                    "epic feedback requires feedback text",
-                    Some("feedback"),
-                )
-            })?;
-            (
-                json!({"action": "reject", "feedback": feedback}),
-                "Epic feedback received",
-            )
-        }
-        PlanActionChoiceWire::Run | PlanActionChoiceWire::Epic => {
-            return Err(plan_error(
-                MobileActionPlanErrorCodeWire::InvalidRequest,
-                "epic approval supports approve, reject, or feedback",
-                Some("choice"),
-            ));
-        }
-    };
-
-    Ok(ActionResultWire {
-        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-        action_kind: MobileActionKindWire::EpicApproval,
-        prefix: request.prefix.clone(),
-        notification_id: None,
-        state: MobileActionStateWire::Available,
-        response_file: "plan_response.json".to_string(),
-        response_json,
-        message: Some(message.to_string()),
-    })
-}
-
-pub fn plan_hitl_action_response(
-    request: &HitlActionRequestWire,
-) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
-    validate_schema(request.schema_version)?;
-    let response_json = match request.choice {
-        HitlActionChoiceWire::Accept => {
-            json!({"action": "accept", "approved": true})
-        }
-        HitlActionChoiceWire::Reject => {
-            json!({"action": "reject", "approved": false})
-        }
-        HitlActionChoiceWire::Feedback => {
-            let feedback = request.feedback.as_deref().ok_or_else(|| {
-                plan_error(
-                    MobileActionPlanErrorCodeWire::InvalidRequest,
-                    "HITL feedback requires feedback text",
-                    Some("feedback"),
-                )
-            })?;
-            json!({
-                "action": "feedback",
-                "approved": false,
-                "feedback": feedback,
-            })
-        }
-    };
-
-    Ok(ActionResultWire {
-        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-        action_kind: MobileActionKindWire::Hitl,
-        prefix: request.prefix.clone(),
-        notification_id: None,
-        state: MobileActionStateWire::Available,
-        response_file: "hitl_response.json".to_string(),
-        response_json,
-        message: Some(hitl_message(request.choice).to_string()),
-    })
 }
 
 pub fn plan_question_action_response_from_bytes(
@@ -914,49 +755,6 @@ pub fn plan_question_action_response(
     })
 }
 
-pub fn plan_launch_action_response(
-    request: &LaunchActionRequestWire,
-) -> Result<ActionResultWire, MobileActionPlanErrorWire> {
-    validate_schema(request.schema_version)?;
-    let (response_json, message) = match request.choice {
-        LaunchActionChoiceWire::Approve => {
-            (json!({"action": "approve"}), "Launch approved")
-        }
-        LaunchActionChoiceWire::Reject => {
-            let mut response = serde_json::Map::new();
-            response.insert("action".to_string(), json!("reject"));
-            if let Some(feedback) = &request.feedback {
-                response.insert("feedback".to_string(), json!(feedback));
-            }
-            (JsonValue::Object(response), "Launch rejected")
-        }
-        LaunchActionChoiceWire::Feedback => {
-            let feedback = request.feedback.as_deref().ok_or_else(|| {
-                plan_error(
-                    MobileActionPlanErrorCodeWire::InvalidRequest,
-                    "launch feedback requires feedback text",
-                    Some("feedback"),
-                )
-            })?;
-            (
-                json!({"action": "reject", "feedback": feedback}),
-                "Launch feedback received",
-            )
-        }
-    };
-
-    Ok(ActionResultWire {
-        schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-        action_kind: MobileActionKindWire::LaunchApproval,
-        prefix: request.prefix.clone(),
-        notification_id: None,
-        state: MobileActionStateWire::Available,
-        response_file: "launch_response.json".to_string(),
-        response_json,
-        message: Some(message.to_string()),
-    })
-}
-
 fn classify_attachment_display_name(
     display_name: &str,
 ) -> (MobileAttachmentKindWire, Option<String>, bool) {
@@ -1011,32 +809,6 @@ fn classify_attachment_display_name(
         );
     }
     (MobileAttachmentKindWire::Unknown, None, false)
-}
-
-fn insert_plan_options(
-    response: &mut serde_json::Map<String, JsonValue>,
-    request: &PlanActionRequestWire,
-) {
-    if let Some(value) = request.commit_plan {
-        response.insert("commit_plan".to_string(), json!(value));
-    }
-    if let Some(value) = request.run_coder {
-        response.insert("run_coder".to_string(), json!(value));
-    }
-    if let Some(value) = &request.coder_prompt {
-        response.insert("coder_prompt".to_string(), json!(value));
-    }
-    if let Some(value) = &request.coder_model {
-        response.insert("coder_model".to_string(), json!(value));
-    }
-}
-
-fn hitl_message(choice: HitlActionChoiceWire) -> &'static str {
-    match choice {
-        HitlActionChoiceWire::Accept => "Accepted",
-        HitlActionChoiceWire::Reject => "Rejected",
-        HitlActionChoiceWire::Feedback => "Feedback received",
-    }
 }
 
 fn question_by_index(
@@ -1175,6 +947,10 @@ fn _action_data(values: &[(&str, &str)]) -> BTreeMap<String, String> {
 mod tests {
     use super::*;
 
+    fn write_gate_request(path: &std::path::Path, value: JsonValue) {
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
     fn sample_plan_notification() -> NotificationWire {
         NotificationWire {
             id: "abcdef1234567890".to_string(),
@@ -1218,7 +994,27 @@ mod tests {
 
     #[test]
     fn mobile_notification_contract_snapshot_is_stable() {
-        let notification = sample_plan_notification();
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        write_gate_request(
+            &request_path,
+            json!({
+                "schema_version": 2,
+                "branches": [["approve", "commit"], ["reject"], ["feedback"]],
+                "options": [
+                    {"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"},
+                    {"id": "commit", "label": "Commit plan file to the plans sidecar", "icon": "💾", "default_selected": true, "feedback": "disabled"},
+                    {"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled"},
+                    {"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required"}
+                ],
+                "groups": [{"options": ["approve", "commit"], "label": "Approve", "icon": "✅"}]
+            }),
+        );
+        let mut notification = sample_plan_notification();
+        notification.action_data.insert(
+            "request_path".to_string(),
+            request_path.to_string_lossy().into_owned(),
+        );
         let card = mobile_notification_card_from_wire(
             &notification,
             MobileActionStateWire::Available,
@@ -1249,7 +1045,26 @@ mod tests {
 
     #[test]
     fn epic_notification_contract_snapshot_is_stable() {
-        let notification = sample_epic_notification();
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        write_gate_request(
+            &request_path,
+            json!({
+                "schema_version": 2,
+                "branches": [["approve"], ["reject"], ["feedback"]],
+                "options": [
+                    {"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"},
+                    {"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled"},
+                    {"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required"}
+                ],
+                "groups": []
+            }),
+        );
+        let mut notification = sample_epic_notification();
+        notification.action_data.insert(
+            "request_path".to_string(),
+            request_path.to_string_lossy().into_owned(),
+        );
         let detail = MobileNotificationDetailResponseWire {
             schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
             notification: mobile_notification_card_from_wire(
@@ -1284,32 +1099,33 @@ mod tests {
         std::fs::write(
             &request_path,
             serde_json::to_vec(&json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "request_id": "custom-demo",
                 "kind": "custom",
-                "choices": [
+                "branches": [["proceed", "open_report"], ["cancel"]],
+                "options": [
                     {
                         "id": "proceed",
                         "label": "Proceed safely",
                         "icon": "✅",
                         "feedback": "required",
-                        "command": {"argv": ["commands/proceed"]},
-                        "extras": [
-                            {
-                                "id": "open_report",
-                                "label": "Open the report",
-                                "icon": "📄",
-                                "default_selected": true,
-                                "command": {"argv": ["commands/open-report"]}
-                            }
-                        ]
+                        "default_selected": true
+                    },
+                    {
+                        "id": "open_report",
+                        "label": "Open the report",
+                        "icon": "📄",
+                        "default_selected": true,
+                        "feedback": "optional"
                     },
                     {
                         "id": "cancel",
                         "label": "Cancel",
-                        "command": {"argv": ["commands/cancel"]}
+                        "default_selected": true,
+                        "feedback": "optional"
                     }
-                ]
+                ],
+                "groups": [{"options": ["proceed", "open_report"], "label": "Proceed safely", "icon": "✅"}]
             }))
             .unwrap(),
         )
@@ -1356,6 +1172,21 @@ mod tests {
 
     #[test]
     fn launch_approval_detail_exposes_preview_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        write_gate_request(
+            &request_path,
+            json!({
+                "schema_version": 2,
+                "branches": [["approve"], ["reject"], ["feedback"]],
+                "options": [
+                    {"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"},
+                    {"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled"},
+                    {"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required"}
+                ],
+                "groups": []
+            }),
+        );
         let notification = NotificationWire {
             id: "launch1234567890".to_string(),
             timestamp: "2026-05-06T15:30:00Z".to_string(),
@@ -1371,6 +1202,7 @@ mod tests {
             action_data: _action_data(&[
                 ("response_dir", "/tmp/launch"),
                 ("request_id", "req-123"),
+                ("request_path", request_path.to_str().unwrap()),
                 ("source_surface", "agent"),
                 ("slot_count", "3"),
             ]),
@@ -1401,42 +1233,31 @@ mod tests {
                 "request_id": "req-123",
                 "source_surface": "agent",
                 "slot_count": 3,
-                "choices": ["approve", "reject", "feedback"],
+                "branches": [
+                    {"options": [{"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"}], "submit": null},
+                    {"options": [{"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled"}], "submit": null},
+                    {"options": [{"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required"}], "submit": null}
+                ],
             })
         );
     }
 
     #[test]
     fn action_result_contract_snapshot_is_stable() {
-        let plan = plan_plan_action_response(&PlanActionRequestWire {
+        let gate = ActionResultWire {
             schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
             prefix: "abcdef12".to_string(),
-            choice: PlanActionChoiceWire::Run,
-            feedback: None,
-            commit_plan: None,
-            run_coder: None,
-            coder_prompt: Some("Focus tests".to_string()),
-            coder_model: Some("gpt-5.2".to_string()),
-        })
-        .unwrap();
-        let hitl = plan_hitl_action_response(&HitlActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "hitl0001".to_string(),
-            choice: HitlActionChoiceWire::Feedback,
-            feedback: Some("Please revise".to_string()),
-        })
-        .unwrap();
-        let epic = plan_epic_action_response(&PlanActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "epic0001".to_string(),
-            choice: PlanActionChoiceWire::Approve,
-            feedback: None,
-            commit_plan: None,
-            run_coder: None,
-            coder_prompt: None,
-            coder_model: None,
-        })
-        .unwrap();
+            action_kind: MobileActionKindWire::PlanApproval,
+            notification_id: Some("abcdef1234567890".to_string()),
+            state: MobileActionStateWire::Available,
+            response_file: "response.json".to_string(),
+            response_json: json!({
+                "schema_version": 2,
+                "selected_option_ids": ["approve", "commit"],
+                "feedback": null,
+            }),
+            message: Some("Gate resolved with approve, commit".to_string()),
+        };
         let question = plan_question_action_response(
             &QuestionActionRequestWire {
                 schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
@@ -1465,120 +1286,12 @@ mod tests {
             "../../tests/fixtures/mobile/mobile_action_result_contract.json"
         ))
         .unwrap();
-        let launch = plan_launch_action_response(&LaunchActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "laun0001".to_string(),
-            choice: LaunchActionChoiceWire::Feedback,
-            feedback: Some("Needs less fanout".to_string()),
-        })
-        .unwrap();
         assert_eq!(
             json!({
-                "plan": plan,
-                "epic": epic,
-                "hitl": hitl,
+                "gate": gate,
                 "question": question,
-                "launch": launch,
             }),
             expected
-        );
-    }
-
-    #[test]
-    fn plan_response_planner_covers_all_choices() {
-        let expected = [
-            (PlanActionChoiceWire::Approve, json!({"action": "approve"})),
-            (
-                PlanActionChoiceWire::Run,
-                json!({
-                    "action": "approve",
-                    "commit_plan": false,
-                    "run_coder": true,
-                }),
-            ),
-            (PlanActionChoiceWire::Reject, json!({"action": "reject"})),
-            (PlanActionChoiceWire::Epic, json!({"action": "epic"})),
-            (
-                PlanActionChoiceWire::Feedback,
-                json!({"action": "reject", "feedback": "try again"}),
-            ),
-        ];
-        for (choice, response_json) in expected {
-            let feedback = if choice == PlanActionChoiceWire::Feedback {
-                Some("try again".to_string())
-            } else {
-                None
-            };
-            let result = plan_plan_action_response(&PlanActionRequestWire {
-                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-                prefix: "abcd1234".to_string(),
-                choice,
-                feedback,
-                commit_plan: None,
-                run_coder: None,
-                coder_prompt: None,
-                coder_model: None,
-            })
-            .unwrap();
-            assert_eq!(result.response_json, response_json);
-        }
-    }
-
-    #[test]
-    fn epic_response_planner_has_a_typed_action_and_closed_choices() {
-        let approve = plan_epic_action_response(&PlanActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "epic0001".to_string(),
-            choice: PlanActionChoiceWire::Approve,
-            feedback: None,
-            commit_plan: None,
-            run_coder: None,
-            coder_prompt: None,
-            coder_model: None,
-        })
-        .unwrap();
-        assert_eq!(approve.action_kind, MobileActionKindWire::EpicApproval);
-        assert_eq!(approve.response_json, json!({"action": "epic"}));
-
-        let invalid = plan_epic_action_response(&PlanActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "epic0001".to_string(),
-            choice: PlanActionChoiceWire::Run,
-            feedback: None,
-            commit_plan: None,
-            run_coder: None,
-            coder_prompt: None,
-            coder_model: None,
-        })
-        .unwrap_err();
-        assert_eq!(invalid.code, MobileActionPlanErrorCodeWire::InvalidRequest);
-        assert_eq!(invalid.target.as_deref(), Some("choice"));
-    }
-
-    #[test]
-    fn hitl_response_planner_matches_existing_shapes() {
-        let accept = plan_hitl_action_response(&HitlActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "hitl0001".to_string(),
-            choice: HitlActionChoiceWire::Accept,
-            feedback: None,
-        })
-        .unwrap();
-        assert_eq!(
-            accept.response_json,
-            json!({"action": "accept", "approved": true})
-        );
-
-        let reject = plan_hitl_action_response(&HitlActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "hitl0001".to_string(),
-            choice: HitlActionChoiceWire::Reject,
-            feedback: None,
-        })
-        .unwrap();
-        assert_eq!(
-            reject.response_json,
-            json!({"action": "reject", "approved": false})
         );
     }
 
@@ -1660,40 +1373,6 @@ mod tests {
                 "global_note": "Answered via mobile",
             })
         );
-    }
-
-    #[test]
-    fn launch_response_planner_covers_all_choices() {
-        let approve = plan_launch_action_response(&LaunchActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "launch01".to_string(),
-            choice: LaunchActionChoiceWire::Approve,
-            feedback: None,
-        })
-        .unwrap();
-        assert_eq!(approve.response_json, json!({"action": "approve"}));
-
-        let reject = plan_launch_action_response(&LaunchActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "launch01".to_string(),
-            choice: LaunchActionChoiceWire::Reject,
-            feedback: Some("Too broad".to_string()),
-        })
-        .unwrap();
-        assert_eq!(
-            reject.response_json,
-            json!({"action": "reject", "feedback": "Too broad"})
-        );
-
-        let err = plan_launch_action_response(&LaunchActionRequestWire {
-            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
-            prefix: "launch01".to_string(),
-            choice: LaunchActionChoiceWire::Feedback,
-            feedback: None,
-        })
-        .unwrap_err();
-        assert_eq!(err.code, MobileActionPlanErrorCodeWire::InvalidRequest);
-        assert_eq!(err.target.as_deref(), Some("feedback"));
     }
 
     #[test]
@@ -1794,6 +1473,64 @@ mod tests {
             );
             assert_eq!(kind.notification_action(), Some(action));
             assert!(kind.is_gate());
+        }
+    }
+
+    #[test]
+    fn every_non_question_gate_projects_the_same_branch_wire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        write_gate_request(
+            &request_path,
+            json!({
+                "schema_version": 2,
+                "branches": [["approve"]],
+                "options": [{
+                    "id": "approve",
+                    "label": "Approve",
+                    "icon": "✅",
+                    "default_selected": true,
+                    "feedback": "disabled"
+                }],
+                "groups": []
+            }),
+        );
+        for action in [
+            "PlanApproval",
+            "EpicApproval",
+            "HITL",
+            "LaunchApproval",
+            "CustomGate",
+        ] {
+            let notification = NotificationWire {
+                id: format!("{action}-notification"),
+                action: Some(action.to_string()),
+                action_data: _action_data(&[(
+                    "request_path",
+                    request_path.to_str().unwrap(),
+                )]),
+                ..Default::default()
+            };
+            let detail =
+                serde_json::to_value(mobile_action_detail_from_notification(
+                    &notification,
+                    MobileActionStateWire::Available,
+                ))
+                .unwrap();
+            assert_eq!(
+                detail["branches"],
+                json!([{
+                    "options": [{
+                        "id": "approve",
+                        "label": "Approve",
+                        "icon": "✅",
+                        "default_selected": true,
+                        "feedback": "disabled"
+                    }],
+                    "submit": null
+                }]),
+                "{action} did not use the generic branch projection"
+            );
         }
     }
 }

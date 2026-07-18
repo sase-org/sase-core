@@ -24,15 +24,16 @@ use sase_core::notifications::{
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
     mobile_notification_error_from_wire,
     mobile_notification_priority_from_wire, ActionResultWire,
-    HitlActionChoiceWire, HitlActionRequestWire, LaunchActionChoiceWire,
-    LaunchActionRequestWire, MobileActionKindWire,
+    GateActionRequestWire, MobileActionKindWire,
     MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
-    NotificationWire, PlanActionChoiceWire, PlanActionRequestWire,
-    QuestionActionChoiceWire, QuestionActionRequestWire,
+    NotificationWire, QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use tower_http::trace::TraceLayer;
+
+#[cfg(test)]
+use sase_core::notifications::MobileActionStateWire;
 
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
@@ -531,26 +532,7 @@ pub fn app_with_state(state: GatewayState) -> Router {
             post(dismiss_notification),
         )
         .route("/api/v1/attachments/:token", get(download_attachment))
-        .route("/api/v1/actions/plan/:prefix/approve", post(plan_approve))
-        .route("/api/v1/actions/plan/:prefix/run", post(plan_run))
-        .route("/api/v1/actions/plan/:prefix/reject", post(plan_reject))
-        .route("/api/v1/actions/plan/:prefix/epic", post(plan_epic))
-        .route("/api/v1/actions/plan/:prefix/feedback", post(plan_feedback))
-        .route("/api/v1/actions/epic/:prefix/approve", post(epic_approve))
-        .route("/api/v1/actions/epic/:prefix/reject", post(epic_reject))
-        .route("/api/v1/actions/epic/:prefix/feedback", post(epic_feedback))
-        .route("/api/v1/actions/hitl/:prefix/accept", post(hitl_accept))
-        .route("/api/v1/actions/hitl/:prefix/reject", post(hitl_reject))
-        .route("/api/v1/actions/hitl/:prefix/feedback", post(hitl_feedback))
-        .route(
-            "/api/v1/actions/launch/:prefix/approve",
-            post(launch_approve),
-        )
-        .route("/api/v1/actions/launch/:prefix/reject", post(launch_reject))
-        .route(
-            "/api/v1/actions/launch/:prefix/feedback",
-            post(launch_feedback),
-        )
+        .route("/api/v1/actions/gate/:prefix", post(gate_action))
         .route(
             "/api/v1/actions/question/:prefix/answer",
             post(question_answer),
@@ -1445,33 +1427,11 @@ async fn download_attachment(
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct PlanActionBody {
+struct GateActionBody {
     #[serde(default = "default_mobile_schema_version")]
     schema_version: u32,
     #[serde(default)]
-    feedback: Option<String>,
-    #[serde(default)]
-    commit_plan: Option<bool>,
-    #[serde(default)]
-    run_coder: Option<bool>,
-    #[serde(default)]
-    coder_prompt: Option<String>,
-    #[serde(default)]
-    coder_model: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct HitlActionBody {
-    #[serde(default = "default_mobile_schema_version")]
-    schema_version: u32,
-    #[serde(default)]
-    feedback: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct LaunchActionBody {
-    #[serde(default = "default_mobile_schema_version")]
-    schema_version: u32,
+    selected_option_ids: Vec<String>,
     #[serde(default)]
     feedback: Option<String>,
 }
@@ -1494,122 +1454,32 @@ struct QuestionActionBody {
     global_note: Option<String>,
 }
 
-async fn plan_approve(
+async fn gate_action(
     State(state): State<GatewayState>,
     headers: HeaderMap,
     AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
+    payload: Result<Json<GateActionBody>, JsonRejection>,
 ) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Approve,
-        payload,
-        "/api/v1/actions/plan/{prefix}/approve",
-    )
-    .await
-}
-
-async fn plan_run(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Run,
-        payload,
-        "/api/v1/actions/plan/{prefix}/run",
-    )
-    .await
-}
-
-async fn plan_reject(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Reject,
-        payload,
-        "/api/v1/actions/plan/{prefix}/reject",
-    )
-    .await
-}
-
-async fn plan_epic(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Epic,
-        payload,
-        "/api/v1/actions/plan/{prefix}/epic",
-    )
-    .await
-}
-
-async fn plan_feedback(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_plan_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Feedback,
-        payload,
-        "/api/v1/actions/plan/{prefix}/feedback",
-    )
-    .await
-}
-
-async fn execute_plan_action_route(
-    state: GatewayState,
-    headers: HeaderMap,
-    prefix: String,
-    choice: PlanActionChoiceWire,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-    endpoint: &'static str,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    let device = authenticate(&state, &headers, endpoint).await?;
+    const ENDPOINT: &str = "/api/v1/actions/gate/{prefix}";
+    let device = authenticate(&state, &headers, ENDPOINT).await?;
     let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
-    let request = PlanActionRequestWire {
+    let request = GateActionRequestWire {
         schema_version: payload.schema_version,
         prefix: prefix.clone(),
-        choice,
+        selected_option_ids: payload.selected_option_ids,
         feedback: payload.feedback,
-        commit_plan: payload.commit_plan,
-        run_coder: payload.run_coder,
-        coder_prompt: payload.coder_prompt,
-        coder_model: payload.coder_model,
     };
-    match state.notification_bridge.execute_plan_action(&request) {
+    match state.notification_bridge.execute_gate_action(&request) {
         Ok(result) => {
             state.audit(
                 Some(device.device_id),
-                endpoint,
+                ENDPOINT,
                 result.notification_id.clone().or(Some(prefix)),
                 "success",
             );
             publish_notifications_changed(
                 &state,
-                "plan_action",
+                "gate_action",
                 result.notification_id.clone(),
             )?;
             Ok(Json(result))
@@ -1618,296 +1488,7 @@ async fn execute_plan_action_route(
             let api_error = ApiError::from_host_bridge(error);
             state.audit(
                 Some(device.device_id),
-                endpoint,
-                Some(prefix),
-                api_error.wire.code.outcome_label(),
-            );
-            Err(api_error)
-        }
-    }
-}
-
-async fn epic_approve(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_epic_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Approve,
-        payload,
-        "/api/v1/actions/epic/{prefix}/approve",
-    )
-    .await
-}
-
-async fn epic_reject(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_epic_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Reject,
-        payload,
-        "/api/v1/actions/epic/{prefix}/reject",
-    )
-    .await
-}
-
-async fn epic_feedback(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_epic_action_route(
-        state,
-        headers,
-        prefix,
-        PlanActionChoiceWire::Feedback,
-        payload,
-        "/api/v1/actions/epic/{prefix}/feedback",
-    )
-    .await
-}
-
-async fn execute_epic_action_route(
-    state: GatewayState,
-    headers: HeaderMap,
-    prefix: String,
-    choice: PlanActionChoiceWire,
-    payload: Result<Json<PlanActionBody>, JsonRejection>,
-    endpoint: &'static str,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    let device = authenticate(&state, &headers, endpoint).await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
-    let request = PlanActionRequestWire {
-        schema_version: payload.schema_version,
-        prefix: prefix.clone(),
-        choice,
-        feedback: payload.feedback,
-        commit_plan: payload.commit_plan,
-        run_coder: payload.run_coder,
-        coder_prompt: payload.coder_prompt,
-        coder_model: payload.coder_model,
-    };
-    match state.notification_bridge.execute_epic_action(&request) {
-        Ok(result) => {
-            state.audit(
-                Some(device.device_id),
-                endpoint,
-                result.notification_id.clone().or(Some(prefix)),
-                "success",
-            );
-            publish_notifications_changed(
-                &state,
-                "epic_action",
-                result.notification_id.clone(),
-            )?;
-            Ok(Json(result))
-        }
-        Err(error) => {
-            let api_error = ApiError::from_host_bridge(error);
-            state.audit(
-                Some(device.device_id),
-                endpoint,
-                Some(prefix),
-                api_error.wire.code.outcome_label(),
-            );
-            Err(api_error)
-        }
-    }
-}
-
-async fn hitl_accept(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<HitlActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_hitl_action_route(
-        state,
-        headers,
-        prefix,
-        HitlActionChoiceWire::Accept,
-        payload,
-        "/api/v1/actions/hitl/{prefix}/accept",
-    )
-    .await
-}
-
-async fn hitl_reject(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<HitlActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_hitl_action_route(
-        state,
-        headers,
-        prefix,
-        HitlActionChoiceWire::Reject,
-        payload,
-        "/api/v1/actions/hitl/{prefix}/reject",
-    )
-    .await
-}
-
-async fn hitl_feedback(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<HitlActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_hitl_action_route(
-        state,
-        headers,
-        prefix,
-        HitlActionChoiceWire::Feedback,
-        payload,
-        "/api/v1/actions/hitl/{prefix}/feedback",
-    )
-    .await
-}
-
-async fn execute_hitl_action_route(
-    state: GatewayState,
-    headers: HeaderMap,
-    prefix: String,
-    choice: HitlActionChoiceWire,
-    payload: Result<Json<HitlActionBody>, JsonRejection>,
-    endpoint: &'static str,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    let device = authenticate(&state, &headers, endpoint).await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
-    let request = HitlActionRequestWire {
-        schema_version: payload.schema_version,
-        prefix: prefix.clone(),
-        choice,
-        feedback: payload.feedback,
-    };
-    match state.notification_bridge.execute_hitl_action(&request) {
-        Ok(result) => {
-            state.audit(
-                Some(device.device_id),
-                endpoint,
-                result.notification_id.clone().or(Some(prefix)),
-                "success",
-            );
-            publish_notifications_changed(
-                &state,
-                "hitl_action",
-                result.notification_id.clone(),
-            )?;
-            Ok(Json(result))
-        }
-        Err(error) => {
-            let api_error = ApiError::from_host_bridge(error);
-            state.audit(
-                Some(device.device_id),
-                endpoint,
-                Some(prefix),
-                api_error.wire.code.outcome_label(),
-            );
-            Err(api_error)
-        }
-    }
-}
-
-async fn launch_approve(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<LaunchActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_launch_action_route(
-        state,
-        headers,
-        prefix,
-        LaunchActionChoiceWire::Approve,
-        payload,
-        "/api/v1/actions/launch/{prefix}/approve",
-    )
-    .await
-}
-
-async fn launch_reject(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<LaunchActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_launch_action_route(
-        state,
-        headers,
-        prefix,
-        LaunchActionChoiceWire::Reject,
-        payload,
-        "/api/v1/actions/launch/{prefix}/reject",
-    )
-    .await
-}
-
-async fn launch_feedback(
-    State(state): State<GatewayState>,
-    headers: HeaderMap,
-    AxumPath(prefix): AxumPath<String>,
-    payload: Result<Json<LaunchActionBody>, JsonRejection>,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    execute_launch_action_route(
-        state,
-        headers,
-        prefix,
-        LaunchActionChoiceWire::Feedback,
-        payload,
-        "/api/v1/actions/launch/{prefix}/feedback",
-    )
-    .await
-}
-
-async fn execute_launch_action_route(
-    state: GatewayState,
-    headers: HeaderMap,
-    prefix: String,
-    choice: LaunchActionChoiceWire,
-    payload: Result<Json<LaunchActionBody>, JsonRejection>,
-    endpoint: &'static str,
-) -> Result<Json<ActionResultWire>, ApiError> {
-    let device = authenticate(&state, &headers, endpoint).await?;
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
-    let request = LaunchActionRequestWire {
-        schema_version: payload.schema_version,
-        prefix: prefix.clone(),
-        choice,
-        feedback: payload.feedback,
-    };
-    match state.notification_bridge.execute_launch_action(&request) {
-        Ok(result) => {
-            state.audit(
-                Some(device.device_id),
-                endpoint,
-                result.notification_id.clone().or(Some(prefix)),
-                "success",
-            );
-            publish_notifications_changed(
-                &state,
-                "launch_action",
-                result.notification_id.clone(),
-            )?;
-            Ok(Json(result))
-        }
-        Err(error) => {
-            let api_error = ApiError::from_host_bridge(error);
-            state.audit(
-                Some(device.device_id),
-                endpoint,
+                ENDPOINT,
                 Some(prefix),
                 api_error.wire.code.outcome_label(),
             );
@@ -3804,182 +3385,6 @@ exit 4
         assert_eq!(value["target"], "helper_bridge:beads-show");
     }
 
-    fn seed_plan_notification(
-        tmp: &TempDir,
-        id: &str,
-    ) -> (NotificationWire, PathBuf) {
-        let response_dir =
-            tmp.path().join("agent").join(id).join("plan_approval");
-        std::fs::create_dir_all(&response_dir).unwrap();
-        std::fs::write(response_dir.join("plan_request.json"), "{}").unwrap();
-        let plan_file = tmp.path().join("plan.md");
-        std::fs::write(&plan_file, "# Plan\n").unwrap();
-        let mut notification =
-            notification(id, "2026-05-06T17:00:00Z", Some("PlanApproval"));
-        notification.files = vec![plan_file.to_string_lossy().to_string()];
-        notification.action_data.insert(
-            "response_dir".to_string(),
-            response_dir.to_string_lossy().to_string(),
-        );
-        let store_path =
-            tmp.path().join("notifications").join("notifications.jsonl");
-        sase_core::notifications::append_notification(
-            &store_path,
-            &notification,
-        )
-        .unwrap();
-        let pending_path =
-            sase_core::notifications::pending_action_store_path(tmp.path());
-        let pending =
-            sase_core::notifications::pending_action_from_notification(
-                &notification,
-                sase_core::notifications::current_unix_time(),
-            )
-            .unwrap();
-        sase_core::notifications::register_pending_action(
-            &pending_path,
-            &pending,
-        )
-        .unwrap();
-        (notification, response_dir)
-    }
-
-    fn seed_epic_notification(
-        tmp: &TempDir,
-        id: &str,
-    ) -> (NotificationWire, PathBuf) {
-        let response_dir =
-            tmp.path().join("agent").join(id).join("epic_approval");
-        std::fs::create_dir_all(&response_dir).unwrap();
-        std::fs::write(response_dir.join("plan_request.json"), "{}").unwrap();
-        let plan_file = tmp.path().join("epic.md");
-        std::fs::write(&plan_file, "# Epic\n").unwrap();
-        let mut notification =
-            notification(id, "2026-07-16T17:00:00Z", Some("EpicApproval"));
-        notification.files = vec![plan_file.to_string_lossy().to_string()];
-        notification.action_data.insert(
-            "response_dir".to_string(),
-            response_dir.to_string_lossy().to_string(),
-        );
-        seed_action_notification(tmp, &notification);
-        (notification, response_dir)
-    }
-
-    fn seed_hitl_notification(
-        tmp: &TempDir,
-        id: &str,
-    ) -> (NotificationWire, PathBuf) {
-        let artifacts_dir = tmp.path().join("agent").join(id).join("artifacts");
-        std::fs::create_dir_all(&artifacts_dir).unwrap();
-        std::fs::write(
-            artifacts_dir.join("hitl_request.json"),
-            r#"{"step_name":"review","step_type":"bash","output":"ok"}"#,
-        )
-        .unwrap();
-        let mut notification =
-            notification(id, "2026-05-06T17:00:00Z", Some("HITL"));
-        notification.action_data.insert(
-            "artifacts_dir".to_string(),
-            artifacts_dir.to_string_lossy().to_string(),
-        );
-        seed_action_notification(tmp, &notification);
-        (notification, artifacts_dir)
-    }
-
-    fn seed_question_notification(
-        tmp: &TempDir,
-        id: &str,
-    ) -> (NotificationWire, PathBuf) {
-        let response_dir = tmp.path().join("agent").join(id).join("question");
-        std::fs::create_dir_all(&response_dir).unwrap();
-        std::fs::write(
-            response_dir.join("question_request.json"),
-            serde_json::to_string_pretty(&json!({
-                "questions": [{
-                    "question": "Which approach?",
-                    "options": [
-                        {"id": "fast", "label": "Fast"},
-                        {"id": "safe", "label": "Safe"}
-                    ]
-                }],
-                "session_id": "session-question",
-                "timestamp": 1778086800.0
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let mut notification =
-            notification(id, "2026-05-06T17:00:00Z", Some("UserQuestion"));
-        notification.action_data.insert(
-            "response_dir".to_string(),
-            response_dir.to_string_lossy().to_string(),
-        );
-        seed_action_notification(tmp, &notification);
-        (notification, response_dir)
-    }
-
-    fn seed_launch_notification(
-        tmp: &TempDir,
-        id: &str,
-    ) -> (NotificationWire, PathBuf) {
-        let response_dir = tmp.path().join("agent").join(id).join("launch");
-        std::fs::create_dir_all(&response_dir).unwrap();
-        std::fs::write(
-            response_dir.join("launch_request.json"),
-            serde_json::to_string_pretty(&json!({
-                "schema_version": 1,
-                "request_id": "launch-request-1",
-                "slot_count": 2,
-                "source_surface": "agent",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let mut notification =
-            notification(id, "2026-05-06T17:00:00Z", Some("LaunchApproval"));
-        notification.action_data.insert(
-            "response_dir".to_string(),
-            response_dir.to_string_lossy().to_string(),
-        );
-        notification
-            .action_data
-            .insert("request_id".to_string(), "launch-request-1".to_string());
-        notification
-            .action_data
-            .insert("source_surface".to_string(), "agent".to_string());
-        notification
-            .action_data
-            .insert("slot_count".to_string(), "2".to_string());
-        seed_action_notification(tmp, &notification);
-        (notification, response_dir)
-    }
-
-    fn seed_action_notification(
-        tmp: &TempDir,
-        notification: &NotificationWire,
-    ) {
-        let store_path =
-            tmp.path().join("notifications").join("notifications.jsonl");
-        sase_core::notifications::append_notification(
-            &store_path,
-            notification,
-        )
-        .unwrap();
-        let pending_path =
-            sase_core::notifications::pending_action_store_path(tmp.path());
-        let pending =
-            sase_core::notifications::pending_action_from_notification(
-                notification,
-                sase_core::notifications::current_unix_time(),
-            )
-            .unwrap();
-        sase_core::notifications::register_pending_action(
-            &pending_path,
-            &pending,
-        )
-        .unwrap();
-    }
-
     fn seed_store_notification(tmp: &TempDir, notification: &NotificationWire) {
         let store_path =
             tmp.path().join("notifications").join("notifications.jsonl");
@@ -5634,12 +5039,70 @@ exit 4
         }));
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingNotificationActionBridge {
+        gate_request: Mutex<Option<GateActionRequestWire>>,
+        question_request: Mutex<Option<QuestionActionRequestWire>>,
+    }
+
+    impl NotificationHostBridge for RecordingNotificationActionBridge {
+        fn list_notifications(
+            &self,
+            _include_dismissed: bool,
+        ) -> Result<
+            sase_core::notifications::NotificationStoreSnapshotWire,
+            HostBridgeError,
+        > {
+            Err(HostBridgeError::BridgeUnavailable(
+                "recording_notification_bridge".to_string(),
+            ))
+        }
+
+        fn execute_gate_action(
+            &self,
+            request: &GateActionRequestWire,
+        ) -> Result<ActionResultWire, HostBridgeError> {
+            *self.gate_request.lock().unwrap() = Some(request.clone());
+            Ok(ActionResultWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                action_kind: MobileActionKindWire::PlanApproval,
+                prefix: request.prefix.clone(),
+                notification_id: Some("abcdef12-plan".to_string()),
+                state: MobileActionStateWire::Available,
+                response_file: "response.json".to_string(),
+                response_json: json!({
+                    "selected_option_ids": request.selected_option_ids,
+                    "feedback": request.feedback,
+                }),
+                message: Some("Gate resolved".to_string()),
+            })
+        }
+
+        fn execute_question_action(
+            &self,
+            request: &QuestionActionRequestWire,
+        ) -> Result<ActionResultWire, HostBridgeError> {
+            *self.question_request.lock().unwrap() = Some(request.clone());
+            Ok(ActionResultWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                action_kind: MobileActionKindWire::UserQuestion,
+                prefix: request.prefix.clone(),
+                notification_id: Some("question-row".to_string()),
+                state: MobileActionStateWire::Available,
+                response_file: "response.json".to_string(),
+                response_json: json!({"selected_option_ids": ["submit"]}),
+                message: Some("Question answered".to_string()),
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn plan_action_approve_writes_response_and_dismisses_notification() {
+    async fn gate_action_forwards_selected_option_submission() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_notification, response_dir) =
-            seed_plan_notification(&tmp, "abcdef12-plan");
+        let bridge = Arc::new(RecordingNotificationActionBridge::default());
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
         let (_start, _finish, token, _device_id) =
             pair_device(state.clone()).await;
 
@@ -5647,230 +5110,35 @@ exit 4
             state,
             action_request(
                 Some(&token),
-                "/api/v1/actions/plan/abcdef12/approve",
+                "/api/v1/actions/gate/abcdef12",
                 json!({
-                    "schema_version": 1,
-                    "commit_plan": true,
-                    "run_coder": false,
-                    "coder_model": "gpt-5.4"
+                    "schema_version": MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                    "selected_option_ids": ["approve", "commit"],
+                    "feedback": "Reviewed on mobile"
                 }),
             ),
         )
         .await;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["notification_id"], "abcdef12-plan");
+        assert_eq!(value["response_file"], "response.json");
         assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    response_dir.join("plan_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({
-                "action": "approve",
-                "commit_plan": true,
-                "run_coder": false,
-                "coder_model": "gpt-5.4"
-            })
+            value["response_json"]["selected_option_ids"],
+            json!(["approve", "commit"])
         );
-        let snapshot = sase_core::notifications::read_notifications_snapshot(
-            &tmp.path().join("notifications").join("notifications.jsonl"),
-            true,
-        )
-        .unwrap();
-        assert!(snapshot.notifications[0].dismissed);
-        let meta: Value = serde_json::from_str(
-            &std::fs::read_to_string(
-                response_dir.parent().unwrap().join("agent_meta.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(meta["plan_approved"], true);
-        assert_eq!(meta["plan_action"], "commit");
+        let request = bridge.gate_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.prefix, "abcdef12");
+        assert_eq!(request.selected_option_ids, ["approve", "commit"]);
+        assert_eq!(request.feedback.as_deref(), Some("Reviewed on mobile"));
     }
 
     #[tokio::test]
-    async fn epic_action_approve_uses_typed_route_and_epic_response() {
+    async fn question_action_forwards_specialized_submission() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (notification, response_dir) =
-            seed_epic_notification(&tmp, "epic1234-plan");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (detail_status, detail) = json_response_with_state(
-            state.clone(),
-            notifications_request(
-                Some(&token),
-                &format!("/api/v1/notifications/{}", notification.id),
-            ),
-        )
-        .await;
-        assert_eq!(detail_status, StatusCode::OK);
-        assert_eq!(detail["action"]["kind"], "epic_approval");
-        assert!(detail["attachments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["display_name"]
-                .as_str()
-                .is_some_and(|path| path.ends_with("plan_request.json"))));
-
-        let (status, value) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/epic/epic1234/approve",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["action_kind"], "epic_approval");
-        assert_eq!(value["notification_id"], "epic1234-plan");
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    response_dir.join("plan_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({"action": "epic"})
-        );
-        let meta: Value = serde_json::from_str(
-            &std::fs::read_to_string(
-                response_dir.parent().unwrap().join("agent_meta.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(meta["plan_approved"], true);
-        assert_eq!(meta["plan_action"], "epic");
-    }
-
-    #[tokio::test]
-    async fn plan_action_run_and_feedback_match_existing_response_shapes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_notification, first_response_dir) =
-            seed_plan_notification(&tmp, "run00001-plan");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (run_status, _run_value) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/run00001/run",
-                json!({"schema_version": 1, "coder_prompt": "Focus tests"}),
-            ),
-        )
-        .await;
-        assert_eq!(run_status, StatusCode::OK);
-        let run_response: Value = serde_json::from_str(
-            &std::fs::read_to_string(
-                first_response_dir.join("plan_response.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            run_response,
-            json!({
-                "action": "approve",
-                "commit_plan": false,
-                "run_coder": true,
-                "coder_prompt": "Focus tests",
-            })
-        );
-
-        let (_notification, second_response_dir) =
-            seed_plan_notification(&tmp, "feed0001-plan");
-        let (feedback_status, _feedback_value) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/feed0001/feedback",
-                json!({"schema_version": 1, "feedback": "Revise scope"}),
-            ),
-        )
-        .await;
-        assert_eq!(feedback_status, StatusCode::OK);
-        let feedback_response: Value = serde_json::from_str(
-            &std::fs::read_to_string(
-                second_response_dir.join("plan_response.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            feedback_response,
-            json!({"action": "reject", "feedback": "Revise scope"})
-        );
-    }
-
-    #[tokio::test]
-    async fn plan_action_errors_are_deterministic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_first, _first_dir) = seed_plan_notification(&tmp, "ambig001-one");
-        let (_second, _second_dir) =
-            seed_plan_notification(&tmp, "ambig002-two");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (ambiguous_status, ambiguous) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/ambig/approve",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(ambiguous_status, StatusCode::CONFLICT);
-        assert_eq!(ambiguous["code"], "ambiguous_prefix");
-
-        let (missing_status, missing) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/missing/approve",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(missing_status, StatusCode::NOT_FOUND);
-        assert_eq!(missing["code"], "not_found");
-
-        let (_notification, response_dir) =
-            seed_plan_notification(&tmp, "handled1-plan");
-        std::fs::write(response_dir.join("plan_response.json"), "{}").unwrap();
-        let (handled_status, handled) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/handled1/approve",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(handled_status, StatusCode::CONFLICT);
-        assert_eq!(handled["code"], "conflict_already_handled");
-    }
-
-    #[tokio::test]
-    async fn launch_action_feedback_writes_response_and_dismisses_notification()
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (notification, response_dir) =
-            seed_launch_notification(&tmp, "launch01-row");
+        let bridge = Arc::new(RecordingNotificationActionBridge::default());
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
         let (_start, _finish, token, _device_id) =
             pair_device(state.clone()).await;
 
@@ -5878,387 +5146,23 @@ exit 4
             state,
             action_request(
                 Some(&token),
-                "/api/v1/actions/launch/launch01/feedback",
+                "/api/v1/actions/question/question/answer",
                 json!({
-                    "schema_version": 1,
-                    "feedback": "Fanout is too broad"
-                }),
-            ),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["notification_id"], notification.id.as_str());
-        assert_eq!(value["action_kind"], "launch_approval");
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    response_dir.join("launch_response.json"),
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({"action": "reject", "feedback": "Fanout is too broad"})
-        );
-        let snapshot = sase_core::notifications::read_notifications_snapshot(
-            &tmp.path().join("notifications").join("notifications.jsonl"),
-            true,
-        )
-        .unwrap();
-        assert!(snapshot.notifications[0].dismissed);
-    }
-
-    #[tokio::test]
-    async fn hitl_actions_write_response_and_dismiss_notification() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_notification, first_artifacts_dir) =
-            seed_hitl_notification(&tmp, "hitl0001-row");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (accept_status, accept_value) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/hitl/hitl0001/accept",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(accept_status, StatusCode::OK);
-        assert_eq!(accept_value["action_kind"], "hitl");
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    first_artifacts_dir.join("hitl_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({"action": "accept", "approved": true})
-        );
-        let snapshot = sase_core::notifications::read_notifications_snapshot(
-            &tmp.path().join("notifications").join("notifications.jsonl"),
-            true,
-        )
-        .unwrap();
-        assert!(snapshot
-            .notifications
-            .iter()
-            .any(|row| row.id == "hitl0001-row" && row.dismissed));
-
-        let (_notification, second_artifacts_dir) =
-            seed_hitl_notification(&tmp, "hitl0002-row");
-        let (feedback_status, _feedback_value) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/hitl/hitl0002/feedback",
-                json!({"schema_version": 1, "feedback": "Needs revision"}),
-            ),
-        )
-        .await;
-        assert_eq!(feedback_status, StatusCode::OK);
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    second_artifacts_dir.join("hitl_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({
-                "action": "feedback",
-                "approved": false,
-                "feedback": "Needs revision"
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn question_actions_support_option_and_custom_answers() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_notification, first_response_dir) =
-            seed_question_notification(&tmp, "quest001-row");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (answer_status, answer_value) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/question/quest001/answer",
-                json!({
-                    "schema_version": 1,
+                    "schema_version": MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
                     "selected_option_id": "safe",
                     "global_note": "Use durable path"
                 }),
             ),
         )
         .await;
-        assert_eq!(answer_status, StatusCode::OK);
-        assert_eq!(answer_value["action_kind"], "user_question");
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    first_response_dir.join("question_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({
-                "answers": [{
-                    "question": "Which approach?",
-                    "selected": ["Safe"],
-                    "custom_feedback": null
-                }],
-                "global_note": "Use durable path"
-            })
-        );
 
-        let (_notification, second_response_dir) =
-            seed_question_notification(&tmp, "quest002-row");
-        let (custom_status, _custom_value) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/question/quest002/custom",
-                json!({
-                    "schema_version": 1,
-                    "custom_answer": "Use SQLite",
-                    "global_note": "Small local DB"
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(custom_status, StatusCode::OK);
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    second_response_dir.join("question_response.json")
-                )
-                .unwrap()
-            )
-            .unwrap(),
-            json!({
-                "answers": [{
-                    "question": "Which approach?",
-                    "selected": [],
-                    "custom_feedback": "Use SQLite"
-                }],
-                "global_note": "Small local DB"
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn hitl_and_question_action_errors_are_deterministic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (_hitl, artifacts_dir) =
-            seed_hitl_notification(&tmp, "hitlerr1-row");
-        let (_question, response_dir) =
-            seed_question_notification(&tmp, "questerr-row");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        std::fs::write(artifacts_dir.join("hitl_response.json"), "{}").unwrap();
-        let (handled_status, handled) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/hitl/hitlerr1/accept",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(handled_status, StatusCode::CONFLICT);
-        assert_eq!(handled["code"], "conflict_already_handled");
-
-        let (invalid_status, invalid) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/question/questerr/answer",
-                json!({"schema_version": 1, "selected_option_id": "missing"}),
-            ),
-        )
-        .await;
-        assert_eq!(invalid_status, StatusCode::BAD_REQUEST);
-        assert_eq!(invalid["code"], "invalid_request");
-        assert!(!response_dir.join("question_response.json").exists());
-
-        std::fs::remove_file(response_dir.join("question_request.json"))
-            .unwrap();
-        let (stale_status, stale) = json_response_with_state(
-            state,
-            action_request(
-                Some(&token),
-                "/api/v1/actions/question/questerr/custom",
-                json!({"schema_version": 1, "custom_answer": "later"}),
-            ),
-        )
-        .await;
-        assert_eq!(stale_status, StatusCode::CONFLICT);
-        assert_eq!(stale["code"], "conflict_already_handled");
-        assert!(!response_dir.join("question_response.json").exists());
-    }
-
-    #[tokio::test]
-    async fn mobile_notification_actions_attachment_smoke_harness() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = state_for_tmp(&tmp, Duration::minutes(5));
-        let (plan, plan_response_dir) =
-            seed_plan_notification(&tmp, "smokepln-row");
-        let (hitl, hitl_artifacts_dir) =
-            seed_hitl_notification(&tmp, "smokehit-row");
-        let (question, question_response_dir) =
-            seed_question_notification(&tmp, "smokeqst-row");
-        let (_start, _finish, token, _device_id) =
-            pair_device(state.clone()).await;
-
-        let (list_status, list) = json_response_with_state(
-            state.clone(),
-            notifications_request(
-                Some(&token),
-                "/api/v1/notifications?unread=true",
-            ),
-        )
-        .await;
-        assert_eq!(list_status, StatusCode::OK);
-        let listed_ids: Vec<&str> = list["notifications"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["id"].as_str().unwrap())
-            .collect();
-        assert!(listed_ids.contains(&plan.id.as_str()));
-        assert!(listed_ids.contains(&hitl.id.as_str()));
-        assert!(listed_ids.contains(&question.id.as_str()));
-
-        let (detail_status, detail) = json_response_with_state(
-            state.clone(),
-            notifications_request(
-                Some(&token),
-                &format!("/api/v1/notifications/{}", plan.id),
-            ),
-        )
-        .await;
-        assert_eq!(detail_status, StatusCode::OK);
-        assert_eq!(detail["action"]["kind"], "plan_approval");
-        let attachment_token =
-            detail["attachments"][0]["token"].as_str().unwrap();
-        let (download_status, headers, body) = raw_response_with_state(
-            state.clone(),
-            attachment_request(
-                Some(&token),
-                &format!("/api/v1/attachments/{attachment_token}"),
-            ),
-        )
-        .await;
-        assert_eq!(download_status, StatusCode::OK);
-        assert_eq!(headers["content-type"], "text/markdown");
-        assert_eq!(body, b"# Plan\n");
-
-        let (plan_status, plan_result) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/plan/smokepln/approve",
-                json!({
-                    "schema_version": 1,
-                    "commit_plan": true,
-                    "run_coder": false
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(plan_status, StatusCode::OK);
-        assert_eq!(plan_result["notification_id"], plan.id.as_str());
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    plan_response_dir.join("plan_response.json"),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            json!({
-                "action": "approve",
-                "commit_plan": true,
-                "run_coder": false
-            })
-        );
-
-        let (hitl_status, _hitl_result) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/hitl/smokehit/accept",
-                json!({"schema_version": 1}),
-            ),
-        )
-        .await;
-        assert_eq!(hitl_status, StatusCode::OK);
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    hitl_artifacts_dir.join("hitl_response.json"),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            json!({"action": "accept", "approved": true})
-        );
-
-        let (question_status, _question_result) = json_response_with_state(
-            state.clone(),
-            action_request(
-                Some(&token),
-                "/api/v1/actions/question/smokeqst/answer",
-                json!({
-                    "schema_version": 1,
-                    "selected_option_index": 1,
-                    "global_note": "smoke verified"
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(question_status, StatusCode::OK);
-        assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(
-                    question_response_dir.join("question_response.json"),
-                )
-                .unwrap(),
-            )
-            .unwrap(),
-            json!({
-                "answers": [{
-                    "question": "Which approach?",
-                    "selected": ["Safe"],
-                    "custom_feedback": null
-                }],
-                "global_note": "smoke verified"
-            })
-        );
-
-        let snapshot = sase_core::notifications::read_notifications_snapshot(
-            &tmp.path().join("notifications").join("notifications.jsonl"),
-            true,
-        )
-        .unwrap();
-        for id in [&plan.id, &hitl.id, &question.id] {
-            assert!(
-                snapshot
-                    .notifications
-                    .iter()
-                    .any(|row| row.id == id.as_str() && row.dismissed),
-                "{id} should be dismissed after its mobile action",
-            );
-        }
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["action_kind"], "user_question");
+        let request = bridge.question_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.prefix, "question");
+        assert_eq!(request.choice, QuestionActionChoiceWire::Answer);
+        assert_eq!(request.selected_option_id.as_deref(), Some("safe"));
+        assert_eq!(request.global_note.as_deref(), Some("Use durable path"));
     }
 
     #[tokio::test]

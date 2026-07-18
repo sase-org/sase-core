@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "notification": {
     "id": "epic1234567890",
     "timestamp": "2026-07-16T15:30:00Z",
@@ -52,10 +52,43 @@
     "state": "available",
     "response_dir": "/tmp/epic",
     "plan_file": "/tmp/epic.md",
-    "choices": [
-      "approve",
-      "reject",
-      "feedback"
+    "branches": [
+      {
+        "options": [
+          {
+            "id": "approve",
+            "label": "Approve",
+            "icon": "✅",
+            "default_selected": true,
+            "feedback": "disabled"
+          }
+        ],
+        "submit": null
+      },
+      {
+        "options": [
+          {
+            "id": "reject",
+            "label": "Reject",
+            "icon": "❌",
+            "default_selected": true,
+            "feedback": "disabled"
+          }
+        ],
+        "submit": null
+      },
+      {
+        "options": [
+          {
+            "id": "feedback",
+            "label": "Send Feedback",
+            "icon": "💬",
+            "default_selected": true,
+            "feedback": "required"
+          }
+        ],
+        "submit": null
+      }
     ]
   }
 }

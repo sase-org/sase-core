@@ -1,48 +1,23 @@
 {
-  "plan": {
-    "schema_version": 3,
+  "gate": {
+    "schema_version": 4,
     "action_kind": "plan_approval",
     "prefix": "abcdef12",
-    "notification_id": null,
+    "notification_id": "abcdef1234567890",
     "state": "available",
-    "response_file": "plan_response.json",
+    "response_file": "response.json",
     "response_json": {
-      "action": "approve",
-      "commit_plan": false,
-      "run_coder": true,
-      "coder_prompt": "Focus tests",
-      "coder_model": "gpt-5.2"
+      "schema_version": 2,
+      "selected_option_ids": [
+        "approve",
+        "commit"
+      ],
+      "feedback": null
     },
-    "message": "Running coder"
-  },
-  "epic": {
-    "schema_version": 3,
-    "action_kind": "epic_approval",
-    "prefix": "epic0001",
-    "notification_id": null,
-    "state": "available",
-    "response_file": "plan_response.json",
-    "response_json": {
-      "action": "epic"
-    },
-    "message": "Epic approved"
-  },
-  "hitl": {
-    "schema_version": 3,
-    "action_kind": "hitl",
-    "prefix": "hitl0001",
-    "notification_id": null,
-    "state": "available",
-    "response_file": "hitl_response.json",
-    "response_json": {
-      "action": "feedback",
-      "approved": false,
-      "feedback": "Please revise"
-    },
-    "message": "Feedback received"
+    "message": "Gate resolved with approve, commit"
   },
   "question": {
-    "schema_version": 3,
+    "schema_version": 4,
     "action_kind": "user_question",
     "prefix": "ques0001",
     "notification_id": null,
@@ -61,18 +36,5 @@
       "global_note": "Answered via mobile"
     },
     "message": "Question answered"
-  },
-  "launch": {
-    "schema_version": 3,
-    "action_kind": "launch_approval",
-    "prefix": "laun0001",
-    "notification_id": null,
-    "state": "available",
-    "response_file": "launch_response.json",
-    "response_json": {
-      "action": "reject",
-      "feedback": "Needs less fanout"
-    },
-    "message": "Launch feedback received"
   }
 }

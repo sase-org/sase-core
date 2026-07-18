@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "notification": {
     "id": "custom1234567890",
     "timestamp": "2026-07-16T23:00:00Z",
@@ -37,27 +37,40 @@
     },
     "state": "available",
     "request_id": "custom-demo",
-    "choices": [
+    "branches": [
       {
-        "id": "proceed",
-        "label": "Proceed safely",
-        "icon": "✅",
-        "feedback": "required",
-        "extras": [
+        "options": [
+          {
+            "id": "proceed",
+            "label": "Proceed safely",
+            "icon": "✅",
+            "default_selected": true,
+            "feedback": "required"
+          },
           {
             "id": "open_report",
             "label": "Open the report",
             "icon": "📄",
-            "default_selected": true
+            "default_selected": true,
+            "feedback": "optional"
           }
-        ]
+        ],
+        "submit": {
+          "label": "Proceed safely",
+          "icon": "✅"
+        }
       },
       {
-        "id": "cancel",
-        "label": "Cancel",
-        "icon": null,
-        "feedback": "optional",
-        "extras": []
+        "options": [
+          {
+            "id": "cancel",
+            "label": "Cancel",
+            "icon": null,
+            "default_selected": true,
+            "feedback": "optional"
+          }
+        ],
+        "submit": null
       }
     ]
   }

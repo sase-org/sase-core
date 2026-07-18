@@ -14,16 +14,10 @@ pub use sase_core::host_bridge::{
 use sase_core::notifications::{
     apply_notification_state_update, current_unix_time,
     legacy_telegram_pending_actions_path, pending_action_state_from_store,
-    pending_action_store_path, plan_epic_action_response,
-    plan_hitl_action_response, plan_launch_action_response,
-    plan_plan_action_response, plan_question_action_response_from_bytes,
-    read_notifications_snapshot_with_options, read_pending_action_store,
-    resolve_pending_action_prefix, ActionResultWire, HitlActionRequestWire,
-    LaunchActionRequestWire, MobileActionKindWire, MobileActionStateWire,
+    pending_action_store_path, read_notifications_snapshot_with_options,
+    ActionResultWire, GateActionRequestWire, MobileActionStateWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
-    NotificationWire, PendingActionPrefixResolutionWire,
-    PendingActionStoreWire, PlanActionChoiceWire, PlanActionRequestWire,
-    QuestionActionRequestWire,
+    NotificationWire, QuestionActionRequestWire,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value as JsonValue;
@@ -381,25 +375,11 @@ impl DynNotificationHostBridge {
         self.0.dismiss_notification(id)
     }
 
-    pub fn execute_plan_action(
+    pub fn execute_gate_action(
         &self,
-        request: &PlanActionRequestWire,
+        request: &GateActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        self.0.execute_plan_action(request)
-    }
-
-    pub fn execute_epic_action(
-        &self,
-        request: &PlanActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        self.0.execute_epic_action(request)
-    }
-
-    pub fn execute_hitl_action(
-        &self,
-        request: &HitlActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        self.0.execute_hitl_action(request)
+        self.0.execute_gate_action(request)
     }
 
     pub fn execute_question_action(
@@ -407,13 +387,6 @@ impl DynNotificationHostBridge {
         request: &QuestionActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
         self.0.execute_question_action(request)
-    }
-
-    pub fn execute_launch_action(
-        &self,
-        request: &LaunchActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        self.0.execute_launch_action(request)
     }
 }
 
@@ -479,32 +452,12 @@ pub trait NotificationHostBridge: Send + Sync {
         ))
     }
 
-    fn execute_plan_action(
+    fn execute_gate_action(
         &self,
-        _request: &PlanActionRequestWire,
+        _request: &GateActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
         Err(HostBridgeError::UnsupportedAction(
-            "plan action mutations are not supported by this bridge"
-                .to_string(),
-        ))
-    }
-
-    fn execute_epic_action(
-        &self,
-        _request: &PlanActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        Err(HostBridgeError::UnsupportedAction(
-            "epic action mutations are not supported by this bridge"
-                .to_string(),
-        ))
-    }
-
-    fn execute_hitl_action(
-        &self,
-        _request: &HitlActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        Err(HostBridgeError::UnsupportedAction(
-            "HITL action mutations are not supported by this bridge"
+            "gate action mutations are not supported by this bridge"
                 .to_string(),
         ))
     }
@@ -518,16 +471,6 @@ pub trait NotificationHostBridge: Send + Sync {
                 .to_string(),
         ))
     }
-
-    fn execute_launch_action(
-        &self,
-        _request: &LaunchActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        Err(HostBridgeError::UnsupportedAction(
-            "launch action mutations are not supported by this bridge"
-                .to_string(),
-        ))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,130 +481,123 @@ pub struct HostFileMetadataWire {
 
 #[derive(Debug)]
 pub struct LocalJsonlNotificationBridge {
+    sase_home: PathBuf,
     notifications_path: PathBuf,
     pending_actions_path: PathBuf,
     legacy_telegram_pending_actions_path: PathBuf,
+    gate_bridge_command: Vec<String>,
 }
 
 impl LocalJsonlNotificationBridge {
     pub fn new(sase_home: impl AsRef<Path>) -> Self {
+        let sase_home = sase_home.as_ref().to_path_buf();
         Self {
             notifications_path: sase_home
-                .as_ref()
                 .join("notifications")
                 .join("notifications.jsonl"),
-            pending_actions_path: pending_action_store_path(sase_home.as_ref()),
+            pending_actions_path: pending_action_store_path(&sase_home),
             legacy_telegram_pending_actions_path:
-                legacy_telegram_pending_actions_path(sase_home.as_ref()),
+                legacy_telegram_pending_actions_path(&sase_home),
+            sase_home,
+            gate_bridge_command: std::env::var(
+                "SASE_MOBILE_NOTIFICATION_BRIDGE_COMMAND",
+            )
+            .ok()
+            .and_then(|raw| split_command_words(&raw).ok())
+            .filter(|parts| !parts.is_empty())
+            .unwrap_or_else(|| vec!["sase".to_string()]),
         }
     }
 
-    fn resolve_action_notification(
+    pub fn new_with_gate_bridge_command(
+        sase_home: impl AsRef<Path>,
+        command: Vec<String>,
+    ) -> Self {
+        let mut bridge = Self::new(sase_home);
+        bridge.gate_bridge_command = command;
+        bridge
+    }
+
+    fn invoke_notification_bridge<Request>(
         &self,
+        operation: &str,
+        request: &Request,
         prefix: &str,
-        expected_action_kind: MobileActionKindWire,
-    ) -> Result<(PendingActionStoreWire, NotificationWire), HostBridgeError>
+    ) -> Result<ActionResultWire, HostBridgeError>
+    where
+        Request: Serialize,
     {
-        let store = read_pending_action_store(
-            &self.pending_actions_path,
-            Some(&self.legacy_telegram_pending_actions_path),
-        )
-        .map_err(HostBridgeError::ReadPendingActions)?;
-        let identity = resolve_pending_action_prefix(&store, prefix);
-        match identity.resolution {
-            PendingActionPrefixResolutionWire::Exact
-            | PendingActionPrefixResolutionWire::UniquePrefix => {}
-            PendingActionPrefixResolutionWire::Missing => {
-                return Err(HostBridgeError::ActionMissing(prefix.to_string()));
-            }
-            PendingActionPrefixResolutionWire::AmbiguousPrefix
-            | PendingActionPrefixResolutionWire::DuplicateFullId => {
-                return Err(HostBridgeError::AmbiguousPrefix(
-                    prefix.to_string(),
-                ));
-            }
-        }
-
-        let snapshot = self.list_notifications(true)?;
-        let notification = snapshot
-            .notifications
-            .into_iter()
-            .find(|row| row.id == identity.notification_id)
-            .ok_or_else(|| {
-                HostBridgeError::ActionMissing(identity.notification_id.clone())
+        let (program, fixed_args) =
+            self.gate_bridge_command.split_first().ok_or_else(|| {
+                HostBridgeError::BridgeUnavailable(
+                    "notification_bridge".to_string(),
+                )
             })?;
-        if MobileActionKindWire::from_notification_action(
-            notification.action.as_deref(),
-        ) != expected_action_kind
+        let mut command = Command::new(program);
+        command
+            .args(fixed_args)
+            .args(["mobile", "notification-bridge", operation])
+            .env("SASE_HOME", &self.sase_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "notification_bridge:{operation}"
+            ))
+        })?;
         {
-            return Err(HostBridgeError::UnsupportedAction(
-                notification
-                    .action
-                    .clone()
-                    .unwrap_or_else(|| "non_action".to_string()),
-            ));
-        }
-        ensure_action_available(&store, &notification)?;
-        Ok((store, notification))
-    }
-
-    fn execute_plan_action_for_kind(
-        &self,
-        request: &PlanActionRequestWire,
-        action_kind: MobileActionKindWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) =
-            self.resolve_action_notification(&request.prefix, action_kind)?;
-
-        let response_dir = action_path(&notification, "response_dir")
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                HostBridgeError::MissingTarget("response_dir".into())
+            let Some(mut stdin) = child.stdin.take() else {
+                return Err(HostBridgeError::BridgeUnavailable(format!(
+                    "notification_bridge:{operation}:stdin"
+                )));
+            };
+            serde_json::to_writer(&mut stdin, request).map_err(|_| {
+                HostBridgeError::InvalidActionRequest(
+                    "failed to encode notification action request".to_string(),
+                )
             })?;
-        if !response_dir.join("plan_request.json").is_file() {
-            return Err(HostBridgeError::ActionAlreadyHandled(
-                notification.id.clone(),
-            ));
+            stdin.write_all(b"\n").map_err(|_| {
+                HostBridgeError::BridgeUnavailable(format!(
+                    "notification_bridge:{operation}:stdin"
+                ))
+            })?;
         }
-        if notification.files.is_empty() {
-            return Err(HostBridgeError::MissingTarget("plan_file".into()));
-        }
-
-        let mut result = match action_kind {
-            MobileActionKindWire::PlanApproval => {
-                plan_plan_action_response(request)
-            }
-            MobileActionKindWire::EpicApproval => {
-                plan_epic_action_response(request)
-            }
-            _ => {
-                return Err(HostBridgeError::UnsupportedAction(
-                    action_kind.label().to_string(),
-                ));
-            }
-        }
-        .map_err(|err| HostBridgeError::InvalidActionRequest(err.message))?;
-        result.notification_id = Some(notification.id.clone());
-        result.state = MobileActionStateWire::Available;
-
-        let response_path = response_dir.join(&result.response_file);
-        write_response_file_once(&response_path, &result.response_json)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    HostBridgeError::ActionAlreadyHandled(
-                        notification.id.clone(),
-                    )
-                } else {
-                    HostBridgeError::WriteResponse(err.to_string())
+        let output = child.wait_with_output().map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "notification_bridge:{operation}:exit"
+            ))
+        })?;
+        if !output.status.success() {
+            let detail = serde_json::from_slice::<JsonValue>(&output.stderr)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("message")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| {
+                    "notification action bridge failed".to_string()
+                });
+            return Err(match output.status.code() {
+                Some(4) => HostBridgeError::ActionMissing(prefix.to_string()),
+                Some(5) => {
+                    HostBridgeError::ActionAlreadyHandled(prefix.to_string())
                 }
-            })?;
-
-        dismiss_notification_best_effort(
-            &self.notifications_path,
-            &notification,
-        );
-        persist_plan_approval_metadata(&notification, request, action_kind);
-        Ok(result)
+                Some(6) => HostBridgeError::ActionStale(prefix.to_string()),
+                Some(7) => HostBridgeError::UnsupportedAction(detail),
+                Some(2) => HostBridgeError::InvalidActionRequest(detail),
+                _ => HostBridgeError::BridgeUnavailable(format!(
+                    "notification_bridge:{operation}"
+                )),
+            });
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            HostBridgeError::BridgeUnavailable(format!(
+                "notification_bridge:{operation}:invalid_json"
+            ))
+        })
     }
 }
 
@@ -723,161 +659,22 @@ impl NotificationHostBridge for LocalJsonlNotificationBridge {
         )
     }
 
-    fn execute_plan_action(
+    fn execute_gate_action(
         &self,
-        request: &PlanActionRequestWire,
+        request: &GateActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        self.execute_plan_action_for_kind(
-            request,
-            MobileActionKindWire::PlanApproval,
-        )
-    }
-
-    fn execute_epic_action(
-        &self,
-        request: &PlanActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        self.execute_plan_action_for_kind(
-            request,
-            MobileActionKindWire::EpicApproval,
-        )
-    }
-
-    fn execute_hitl_action(
-        &self,
-        request: &HitlActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) = self.resolve_action_notification(
-            &request.prefix,
-            MobileActionKindWire::Hitl,
-        )?;
-        let artifacts_dir = action_path(&notification, "artifacts_dir")
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                HostBridgeError::MissingTarget("artifacts_dir".into())
-            })?;
-        if !artifacts_dir.join("hitl_request.json").is_file() {
-            return Err(HostBridgeError::ActionAlreadyHandled(
-                notification.id.clone(),
-            ));
-        }
-
-        let mut result = plan_hitl_action_response(request).map_err(|err| {
-            HostBridgeError::InvalidActionRequest(err.message)
-        })?;
-        result.notification_id = Some(notification.id.clone());
-        result.state = MobileActionStateWire::Available;
-
-        let response_path = artifacts_dir.join(&result.response_file);
-        write_response_file_once(&response_path, &result.response_json)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    HostBridgeError::ActionAlreadyHandled(
-                        notification.id.clone(),
-                    )
-                } else {
-                    HostBridgeError::WriteResponse(err.to_string())
-                }
-            })?;
-        dismiss_notification_best_effort(
-            &self.notifications_path,
-            &notification,
-        );
-        Ok(result)
+        self.invoke_notification_bridge("gate-action", request, &request.prefix)
     }
 
     fn execute_question_action(
         &self,
         request: &QuestionActionRequestWire,
     ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) = self.resolve_action_notification(
+        self.invoke_notification_bridge(
+            "question-action",
+            request,
             &request.prefix,
-            MobileActionKindWire::UserQuestion,
-        )?;
-        let response_dir = action_path(&notification, "response_dir")
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                HostBridgeError::MissingTarget("response_dir".into())
-            })?;
-        let request_path = response_dir.join("question_request.json");
-        let request_bytes = std::fs::read(&request_path).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                HostBridgeError::ActionAlreadyHandled(notification.id.clone())
-            } else {
-                HostBridgeError::InvalidActionRequest(format!(
-                    "failed to read question_request.json: {err}"
-                ))
-            }
-        })?;
-
-        let mut result =
-            plan_question_action_response_from_bytes(request, &request_bytes)
-                .map_err(|err| {
-                HostBridgeError::InvalidActionRequest(err.message)
-            })?;
-        result.notification_id = Some(notification.id.clone());
-        result.state = MobileActionStateWire::Available;
-
-        let response_path = response_dir.join(&result.response_file);
-        write_response_file_once(&response_path, &result.response_json)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    HostBridgeError::ActionAlreadyHandled(
-                        notification.id.clone(),
-                    )
-                } else {
-                    HostBridgeError::WriteResponse(err.to_string())
-                }
-            })?;
-        dismiss_notification_best_effort(
-            &self.notifications_path,
-            &notification,
-        );
-        Ok(result)
-    }
-
-    fn execute_launch_action(
-        &self,
-        request: &LaunchActionRequestWire,
-    ) -> Result<ActionResultWire, HostBridgeError> {
-        let (_store, notification) = self.resolve_action_notification(
-            &request.prefix,
-            MobileActionKindWire::LaunchApproval,
-        )?;
-        let response_dir = action_path(&notification, "response_dir")
-            .filter(|path| path.is_dir())
-            .ok_or_else(|| {
-                HostBridgeError::MissingTarget("response_dir".into())
-            })?;
-        if !response_dir.join("launch_request.json").is_file() {
-            return Err(HostBridgeError::ActionAlreadyHandled(
-                notification.id.clone(),
-            ));
-        }
-
-        let mut result =
-            plan_launch_action_response(request).map_err(|err| {
-                HostBridgeError::InvalidActionRequest(err.message)
-            })?;
-        result.notification_id = Some(notification.id.clone());
-        result.state = MobileActionStateWire::Available;
-
-        let response_path = response_dir.join(&result.response_file);
-        write_response_file_once(&response_path, &result.response_json)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    HostBridgeError::ActionAlreadyHandled(
-                        notification.id.clone(),
-                    )
-                } else {
-                    HostBridgeError::WriteResponse(err.to_string())
-                }
-            })?;
-        dismiss_notification_best_effort(
-            &self.notifications_path,
-            &notification,
-        );
-        Ok(result)
+        )
     }
 }
 
@@ -1004,50 +801,6 @@ impl AgentHostBridge for StaticAgentHostBridge {
     }
 }
 
-fn ensure_action_available(
-    store: &PendingActionStoreWire,
-    notification: &NotificationWire,
-) -> Result<(), HostBridgeError> {
-    let state = pending_action_state_from_store(
-        store,
-        notification,
-        current_unix_time(),
-    );
-    match state {
-        MobileActionStateWire::Available => Ok(()),
-        MobileActionStateWire::AlreadyHandled => Err(
-            HostBridgeError::ActionAlreadyHandled(notification.id.clone()),
-        ),
-        MobileActionStateWire::Stale => {
-            Err(HostBridgeError::ActionStale(notification.id.clone()))
-        }
-        MobileActionStateWire::MissingRequest
-        | MobileActionStateWire::MissingTarget => {
-            Err(HostBridgeError::MissingTarget(notification.id.clone()))
-        }
-        MobileActionStateWire::Unsupported => {
-            Err(HostBridgeError::UnsupportedAction(
-                notification
-                    .action
-                    .clone()
-                    .unwrap_or_else(|| "non_action".to_string()),
-            ))
-        }
-    }
-}
-
-fn dismiss_notification_best_effort(
-    notifications_path: &Path,
-    notification: &NotificationWire,
-) {
-    let _ = apply_notification_state_update(
-        notifications_path,
-        &NotificationStateUpdateWire::MarkDismissed {
-            id: notification.id.clone(),
-        },
-    );
-}
-
 fn apply_notification_state_mutation(
     notifications_path: &Path,
     id: &str,
@@ -1084,84 +837,4 @@ fn expand_home_path(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
-}
-
-fn action_path(notification: &NotificationWire, key: &str) -> Option<PathBuf> {
-    let raw = notification.action_data.get(key)?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(expand_home_path(raw))
-}
-
-fn write_response_file_once(
-    path: &Path,
-    value: &JsonValue,
-) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "response path has no parent",
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    serde_json::to_writer_pretty(&mut file, value)
-        .map_err(std::io::Error::other)?;
-    use std::io::Write;
-    file.write_all(b"\n")?;
-    file.flush()
-}
-
-fn persist_plan_approval_metadata(
-    notification: &NotificationWire,
-    request: &PlanActionRequestWire,
-    action_kind: MobileActionKindWire,
-) {
-    let Some(response_dir) = action_path(notification, "response_dir") else {
-        return;
-    };
-    let Some(parent) = response_dir.parent() else {
-        return;
-    };
-    let meta_path = parent.join("agent_meta.json");
-    let mut meta = match std::fs::read_to_string(&meta_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<JsonValue>(&content).ok())
-    {
-        Some(JsonValue::Object(object)) => object,
-        _ => serde_json::Map::new(),
-    };
-    let action = match (action_kind, request.choice) {
-        (MobileActionKindWire::EpicApproval, PlanActionChoiceWire::Approve) => {
-            "epic"
-        }
-        (MobileActionKindWire::PlanApproval, PlanActionChoiceWire::Approve) => {
-            if request.commit_plan.unwrap_or(true)
-                && !request.run_coder.unwrap_or(true)
-            {
-                "commit"
-            } else {
-                "approve"
-            }
-        }
-        (MobileActionKindWire::PlanApproval, PlanActionChoiceWire::Epic) => {
-            "epic"
-        }
-        _ => return,
-    };
-    meta.insert("plan_approved".to_string(), JsonValue::Bool(true));
-    meta.insert(
-        "plan_action".to_string(),
-        JsonValue::String(action.to_string()),
-    );
-    if let Ok(mut file) = std::fs::File::create(&meta_path) {
-        let _ =
-            serde_json::to_writer_pretty(&mut file, &JsonValue::Object(meta));
-        use std::io::Write;
-        let _ = file.write_all(b"\n");
-    }
 }

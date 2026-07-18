@@ -67,21 +67,6 @@
       "schema_version": "u32",
       "target": "string|null"
     },
-    "CustomGateChoiceWire": {
-      "defined_by": "sase_core::notifications::mobile",
-      "extras": "CustomGateExtraWire[]",
-      "feedback": "disabled|optional|required",
-      "icon": "string|null",
-      "id": "string",
-      "label": "string"
-    },
-    "CustomGateExtraWire": {
-      "default_selected": "bool",
-      "defined_by": "sase_core::notifications::mobile",
-      "icon": "string|null",
-      "id": "string",
-      "label": "string"
-    },
     "DeviceRecordWire": {
       "app_version": "string|null",
       "device_id": "string",
@@ -124,6 +109,31 @@
       "payload": "EventPayloadWire",
       "schema_version": "u32"
     },
+    "GateActionRequestWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "feedback": "string|null",
+      "prefix": "string",
+      "schema_version": "u32",
+      "selected_option_ids": "string[]; non-empty subset of one branch"
+    },
+    "GateBranchWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "options": "GateOptionWire[]",
+      "submit": "GateSubmitWire|null"
+    },
+    "GateOptionWire": {
+      "default_selected": "bool",
+      "defined_by": "sase_core::notifications::mobile",
+      "feedback": "disabled|optional|required",
+      "icon": "string|null",
+      "id": "string",
+      "label": "string"
+    },
+    "GateSubmitWire": {
+      "defined_by": "sase_core::notifications::mobile",
+      "icon": "string|null",
+      "label": "string"
+    },
     "GatewayBindWire": {
       "address": "host:port",
       "is_loopback": "bool"
@@ -140,20 +150,6 @@
       "service": "sase_gateway",
       "status": "ok",
       "version": "string"
-    },
-    "HitlActionRequestWire": {
-      "choice": "accept|reject|feedback",
-      "defined_by": "sase_core::notifications::mobile",
-      "feedback": "string|null",
-      "prefix": "string",
-      "schema_version": "u32"
-    },
-    "LaunchActionRequestWire": {
-      "choice": "approve|reject|feedback",
-      "defined_by": "sase_core::notifications::mobile",
-      "feedback": "string|null",
-      "prefix": "string",
-      "schema_version": "u32"
     },
     "MobileAgentActionAffordancesWire": {
       "can_kill": "bool",
@@ -552,17 +548,6 @@
       "display_name": "string",
       "platform": "string"
     },
-    "PlanActionRequestWire": {
-      "choice": "approve|run|reject|epic|feedback",
-      "coder_model": "string|null",
-      "coder_prompt": "string|null",
-      "commit_plan": "bool|null",
-      "defined_by": "sase_core::notifications::mobile",
-      "feedback": "string|null",
-      "prefix": "string",
-      "run_coder": "bool|null",
-      "schema_version": "u32"
-    },
     "PushGatewayStatusWire": {
       "attempted": "u64",
       "enabled": "bool",
@@ -927,138 +912,8 @@
         "ApiErrorWire"
       ],
       "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/approve",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/run",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/reject",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/epic",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/plan/{prefix}/feedback",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/epic/{prefix}/approve",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/epic/{prefix}/reject",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/epic/{prefix}/feedback",
-      "request": "PlanActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/hitl/{prefix}/accept",
-      "request": "HitlActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/hitl/{prefix}/reject",
-      "request": "HitlActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/hitl/{prefix}/feedback",
-      "request": "HitlActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/launch/{prefix}/approve",
-      "request": "LaunchActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/launch/{prefix}/reject",
-      "request": "LaunchActionRequestWire without path-derived prefix/choice",
-      "success": "ActionResultWire"
-    },
-    {
-      "auth": true,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/actions/launch/{prefix}/feedback",
-      "request": "LaunchActionRequestWire without path-derived prefix/choice",
+      "path": "/api/v1/actions/gate/{prefix}",
+      "request": "GateActionRequestWire without path-derived prefix",
       "success": "ActionResultWire"
     },
     {

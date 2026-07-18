@@ -49,14 +49,8 @@ The HTTP status code carries transport status, while `code` is the stable client
   device that inspected the detail response, expire after a short TTL, are never stored in the audit log, and are
   rejected if the target path disappears, changes size, crosses a symlink, contains traversal, is not a regular file, or
   exceeds the MVP download limit.
-- `POST /api/v1/actions/plan/{prefix}/approve|run|reject|epic|feedback` writes `plan_response.json` for a
-  currently pending plan notification.
-- `POST /api/v1/actions/epic/{prefix}/approve|reject|feedback` writes `plan_response.json` for a currently pending
-  epic-plan notification.
-- `POST /api/v1/actions/hitl/{prefix}/accept|reject|feedback` writes `hitl_response.json` for a pending HITL
-  notification.
-- `POST /api/v1/actions/launch/{prefix}/approve|reject|feedback` writes `launch_response.json` for a pending launch
-  notification.
+- `POST /api/v1/actions/gate/{prefix}` forwards selected option IDs and optional feedback to the verified Python gate
+  executor for any pending plan, epic, HITL, launch, or custom-gate notification.
 - `POST /api/v1/actions/question/{prefix}/answer|custom` validates `question_request.json` and writes
   `question_response.json` for a pending user-question notification.
 - `GET /api/v1/agents` lists running agents by default, with optional recent/status/project/limit filters.
@@ -153,59 +147,35 @@ curl -sS -X POST "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID/dismiss" \
   -H "$AUTH_HEADER"
 ```
 
-Plan actions accept either the full notification ID or a unique pending-action prefix:
+Gate actions accept either the full notification ID or a unique pending-action prefix. The selected option IDs must
+come from one branch in the notification detail response:
 
 ```bash
 PREFIX="abcdef12"
 
-curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/approve" \
+curl -sS -X POST "$BASE_URL/api/v1/actions/gate/$PREFIX" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"commit_plan":true,"run_coder":false}'
+  -d '{"schema_version":4,"selected_option_ids":["approve","commit"],"feedback":null}'
 
-curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/run" \
+curl -sS -X POST "$BASE_URL/api/v1/actions/gate/$PREFIX" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"coder_prompt":"Focus on tests"}'
-
-curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/reject" \
-  -H "$AUTH_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"feedback":"Please narrow the scope"}'
-
-curl -sS -X POST "$BASE_URL/api/v1/actions/plan/$PREFIX/feedback" \
-  -H "$AUTH_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"feedback":"Revise the rollout section"}'
-
-curl -sS -X POST "$BASE_URL/api/v1/actions/epic/$PREFIX/approve" \
-  -H "$AUTH_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d '{"schema_version":1}'
+  -d '{"schema_version":4,"selected_option_ids":["feedback"],"feedback":"Revise the rollout section"}'
 ```
 
-HITL and question actions write the same response-file shapes as existing TUI and Telegram flows:
+Question actions retain their specialized complete-form routes:
 
 ```bash
-curl -sS -X POST "$BASE_URL/api/v1/actions/hitl/hitl0001/accept" \
-  -H "$AUTH_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d '{"schema_version":1}'
-
-curl -sS -X POST "$BASE_URL/api/v1/actions/hitl/hitl0002/feedback" \
-  -H "$AUTH_HEADER" \
-  -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"feedback":"Use a smaller change"}'
-
 curl -sS -X POST "$BASE_URL/api/v1/actions/question/quest001/answer" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"selected_option_id":"safe","global_note":"Use durable path"}'
+  -d '{"schema_version":4,"selected_option_id":"safe","global_note":"Use durable path"}'
 
 curl -sS -X POST "$BASE_URL/api/v1/actions/question/quest002/custom" \
   -H "$AUTH_HEADER" \
   -H 'Content-Type: application/json' \
-  -d '{"schema_version":1,"custom_answer":"Use SQLite"}'
+  -d '{"schema_version":4,"custom_answer":"Use SQLite"}'
 ```
 
 Download an attachment with a token from a detail response:
