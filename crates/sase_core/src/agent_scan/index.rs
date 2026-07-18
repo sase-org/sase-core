@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 11;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 12;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -719,6 +719,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "agent_clan", "TEXT")?;
         migrate_record_json_refresh_v11(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 12) {
+        migrate_record_json_refresh_v12(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp);",
@@ -958,6 +961,14 @@ fn migrate_record_json_refresh_v10(
 /// v11 adds the denormalized `agent_clan` projection and refreshes
 /// `record_json` with `agent_meta.agent_clan`.
 fn migrate_record_json_refresh_v11(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v12 refreshes `record_json` with `agent_meta.agent_clan_generation` and
+/// `agent_meta.clan_tribe` for clan-level tribe resolution.
+fn migrate_record_json_refresh_v12(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())

@@ -136,6 +136,8 @@ fn build_ace_run_running(root: &Path) {
             "agent_family": "legacy_clan",
             "agent_family_role": "phase",
             "agent_family_parallel": true,
+            "agent_clan_generation": "20260718080000",
+            "clan_tribe": "research",
             "pid": 22222,
             "model": "claude-sonnet-4-6",
             "llm_provider": "claude",
@@ -654,6 +656,11 @@ fn running_record_carries_agent_meta() {
     assert_eq!(meta.name.as_deref(), Some("running_alpha"));
     assert_eq!(meta.workflow_name.as_deref(), Some("wf_alpha"));
     assert_eq!(meta.agent_clan.as_deref(), Some("legacy_clan"));
+    assert_eq!(
+        meta.agent_clan_generation.as_deref(),
+        Some("20260718080000")
+    );
+    assert_eq!(meta.clan_tribe.as_deref(), Some("research"));
     assert!(meta.agent_family.is_none());
     assert!(meta.agent_family_role.is_none());
     assert!(meta.agent_family_parallel);
@@ -792,6 +799,11 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
         .as_ref()
         .unwrap();
     assert_eq!(indexed_meta.agent_clan.as_deref(), Some("legacy_clan"));
+    assert_eq!(
+        indexed_meta.agent_clan_generation.as_deref(),
+        Some("20260718080000")
+    );
+    assert_eq!(indexed_meta.clan_tribe.as_deref(), Some("research"));
     assert!(indexed_meta.agent_family.is_none());
 
     let conn = Connection::open(index).unwrap();

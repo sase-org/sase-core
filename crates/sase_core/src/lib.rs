@@ -9,6 +9,7 @@
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod agent_archive;
+pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_family;
 pub mod agent_group_archive;
@@ -48,6 +49,10 @@ pub use agent_archive::{
     AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
     AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
     AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+};
+pub use agent_clan_tribe::{
+    resolve_clan_tribe, ClanTribeMemberWire, ClanTribeResolutionRequestWire,
+    ClanTribeResolutionWire,
 };
 pub use agent_cleanup::{
     cleanup_plan_from_json_value, cleanup_request_from_json_value,

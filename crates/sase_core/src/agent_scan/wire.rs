@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 3;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -217,6 +217,10 @@ pub struct AgentMetaWire {
     pub workflow_name: Option<String>,
     #[serde(default)]
     pub agent_clan: Option<String>,
+    #[serde(default)]
+    pub agent_clan_generation: Option<String>,
+    #[serde(default)]
+    pub clan_tribe: Option<String>,
     #[serde(default)]
     pub agent_family: Option<String>,
     #[serde(default)]
