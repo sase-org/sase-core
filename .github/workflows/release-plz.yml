@@ -1,8 +1,19 @@
 name: Release-plz
 
+# Release flow: release-plz tags + creates the GitHub release, then the wheel
+# matrix builds sase-core-rs distributions at that tag and publishes them to
+# PyPI. Publishing is self-healing: every push and the scheduled run gate the
+# build/publish jobs on "the tagged version is missing from PyPI" rather than
+# "a release was created in this exact run", so a run that dies between
+# tagging and publishing (runner starvation, discarded queued jobs, transient
+# failures) is retried automatically by the next run instead of leaving the
+# version tagged but unpublished forever (which is how v0.6.0 got stuck).
 on:
   push:
     branches: [master]
+  schedule:
+    # Heal missed publishes even when no push arrives.
+    - cron: "23 */6 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -30,6 +41,7 @@ jobs:
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: ${{ github.repository_owner == 'sase-org' }}
     permissions:
       contents: write
@@ -70,54 +82,96 @@ jobs:
           echo "releases_created: ${RELEASES_CREATED}"
           echo "releases: ${RELEASES}"
 
-  release-plz-pr:
-    name: Release-plz PR
+  # Decides whether the wheel matrix and PyPI publish need to run. Runs after
+  # release-plz so a tag created moments ago in this run is already visible.
+  # needs_publish is true when the workspace version has a release tag but no
+  # matching release on PyPI — regardless of which run created the tag.
+  publish-plan:
+    name: Publish plan
     needs: release-plz-release
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
-    permissions:
-      contents: write
-      pull-requests: write
-    concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
+    timeout-minutes: 10
+    if: ${{ github.repository_owner == 'sase-org' }}
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      needs_publish: ${{ steps.plan.outputs.needs_publish }}
+      build_ref: ${{ steps.plan.outputs.build_ref }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-plz
-          workspaces: ". -> target"
-
-      - name: Run release-plz
-        id: release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
+      - name: Compute publish plan
+        id: plan
         env:
-          GITHUB_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Print release-plz PR output
-        env:
-          PR: ${{ steps.release-plz.outputs.pr }}
-          PRS_CREATED: ${{ steps.release-plz.outputs.prs_created }}
+          EXPECTED_VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '' }}
         run: |
-          echo "prs_created: ${PRS_CREATED}"
-          echo "pr: ${PR}"
+          set -euo pipefail
+
+          # release-plz keeps sase_core and sase_core_py in one version_group
+          # and both inherit [workspace.package].version, so the workspace
+          # version IS the sase-core-rs distribution version.
+          version="$(python3 - <<'PY'
+          import tomllib
+
+          with open("Cargo.toml", "rb") as handle:
+              print(tomllib.load(handle)["workspace"]["package"]["version"])
+          PY
+          )"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+          if git ls-remote --exit-code origin "refs/tags/v${version}" >/dev/null; then
+            tag_exists=true
+          else
+            tag_exists=false
+          fi
+
+          pypi_state="$(python3 - "$version" <<'PY'
+          import sys
+          import urllib.error
+          import urllib.request
+
+          version = sys.argv[1]
+          url = f"https://pypi.org/pypi/sase-core-rs/{version}/json"
+          request = urllib.request.Request(url, headers={"Accept": "application/json"})
+          try:
+              with urllib.request.urlopen(request, timeout=30):
+                  print("published")
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              print("absent")
+          PY
+          )"
+
+          if [[ "${tag_exists}" == "true" && "${pypi_state}" == "absent" ]]; then
+            needs_publish=true
+          else
+            needs_publish=false
+          fi
+          echo "needs_publish=${needs_publish}" >> "$GITHUB_OUTPUT"
+
+          # Build from the release tag so post-release commits on master can
+          # never leak into the published artifacts. Empty means "the pushed
+          # commit", which only manual wheel test builds fall back to.
+          if [[ -n "${EXPECTED_VERSION_INPUT}" ]]; then
+            build_ref="v${EXPECTED_VERSION_INPUT}"
+          elif [[ "${needs_publish}" == "true" ]]; then
+            build_ref="v${version}"
+          else
+            build_ref=""
+          fi
+          echo "build_ref=${build_ref}" >> "$GITHUB_OUTPUT"
+
+          echo "version=${version} tag_exists=${tag_exists} pypi=${pypi_state} needs_publish=${needs_publish} build_ref=${build_ref}"
 
   linux:
     name: linux ${{ matrix.target }}
-    needs: release-plz-release
+    needs: [release-plz-release, publish-plan]
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
+    timeout-minutes: 60
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.expected_version != '') && format('v{0}', inputs.expected_version) || '' }}
+          ref: ${{ needs.publish-plan.outputs.build_ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -169,13 +223,14 @@ jobs:
 
   macos:
     name: macos universal2
-    needs: release-plz-release
+    needs: [release-plz-release, publish-plan]
     runs-on: macos-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
+    timeout-minutes: 45
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.expected_version != '') && format('v{0}', inputs.expected_version) || '' }}
+          ref: ${{ needs.publish-plan.outputs.build_ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -207,13 +262,14 @@ jobs:
 
   windows:
     name: windows x86_64
-    needs: release-plz-release
+    needs: [release-plz-release, publish-plan]
     runs-on: windows-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
+    timeout-minutes: 45
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.expected_version != '') && format('v{0}', inputs.expected_version) || '' }}
+          ref: ${{ needs.publish-plan.outputs.build_ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -248,13 +304,14 @@ jobs:
 
   sdist:
     name: sdist
-    needs: release-plz-release
+    needs: [release-plz-release, publish-plan]
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
+    timeout-minutes: 20
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.expected_version != '') && format('v{0}', inputs.expected_version) || '' }}
+          ref: ${{ needs.publish-plan.outputs.build_ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -274,9 +331,10 @@ jobs:
 
   metadata-check:
     name: twine check
-    needs: [release-plz-release, linux, macos, windows, sdist]
+    needs: [publish-plan, linux, macos, windows, sdist]
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
+    timeout-minutes: 15
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -293,16 +351,16 @@ jobs:
 
   publish:
     name: publish to PyPI
-    needs: [release-plz-release, metadata-check]
+    needs: [publish-plan, metadata-check]
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'sase-org' && ((needs.release-plz-release.outputs.releases_created == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)) || (github.event_name == 'workflow_dispatch' && inputs.build_wheels == true && inputs.publish_pypi == true && inputs.dry_run == false)) }}
+    timeout-minutes: 30
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels == true && inputs.publish_pypi == true && inputs.dry_run == false)) }}
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Checkout repository for manual guard
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_pypi == true }}
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -313,22 +371,29 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Guard manual PyPI publish
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_pypi == true }}
+      - name: Guard PyPI publish
         env:
-          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '' }}
+          PLAN_VERSION: ${{ needs.publish-plan.outputs.version }}
+          IS_MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
 
           if [[ "${GITHUB_REF}" != "refs/heads/master" ]]; then
-            echo "Manual PyPI publish must run from refs/heads/master; got ${GITHUB_REF}" >&2
+            echo "PyPI publish must run from refs/heads/master; got ${GITHUB_REF}" >&2
             exit 1
           fi
 
-          if [[ -z "${EXPECTED_VERSION}" ]]; then
-            echo "expected_version is required for manual PyPI publish" >&2
-            exit 1
+          if [[ "${IS_MANUAL}" == "true" ]]; then
+            if [[ -z "${EXPECTED_VERSION_INPUT}" ]]; then
+              echo "expected_version is required for manual PyPI publish" >&2
+              exit 1
+            fi
+            EXPECTED_VERSION="${EXPECTED_VERSION_INPUT}"
+          else
+            EXPECTED_VERSION="${PLAN_VERSION}"
           fi
+          export EXPECTED_VERSION
 
           git fetch --force --tags origin
           if ! tag_commit="$(git rev-parse --verify --quiet "v${EXPECTED_VERSION}^{commit}")"; then
@@ -342,8 +407,6 @@ jobs:
           import os
           import pathlib
           import tarfile
-          import urllib.error
-          import urllib.request
           import zipfile
 
           expected_version = os.environ["EXPECTED_VERSION"]
@@ -395,17 +458,56 @@ jobs:
                       f"got Name={name!r} Version={version!r}"
                   )
               print(f"verified {path}: {name} {version}")
-
-          url = f"https://pypi.org/pypi/{expected_name}/{expected_version}/json"
-          request = urllib.request.Request(url, headers={"Accept": "application/json"})
-          try:
-              with urllib.request.urlopen(request, timeout=15):
-                  raise SystemExit(f"{expected_name}=={expected_version} already exists on PyPI")
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise
-              print(f"verified {expected_name}=={expected_version} is absent from PyPI")
           PY
 
+      # skip-existing keeps retries and partial-upload recovery idempotent:
+      # PyPI rejects duplicate filenames anyway, so re-running a heal can only
+      # top up files that are genuinely missing.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  release-plz-pr:
+    name: Release-plz PR
+    needs: release-plz-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ github.repository_owner == 'sase-org' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
+          workspaces: ". -> target"
+
+      - name: Run release-plz
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Print release-plz PR output
+        env:
+          PR: ${{ steps.release-plz.outputs.pr }}
+          PRS_CREATED: ${{ steps.release-plz.outputs.prs_created }}
+        run: |
+          echo "prs_created: ${PRS_CREATED}"
+          echo "pr: ${PR}"
