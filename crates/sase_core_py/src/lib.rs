@@ -4944,6 +4944,8 @@ mod tests {
                     "artifacts_dir": "/tmp/artifacts",
                     "workspace": null,
                     "tag": null,
+                    "agent_clan": "shipping",
+                    "agent_clan_generation": "current-gen",
                     "agent_name": "done",
                     "display_name": "done",
                     "start_time": null,
@@ -4958,10 +4960,12 @@ mod tests {
                 py,
                 &json!({
                     "schema_version": sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
-                    "scope": "all_panels",
+                    "scope": "clan",
                     "mode": "dismiss_completed",
                     "focused_panel_tag": null,
                     "tag": null,
+                    "clan_name": "shipping",
+                    "clan_generation": "current-gen",
                     "identities": [],
                     "include_pidless_as_dismissable": false
                 }),

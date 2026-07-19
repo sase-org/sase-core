@@ -13,6 +13,7 @@ pub const CLEANUP_SCOPE_FOCUSED_PANEL: &str = "focused_panel";
 pub const CLEANUP_SCOPE_ALL_PANELS: &str = "all_panels";
 pub const CLEANUP_SCOPE_EXPLICIT_IDENTITIES: &str = "explicit_identities";
 pub const CLEANUP_SCOPE_TAG: &str = "tag";
+pub const CLEANUP_SCOPE_CLAN: &str = "clan";
 pub const CLEANUP_SCOPE_FOCUSED_GROUP: &str = "focused_group";
 pub const CLEANUP_SCOPE_CUSTOM_SELECTION: &str = "custom_selection";
 
@@ -78,6 +79,10 @@ pub struct AgentCleanupTargetWire {
     #[serde(default)]
     pub tag: Option<String>,
     #[serde(default)]
+    pub agent_clan: Option<String>,
+    #[serde(default)]
+    pub agent_clan_generation: Option<String>,
+    #[serde(default)]
     pub agent_name: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
@@ -105,6 +110,10 @@ pub struct AgentCleanupRequestWire {
     pub focused_panel_tag: Option<String>,
     #[serde(default)]
     pub tag: Option<String>,
+    #[serde(default)]
+    pub clan_name: Option<String>,
+    #[serde(default)]
+    pub clan_generation: Option<String>,
     #[serde(default)]
     pub identities: Vec<AgentCleanupIdentityWire>,
     #[serde(default)]

@@ -266,12 +266,16 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
         "agent_type": "run",
         "status": "RUNNING",
         "parent_timestamp": "root-ts",
-        "agent_family_parallel": true
+        "agent_family_parallel": true,
+        "agent_clan": "shipping",
+        "agent_clan_generation": "current-gen"
     });
     let target: AgentCleanupTargetWire =
         serde_json::from_value(python_fixture.clone()).unwrap();
 
     assert!(target.agent_family_parallel);
+    assert_eq!(target.agent_clan.as_deref(), Some("shipping"));
+    assert_eq!(target.agent_clan_generation.as_deref(), Some("current-gen"));
     assert_eq!(
         serde_json::to_value(target).unwrap()["agent_family_parallel"],
         python_fixture["agent_family_parallel"]
@@ -289,4 +293,6 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
         }))
         .unwrap();
     assert!(!legacy.agent_family_parallel);
+    assert!(legacy.agent_clan.is_none());
+    assert!(legacy.agent_clan_generation.is_none());
 }

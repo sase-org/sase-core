@@ -16,7 +16,7 @@ use super::wire::{
     AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
     AgentCleanupWorkspaceReleaseIntentWire, AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
     CLEANUP_MODE_DISMISS_COMPLETED, CLEANUP_MODE_KILL_AND_DISMISS,
-    CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS,
+    CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS, CLEANUP_SCOPE_CLAN,
     CLEANUP_SCOPE_CUSTOM_SELECTION, CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
     CLEANUP_SCOPE_FOCUSED_GROUP, CLEANUP_SCOPE_FOCUSED_PANEL,
     CLEANUP_SCOPE_TAG, CONFIRMATION_SEVERITY_DESTRUCTIVE,
@@ -77,6 +77,17 @@ fn selected_by_scope(
             effective_tag(target, parent_tags) == request.focused_panel_tag
         }
         CLEANUP_SCOPE_TAG => effective_tag(target, parent_tags) == request.tag,
+        CLEANUP_SCOPE_CLAN => {
+            request.clan_name.is_some()
+                && target.agent_clan == request.clan_name
+                && match request.clan_generation.as_deref() {
+                    Some(generation) => {
+                        target.agent_clan_generation.as_deref()
+                            == Some(generation)
+                    }
+                    None => true,
+                }
+        }
         CLEANUP_SCOPE_EXPLICIT_IDENTITIES
         | CLEANUP_SCOPE_FOCUSED_GROUP
         | CLEANUP_SCOPE_CUSTOM_SELECTION => {
@@ -831,6 +842,8 @@ mod tests {
             from_changespec: false,
             workspace: None,
             tag: None,
+            agent_clan: None,
+            agent_clan_generation: None,
             agent_name: None,
             display_name: Some(cl_name.to_string()),
             start_time: None,
@@ -849,6 +862,8 @@ mod tests {
             mode: mode.to_string(),
             focused_panel_tag: None,
             tag: None,
+            clan_name: None,
+            clan_generation: None,
             identities: vec![],
             include_pidless_as_dismissable: false,
         }
@@ -980,6 +995,140 @@ mod tests {
             .skipped_items
             .iter()
             .any(|s| s.reason == SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY));
+    }
+
+    #[test]
+    fn clan_scope_filters_generation_and_partitions_with_workflow_cascade() {
+        let mut parent = target(
+            "workflow",
+            "release",
+            Some("parent-ts"),
+            "RUNNING",
+            Some(101),
+        );
+        parent.workflow = Some("release".to_string());
+        parent.agent_clan = Some("shipping".to_string());
+        parent.agent_clan_generation = Some("current-gen".to_string());
+
+        let mut child = target(
+            "workflow",
+            "release-step",
+            Some("child-ts"),
+            "RUNNING",
+            Some(102),
+        );
+        child.workflow = Some("release".to_string());
+        child.parent_workflow = Some("release".to_string());
+        child.parent_timestamp = Some("parent-ts".to_string());
+        child.is_workflow_child = true;
+        child.agent_clan = Some("shipping".to_string());
+        child.agent_clan_generation = Some("current-gen".to_string());
+
+        let mut done = target("run", "verified", Some("done-ts"), "DONE", None);
+        done.agent_clan = Some("shipping".to_string());
+        done.agent_clan_generation = Some("current-gen".to_string());
+
+        let mut stale =
+            target("run", "stale", Some("stale-ts"), "RUNNING", Some(201));
+        stale.agent_clan = Some("shipping".to_string());
+        stale.agent_clan_generation = Some("stale-gen".to_string());
+
+        let mut other =
+            target("run", "other", Some("other-ts"), "RUNNING", Some(202));
+        other.agent_clan = Some("research".to_string());
+        other.agent_clan_generation = Some("current-gen".to_string());
+
+        let mut request =
+            req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.clan_name = Some("shipping".to_string());
+        request.clan_generation = Some("current-gen".to_string());
+
+        let plan =
+            plan_agent_cleanup(&[parent, child, done, stale, other], &request)
+                .unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["release"]
+        );
+        assert_eq!(
+            plan.dismiss_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["verified"]
+        );
+        assert_eq!(
+            plan.cascaded_workflow_children
+                .iter()
+                .map(|identity| identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["release-step"]
+        );
+        assert!(plan.skipped_items.iter().any(|item| {
+            item.identity.cl_name == "stale"
+                && item.reason == SKIPPED_NOT_IN_SCOPE
+        }));
+        assert!(plan.skipped_items.iter().any(|item| {
+            item.identity.cl_name == "other"
+                && item.reason == SKIPPED_NOT_IN_SCOPE
+        }));
+    }
+
+    #[test]
+    fn clan_scope_without_generation_selects_all_generations() {
+        let mut current =
+            target("run", "current", Some("current-ts"), "RUNNING", Some(101));
+        current.agent_clan = Some("research".to_string());
+        current.agent_clan_generation = Some("current-gen".to_string());
+        let mut stale =
+            target("run", "stale", Some("stale-ts"), "RUNNING", Some(102));
+        stale.agent_clan = Some("research".to_string());
+        stale.agent_clan_generation = Some("stale-gen".to_string());
+        let mut request =
+            req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.clan_name = Some("research".to_string());
+
+        let plan = plan_agent_cleanup(&[current, stale], &request).unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["current", "stale"]
+        );
+    }
+
+    #[test]
+    fn clan_scope_keeps_active_parallel_family_root_from_dismissal() {
+        let mut root = target("run", "family", Some("root-ts"), "DONE", None);
+        root.agent_family_parallel = true;
+        root.agent_clan = Some("research".to_string());
+        root.agent_clan_generation = Some("generation".to_string());
+        let mut member =
+            target("run", "family.1", Some("member-ts"), "RUNNING", Some(101));
+        member.agent_family_parallel = true;
+        member.parent_timestamp = Some("root-ts".to_string());
+        member.agent_clan = Some("research".to_string());
+        member.agent_clan_generation = Some("generation".to_string());
+        let mut request =
+            req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_DISMISS_COMPLETED);
+        request.clan_name = Some("research".to_string());
+        request.clan_generation = Some("generation".to_string());
+
+        let plan = plan_agent_cleanup(&[root, member], &request).unwrap();
+
+        assert!(plan.dismiss_items.is_empty());
+        assert!(plan.skipped_items.iter().any(|item| {
+            item.identity.cl_name == "family"
+                && item.reason == SKIPPED_NOT_DISMISSABLE
+                && item.detail.as_deref()
+                    == Some("parallel family still active")
+        }));
     }
 
     #[test]
