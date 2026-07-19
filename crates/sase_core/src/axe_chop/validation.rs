@@ -308,6 +308,7 @@ pub fn derive_chop_agent_name(
     chop_name: &str,
     target_key: Option<&str>,
     proposal_index: usize,
+    run_token: Option<&str>,
 ) -> Result<String, ChopEngineError> {
     let chop = sanitized_component(chop_name);
     if chop.is_empty() {
@@ -328,6 +329,28 @@ pub fn derive_chop_agent_name(
             ));
         }
         parts.push(target);
+    }
+    if let Some(run_token) = run_token {
+        let mut run_token = sanitized_component(run_token);
+        // Chop run ids begin with a sortable date shared by every run that
+        // day; keep the entropy-bearing seconds/microseconds at the tail.
+        if run_token.len() > 8 {
+            run_token = run_token.split_off(run_token.len() - 8);
+        }
+        while run_token.starts_with('-') || run_token.starts_with('_') {
+            run_token.remove(0);
+        }
+        while run_token.ends_with('-') || run_token.ends_with('_') {
+            run_token.pop();
+        }
+        if run_token.is_empty() {
+            return Err(ChopEngineError::new(
+                "invalid_run_token",
+                "$.run_token",
+                "run token must contain at least one letter or digit",
+            ));
+        }
+        parts.push(run_token);
     }
     parts.push((proposal_index + 1).to_string());
     let mut value = parts.join(".");

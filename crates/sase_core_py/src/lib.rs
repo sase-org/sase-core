@@ -94,7 +94,7 @@
 //! - `parse_chop_result(document: str) -> dict`
 //! - `validate_chop_result(result: dict) -> dict`
 //! - `validate_chop_proposal(proposal: dict, index: int, prior_ids: list[str]) -> dict`
-//! - `derive_chop_agent_name(chop_name: str, target_key: str | None, proposal_index: int) -> str`
+//! - `derive_chop_agent_name(chop_name: str, target_key: str | None, proposal_index: int, run_token: str | None = None) -> str`
 //! - `evaluate_chop_decision(request: dict) -> dict`
 //! - `apply_chop_checkpoint_update(request: dict) -> dict`
 //! - `check_and_record_chop_once_per(request: dict) -> dict`
@@ -3502,14 +3502,20 @@ fn py_validate_chop_proposal<'py>(
 /// Derive the default agent name scaffold for one proposal.
 #[pyfunction]
 #[pyo3(name = "derive_chop_agent_name")]
-#[pyo3(signature = (chop_name, target_key = None, proposal_index = 0))]
+#[pyo3(signature = (chop_name, target_key = None, proposal_index = 0, run_token = None))]
 fn py_derive_chop_agent_name(
     chop_name: &str,
     target_key: Option<&str>,
     proposal_index: usize,
+    run_token: Option<&str>,
 ) -> PyResult<String> {
-    core_derive_chop_agent_name(chop_name, target_key, proposal_index)
-        .map_err(chop_error_to_pyerr)
+    core_derive_chop_agent_name(
+        chop_name,
+        target_key,
+        proposal_index,
+        run_token,
+    )
+    .map_err(chop_error_to_pyerr)
 }
 
 /// Evaluate inhibit guards followed by the configured trigger.

@@ -75,9 +75,45 @@ fn result_validation_rejects_forward_wait_and_unknown_fields() {
 #[test]
 fn derived_agent_names_include_target_and_order() {
     assert_eq!(
-        derive_chop_agent_name("Refresh Docs", Some("sase/core"), 1).unwrap(),
+        derive_chop_agent_name("Refresh Docs", Some("sase/core"), 1, None)
+            .unwrap(),
         "chop.refresh-docs.sase-core.2"
     );
+}
+
+#[test]
+fn derived_agent_names_include_sanitized_bounded_run_token() {
+    assert_eq!(
+        derive_chop_agent_name(
+            "Refresh Docs",
+            Some("sase/core"),
+            1,
+            Some("20260719T072506_123456")
+        )
+        .unwrap(),
+        "chop.refresh-docs.sase-core.6_123456.2"
+    );
+}
+
+#[test]
+fn derived_agent_names_reject_empty_sanitized_run_token() {
+    let error =
+        derive_chop_agent_name("docs", None, 0, Some("///")).unwrap_err();
+    assert_eq!(error.code, "invalid_run_token");
+    assert_eq!(error.path, "$.run_token");
+}
+
+#[test]
+fn derived_agent_names_keep_length_and_trailing_separator_guards() {
+    let name = derive_chop_agent_name(
+        &"very-long-chop_".repeat(12),
+        Some(&"very-long-target_".repeat(12)),
+        0,
+        Some("run-token"),
+    )
+    .unwrap();
+    assert!(name.len() <= 120);
+    assert!(!name.ends_with(['.', '-', '_']));
 }
 
 #[test]
