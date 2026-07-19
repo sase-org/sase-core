@@ -864,10 +864,9 @@ fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
         .map(|(idx, _)| idx)
 }
 
-// --- vcs_project (`#+`) completion ----------------------------------------
+// --- vcs_project (`+`) completion -----------------------------------------
 
-/// Build `vcs_project` completion candidates for a `#+query` or BOF `+query`
-/// trigger token.
+/// Build `vcs_project` completion candidates for a `+query` trigger token.
 ///
 /// Each candidate expands the selected project into the prompt via the
 /// canonical VCS-tag expansion algorithm (see [`apply_vcs_project_selection`]),
@@ -890,15 +889,9 @@ pub fn build_vcs_project_completion_candidates(
         .position_to_byte_offset(position)
         .unwrap_or(t1)
         .clamp(t0, t1);
-    // Filter query is the text after the trigger prefix up to the cursor (empty
-    // for a bare `#+`/`+`), matching the Python `find_vcs_project_trigger`. The
-    // prefix is `#+` (offset 2) for a hash-plus token, or `+` (offset 1) for a
-    // BOF bare-plus token.
-    let prefix_len = if token.text.starts_with("#+") { 2 } else { 1 };
-    let query = text
-        .get(t0 + prefix_len..cursor)
-        .unwrap_or("")
-        .to_lowercase();
+    // Filter query is the text after the plus up to the cursor (empty for a
+    // bare `+`), matching the Python `find_vcs_project_trigger`.
+    let query = text.get(t0 + 1..cursor).unwrap_or("").to_lowercase();
 
     let replace_re = vcs_replace_regex(known_workflow_names);
     let mut candidates = Vec::new();
@@ -2720,7 +2713,7 @@ mod tests {
         );
     }
 
-    // --- vcs_project (`#+`) completion -------------------------------------
+    // --- vcs_project (`+`) completion --------------------------------------
 
     fn vcs_names() -> Vec<String> {
         ["gh", "git", "hg"].iter().map(|s| s.to_string()).collect()
@@ -2810,30 +2803,30 @@ mod tests {
         // The cross-language parity contract -- identical to the Python
         // `_GOLDEN_VECTORS` table. `‸` marks the cursor.
         let cases = [
-            ("Describe this repo. #+‸", "#gh:sase Describe this repo."),
-            ("#+‸", "#gh:sase "),
-            ("#+sa‸", "#gh:sase "),
-            ("#+s‸\n", "#gh:sase \n"),
-            ("#+s‸\nmore text", "#gh:sase \nmore text"),
-            ("#git:foo Fix bug #+‸", "#gh:sase Fix bug"),
-            ("#gh!!:foo do X #+‸", "#gh:sase do X"),
-            // Existing leading VCS tag at end-of-input (no trailing text): the
-            // trigger strip leaves the bare tag at EOF, which must still be
-            // replaced -- not doubled. Covers the `#gh:sase #+` regression.
-            ("#gh:sase #+‸", "#gh:sase "),
-            ("#gh:sase #+foo‸", "#gh:sase "),
-            ("#git:foo #+‸", "#gh:sase "),
-            ("Fix #+bug‸ here", "#gh:sase Fix here"),
-            ("Line one\n#+‸", "#gh:sase Line one\n"),
-            (
-                "---\nname: x\n---\nBody #+‸",
-                "---\nname: x\n---\n#gh:sase Body",
-            ),
-            ("%model:opus Body #+‸", "%model:opus #gh:sase Body"),
-            // Bare `+` at the very beginning of the prompt (offset 0).
+            ("Describe this repo. +‸", "#gh:sase Describe this repo."),
             ("+‸", "#gh:sase "),
             ("+sa‸", "#gh:sase "),
+            ("+s‸\n", "#gh:sase \n"),
+            ("+s‸\nmore text", "#gh:sase \nmore text"),
+            ("#git:foo Fix bug +‸", "#gh:sase Fix bug"),
+            ("#gh!!:foo do X +‸", "#gh:sase do X"),
+            // Existing leading VCS tag at end-of-input (no trailing text): the
+            // trigger strip leaves the bare tag at EOF, which must still be
+            // replaced -- not doubled.
+            ("#gh:sase +‸", "#gh:sase "),
+            ("#gh:sase +foo‸", "#gh:sase "),
+            ("#git:foo +‸", "#gh:sase "),
+            ("Fix +bug‸ here", "#gh:sase Fix here"),
+            ("Line one\n +‸", "#gh:sase Line one\n"),
+            (
+                "---\nname: x\n---\nBody +‸",
+                "---\nname: x\n---\n#gh:sase Body",
+            ),
+            ("%model:opus Body +‸", "%model:opus #gh:sase Body"),
             ("+sa‸ Fix", "#gh:sase Fix"),
+            // The cursor-local query is `sa`, while selection consumes the
+            // entire `+sase` token.
+            ("Fix +sa‸se now", "#gh:sase Fix now"),
         ];
         for (marked, expected) in cases {
             let (canonical, via_edits) = expand_via_both(marked);
@@ -2853,13 +2846,11 @@ mod tests {
     #[test]
     fn classifies_vcs_project_trigger() {
         for (text, col) in [
-            ("#+", 2),
-            ("Fix #+", 6),
-            ("#+sa", 4),
-            ("2 #+ 2", 4),
-            // Bare `+` at byte offset 0.
             ("+", 1),
             ("+sa", 3),
+            ("Fix +", 5),
+            ("Fix +sa", 7),
+            ("2 + 2", 3),
         ] {
             let doc = DocumentSnapshot::new(text);
             let context =
@@ -2871,27 +2862,55 @@ mod tests {
             );
         }
 
-        // A bare `+` outside byte offset 0 is not a project trigger.
-        for (text, col) in [("Fix +", 5), (" +", 2), ("# +", 3), ("c#+x", 4)] {
+        for (text, col) in [
+            ("#+", 2),
+            ("Fix #+", 6),
+            ("line\n+", 1),
+            ("\t+", 2),
+            ("word+", 5),
+            ("a+b", 3),
+            ("c++", 3),
+            ("c#+x", 4),
+        ] {
             let doc = DocumentSnapshot::new(text);
-            let context = classify_completion_context(&doc, pos(col), &[]);
+            let position = if text == "line\n+" {
+                EditorPosition {
+                    line: 1,
+                    character: col,
+                }
+            } else {
+                pos(col)
+            };
+            let context = classify_completion_context(&doc, position, &[]);
             assert_ne!(
                 context.map(|context| context.kind),
                 Some(CompletionContextKind::VcsProject),
                 "{text}"
             );
         }
+
+        let doc = DocumentSnapshot::new("line\n +");
+        let context = classify_completion_context(
+            &doc,
+            EditorPosition {
+                line: 1,
+                character: 2,
+            },
+            &[],
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::VcsProject);
     }
 
     #[test]
-    fn bare_trigger_merges_into_single_primary_edit() {
-        let doc = DocumentSnapshot::new("#+");
-        let context = classify_completion_context(&doc, pos(2), &[]).unwrap();
+    fn bof_trigger_merges_into_single_primary_edit() {
+        let doc = DocumentSnapshot::new("+");
+        let context = classify_completion_context(&doc, pos(1), &[]).unwrap();
         let token = context.token.as_ref().unwrap();
         let list = build_vcs_project_completion_candidates(
             token,
             &doc,
-            pos(2),
+            pos(1),
             &[project_entry("sase", "gh")],
             &vcs_names(),
         );
@@ -2900,7 +2919,7 @@ mod tests {
         let candidate = &list.candidates[0];
         assert_eq!(candidate.name, "sase");
         assert_eq!(candidate.insertion, "#gh:sase");
-        // BOF `#+`: the prepend point coincides with the trigger deletion, so
+        // BOF `+`: the prepend point coincides with the trigger deletion, so
         // the edits merge into one primary edit with no additional edits.
         assert!(candidate.additional_edits.is_empty());
         assert_eq!(
@@ -2911,8 +2930,8 @@ mod tests {
 
     #[test]
     fn trailing_trigger_emits_primary_plus_additional_edit() {
-        let doc = DocumentSnapshot::new("Describe this repo. #+");
-        let cursor = pos(22);
+        let doc = DocumentSnapshot::new("Describe this repo. +");
+        let cursor = pos(21);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
         let token = context.token.as_ref().unwrap();
         let list = build_vcs_project_completion_candidates(
@@ -2935,8 +2954,8 @@ mod tests {
 
     #[test]
     fn vcs_project_candidates_filter_preserves_catalog_order() {
-        let doc = DocumentSnapshot::new("#+sa");
-        let cursor = pos(4);
+        let doc = DocumentSnapshot::new("Fix +sa");
+        let cursor = pos(7);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
         let token = context.token.as_ref().unwrap();
         let list = build_vcs_project_completion_candidates(
@@ -2962,8 +2981,8 @@ mod tests {
 
     #[test]
     fn vcs_project_candidates_include_changespec_context() {
-        let doc = DocumentSnapshot::new("#+ship");
-        let cursor = pos(6);
+        let doc = DocumentSnapshot::new("Review +ship");
+        let cursor = pos(12);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
         let token = context.token.as_ref().unwrap();
         let list = build_vcs_project_completion_candidates(
@@ -2989,7 +3008,7 @@ mod tests {
     #[test]
     fn vcs_project_candidates_filter_for_bare_plus_query() {
         // The query for a BOF `+sa` token is `sa` (prefix length 1), so the
-        // candidate list filters and sorts exactly as the `#+sa` case does.
+        // candidate list filters in catalog order.
         let doc = DocumentSnapshot::new("+sa");
         let cursor = pos(3);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
@@ -3017,33 +3036,9 @@ mod tests {
     }
 
     #[test]
-    fn bare_plus_trigger_merges_into_single_primary_edit() {
-        // A BOF `+`: the prepend point coincides with the trigger deletion, so
-        // the edits merge into one primary edit with no additional edits.
-        let doc = DocumentSnapshot::new("+");
-        let context = classify_completion_context(&doc, pos(1), &[]).unwrap();
-        let token = context.token.as_ref().unwrap();
-        let list = build_vcs_project_completion_candidates(
-            token,
-            &doc,
-            pos(1),
-            &[project_entry("sase", "gh")],
-            &vcs_names(),
-        );
-
-        assert_eq!(list.candidates.len(), 1);
-        let candidate = &list.candidates[0];
-        assert!(candidate.additional_edits.is_empty());
-        assert_eq!(
-            candidate.replacement.as_ref().unwrap().new_text,
-            "#gh:sase "
-        );
-    }
-
-    #[test]
     fn vcs_project_candidates_match_aliases() {
-        let doc = DocumentSnapshot::new("#+sea");
-        let cursor = pos(5);
+        let doc = DocumentSnapshot::new("Find +sea");
+        let cursor = pos(9);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
         let token = context.token.as_ref().unwrap();
         let mut entry = project_entry("sase", "gh");
@@ -3070,18 +3065,17 @@ mod tests {
         // Every golden input must yield non-overlapping edits (LSP requires
         // it); `vcs_edits_conflict` is the guard.
         for marked in [
-            "Describe this repo. #+‸",
-            "#+‸",
-            "#+sa‸",
-            "#git:foo Fix bug #+‸",
-            // Existing tag at EOF: the replace edit (tag span) and the primary
-            // trigger-deletion edit are adjacent and must not overlap.
-            "#git:foo #+‸",
-            "#gh:sase #+‸",
-            "%model:opus Body #+‸",
+            "Describe this repo. +‸",
             "+‸",
             "+sa‸",
+            "#git:foo Fix bug +‸",
+            // Existing tag at EOF: the replace edit (tag span) and the primary
+            // trigger-deletion edit are adjacent and must not overlap.
+            "#git:foo +‸",
+            "#gh:sase +‸",
+            "%model:opus Body +‸",
             "+sa‸ Fix",
+            "Fix +sa‸se now",
         ] {
             let cursor_byte = marked.find('‸').unwrap();
             let text = marked.replacen('‸', "", 1);

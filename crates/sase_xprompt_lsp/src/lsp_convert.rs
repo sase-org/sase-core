@@ -56,33 +56,22 @@ pub fn placeholder_completion_response(
     )
 }
 
-/// Build the completion response for the `#+`/`+` (`vcs_project`) completion
-/// kind.
+/// Build the completion response for the `+` (`vcs_project`) completion kind.
 ///
 /// Differs from [`completion_response`] in two ways: the `filter_text` is the
-/// trigger spelling (`#+name` for a hash-plus token, or `+name` for a BOF
-/// bare-plus token, so typing `#+sa`/`+sa` keeps the `sase` item), and the item
-/// kind/label details distinguish projects from PRs. The primary
+/// `+name` trigger spelling (so typing `+sa` keeps the `sase` item), and the
+/// item kind/label details distinguish projects from PRs. The primary
 /// `text_edit` and `additional_text_edits` (the prepend/replace edit) are
 /// carried over from the candidate's `replacement` / `additional_edits`.
-///
-/// `trigger_prefix` is the literal trigger spelling typed by the user (`"#+"`
-/// or `"+"`); it prefixes each item's `filter_text` so client-side filtering
-/// matches what is in the buffer.
 pub fn vcs_project_completion_response(
     list: CompletionList,
     replacement_range: EditorRange,
-    trigger_prefix: &str,
 ) -> CompletionResponse {
     CompletionResponse::Array(
         list.candidates
             .into_iter()
             .map(|candidate| {
-                vcs_project_completion_item(
-                    candidate,
-                    replacement_range,
-                    trigger_prefix,
-                )
+                vcs_project_completion_item(candidate, replacement_range)
             })
             .collect(),
     )
@@ -279,14 +268,13 @@ fn completion_item(
 }
 
 /// Convert one `vcs_project` candidate, overriding the generic item's kind,
-/// label details, and `filter_text` so the `#+name`/`+name` trigger spelling
-/// (per `trigger_prefix`) drives client-side filtering.
+/// label details, and `filter_text` so the `+name` trigger spelling drives
+/// client-side filtering.
 fn vcs_project_completion_item(
     candidate: CompletionCandidate,
     replacement_range: EditorRange,
-    trigger_prefix: &str,
 ) -> CompletionItem {
-    let filter_text = format!("{trigger_prefix}{}", candidate.name);
+    let filter_text = format!("+{}", candidate.name);
     let is_changespec = candidate.kind == "changespec";
     let label_details = if is_changespec {
         Some(CompletionItemLabelDetails {

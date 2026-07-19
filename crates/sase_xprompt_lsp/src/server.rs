@@ -61,7 +61,7 @@ const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 /// Env var carrying the path to the JSON `vcs_project` completion catalog
 /// (enabled-project entries + known VCS workflow names). Materialized by the
 /// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
-/// fresh on every `#+` completion request so external rewrites are picked up.
+/// fresh on every `+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
 
@@ -74,7 +74,7 @@ struct ServerConfig {
     allow_all_markdown: bool,
     /// Path to the materialized `vcs_project` completion catalog, captured from
     /// [`VCS_PROJECT_CATALOG_ENV`] at startup. The file itself is re-read fresh
-    /// on each `#+` completion request (see [`load_vcs_project_catalog`]).
+    /// on each `+` completion request (see [`load_vcs_project_catalog`]).
     vcs_project_catalog: Option<PathBuf>,
     /// Path to the materialized `%model` completion catalog, captured from
     /// [`MODEL_CATALOG_ENV`] at startup. The file itself is re-read fresh on
@@ -279,7 +279,7 @@ impl XpromptLspServer {
         Some(response)
     }
 
-    /// Build the `#+` (`vcs_project`) completion response.
+    /// Build the `+` (`vcs_project`) completion response.
     ///
     /// The project catalog (enabled-project entries + known VCS workflow names)
     /// is read fresh from the materialized JSON file on every request so
@@ -305,18 +305,7 @@ impl XpromptLspServer {
             &vcs_catalog.entries,
             &vcs_catalog.workflow_names,
         );
-        // The trigger spelling the user typed (`#+` for a hash-plus token, `+`
-        // for a BOF bare-plus token) drives the items' client-side `filter_text`.
-        let trigger_prefix = if token.text.starts_with("#+") {
-            "#+"
-        } else {
-            "+"
-        };
-        vcs_project_completion_response(
-            list,
-            context.replacement_range,
-            trigger_prefix,
-        )
+        vcs_project_completion_response(list, context.replacement_range)
     }
 
     /// Build the `#workflow:` / `#workflow(` root-ref completion response.
@@ -1430,8 +1419,8 @@ fn file_history() -> Vec<String> {
 /// Load the enabled project/PR completion catalog from the materialized JSON
 /// file at `path`.
 ///
-/// Read fresh on every `#+` completion request. Any failure (no path, unreadable
-/// file, malformed JSON) degrades to empty results so the `#+` menu simply
+/// Read fresh on every `+` completion request. Any failure (no path, unreadable
+/// file, malformed JSON) degrades to empty results so the `+` menu simply
 /// shows nothing rather than breaking completion. Schema versions 1, 2, and 3
 /// are accepted; v1 entries default to project rows, and v1/v2 catalogs default
 /// `namespaces` to empty. The v3 file shape is
@@ -1745,10 +1734,12 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use lsp_types::{
-        CodeActionOrCommand, CompletionClientCapabilities,
+        CodeActionOrCommand, CompletionClientCapabilities, CompletionContext,
         CompletionItemCapability, CompletionItemKind, CompletionResponse,
-        CompletionTextEdit, Documentation, GotoDefinitionResponse, Hover,
-        InsertTextFormat, Position, Range, TextDocumentClientCapabilities, Uri,
+        CompletionTextEdit, CompletionTriggerKind, Documentation,
+        GotoDefinitionResponse, Hover, InsertTextFormat, Position, Range,
+        TextDocumentClientCapabilities, TextDocumentIdentifier,
+        TextDocumentPositionParams, Uri,
     };
     use sase_core::{
         EditorPosition as CorePosition, EditorRange as CoreRange,
@@ -3154,7 +3145,7 @@ mod tests {
         assert_eq!(edit.new_text, "xhigh");
     }
 
-    // --- vcs_project (`#+`) completion -------------------------------------
+    // --- vcs_project (`+`) completion --------------------------------------
 
     fn write_vcs_project_catalog(path: &Path) {
         fs::write(
@@ -3540,10 +3531,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "Describe this repo. #+".to_string(),
+                "Describe this repo. +".to_string(),
                 Position {
                     line: 0,
-                    character: 22,
+                    character: 21,
                 },
             )
             .await
@@ -3558,9 +3549,9 @@ mod tests {
         assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
         let label_details = item.label_details.as_ref().unwrap();
         assert_eq!(label_details.description.as_deref(), Some("project"));
-        // `filter_text` is the `#+name` trigger spelling so typing `#+sa` keeps
+        // `filter_text` is the `+name` trigger spelling so typing `+sa` keeps
         // the item under client-side filtering.
-        assert_eq!(item.filter_text.as_deref(), Some("#+sase"));
+        assert_eq!(item.filter_text.as_deref(), Some("+sase"));
         assert_eq!(item.detail.as_deref(), Some("#gh:sase"));
         let Some(Documentation::MarkupContent(documentation)) =
             item.documentation.as_ref()
@@ -3569,7 +3560,7 @@ mod tests {
         };
         assert_eq!(documentation.value, "SASE repo");
 
-        // Primary edit consumes the `#+` trigger token...
+        // Primary edit consumes the `+` trigger token...
         let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
         else {
             panic!("expected primary text edit");
@@ -3584,10 +3575,10 @@ mod tests {
 
     #[tokio::test]
     async fn completes_vcs_project_replacing_existing_tag_at_eof() {
-        // `#git:foo #+` -- an existing leading VCS tag immediately followed by
-        // the `#+` trigger at end-of-input. Selecting a project must replace the
+        // `#git:foo +` -- an existing leading VCS tag immediately followed by
+        // the `+` trigger at end-of-input. Selecting a project must replace the
         // existing tag, not double it. The primary edit deletes the trailing
-        // ` #+` trigger span; the additional edit replaces the `#git:foo` range
+        // ` +` trigger span; the additional edit replaces the `#git:foo` range
         // with the selected `#gh:sase ` tag.
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
@@ -3606,10 +3597,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "#git:foo #+".to_string(),
+                "#git:foo +".to_string(),
                 Position {
                     line: 0,
-                    character: 11,
+                    character: 10,
                 },
             )
             .await
@@ -3622,14 +3613,14 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.label, "sase");
 
-        // Primary edit deletes the trailing ` #+` trigger span (bytes 8..11).
+        // Primary edit deletes the trailing ` +` trigger span (bytes 8..10).
         let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
         else {
             panic!("expected primary text edit");
         };
         assert_eq!(edit.new_text, "");
         assert_eq!(edit.range.start, Position::new(0, 8));
-        assert_eq!(edit.range.end, Position::new(0, 11));
+        assert_eq!(edit.range.end, Position::new(0, 10));
 
         // Additional edit replaces the existing `#git:foo` (bytes 0..8) tag.
         let additional = item.additional_text_edits.as_ref().unwrap();
@@ -3658,10 +3649,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "#+ship".to_string(),
+                "+ship".to_string(),
                 Position {
                     line: 0,
-                    character: 6,
+                    character: 5,
                 },
             )
             .await
@@ -3675,14 +3666,14 @@ mod tests {
         assert_eq!(item.label, "ship-completion");
         assert_eq!(item.kind, Some(CompletionItemKind::EVENT));
         assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion"));
-        assert_eq!(item.filter_text.as_deref(), Some("#+ship-completion"));
+        assert_eq!(item.filter_text.as_deref(), Some("+ship-completion"));
         let label_details = item.label_details.as_ref().unwrap();
         assert_eq!(label_details.detail.as_deref(), Some(" · sase"));
         assert_eq!(label_details.description.as_deref(), Some("PR · Ready"));
     }
 
     #[tokio::test]
-    async fn hash_plus_trigger_merges_into_single_primary_edit() {
+    async fn obsolete_and_unspaced_plus_forms_do_not_complete_vcs_projects() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
         write_vcs_project_catalog(&catalog_path);
@@ -3698,30 +3689,29 @@ mod tests {
             config.vcs_project_catalog = Some(catalog_path);
         }
 
-        let response = server
-            .completion_for_text(
-                "#+".to_string(),
-                Position {
-                    line: 0,
-                    character: 2,
-                },
-            )
-            .await
-            .unwrap();
-        let CompletionResponse::Array(items) = response else {
-            panic!("expected completion array");
-        };
-
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
-        else {
-            panic!("expected primary text edit");
-        };
-        // BOF `#+`: prepend point coincides with the trigger deletion, so the
-        // edits merge into one primary edit with no additional edits.
-        assert_eq!(edit.new_text, "#gh:sase ");
-        assert!(item.additional_text_edits.is_none());
+        for (text, position) in [
+            ("#+", Position::new(0, 2)),
+            ("Fix #+sa", Position::new(0, 8)),
+            ("line\n+", Position::new(1, 1)),
+            ("\t+", Position::new(0, 2)),
+            ("word+", Position::new(0, 5)),
+            ("a+b", Position::new(0, 3)),
+            ("c++", Position::new(0, 3)),
+        ] {
+            let response =
+                server.completion_for_text(text.to_string(), position).await;
+            let has_vcs_project_item = match response {
+                Some(CompletionResponse::Array(items)) => items
+                    .iter()
+                    .any(|item| item.detail.as_deref() == Some("#gh:sase")),
+                Some(CompletionResponse::List(list)) => list
+                    .items
+                    .iter()
+                    .any(|item| item.detail.as_deref() == Some("#gh:sase")),
+                None => false,
+            };
+            assert!(!has_vcs_project_item, "{text:?} should not complete");
+        }
     }
 
     #[tokio::test]
@@ -3776,7 +3766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bare_plus_outside_bof_does_not_complete_vcs_project() {
+    async fn space_delimited_plus_completes_vcs_project() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
         write_vcs_project_catalog(&catalog_path);
@@ -3794,15 +3784,103 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "Fix +".to_string(),
+                "Fix +sa".to_string(),
                 Position {
                     line: 0,
-                    character: 5,
+                    character: 7,
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
-        assert!(response.is_none());
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "sase");
+        assert_eq!(items[0].filter_text.as_deref(), Some("+sase"));
+    }
+
+    #[tokio::test]
+    async fn automatic_and_manual_space_plus_completion_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        write_vcs_project_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.vcs_project_catalog = Some(catalog_path);
+        }
+        let uri = file_uri(temp.path().join("sase_prompt_completion.md"));
+
+        for (text, position, trigger_kind, trigger_character) in [
+            (
+                "+",
+                Position::new(0, 1),
+                CompletionTriggerKind::TRIGGER_CHARACTER,
+                Some("+".to_string()),
+            ),
+            (
+                "+sa",
+                Position::new(0, 3),
+                CompletionTriggerKind::INVOKED,
+                None,
+            ),
+            (
+                "Fix +",
+                Position::new(0, 5),
+                CompletionTriggerKind::TRIGGER_CHARACTER,
+                Some("+".to_string()),
+            ),
+            (
+                "Fix +sa",
+                Position::new(0, 7),
+                CompletionTriggerKind::INVOKED,
+                None,
+            ),
+        ] {
+            let document = server.open_document(
+                &uri,
+                "markdown".to_string(),
+                text.to_string(),
+            );
+            server
+                .documents
+                .write()
+                .unwrap()
+                .insert(uri.to_string(), document);
+
+            let response = server
+                .completion(CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: uri.clone(),
+                        },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind,
+                        trigger_character,
+                    }),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert_eq!(items.len(), 1, "{text:?}");
+            assert_eq!(items[0].label, "sase", "{text:?}");
+            assert_eq!(items[0].filter_text.as_deref(), Some("+sase"));
+        }
     }
 
     #[tokio::test]
@@ -3821,10 +3899,10 @@ mod tests {
 
         let response = server
             .completion_for_text(
-                "#+".to_string(),
+                "+".to_string(),
                 Position {
                     line: 0,
-                    character: 2,
+                    character: 1,
                 },
             )
             .await
