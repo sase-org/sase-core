@@ -112,8 +112,10 @@
 //! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
-//! - `agent_stats_query_runs(index_path: str, request: dict) -> dict`
-//! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict) -> dict`
+//! - `agent_stats_query_runs(index_path: str, request: dict) -> dict` (run,
+//!   runtime, project, and ChangeSpec work rollups)
+//! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
+//!   `-> dict` (project-filterable skills and memories plus global documents)
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -5390,13 +5392,19 @@ mod tests {
                 projects.join("proj/artifacts/ace-run/20260710010000");
             fs::create_dir_all(&artifact).unwrap();
             fs::write(
+                projects.join("proj/proj.sase"),
+                "NAME: binding-spec\nSTATUS: Ready\n",
+            )
+            .unwrap();
+            fs::write(
                 artifact.join("agent_meta.json"),
                 serde_json::to_vec(&json!({
                     "name": "binding-agent",
                     "run_started_at": "100",
                     "llm_provider": "codex",
                     "model": "gpt-5",
-                    "reasoning_effort": "high"
+                    "reasoning_effort": "high",
+                    "cl_name": "binding-spec"
                 }))
                 .unwrap(),
             )
@@ -5405,7 +5413,11 @@ mod tests {
                 artifact.join("done.json"),
                 serde_json::to_vec(&json!({
                     "outcome": "completed",
-                    "finished_at": 160.0
+                    "finished_at": 160.0,
+                    "step_output": {"meta_commits": [{
+                        "sha": "abc",
+                        "changespec_name": "binding-spec"
+                    }]}
                 }))
                 .unwrap(),
             )
@@ -5425,7 +5437,9 @@ mod tests {
                     "end_ts": 200,
                     "runtime_group_by": "agent",
                     "bucket_seconds": 100,
-                    "top_n": 5
+                    "top_n": 5,
+                    "project": "proj",
+                    "work_top_n": 50
                 }),
             )
             .unwrap();
@@ -5434,13 +5448,18 @@ mod tests {
                 py_agent_stats_query_runs(py, index.to_str().unwrap(), request)
                     .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["schema_version"], json!(2));
             assert_eq!(result["totals"]["runs"], json!(1));
             assert_eq!(result["totals"]["completed"], json!(1));
             assert_eq!(result["providers"][0]["effort"], json!("high"));
             assert_eq!(
                 result["runtime_groups"][0]["total_seconds"],
                 json!(60.0)
+            );
+            assert_eq!(result["work"]["projects"][0]["project"], json!("proj"));
+            assert_eq!(
+                result["work"]["changespecs"][0]["name"],
+                json!("binding-spec")
             );
 
             let _ = fs::remove_dir_all(root);
@@ -5483,7 +5502,12 @@ mod tests {
 
             let request_obj = json_value_to_py(
                 py,
-                &json!({"start_ts": 0, "end_ts": 200, "top_n": 5}),
+                &json!({
+                    "start_ts": 0,
+                    "end_ts": 200,
+                    "top_n": 5,
+                    "project": "proj"
+                }),
             )
             .unwrap();
             let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
@@ -5495,7 +5519,7 @@ mod tests {
             )
             .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["schema_version"], json!(2));
             assert_eq!(result["skills"][0]["name"], json!("review"));
             assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
             assert_eq!(result["questions"]["sessions"], json!(1));

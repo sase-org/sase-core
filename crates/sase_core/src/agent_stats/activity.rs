@@ -120,6 +120,12 @@ fn scan_project_logs(
 ) -> BTreeMap<String, ActivityAccumulator> {
     let mut counts = BTreeMap::<String, ActivityAccumulator>::new();
     for project_dir in sorted_subdirs(&sase_home.join("projects")) {
+        if request.project.as_deref().is_some_and(|project| {
+            project_dir.file_name().and_then(|value| value.to_str())
+                != Some(project)
+        }) {
+            continue;
+        }
         let path = project_dir.join(filename);
         let Ok(file) = File::open(path) else {
             continue;
@@ -580,6 +586,7 @@ mod tests {
             start_ts: 100,
             end_ts: 200,
             top_n: 10,
+            project: None,
         }
     }
 
@@ -750,6 +757,15 @@ mod tests {
         assert_eq!(result.plans.mean_phases_per_epic, 2.0);
         assert_eq!(result.unresolved_plan_files, 1);
         assert_eq!(result.malformed_rows_skipped, 1);
+
+        let mut filtered_request = request();
+        filtered_request.project = Some("alpha".to_string());
+        let filtered =
+            query_activity_stats(&index, &home, filtered_request).unwrap();
+        assert_eq!(filtered.skills.len(), 2);
+        assert!(filtered.memories.is_empty());
+        assert_eq!(filtered.questions.sessions, 2);
+        assert_eq!(filtered.plans.proposed, 4);
     }
 
     #[test]
@@ -786,6 +802,7 @@ mod tests {
                     as i64,
                 end_ts: parse_timestamp("2026-07-11T00:00:00Z").unwrap() as i64,
                 top_n: 5,
+                project: None,
             },
         )
         .unwrap();
@@ -803,6 +820,7 @@ mod tests {
                 start_ts: 100,
                 end_ts: 100,
                 top_n: 5,
+                project: None,
             },
         );
         assert!(result.unwrap_err().contains("end_ts"));

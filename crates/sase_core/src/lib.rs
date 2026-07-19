@@ -149,13 +149,14 @@ pub use agent_scan::{
 pub use agent_stats::{
     query_activity_stats, query_run_stats, AgentActivityCountWire,
     AgentActivityStatsRequestWire, AgentActivityStatsResponseWire,
-    AgentCommitDistributionWire, AgentCommitStatsWire,
-    AgentPlanActivityStatsWire, AgentPlanStatsWire, AgentProviderStatsWire,
+    AgentChangeSpecWorkStatsWire, AgentCommitDistributionWire,
+    AgentCommitStatsWire, AgentPlanActivityStatsWire, AgentPlanStatsWire,
+    AgentProjectWorkStatsWire, AgentProviderStatsWire,
     AgentQuestionActivityStatsWire, AgentQuestionStatsWire,
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
     AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
     AgentStatsCountWire, AgentStatsDistributionWire,
-    AgentStatsRuntimeGroupByWire, AgentWorkspaceStatsWire,
+    AgentStatsRuntimeGroupByWire, AgentWorkStatsWire, AgentWorkspaceStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{

@@ -320,7 +320,7 @@ fn repair_abandoned_agent_artifact_index_rows(
     Ok(repaired)
 }
 
-fn cl_name_is_unknownish(cl_name: Option<&str>) -> bool {
+pub(crate) fn cl_name_is_unknownish(cl_name: Option<&str>) -> bool {
     cl_name
         .map(|name| name.is_empty() || name == "unknown")
         .unwrap_or(true)

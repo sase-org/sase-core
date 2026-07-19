@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 2;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -8,6 +8,10 @@ fn default_bucket_seconds() -> u64 {
 
 fn default_top_n() -> u32 {
     5
+}
+
+fn default_work_top_n() -> u32 {
+    50
 }
 
 /// Dimension used by the runtime ranking in a run-statistics response.
@@ -24,6 +28,8 @@ pub enum AgentStatsRuntimeGroupByWire {
     Provider,
     Model,
     Workflow,
+    Project,
+    Changespec,
 }
 
 /// Query controls for one composite agent-run statistics snapshot.
@@ -39,6 +45,12 @@ pub struct AgentRunStatsRequestWire {
     pub bucket_seconds: u64,
     #[serde(default = "default_top_n")]
     pub top_n: u32,
+    /// Exact artifact-index project name to include, or every project.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Maximum number of ChangeSpec work rows returned.
+    #[serde(default = "default_work_top_n")]
+    pub work_top_n: u32,
 }
 
 /// Query controls for durable activity-log and plan statistics.
@@ -50,6 +62,11 @@ pub struct AgentActivityStatsRequestWire {
     pub end_ts: i64,
     #[serde(default = "default_top_n")]
     pub top_n: u32,
+    /// Exact project directory name used to scope skills and memories.
+    /// Question sessions and plan-document aggregates are intentionally
+    /// global because their durable files are not project-scoped.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Exact count for one named category.
@@ -157,6 +174,52 @@ pub struct AgentWorkspaceStatsWire {
     pub runs: u64,
 }
 
+/// Work performed in one project over the selected window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentProjectWorkStatsWire {
+    pub project: String,
+    pub runs: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub other_terminal: u64,
+    pub in_progress: u64,
+    pub waiting: u64,
+    pub success_rate: f64,
+    pub commits: u64,
+    pub distinct_changespecs: u64,
+    pub unattributed_runs: u64,
+    pub total_runtime_seconds: f64,
+    pub last_run_ts: f64,
+}
+
+/// Work attributed to one ChangeSpec in one project.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentChangeSpecWorkStatsWire {
+    pub project: String,
+    pub name: String,
+    pub status: String,
+    pub has_pr: bool,
+    pub runs: u64,
+    pub distinct_agents: u64,
+    pub commits: u64,
+    pub total_runtime_seconds: f64,
+    pub first_run_ts: f64,
+    pub last_run_ts: f64,
+}
+
+/// Per-project and per-ChangeSpec work attribution for a run snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentWorkStatsWire {
+    #[serde(default)]
+    pub projects: Vec<AgentProjectWorkStatsWire>,
+    #[serde(default)]
+    pub changespecs: Vec<AgentChangeSpecWorkStatsWire>,
+    pub unattributed_runs: u64,
+    pub truncated_changespec_rows: u64,
+    /// Missing, unreadable, or malformed active/archive project files.
+    pub malformed_spec_files_skipped: u64,
+}
+
 /// One caller-sized launch-time bucket. Zero-count buckets are retained.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRunBucketWire {
@@ -195,6 +258,8 @@ pub struct AgentRunStatsResponseWire {
     pub questions: AgentQuestionStatsWire,
     #[serde(default)]
     pub workspaces: Vec<AgentWorkspaceStatsWire>,
+    #[serde(default)]
+    pub work: AgentWorkStatsWire,
     #[serde(default)]
     pub buckets: Vec<AgentRunBucketWire>,
     #[serde(default)]

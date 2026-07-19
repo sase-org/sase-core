@@ -1,25 +1,30 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 
+use crate::agent_scan::index::cl_name_is_unknownish;
 use crate::agent_scan::AgentArtifactRecordWire;
 use crate::effort::{is_valid_effort, EFFORT_LEVELS_ORDERED};
+use crate::parser::parse_project_bytes;
+use crate::project_spec::{preferred_project_spec_path, project_spec_basename};
 
 use super::wire::{
-    AgentCommitStatsWire, AgentPlanStatsWire, AgentProviderStatsWire,
-    AgentQuestionStatsWire, AgentRetryStatsWire, AgentRunBucketWire,
-    AgentRunStatsRequestWire, AgentRunStatsResponseWire, AgentRunTotalsWire,
-    AgentRuntimeGroupStatsWire, AgentStatsCountWire,
-    AgentStatsRuntimeGroupByWire, AgentWorkspaceStatsWire,
-    AGENT_STATS_WIRE_SCHEMA_VERSION,
+    AgentChangeSpecWorkStatsWire, AgentCommitStatsWire, AgentPlanStatsWire,
+    AgentProjectWorkStatsWire, AgentProviderStatsWire, AgentQuestionStatsWire,
+    AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
+    AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
+    AgentStatsCountWire, AgentStatsRuntimeGroupByWire, AgentWorkStatsWire,
+    AgentWorkspaceStatsWire, AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 
 const INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BUCKETS: u64 = 1_000_000;
 const UNKNOWN: &str = "unknown";
+const NO_CHANGESPEC: &str = "(no changespec)";
 const DEFAULT_EFFORT: &str = "default";
 
 #[derive(Debug)]
@@ -29,6 +34,7 @@ struct IndexRunRow {
     workflow_name: Option<String>,
     timestamp: String,
     status: String,
+    cl_name: Option<String>,
     agent_name: Option<String>,
     model: Option<String>,
     provider: Option<String>,
@@ -57,6 +63,56 @@ struct DurationAccumulator {
     values: Vec<f64>,
 }
 
+#[derive(Debug, Default)]
+struct ProjectWorkAccumulator {
+    runs: u64,
+    completed: u64,
+    failed: u64,
+    other_terminal: u64,
+    in_progress: u64,
+    waiting: u64,
+    commits: u64,
+    changespecs: BTreeSet<String>,
+    unattributed_runs: u64,
+    total_runtime_seconds: f64,
+    last_run_ts: f64,
+    project_file: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct ChangespecWorkAccumulator {
+    runs: u64,
+    agents: BTreeSet<String>,
+    commits: u64,
+    total_runtime_seconds: f64,
+    first_run_ts: f64,
+    last_run_ts: f64,
+}
+
+#[derive(Debug, Default)]
+struct WorkAccumulators {
+    projects: BTreeMap<String, ProjectWorkAccumulator>,
+    changespecs: BTreeMap<(String, String), ChangespecWorkAccumulator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttributedChangespec {
+    name: String,
+    commits: u64,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RunAttribution {
+    changespecs: Vec<AttributedChangespec>,
+    total_commits: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ChangespecMetadata {
+    status: String,
+    has_pr: bool,
+}
+
 /// Aggregate durable per-run artifact-index records over a launch-time range.
 ///
 /// Cached records that cannot be decoded are counted in
@@ -83,28 +139,30 @@ pub fn query_run_stats(
         .prepare(
             r#"
             SELECT project_name, workflow_dir_name, workflow_name, timestamp,
-                   status, agent_name, model, llm_provider, started_at,
-                   finished_at, record_json
+                   status, cl_name, agent_name, model, llm_provider,
+                   started_at, finished_at, record_json
             FROM agent_artifacts
             WHERE hidden = 0
+              AND (?1 IS NULL OR project_name = ?1)
             ORDER BY timestamp ASC
             "#,
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([request.project.as_deref()], |row| {
             Ok(IndexRunRow {
                 project_name: row.get(0)?,
                 workflow_dir_name: row.get(1)?,
                 workflow_name: row.get(2)?,
                 timestamp: row.get(3)?,
                 status: row.get(4)?,
-                agent_name: row.get(5)?,
-                model: row.get(6)?,
-                provider: row.get(7)?,
-                started_at: row.get(8)?,
-                finished_at: row.get(9)?,
-                record_json: row.get(10)?,
+                cl_name: row.get(5)?,
+                agent_name: row.get(6)?,
+                model: row.get(7)?,
+                provider: row.get(8)?,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+                record_json: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -125,6 +183,7 @@ pub fn query_run_stats(
     let mut plan_actions = BTreeMap::<String, u64>::new();
     let mut workspace_counts = BTreeMap::<(String, i64), u64>::new();
     let mut runtime_groups = BTreeMap::<String, DurationAccumulator>::new();
+    let mut work = WorkAccumulators::default();
 
     for row in rows {
         let row = row.map_err(|error| error.to_string())?;
@@ -151,6 +210,7 @@ pub fn query_run_stats(
         }
 
         let duration = run_duration_seconds(&record, &row);
+        let attribution = resolve_run_attribution(&record, &row);
         let provider_key = provider_key(&record, &row);
         let provider_stats = providers.entry(provider_key).or_default();
         provider_stats.runs += 1;
@@ -160,13 +220,18 @@ pub fn query_run_stats(
         if let Some(duration) = duration {
             provider_stats.duration_count += 1;
             provider_stats.total_runtime_seconds += duration;
-            let group =
-                runtime_group_value(request.runtime_group_by, &record, &row);
-            runtime_groups
-                .entry(group)
-                .or_default()
-                .values
-                .push(duration);
+            for group in runtime_group_values(
+                request.runtime_group_by,
+                &record,
+                &row,
+                &attribution,
+            ) {
+                runtime_groups
+                    .entry(group)
+                    .or_default()
+                    .values
+                    .push(duration);
+            }
         }
 
         fold_retries(&record, &row, &mut response.retries, &mut retry_chains);
@@ -179,6 +244,15 @@ pub fn query_run_stats(
         );
         fold_questions(&record, &mut response.questions);
         fold_workspace(&record, &row, &mut workspace_counts);
+        fold_work(
+            &record,
+            &row,
+            launch_ts,
+            duration,
+            outcome.as_deref(),
+            &attribution,
+            &mut work,
+        );
     }
 
     response.retries.chains = retry_chains.len() as u64;
@@ -198,6 +272,7 @@ pub fn query_run_stats(
         finish_workspaces(workspace_counts, request.top_n as usize);
     response.runtime_groups =
         finish_runtime_groups(runtime_groups, request.top_n as usize);
+    response.work = finish_work(work, request.work_top_n as usize);
     Ok(response)
 }
 
@@ -345,10 +420,30 @@ fn provider_key(
     }
 }
 
+fn runtime_group_values(
+    group_by: AgentStatsRuntimeGroupByWire,
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+    attribution: &RunAttribution,
+) -> Vec<String> {
+    if group_by == AgentStatsRuntimeGroupByWire::Changespec {
+        if attribution.changespecs.is_empty() {
+            return vec![NO_CHANGESPEC.to_string()];
+        }
+        return attribution
+            .changespecs
+            .iter()
+            .map(|value| value.name.clone())
+            .collect();
+    }
+    vec![runtime_group_value(group_by, record, row, attribution)]
+}
+
 fn runtime_group_value(
     group_by: AgentStatsRuntimeGroupByWire,
     record: &AgentArtifactRecordWire,
     row: &IndexRunRow,
+    attribution: &RunAttribution,
 ) -> String {
     let meta = record.agent_meta.as_ref();
     let value = match group_by {
@@ -369,6 +464,14 @@ fn runtime_group_value(
         AgentStatsRuntimeGroupByWire::Workflow => meta
             .and_then(|value| value.workflow_name.as_deref())
             .or(row.workflow_name.as_deref()),
+        AgentStatsRuntimeGroupByWire::Project => {
+            Some(row.project_name.as_str())
+        }
+        AgentStatsRuntimeGroupByWire::Changespec => attribution
+            .changespecs
+            .first()
+            .map(|value| value.name.as_str())
+            .or(Some(NO_CHANGESPEC)),
     };
     normalized(value)
 }
@@ -498,6 +601,297 @@ fn fold_workspace(
             .entry((row.project_name.clone(), workspace_num))
             .or_default() += 1;
     }
+}
+
+fn resolve_run_attribution(
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+) -> RunAttribution {
+    let meta_commits = record
+        .done
+        .as_ref()
+        .and_then(|done| done.step_output.as_ref())
+        .and_then(|output| output.get("meta_commits"))
+        .and_then(|value| value.as_array());
+    let mut total_commits = 0u64;
+    let mut commit_changespecs = BTreeMap::<String, u64>::new();
+    if let Some(meta_commits) = meta_commits {
+        for commit in meta_commits.iter().filter_map(|value| value.as_object())
+        {
+            total_commits += 1;
+            let name = commit
+                .get("changespec_name")
+                .and_then(|value| value.as_str())
+                .or_else(|| {
+                    commit
+                        .get("commit_changespec_name")
+                        .and_then(|value| value.as_str())
+                });
+            if let Some(name) = real_changespec_name(name, record, row) {
+                *commit_changespecs.entry(name).or_default() += 1;
+            }
+        }
+    }
+    if !commit_changespecs.is_empty() {
+        return RunAttribution {
+            changespecs: commit_changespecs
+                .into_iter()
+                .map(|(name, commits)| AttributedChangespec { name, commits })
+                .collect(),
+            total_commits,
+        };
+    }
+
+    let commit_name = record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.commit_changespec_name.as_deref());
+    if let Some(name) = real_changespec_name(commit_name, record, row) {
+        return RunAttribution {
+            changespecs: vec![AttributedChangespec {
+                name,
+                commits: total_commits,
+            }],
+            total_commits,
+        };
+    }
+    if let Some(name) =
+        real_changespec_name(row.cl_name.as_deref(), record, row)
+    {
+        return RunAttribution {
+            changespecs: vec![AttributedChangespec {
+                name,
+                commits: total_commits,
+            }],
+            total_commits,
+        };
+    }
+    RunAttribution {
+        changespecs: Vec::new(),
+        total_commits,
+    }
+}
+
+fn real_changespec_name(
+    name: Option<&str>,
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+) -> Option<String> {
+    let name = name.map(str::trim).filter(|value| !value.is_empty())?;
+    if cl_name_is_unknownish(Some(name))
+        || is_project_identity_placeholder(name, record, row)
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn is_project_identity_placeholder(
+    name: &str,
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+) -> bool {
+    if name == row.project_name
+        || name == project_spec_basename(&record.project_file)
+    {
+        return true;
+    }
+    let Some(github_name) = row.project_name.strip_prefix("gh_") else {
+        return false;
+    };
+    let Some((owner, repo)) = github_name.split_once("__") else {
+        return false;
+    };
+    name == repo || name == format!("{owner}/{repo}")
+}
+
+fn fold_work(
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+    launch_ts: f64,
+    duration: Option<f64>,
+    outcome: Option<&str>,
+    attribution: &RunAttribution,
+    work: &mut WorkAccumulators,
+) {
+    let project = work.projects.entry(row.project_name.clone()).or_default();
+    let first_project_run = project.runs == 0;
+    project.runs += 1;
+    project.commits += attribution.total_commits;
+    if first_project_run || launch_ts > project.last_run_ts {
+        project.last_run_ts = launch_ts;
+    }
+    if project.project_file.as_os_str().is_empty() {
+        project.project_file = PathBuf::from(&record.project_file);
+    }
+    match outcome {
+        Some("completed") => project.completed += 1,
+        Some("failed" | "epic_launch_failed") => project.failed += 1,
+        Some(_) => project.other_terminal += 1,
+        None if record.waiting.is_some() || row.status == "waiting" => {
+            project.waiting += 1;
+        }
+        None => project.in_progress += 1,
+    }
+    if let Some(duration) = duration {
+        project.total_runtime_seconds += duration;
+    }
+    if attribution.changespecs.is_empty() {
+        project.unattributed_runs += 1;
+        return;
+    }
+
+    let agent = normalized(
+        record
+            .agent_meta
+            .as_ref()
+            .and_then(|meta| meta.name.as_deref())
+            .or(row.agent_name.as_deref()),
+    );
+    for attributed in &attribution.changespecs {
+        project.changespecs.insert(attributed.name.clone());
+        let changespec = work
+            .changespecs
+            .entry((row.project_name.clone(), attributed.name.clone()))
+            .or_default();
+        let first_changespec_run = changespec.runs == 0;
+        changespec.runs += 1;
+        changespec.agents.insert(agent.clone());
+        changespec.commits += attributed.commits;
+        if let Some(duration) = duration {
+            changespec.total_runtime_seconds += duration;
+        }
+        if first_changespec_run || launch_ts < changespec.first_run_ts {
+            changespec.first_run_ts = launch_ts;
+        }
+        if first_changespec_run || launch_ts > changespec.last_run_ts {
+            changespec.last_run_ts = launch_ts;
+        }
+    }
+}
+
+fn finish_work(
+    work: WorkAccumulators,
+    work_top_n: usize,
+) -> AgentWorkStatsWire {
+    let WorkAccumulators {
+        projects,
+        changespecs,
+    } = work;
+    let (metadata, malformed_spec_files_skipped) =
+        load_changespec_metadata(&projects);
+    let unattributed_runs = projects
+        .values()
+        .map(|project| project.unattributed_runs)
+        .sum();
+    let mut project_rows = projects
+        .into_iter()
+        .map(|(project, value)| AgentProjectWorkStatsWire {
+            project,
+            runs: value.runs,
+            completed: value.completed,
+            failed: value.failed,
+            other_terminal: value.other_terminal,
+            in_progress: value.in_progress,
+            waiting: value.waiting,
+            success_rate: ratio(value.completed, value.runs),
+            commits: value.commits,
+            distinct_changespecs: value.changespecs.len() as u64,
+            unattributed_runs: value.unattributed_runs,
+            total_runtime_seconds: value.total_runtime_seconds,
+            last_run_ts: value.last_run_ts,
+        })
+        .collect::<Vec<_>>();
+    project_rows.sort_by(|left, right| {
+        right
+            .runs
+            .cmp(&left.runs)
+            .then_with(|| left.project.cmp(&right.project))
+    });
+
+    let mut changespec_rows = changespecs
+        .into_iter()
+        .map(|((project, name), value)| {
+            let metadata = metadata.get(&(project.clone(), name.clone()));
+            AgentChangeSpecWorkStatsWire {
+                project,
+                name,
+                status: metadata
+                    .map(|value| value.status.clone())
+                    .unwrap_or_else(|| UNKNOWN.to_string()),
+                has_pr: metadata.is_some_and(|value| value.has_pr),
+                runs: value.runs,
+                distinct_agents: value.agents.len() as u64,
+                commits: value.commits,
+                total_runtime_seconds: value.total_runtime_seconds,
+                first_run_ts: value.first_run_ts,
+                last_run_ts: value.last_run_ts,
+            }
+        })
+        .collect::<Vec<_>>();
+    changespec_rows.sort_by(|left, right| {
+        right
+            .runs
+            .cmp(&left.runs)
+            .then_with(|| left.project.cmp(&right.project))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let truncated_changespec_rows =
+        changespec_rows.len().saturating_sub(work_top_n) as u64;
+    changespec_rows.truncate(work_top_n);
+
+    AgentWorkStatsWire {
+        projects: project_rows,
+        changespecs: changespec_rows,
+        unattributed_runs,
+        truncated_changespec_rows,
+        malformed_spec_files_skipped,
+    }
+}
+
+fn load_changespec_metadata(
+    projects: &BTreeMap<String, ProjectWorkAccumulator>,
+) -> (BTreeMap<(String, String), ChangespecMetadata>, u64) {
+    let mut metadata = BTreeMap::new();
+    let mut malformed = 0u64;
+    for (project, value) in projects {
+        if value.changespecs.is_empty() {
+            continue;
+        }
+        let active = value.project_file.as_path();
+        let basename = project_spec_basename(&active.to_string_lossy());
+        let archive = active
+            .parent()
+            .map(|parent| preferred_project_spec_path(parent, &basename, true));
+        let mut paths = vec![active.to_path_buf()];
+        if let Some(archive) = archive.filter(|path| path != active) {
+            paths.push(archive);
+        }
+        for path in paths {
+            let Ok(content) = fs::read(&path) else {
+                malformed += 1;
+                continue;
+            };
+            let Ok(specs) =
+                parse_project_bytes(&path.to_string_lossy(), &content)
+            else {
+                malformed += 1;
+                continue;
+            };
+            for spec in specs {
+                metadata.entry((project.clone(), spec.name)).or_insert_with(
+                    || ChangespecMetadata {
+                        status: spec.status,
+                        has_pr: spec
+                            .pr_url
+                            .as_deref()
+                            .is_some_and(|value| !value.trim().is_empty()),
+                    },
+                );
+            }
+        }
+    }
+    (metadata, malformed)
 }
 
 fn ranked_counts(
@@ -673,7 +1067,15 @@ mod tests {
     }
 
     fn artifact(root: &Path, timestamp: &str) -> PathBuf {
-        root.join("proj")
+        artifact_for_project(root, "proj", timestamp)
+    }
+
+    fn artifact_for_project(
+        root: &Path,
+        project: &str,
+        timestamp: &str,
+    ) -> PathBuf {
+        root.join(project)
             .join("artifacts")
             .join("ace-run")
             .join(timestamp)
@@ -701,6 +1103,25 @@ mod tests {
         dir
     }
 
+    fn add_project_run(
+        projects: &Path,
+        project: &str,
+        timestamp: &str,
+        meta: Value,
+        done: Option<Value>,
+        waiting: bool,
+    ) -> PathBuf {
+        let dir = artifact_for_project(projects, project, timestamp);
+        write_json(&dir.join("agent_meta.json"), meta);
+        if let Some(done) = done {
+            write_json(&dir.join("done.json"), done);
+        }
+        if waiting {
+            write_json(&dir.join("waiting.json"), json!({"waiting_for": []}));
+        }
+        dir
+    }
+
     fn request() -> AgentRunStatsRequestWire {
         AgentRunStatsRequestWire {
             start_ts: parse_timestamp("2026-07-10T00:00:00Z").unwrap() as i64,
@@ -708,6 +1129,8 @@ mod tests {
             runtime_group_by: AgentStatsRuntimeGroupByWire::Agent,
             bucket_seconds: 6 * 60 * 60,
             top_n: 10,
+            project: None,
+            work_top_n: 50,
         }
     }
 
@@ -945,6 +1368,263 @@ mod tests {
         // path, so this also verifies the denormalized fields used before JSON
         // decoding. Keep the variable live to make that relationship clear.
         assert!(first.exists());
+        assert_eq!(result.work.projects[0].runs, 4);
+    }
+
+    #[test]
+    fn attributes_project_and_changespec_work_with_filters_and_statuses() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let project = "gh_sase-org__sase";
+        fs::create_dir_all(projects.join(project)).unwrap();
+        fs::write(
+            projects.join(project).join(format!("{project}.sase")),
+            concat!(
+                "PROJECT_NAME: sase\n",
+                "NAME: commit-spec\n",
+                "STATUS: Ready\n",
+                "PR: https://example.test/pr/1\n\n\n",
+                "NAME: launch-spec\n",
+                "STATUS: WIP\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            projects
+                .join(project)
+                .join(format!("{project}-archive.sase")),
+            "NAME: archived-spec\nSTATUS: Submitted\n",
+        )
+        .unwrap();
+
+        let multi_start = "2026-07-10T01:00:00Z";
+        add_project_run(
+            &projects,
+            project,
+            "20260710010000",
+            json!({
+                "name": "multi",
+                "run_started_at": multi_start,
+                "cl_name": "launch-spec",
+                "commit_changespec_name": "launch-spec"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(multi_start, 60.0),
+                "step_output": {"meta_commits": [
+                    {"sha": "1", "changespec_name": "commit-spec"},
+                    {"sha": "2", "changespec_name": "commit-spec"},
+                    {"sha": "3", "changespec_name": "archived-spec"}
+                ]}
+            })),
+            false,
+        );
+        let fallback_start = "2026-07-10T02:00:00Z";
+        add_project_run(
+            &projects,
+            project,
+            "20260710020000",
+            json!({
+                "name": "fallback",
+                "run_started_at": fallback_start,
+                "cl_name": "launch-spec",
+                "commit_changespec_name": "archived-spec"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(fallback_start, 30.0),
+                "step_output": {"meta_commits": [{"sha": "4"}]}
+            })),
+            false,
+        );
+        let orphan_start = "2026-07-10T03:00:00Z";
+        add_project_run(
+            &projects,
+            project,
+            "20260710030000",
+            json!({
+                "name": "orphan",
+                "run_started_at": orphan_start,
+                "cl_name": "orphan-spec"
+            }),
+            Some(json!({
+                "outcome": "failed",
+                "finished_at": finish_at(orphan_start, 20.0)
+            })),
+            false,
+        );
+        let key_start = "2026-07-10T04:00:00Z";
+        add_project_run(
+            &projects,
+            project,
+            "20260710040000",
+            json!({
+                "name": "key-placeholder",
+                "run_started_at": key_start,
+                "cl_name": project
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(key_start, 10.0)
+            })),
+            false,
+        );
+        add_project_run(
+            &projects,
+            project,
+            "20260710050000",
+            json!({
+                "name": "display-placeholder",
+                "run_started_at": "2026-07-10T05:00:00Z",
+                "cl_name": "sase-org/sase"
+            }),
+            None,
+            false,
+        );
+        add_project_run(
+            &projects,
+            project,
+            "20260710060000",
+            json!({
+                "name": "bare-placeholder",
+                "run_started_at": "2026-07-10T06:00:00Z",
+                "cl_name": "sase"
+            }),
+            None,
+            true,
+        );
+        let unknown_start = "2026-07-10T07:00:00Z";
+        add_project_run(
+            &projects,
+            project,
+            "20260710070000",
+            json!({
+                "name": "unknown-placeholder",
+                "run_started_at": unknown_start,
+                "cl_name": "unknown"
+            }),
+            Some(json!({
+                "outcome": "cancelled",
+                "finished_at": finish_at(unknown_start, 5.0)
+            })),
+            false,
+        );
+
+        let other = "other";
+        fs::create_dir_all(projects.join(other)).unwrap();
+        fs::write(projects.join(other).join("other.sase"), [0xff]).unwrap();
+        let other_start = "2026-07-10T08:00:00Z";
+        add_project_run(
+            &projects,
+            other,
+            "20260710080000",
+            json!({
+                "name": "other-agent",
+                "run_started_at": other_start,
+                "cl_name": "other-spec"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(other_start, 10.0)
+            })),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let mut filtered = request();
+        filtered.project = Some(project.to_string());
+        filtered.runtime_group_by = AgentStatsRuntimeGroupByWire::Changespec;
+        let result = query_run_stats(&index, filtered.clone()).unwrap();
+        assert_eq!(result.totals.runs, 7);
+        assert_eq!(result.work.projects.len(), 1);
+        let project_row = &result.work.projects[0];
+        assert_eq!(project_row.project, project);
+        assert_eq!(project_row.runs, 7);
+        assert_eq!(project_row.completed, 3);
+        assert_eq!(project_row.failed, 1);
+        assert_eq!(project_row.other_terminal, 1);
+        assert_eq!(project_row.in_progress, 1);
+        assert_eq!(project_row.waiting, 1);
+        assert_eq!(project_row.commits, 4);
+        assert_eq!(project_row.distinct_changespecs, 3);
+        assert_eq!(project_row.unattributed_runs, 4);
+        assert_eq!(project_row.total_runtime_seconds, 125.0);
+        assert_eq!(result.work.unattributed_runs, 4);
+        assert_eq!(result.work.malformed_spec_files_skipped, 0);
+
+        let archived = result
+            .work
+            .changespecs
+            .iter()
+            .find(|row| row.name == "archived-spec")
+            .unwrap();
+        assert_eq!(archived.status, "Submitted");
+        assert_eq!(archived.runs, 2);
+        assert_eq!(archived.distinct_agents, 2);
+        assert_eq!(archived.commits, 2);
+        assert_eq!(archived.total_runtime_seconds, 90.0);
+        let committed = result
+            .work
+            .changespecs
+            .iter()
+            .find(|row| row.name == "commit-spec")
+            .unwrap();
+        assert_eq!(committed.status, "Ready");
+        assert!(committed.has_pr);
+        assert_eq!(committed.commits, 2);
+        assert!(result
+            .work
+            .changespecs
+            .iter()
+            .all(|row| row.name != "launch-spec"));
+        let orphan = result
+            .work
+            .changespecs
+            .iter()
+            .find(|row| row.name == "orphan-spec")
+            .unwrap();
+        assert_eq!(orphan.status, UNKNOWN);
+
+        let runtime = |name: &str| {
+            result
+                .runtime_groups
+                .iter()
+                .find(|group| group.group == name)
+                .unwrap()
+                .total_seconds
+        };
+        assert_eq!(runtime("archived-spec"), 90.0);
+        assert_eq!(runtime("commit-spec"), 60.0);
+        assert_eq!(runtime("orphan-spec"), 20.0);
+        assert_eq!(runtime(NO_CHANGESPEC), 15.0);
+
+        filtered.work_top_n = 2;
+        let truncated = query_run_stats(&index, filtered).unwrap();
+        assert_eq!(truncated.work.changespecs.len(), 2);
+        assert_eq!(truncated.work.truncated_changespec_rows, 1);
+
+        let mut by_project = request();
+        by_project.runtime_group_by = AgentStatsRuntimeGroupByWire::Project;
+        let all_projects = query_run_stats(&index, by_project).unwrap();
+        assert_eq!(all_projects.totals.runs, 8);
+        assert_eq!(all_projects.work.projects.len(), 2);
+        assert_eq!(all_projects.work.malformed_spec_files_skipped, 2);
+        assert_eq!(
+            all_projects
+                .runtime_groups
+                .iter()
+                .find(|group| group.group == project)
+                .unwrap()
+                .total_seconds,
+            125.0
+        );
     }
 
     #[test]
