@@ -310,6 +310,24 @@ fn default_seen_capacity() -> usize {
     1024
 }
 
+/// Request to release exact keys from the once-per store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopOncePerReleaseRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub document: ChopSeenStoreDocumentWire,
+    pub keys: Vec<String>,
+}
+
+/// Once-per release result plus the transformed store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopOncePerReleaseWire {
+    pub document: ChopSeenStoreDocumentWire,
+    pub released: usize,
+}
+
 /// Declarative per-proposal event-dedupe configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

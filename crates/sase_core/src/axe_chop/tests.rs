@@ -220,6 +220,55 @@ fn once_per_store_rejects_duplicates_and_evicts_oldest() {
 }
 
 #[test]
+fn once_per_release_removes_exact_keys_and_is_idempotent() {
+    let request: ChopOncePerReleaseRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "document": {"schema_version": 1, "entries": [
+                {"key": "first", "seen_at": "t0"},
+                {"key": "second", "seen_at": "t1"}
+            ]},
+            "keys": ["first", "missing", "first"]
+        }))
+        .unwrap();
+
+    let released = release_chop_once_per(&request).unwrap();
+    assert_eq!(released.released, 1);
+    assert_eq!(released.document.entries.len(), 1);
+    assert_eq!(released.document.entries[0].key, "second");
+
+    let repeated = release_chop_once_per(&ChopOncePerReleaseRequestWire {
+        document: released.document,
+        ..request
+    })
+    .unwrap();
+    assert_eq!(repeated.released, 0);
+    assert_eq!(repeated.document.entries[0].key, "second");
+}
+
+#[test]
+fn once_per_release_validates_engine_and_document_schemas() {
+    let request = ChopOncePerReleaseRequestWire {
+        schema_version: CHOP_ENGINE_SCHEMA_VERSION + 1,
+        document: ChopSeenStoreDocumentWire::default(),
+        keys: vec!["first".to_string()],
+    };
+    let engine_error = release_chop_once_per(&request).unwrap_err();
+    assert_eq!(engine_error.code, "schema_version_mismatch");
+
+    let state_error = release_chop_once_per(&ChopOncePerReleaseRequestWire {
+        schema_version: CHOP_ENGINE_SCHEMA_VERSION,
+        document: ChopSeenStoreDocumentWire {
+            schema_version: CHOP_STATE_SCHEMA_VERSION + 1,
+            entries: Vec::new(),
+        },
+        ..request
+    })
+    .unwrap_err();
+    assert_eq!(state_error.code, "state_schema_version_mismatch");
+}
+
+#[test]
 fn target_expansion_filters_projects_and_separates_overrides() {
     let request: ChopTargetExpansionRequestWire =
         serde_json::from_value(json!({

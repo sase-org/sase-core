@@ -99,6 +99,7 @@
 //! - `evaluate_chop_decision(request: dict) -> dict`
 //! - `apply_chop_checkpoint_update(request: dict) -> dict`
 //! - `check_and_record_chop_once_per(request: dict) -> dict`
+//! - `release_chop_once_per(request: dict) -> dict`
 //! - `expand_chop_targets(request: dict) -> dict`
 //! - `parse_chop_duration(value: str) -> int`
 //! - `validate_axe_config(request: dict) -> list[dict]`
@@ -242,14 +243,16 @@ use sase_core::axe_chop::{
     expand_chop_targets as core_expand_chop_targets,
     parse_chop_duration as core_parse_chop_duration,
     parse_chop_result as core_parse_chop_result,
+    release_chop_once_per as core_release_chop_once_per,
     validate_axe_config as core_validate_axe_config,
     validate_chop_proposal as core_validate_chop_proposal,
     validate_chop_result as core_validate_chop_result,
     AxeConfigValidationRequestWire, ChopCheckpointUpdateRequestWire,
     ChopDecisionRequestWire, ChopEngineError, ChopLaunchProposalWire,
-    ChopOncePerRequestWire, ChopResultDocumentWire,
-    ChopTargetExpansionRequestWire, CHOP_ENGINE_SCHEMA_VERSION,
-    CHOP_RESULT_SCHEMA_VERSION, CHOP_STATE_SCHEMA_VERSION,
+    ChopOncePerReleaseRequestWire, ChopOncePerRequestWire,
+    ChopResultDocumentWire, ChopTargetExpansionRequestWire,
+    CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
+    CHOP_STATE_SCHEMA_VERSION,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -3562,6 +3565,20 @@ fn py_check_and_record_chop_once_per<'py>(
     chop_result_to_py(py, &result)
 }
 
+/// Release exact keys from a bounded runner-owned seen store.
+#[pyfunction]
+#[pyo3(name = "release_chop_once_per")]
+fn py_release_chop_once_per<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopOncePerReleaseRequestWire =
+        chop_request_from_pydict(request, "chop once-per release request")?;
+    let result =
+        core_release_chop_once_per(&request).map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
 /// Expand literal or host-provided source targets into stable instances.
 #[pyfunction]
 #[pyo3(name = "expand_chop_targets")]
@@ -4477,6 +4494,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_evaluate_chop_decision, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_chop_checkpoint_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_check_and_record_chop_once_per, m)?)?;
+    m.add_function(wrap_pyfunction!(py_release_chop_once_per, m)?)?;
     m.add_function(wrap_pyfunction!(py_expand_chop_targets, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_chop_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_axe_config, m)?)?;

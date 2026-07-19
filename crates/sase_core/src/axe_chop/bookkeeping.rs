@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use super::wire::{
     ChopCheckpointEntryWire, ChopCheckpointEventWire, ChopCheckpointPolicyWire,
     ChopCheckpointUpdateRequestWire, ChopEngineError, ChopOncePerDecisionWire,
-    ChopOncePerRequestWire, ChopSeenEntryWire, CHOP_ENGINE_SCHEMA_VERSION,
-    CHOP_STATE_SCHEMA_VERSION,
+    ChopOncePerReleaseRequestWire, ChopOncePerReleaseWire,
+    ChopOncePerRequestWire, ChopSeenEntryWire, ChopSeenStoreDocumentWire,
+    CHOP_ENGINE_SCHEMA_VERSION, CHOP_STATE_SCHEMA_VERSION,
 };
 
 /// Apply one lifecycle observation to a runner-owned checkpoint document.
@@ -121,7 +122,7 @@ pub fn check_and_record_once_per(
     request: &ChopOncePerRequestWire,
 ) -> Result<ChopOncePerDecisionWire, ChopEngineError> {
     validate_engine_schema(request.schema_version)?;
-    validate_state_schema(request.document.schema_version, "$.document")?;
+    let known = validate_seen_document(&request.document)?;
     if request.key.trim().is_empty() {
         return Err(ChopEngineError::new(
             "blank_value",
@@ -142,23 +143,6 @@ pub fn check_and_record_once_per(
             "$.capacity",
             "once-per store capacity must be positive",
         ));
-    }
-    let mut known = BTreeSet::new();
-    for (index, entry) in request.document.entries.iter().enumerate() {
-        if entry.key.trim().is_empty() {
-            return Err(ChopEngineError::new(
-                "blank_value",
-                format!("$.document.entries[{index}].key"),
-                "stored once-per key must not be blank",
-            ));
-        }
-        if !known.insert(entry.key.as_str()) {
-            return Err(ChopEngineError::new(
-                "duplicate_seen_key",
-                format!("$.document.entries[{index}].key"),
-                format!("once-per key `{}` is duplicated", entry.key),
-            ));
-        }
     }
 
     if known.contains(request.key.as_str()) {
@@ -185,6 +169,51 @@ pub fn check_and_record_once_per(
         reason: format!("recorded once-per key `{}`", request.key),
         document,
     })
+}
+
+/// Release exact keys from a runner-owned once-per store.
+pub fn release_chop_once_per(
+    request: &ChopOncePerReleaseRequestWire,
+) -> Result<ChopOncePerReleaseWire, ChopEngineError> {
+    validate_engine_schema(request.schema_version)?;
+    validate_seen_document(&request.document)?;
+
+    let keys: BTreeSet<&str> =
+        request.keys.iter().map(String::as_str).collect();
+
+    let mut document = request.document.clone();
+    let previous_len = document.entries.len();
+    document
+        .entries
+        .retain(|entry| !keys.contains(entry.key.as_str()));
+    Ok(ChopOncePerReleaseWire {
+        released: previous_len - document.entries.len(),
+        document,
+    })
+}
+
+fn validate_seen_document(
+    document: &ChopSeenStoreDocumentWire,
+) -> Result<BTreeSet<&str>, ChopEngineError> {
+    validate_state_schema(document.schema_version, "$.document")?;
+    let mut known = BTreeSet::new();
+    for (index, entry) in document.entries.iter().enumerate() {
+        if entry.key.trim().is_empty() {
+            return Err(ChopEngineError::new(
+                "blank_value",
+                format!("$.document.entries[{index}].key"),
+                "stored once-per key must not be blank",
+            ));
+        }
+        if !known.insert(entry.key.as_str()) {
+            return Err(ChopEngineError::new(
+                "duplicate_seen_key",
+                format!("$.document.entries[{index}].key"),
+                format!("once-per key `{}` is duplicated", entry.key),
+            ));
+        }
+    }
+    Ok(known)
 }
 
 fn validate_engine_schema(version: u32) -> Result<(), ChopEngineError> {
