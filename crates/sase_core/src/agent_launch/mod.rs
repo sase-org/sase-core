@@ -983,7 +983,7 @@ fn is_line_start(rendered: &str, index: usize) -> bool {
             .is_some_and(|ch| ch == '\n' || ch == '\r')
 }
 
-fn extract_repeat_and_name_rust(
+fn extract_repeat_and_id_rust(
     prompt: &str,
 ) -> (Option<u32>, Option<String>, String) {
     if !prompt.contains('%') {
@@ -992,7 +992,7 @@ fn extract_repeat_and_name_rust(
 
     let ignored_ranges = launch_literal_zone_ranges(prompt);
     let mut repeat_count = None;
-    let mut explicit_name = None;
+    let mut explicit_id = None;
     let mut regions = Vec::new();
 
     for directive in directive_occurrences(prompt).unwrap_or_default() {
@@ -1000,7 +1000,7 @@ fn extract_repeat_and_name_rust(
             continue;
         }
         if directive.canonical_name != "repeat"
-            && directive.canonical_name != "name"
+            && directive.canonical_name != "id"
         {
             continue;
         }
@@ -1013,7 +1013,7 @@ fn extract_repeat_and_name_rust(
         if directive.canonical_name == "repeat" {
             repeat_count = raw_arg.parse::<u32>().ok();
         } else {
-            explicit_name = if raw_arg.is_empty() {
+            explicit_id = if raw_arg.is_empty() {
                 None
             } else {
                 Some(raw_arg)
@@ -1031,7 +1031,7 @@ fn extract_repeat_and_name_rust(
     }
     cleaned = leading_blank_line_re().replace(&cleaned, "").to_string();
     cleaned = strip_disabled_region_markers(&cleaned);
-    (repeat_count, explicit_name, cleaned)
+    (repeat_count, explicit_id, cleaned)
 }
 
 fn has_wait_directive(prompt: &str) -> bool {
@@ -1617,7 +1617,7 @@ fn plan_model_fanout(
 }
 
 fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
-    let (count, explicit_name, stripped) = extract_repeat_and_name_rust(prompt);
+    let (count, explicit_id, stripped) = extract_repeat_and_id_rust(prompt);
     let slots = match count {
         Some(count) if count > 1 => (0..count)
             .map(|idx| LaunchFanoutSlotWire {
@@ -1628,7 +1628,7 @@ fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
                 timestamp: None,
                 workflow_name: None,
                 model: None,
-                repeat_name: explicit_name.clone(),
+                repeat_name: explicit_id.clone(),
                 wait_for_previous: idx > 0,
             })
             .collect(),
@@ -2246,7 +2246,7 @@ mod tests {
             schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
             launch_kind: "repeat".to_string(),
             slots: vec![LaunchFanoutSlotWire {
-                prompt: "%n:task.1\nfix it".to_string(),
+                prompt: "%i:task.1\nfix it".to_string(),
                 launch_kind: "repeat".to_string(),
                 slot_index: 0,
                 alt_id: None,
@@ -2739,7 +2739,7 @@ mod tests {
 
     #[test]
     fn fanout_planner_rejects_repeated_top_level_models_with_alternatives() {
-        let prompt = "%name:foo\n%model:opus\n%model:sonnet %alt(x,y)\nReview";
+        let prompt = "%id:foo\n%model:opus\n%model:sonnet %alt(x,y)\nReview";
 
         let err = plan_agent_launch_fanout(prompt, Some("model")).unwrap_err();
 
@@ -2756,7 +2756,7 @@ mod tests {
 
     #[test]
     fn fanout_planner_splits_model_branches_and_alternatives() {
-        let prompt = "%name:foo\n%{%m:opus | %m:sonnet} %alt(x,y)\nReview";
+        let prompt = "%id:foo\n%{%m:opus | %m:sonnet} %alt(x,y)\nReview";
 
         let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
 
@@ -2858,29 +2858,57 @@ mod tests {
 
     #[test]
     fn fanout_planner_extracts_repeat_slots() {
-        let prompt = "%r:3 %n:task %model:opus do work";
+        for prompt in [
+            "%repeat:3 %id:task %model:opus do work",
+            "%r:3 %i:task %model:opus do work",
+        ] {
+            let plan =
+                plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
 
-        let plan = plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
-
-        assert_eq!(plan.launch_kind, "repeat");
-        assert_eq!(plan.slots.len(), 3);
-        assert_eq!(plan.slots[0].repeat_name.as_deref(), Some("task"));
-        assert_eq!(plan.slots[0].prompt, "  %model:opus do work");
-        assert!(!plan.slots[0].wait_for_previous);
-        assert!(plan.slots[1].wait_for_previous);
+            assert_eq!(plan.launch_kind, "repeat");
+            assert_eq!(plan.slots.len(), 3);
+            assert_eq!(plan.slots[0].repeat_name.as_deref(), Some("task"));
+            assert_eq!(plan.slots[0].prompt, "  %model:opus do work");
+            assert!(!plan.slots[0].wait_for_previous);
+            assert!(plan.slots[1].wait_for_previous);
+        }
     }
 
     #[test]
-    fn fanout_planner_ignores_repeat_and_name_inside_adjacent_inline_code() {
-        let prompt =
-            "keep `foo`/`%r:9` and prefix`%n:wrong`suffix %r:2 %n:right work";
+    fn fanout_planner_preserves_repeat_and_id_inside_literal_zones() {
+        let prompt = concat!(
+            "%xprompts_enabled:false\n",
+            "%r:9 %i:disabled\n",
+            "%xprompts_enabled:true\n",
+            "```text\n%repeat:8 %id:fenced\n```\n",
+            "keep `foo`/`%r:7` and prefix`%i:inline`suffix ",
+            "%r:2 %id:right work",
+        );
 
         let plan = plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
 
         assert_eq!(plan.slots.len(), 2);
         assert_eq!(plan.slots[0].repeat_name.as_deref(), Some("right"));
-        assert!(plan.slots[0].prompt.contains("`%r:9`"));
-        assert!(plan.slots[0].prompt.contains("`%n:wrong`"));
+        assert!(plan.slots[0].prompt.contains("%r:9 %i:disabled"));
+        assert!(plan.slots[0]
+            .prompt
+            .contains("```text\n%repeat:8 %id:fenced\n```"));
+        assert!(plan.slots[0].prompt.contains("`%r:7`"));
+        assert!(plan.slots[0].prompt.contains("`%i:inline`"));
+    }
+
+    #[test]
+    fn fanout_planner_does_not_support_removed_name_spellings() {
+        let prompt = "%r:2 %name:legacy %n:short work";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].repeat_name, None);
+        assert!(plan.slots[0].prompt.contains("%name:legacy"));
+        assert!(plan.slots[0].prompt.contains("%n:short"));
+        assert_eq!(canonical_directive_name("name"), "name");
+        assert_eq!(canonical_directive_name("n"), "n");
     }
 
     #[test]

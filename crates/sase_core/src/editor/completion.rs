@@ -1773,13 +1773,15 @@ fn directive_arg_token(
             .collect();
         return Some(target);
     }
-    if canonical != "clan" || directive.as_bytes().get(split) != Some(&b'(') {
+    if !matches!(canonical, "clan" | "id")
+        || directive.as_bytes().get(split) != Some(&b'(')
+    {
         return Some(target);
     }
 
-    // `%clan` accepts the clan name first and the optional `tribe=` keyword
-    // only after a comma. Keep the canonical directive name for hover while
-    // narrowing keyword completion and replacement to the active clause.
+    // `%clan` accepts `tribe=` and `%id` accepts `clan=` only after their
+    // positional argument(s). Keep the canonical directive name for hover
+    // while narrowing keyword completion and replacement to the active clause.
     let body = &directive[split + 1..];
     let Some(comma) = body.rfind(',') else {
         return Some(target);
@@ -2097,77 +2099,102 @@ mod tests {
     }
 
     #[test]
-    fn clan_keyword_completion_targets_only_the_post_comma_fragment() {
+    fn directive_keyword_completion_targets_only_the_post_comma_fragment() {
         let catalog = entries();
-        for (text, cursor, expected_start) in [
-            ("%clan(research, tr)", 18, 16),
-            ("%c(research, tr)", 15, 13),
+        for (text, cursor, expected_start, directive_name, keyword) in [
+            ("%clan(research, tr)", 18, 16, "clan", "tribe="),
+            ("%c(research, tr)", 15, 13, "clan", "tribe="),
+            ("%id(worker, cl)", 14, 12, "id", "clan="),
+            ("%i(worker, cl)", 13, 11, "id", "clan="),
         ] {
             let doc = DocumentSnapshot::new(text);
             let context =
                 classify_completion_context(&doc, pos(cursor), &catalog)
-                    .expect("clan keyword completion context");
+                    .expect("directive keyword completion context");
             assert_eq!(
                 context.kind,
                 CompletionContextKind::DirectiveArgumentKeyword,
                 "{text}"
             );
-            assert_eq!(context.directive_name.as_deref(), Some("clan"));
-            assert_eq!(context.token.as_ref().unwrap().text, "tr");
+            assert_eq!(context.directive_name.as_deref(), Some(directive_name));
+            assert_eq!(context.token.as_ref().unwrap().text, &keyword[..2]);
             assert_eq!(
                 context.replacement_range,
                 doc.byte_range_to_range(expected_start, cursor as usize)
                     .unwrap()
             );
 
-            let candidates = directive_argument_candidates("clan").candidates;
+            let candidates =
+                directive_argument_candidates(directive_name).candidates;
             assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].insertion, "tribe=");
+            assert_eq!(candidates[0].insertion, keyword);
         }
     }
 
     #[test]
-    fn clan_keyword_completion_stays_out_of_name_and_value_positions() {
+    fn directive_keyword_completion_stays_out_of_positional_and_value_positions(
+    ) {
         let catalog = entries();
-        let doc = DocumentSnapshot::new("%clan(re");
-        let name_context =
-            classify_completion_context(&doc, pos(8), &catalog).unwrap();
-        assert_eq!(name_context.kind, CompletionContextKind::DirectiveArgument);
-        assert_eq!(name_context.directive_name.as_deref(), Some("clan"));
-        assert_eq!(name_context.token.as_ref().unwrap().text, "re");
+        for (open, closed_text, directive_name) in [
+            ("%clan(re", "%clan(research, tribe=blue)", "clan"),
+            ("%id(wo", "%id(worker, clan=research)", "id"),
+        ] {
+            let doc = DocumentSnapshot::new(open);
+            let positional_context = classify_completion_context(
+                &doc,
+                pos(open.len() as u32),
+                &catalog,
+            )
+            .unwrap();
+            assert_eq!(
+                positional_context.kind,
+                CompletionContextKind::DirectiveArgument
+            );
+            assert_eq!(
+                positional_context.directive_name.as_deref(),
+                Some(directive_name)
+            );
 
-        let text = "%clan(research, tribe=blue)";
-        let value_start = text.find("blue").unwrap();
-        let doc = DocumentSnapshot::new(text);
-        let value_context = classify_completion_context(
-            &doc,
-            pos((text.len() - 1) as u32),
-            &catalog,
-        )
-        .unwrap();
-        assert_eq!(
-            value_context.kind,
-            CompletionContextKind::DirectiveArgument
-        );
-        assert_eq!(value_context.directive_name.as_deref(), Some("clan"));
-        assert_eq!(value_context.token.as_ref().unwrap().text, "blue");
-        assert_eq!(
-            value_context.replacement_range,
-            doc.byte_range_to_range(value_start, text.len() - 1)
-                .unwrap()
-        );
+            let value = if directive_name == "clan" {
+                "blue"
+            } else {
+                "research"
+            };
+            let value_start = closed_text.find(value).unwrap();
+            let doc = DocumentSnapshot::new(closed_text);
+            let value_context = classify_completion_context(
+                &doc,
+                pos((closed_text.len() - 1) as u32),
+                &catalog,
+            )
+            .unwrap();
+            assert_eq!(
+                value_context.kind,
+                CompletionContextKind::DirectiveArgument
+            );
+            assert_eq!(
+                value_context.directive_name.as_deref(),
+                Some(directive_name)
+            );
+            assert_eq!(value_context.token.as_ref().unwrap().text, value);
+            assert_eq!(
+                value_context.replacement_range,
+                doc.byte_range_to_range(value_start, closed_text.len() - 1)
+                    .unwrap()
+            );
 
-        let closed = DocumentSnapshot::new("%clan(research, tribe=blue)");
-        let closed_context = classify_completion_context(
-            &closed,
-            pos(closed.text().len() as u32),
-            &catalog,
-        );
-        assert!(!closed_context.is_some_and(|context| matches!(
-            context.kind,
-            CompletionContextKind::DirectiveArgument
-                | CompletionContextKind::DirectiveArgumentKeyword
-        )));
+            let closed = DocumentSnapshot::new(closed_text);
+            let closed_context = classify_completion_context(
+                &closed,
+                pos(closed.text().len() as u32),
+                &catalog,
+            );
+            assert!(!closed_context.is_some_and(|context| matches!(
+                context.kind,
+                CompletionContextKind::DirectiveArgument
+                    | CompletionContextKind::DirectiveArgumentKeyword
+            )));
+        }
     }
 
     #[test]

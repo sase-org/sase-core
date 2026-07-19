@@ -303,7 +303,7 @@ fn validate_token(
     Ok(())
 }
 
-/// Derive the default `%name` value for a proposal.
+/// Derive the default `%id` value for a proposal.
 pub fn derive_chop_agent_name(
     chop_name: &str,
     target_key: Option<&str>,

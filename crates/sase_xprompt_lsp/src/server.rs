@@ -751,7 +751,7 @@ impl XpromptLspServer {
                             token,
                             config.model_catalog.as_deref(),
                         )
-                    } else if name == "clan" {
+                    } else if matches!(name, "clan" | "id") {
                         empty_completion_list()
                     } else {
                         editor_directive_argument_candidates(name)
@@ -1263,11 +1263,10 @@ fn directive_snippet_items(
                 // The advertised alt spelling is the `%{A | B}` brace shorthand.
                 "%{${1:A} | ${2:B}\\}$0".to_string()
             } else {
-                let placeholder = if matches!(directive.name, "clan" | "tribe")
-                {
-                    "name"
-                } else {
-                    "value"
+                let placeholder = match directive.name {
+                    "clan" | "tribe" => "name",
+                    "id" => "agent-id",
+                    _ => "value",
                 };
                 format!("%{}:${{1:{placeholder}}}$0", directive.name)
             };
@@ -1282,6 +1281,14 @@ fn directive_snippet_items(
                 items.push(snippet_completion_item(
                     "%clan(..., tribe=...)".to_string(),
                     "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation,
+                    replacement_range,
+                ));
+            } else if directive.name == "id" {
+                items.push(snippet_completion_item(
+                    "%id(..., clan=...)".to_string(),
+                    "%id(${1:id}, clan=${2:clan})$0".to_string(),
                     Some("directive snippet".to_string()),
                     documentation,
                     replacement_range,
@@ -2133,7 +2140,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completes_clan_and_tribe_from_the_public_editor_surface() {
+    async fn completes_identity_clan_and_tribe_from_the_public_editor_surface()
+    {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2142,8 +2150,20 @@ mod tests {
         });
         let server = service.inner();
         for (token, name, alias, description) in [
-            ("%cla", "clan", "c", "Join a named parallel agent clan"),
-            ("%c", "clan", "c", "Join a named parallel agent clan"),
+            (
+                "%id",
+                "id",
+                "i",
+                "Assign an explicit agent ID or attach to an agent family",
+            ),
+            (
+                "%i",
+                "id",
+                "i",
+                "Assign an explicit agent ID or attach to an agent family",
+            ),
+            ("%cla", "clan", "c", "Declare a new parallel agent clan"),
+            ("%c", "clan", "c", "Declare a new parallel agent clan"),
             (
                 "%tr",
                 "tribe",
@@ -2191,7 +2211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removed_family_and_group_directives_do_not_complete() {
+    async fn removed_identity_family_and_group_directives_do_not_complete() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2200,7 +2220,7 @@ mod tests {
         });
         let server = service.inner();
 
-        for token in ["%family", "%f", "%group", "%g"] {
+        for token in ["%name", "%n", "%family", "%f", "%group", "%g"] {
             let response = server
                 .completion_for_text(
                     token.to_string(),
@@ -2216,7 +2236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clan_keyword_completion_uses_the_active_fragment_range() {
+    async fn directive_keyword_completion_uses_the_active_fragment_range() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2225,9 +2245,35 @@ mod tests {
         });
         let server = service.inner();
 
-        for (text, cursor, start) in [
-            ("%clan(research, tr)", 18, 16),
-            ("%c(research, tr)", 15, 13),
+        for (text, cursor, start, keyword, expected_documentation) in [
+            (
+                "%clan(research, tr)",
+                18,
+                16,
+                "tribe=",
+                "Assign this clan to a user-managed tribe",
+            ),
+            (
+                "%c(research, tr)",
+                15,
+                13,
+                "tribe=",
+                "Assign this clan to a user-managed tribe",
+            ),
+            (
+                "%id(worker, cl)",
+                14,
+                12,
+                "clan=",
+                "Derive the full ID and join this agent clan",
+            ),
+            (
+                "%i(worker, cl)",
+                13,
+                11,
+                "clan=",
+                "Derive the full ID and join this agent clan",
+            ),
         ] {
             let response = server
                 .completion_for_text(text.to_string(), Position::new(0, cursor))
@@ -2238,22 +2284,22 @@ mod tests {
             };
             assert_eq!(items.len(), 1, "{text}");
             assert_text_completion_item(
-                &items, "tribe=", start, cursor, "tribe=",
+                &items, keyword, start, cursor, keyword,
             );
-            let Some(Documentation::MarkupContent(documentation)) =
+            let Some(Documentation::MarkupContent(item_documentation)) =
                 items[0].documentation.as_ref()
             else {
-                panic!("expected tribe keyword documentation");
+                panic!("expected directive keyword documentation");
             };
-            assert_eq!(
-                documentation.value,
-                "Assign this clan to a user-managed tribe"
-            );
+            assert_eq!(item_documentation.value, expected_documentation);
         }
 
-        for (text, cursor) in
-            [("%clan(re", 8), ("%clan(research, tribe=blue)", 26)]
-        {
+        for (text, cursor) in [
+            ("%clan(re", 8),
+            ("%clan(research, tribe=blue)", 26),
+            ("%id(wo", 6),
+            ("%id(worker, clan=research)", 25),
+        ] {
             let response = server
                 .completion_for_text(text.to_string(), Position::new(0, cursor))
                 .await
@@ -2662,7 +2708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snippet_clients_receive_simple_and_combined_clan_forms() {
+    async fn snippet_clients_receive_identity_and_clan_forms() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2722,6 +2768,27 @@ mod tests {
         assert_snippet_item(&items, "%tribe:...", "%tribe:${1:name}$0");
         assert!(!items.iter().any(|item| item.label.contains("family")
             || item.label.contains("group")));
+
+        for token in ["%id", "%i"] {
+            let response = server
+                .completion_for_text(
+                    token.to_string(),
+                    Position::new(0, token.len() as u32),
+                )
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert_snippet_item(&items, "%id:...", "%id:${1:agent-id}$0");
+            assert_snippet_item(
+                &items,
+                "%id(..., clan=...)",
+                "%id(${1:id}, clan=${2:clan})$0",
+            );
+            assert!(!items.iter().any(|item| item.label.starts_with("%name")
+                || item.label.starts_with("%n:")));
+        }
     }
 
     #[test]
@@ -2764,7 +2831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clan_and_tribe_hover_and_diagnostics_use_current_metadata() {
+    async fn identity_clan_and_tribe_editor_surfaces_use_current_metadata() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2775,10 +2842,16 @@ mod tests {
 
         for (text, cursor, heading, description) in [
             (
+                "%i(worker, cl)",
+                13,
+                "**%id**",
+                "Assign an explicit agent ID or attach to an agent family",
+            ),
+            (
                 "%c(research, tr)",
                 15,
                 "**%clan**",
-                "Join a named parallel agent clan",
+                "Declare a new parallel agent clan",
             ),
             (
                 "%t:research",
@@ -2804,7 +2877,7 @@ mod tests {
 
         let current = server
             .diagnostics_for_text(
-                "%clan(research.@, tribe=research) %c(research, tribe=research) %tribe:research %t:research".to_string(),
+                "%id(worker, clan=research) %i:worker %clan(research.@, tribe=research) %c:research %tribe:research %t:research".to_string(),
             )
             .await;
         assert!(!current.iter().any(|diagnostic| matches!(
@@ -2814,7 +2887,7 @@ mod tests {
 
         let removed = server
             .diagnostics_for_text(
-                "%family:x %f:x %group:x %g:x %wat:x".to_string(),
+                "%name:x %n:x %family:x %f:x %group:x %g:x %wat:x".to_string(),
             )
             .await;
         assert_eq!(
@@ -2825,7 +2898,7 @@ mod tests {
                     Some(lsp_types::NumberOrString::String(code)) if code == "unknown_directive"
                 ))
                 .count(),
-            5
+            7
         );
     }
 

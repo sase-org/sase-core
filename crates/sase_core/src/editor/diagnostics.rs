@@ -758,9 +758,9 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_clan_and_tribe_but_rejects_removed_directives() {
+    fn recognizes_current_directives_but_rejects_removed_spellings() {
         let current = DocumentSnapshot::new(
-            "%clan(research.@, tribe=research) %c(research, tribe=research) %tribe:research %t:research",
+            "%id(worker, clan=research) %i:worker %clan(research, tribe=research) %c:research %tribe:research %t:research",
         );
         assert_eq!(
             diagnostic_count(
@@ -770,11 +770,12 @@ mod tests {
             0
         );
 
-        let removed =
-            DocumentSnapshot::new("%family:x %f:x %group:x %g:x %wat:x");
+        let removed = DocumentSnapshot::new(
+            "%name:x %n:x %family:x %f:x %group:x %g:x %wat:x",
+        );
         let diagnostics = analyze_document(&removed, &catalog());
-        assert_eq!(diagnostic_count(&diagnostics, "unknown_directive"), 5);
-        for name in ["family", "f", "group", "g", "wat"] {
+        assert_eq!(diagnostic_count(&diagnostics, "unknown_directive"), 7);
+        for name in ["name", "n", "family", "f", "group", "g", "wat"] {
             assert!(
                 diagnostics.iter().any(|diagnostic| diagnostic.message
                     == format!("Unknown directive `%{name}`")),

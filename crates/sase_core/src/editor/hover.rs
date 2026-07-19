@@ -238,19 +238,31 @@ mod tests {
     }
 
     #[test]
-    fn directive_argument_hover_uses_canonical_clan_and_tribe_metadata() {
+    fn directive_argument_hover_uses_current_identity_and_group_metadata() {
         for (text, character, heading, description) in [
+            (
+                "%id(worker, cl)",
+                14,
+                "**%id**",
+                "Assign an explicit agent ID or attach to an agent family",
+            ),
+            (
+                "%i(worker, cl)",
+                13,
+                "**%id**",
+                "Assign an explicit agent ID or attach to an agent family",
+            ),
             (
                 "%clan(research, tr)",
                 18,
                 "**%clan**",
-                "Join a named parallel agent clan",
+                "Declare a new parallel agent clan",
             ),
             (
                 "%c(research, tr)",
                 15,
                 "**%clan**",
-                "Join a named parallel agent clan",
+                "Declare a new parallel agent clan",
             ),
             (
                 "%tribe:research",
