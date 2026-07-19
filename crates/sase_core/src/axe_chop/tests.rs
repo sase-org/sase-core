@@ -336,6 +336,7 @@ fn strict_axe_validation_accepts_new_shape() {
             "config": {"axe": {
                 "max_hook_runners": 3,
                 "lumberjack_log_temp_max_age_seconds": 300,
+                "lumberjack_restart_backoff_max_seconds": 60,
                 "lumberjacks": {"docs": {
                     "interval": 5,
                     "chop_timeout": "1m30s",
