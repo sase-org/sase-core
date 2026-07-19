@@ -105,15 +105,26 @@ fn derived_agent_names_reject_empty_sanitized_run_token() {
 
 #[test]
 fn derived_agent_names_keep_length_and_trailing_separator_guards() {
-    let name = derive_chop_agent_name(
+    let first = derive_chop_agent_name(
         &"very-long-chop_".repeat(12),
         Some(&"very-long-target_".repeat(12)),
         0,
-        Some("run-token"),
+        Some("20260719T072506_123456"),
     )
     .unwrap();
-    assert!(name.len() <= 120);
-    assert!(!name.ends_with(['.', '-', '_']));
+    let second = derive_chop_agent_name(
+        &"very-long-chop_".repeat(12),
+        Some(&"very-long-target_".repeat(12)),
+        1,
+        Some("20260719T072507_654321"),
+    )
+    .unwrap();
+
+    assert!(first.len() <= 120);
+    assert!(second.len() <= 120);
+    assert!(first.ends_with(".6_123456.1"));
+    assert!(second.ends_with(".7_654321.2"));
+    assert_ne!(first, second);
 }
 
 #[test]

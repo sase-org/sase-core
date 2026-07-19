@@ -330,6 +330,7 @@ pub fn derive_chop_agent_name(
         }
         parts.push(target);
     }
+    let mut suffix_parts = Vec::new();
     if let Some(run_token) = run_token {
         let mut run_token = sanitized_component(run_token);
         // Chop run ids begin with a sortable date shared by every run that
@@ -350,20 +351,22 @@ pub fn derive_chop_agent_name(
                 "run token must contain at least one letter or digit",
             ));
         }
-        parts.push(run_token);
+        suffix_parts.push(run_token);
     }
-    parts.push((proposal_index + 1).to_string());
-    let mut value = parts.join(".");
-    if value.len() > 120 {
-        value.truncate(120);
-        while value.ends_with('.')
-            || value.ends_with('-')
-            || value.ends_with('_')
+    suffix_parts.push((proposal_index + 1).to_string());
+    let suffix = format!(".{}", suffix_parts.join("."));
+    let mut prefix = parts.join(".");
+    let max_prefix_len = 120usize.saturating_sub(suffix.len());
+    if prefix.len() > max_prefix_len {
+        prefix.truncate(max_prefix_len);
+        while prefix.ends_with('.')
+            || prefix.ends_with('-')
+            || prefix.ends_with('_')
         {
-            value.pop();
+            prefix.pop();
         }
     }
-    Ok(value)
+    Ok(format!("{prefix}{suffix}"))
 }
 
 fn sanitized_component(value: &str) -> String {
