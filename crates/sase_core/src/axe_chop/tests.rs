@@ -335,6 +335,7 @@ fn strict_axe_validation_accepts_new_shape() {
             "schema_version": 1,
             "config": {"axe": {
                 "max_hook_runners": 3,
+                "lumberjack_log_temp_max_age_seconds": 300,
                 "lumberjacks": {"docs": {
                     "interval": 5,
                     "chop_timeout": "1m30s",
@@ -356,6 +357,25 @@ fn strict_axe_validation_accepts_new_shape() {
         }))
         .unwrap();
     assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_non_positive_log_temp_max_age() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjack_log_temp_max_age_seconds": 0}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "non_positive_integer");
+    assert_eq!(
+        diagnostics[0].path.as_deref(),
+        Some("axe.lumberjack_log_temp_max_age_seconds")
+    );
 }
 
 #[test]

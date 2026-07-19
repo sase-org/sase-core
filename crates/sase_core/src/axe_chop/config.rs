@@ -14,6 +14,7 @@ const AXE_KEYS: &[&str] = &[
     "max_agent_runners",
     "zombie_timeout_seconds",
     "lumberjack_log_max_bytes",
+    "lumberjack_log_temp_max_age_seconds",
     "verbose_lumberjack_diagnostics",
     "query",
     "chop_script_dirs",
@@ -147,6 +148,7 @@ pub fn validate_axe_config(
         "max_agent_runners",
         "zombie_timeout_seconds",
         "lumberjack_log_max_bytes",
+        "lumberjack_log_temp_max_age_seconds",
     ] {
         if let Some(value) = axe.get(key) {
             validate_positive_integer(
