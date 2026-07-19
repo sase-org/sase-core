@@ -31,6 +31,7 @@ use sase_core::{
     editor_build_vcs_project_completion_candidates,
     editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
+    editor_build_wait_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_workflows,
@@ -47,10 +48,11 @@ use tracing::{info, warn};
 
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
-    apply_replacement, completion_response, diagnostic as lsp_diagnostic,
-    hover as lsp_hover, placeholder_completion_response,
-    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
-    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
+    agent_completion_response, apply_replacement, completion_response,
+    diagnostic as lsp_diagnostic, hover as lsp_hover,
+    placeholder_completion_response, sase_snippet_completion_item,
+    snippet_completion_item, to_editor_position, to_lsp_range,
+    vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
 
@@ -215,7 +217,10 @@ impl XpromptLspServer {
                 &vcs_catalog,
             ));
         }
-        if context.kind == CompletionContextKind::XpromptArgumentAgent {
+        if context.kind == CompletionContextKind::XpromptArgumentAgent
+            || (context.kind == CompletionContextKind::DirectiveArgument
+                && context.directive_name.as_deref() == Some("wait"))
+        {
             return Some(self.agent_completion(&context).await);
         }
         let list = self.completion_list_for_context(
@@ -397,13 +402,22 @@ impl XpromptLspServer {
             .as_ref()
             .map(|token| token.text.as_str())
             .unwrap_or_default();
-        let list = editor_build_agent_completion_candidates(
-            token,
-            None,
-            &response.entries,
-            &context.selected_values,
-        );
-        completion_response(list, context.replacement_range)
+        let list = if context.directive_name.as_deref() == Some("wait") {
+            editor_build_wait_completion_candidates(
+                token,
+                None,
+                &response.entries,
+                &context.selected_values,
+            )
+        } else {
+            editor_build_agent_completion_candidates(
+                token,
+                None,
+                &response.entries,
+                &context.selected_values,
+            )
+        };
+        agent_completion_response(list, context.replacement_range)
     }
 
     async fn vcs_repo_catalog_for_completion(
@@ -2299,6 +2313,77 @@ mod tests {
             items.iter().map(|item| item.label.as_str()).collect();
         assert_eq!(labels, vec!["plan", "tale", "epic"]);
         assert_text_completion_item(&items, "tale", 6, 7, "tale");
+    }
+
+    #[tokio::test]
+    async fn wait_completion_uses_kind_aware_agent_catalog() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.agent_catalog_response = serde_json::from_value(
+            serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "message": "",
+                "entries": [
+                    {"name": "planner", "status": "RUNNING", "project": "sase"},
+                    {"name": "review", "kind": "family", "member_count": 2, "detail": "family · 2 members"},
+                    {"name": "builders", "kind": "clan", "member_count": 3, "detail": "clan · 3 members"},
+                    {"name": "@ops", "kind": "tribe", "member_count": 4, "detail": "tribe · 4 agents"}
+                ]
+            }),
+        )
+        .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+
+        let text = "%wait(planner, ";
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["time=", "runners=", "@ops", "builders", "review"]
+        );
+        assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
+        assert_eq!(items[2].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[3].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[4].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[2].sort_text.as_deref(), Some("1:0002"));
+        assert_eq!(
+            items[3]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("clan · 3 members")
+        );
+
+        let response = server
+            .completion_for_text("%wait:op".to_string(), Position::new(0, 8))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "@ops");
+        assert_eq!(items[0].filter_text.as_deref(), Some("ops"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected tribe text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 6));
+        assert_eq!(edit.new_text, "@ops");
     }
 
     #[tokio::test]

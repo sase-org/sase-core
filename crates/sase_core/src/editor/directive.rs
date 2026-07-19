@@ -179,9 +179,8 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
         "auto" => AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS,
         "hide" => &[],
         "wait" => &[
-            ("agent", "Wait for an agent or workflow"),
-            ("time=5m", "Wait for five minutes"),
-            ("time=1h", "Wait for one hour"),
+            ("time=", "Set a minimum wait duration"),
+            ("runners=", "Wait for runner capacity"),
         ],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
         "clan" => &[("tribe=", "Assign this clan to a user-managed tribe")],
@@ -428,11 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn wait_argument_candidates_include_time_keyword() {
+    fn wait_argument_candidates_use_runtime_keywords() {
         let candidates = directive_argument_candidates("wait").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["agent", "time=5m", "time=1h"]);
+        assert_eq!(values, ["time=", "runners="]);
         assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 }

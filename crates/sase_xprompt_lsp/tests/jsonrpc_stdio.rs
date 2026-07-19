@@ -36,11 +36,17 @@ impl HelperHostBridge for FixtureBridge {
                     name: "planner".to_string(),
                     status: "RUNNING".to_string(),
                     project: "sase".to_string(),
+                    kind: String::new(),
+                    member_count: 0,
+                    detail: String::new(),
                 },
                 AgentCompletionEntry {
                     name: "coder".to_string(),
                     status: "DONE".to_string(),
                     project: "sase-core".to_string(),
+                    kind: String::new(),
+                    member_count: 0,
+                    detail: String::new(),
                 },
             ],
         })

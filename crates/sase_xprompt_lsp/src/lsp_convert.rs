@@ -35,6 +35,69 @@ pub fn completion_response(
     )
 }
 
+/// Render kind-aware wait/fork targets without losing the core candidate order.
+pub fn agent_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let kind = candidate.kind.clone();
+                let detail = candidate.detail.clone();
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(agent_completion_item_kind(&kind));
+                item.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(agent_completion_label(
+                        &kind,
+                        detail.as_deref(),
+                    )),
+                });
+                item.sort_text = Some(format!(
+                    "{}:{index:04}",
+                    agent_completion_sort_group(&kind)
+                ));
+                item
+            })
+            .collect(),
+    )
+}
+
+fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
+    match kind {
+        "keyword" => CompletionItemKind::KEYWORD,
+        "tribe" => CompletionItemKind::ENUM_MEMBER,
+        "clan" => CompletionItemKind::MODULE,
+        "family" => CompletionItemKind::CLASS,
+        _ => CompletionItemKind::VALUE,
+    }
+}
+
+fn agent_completion_sort_group(kind: &str) -> u8 {
+    match kind {
+        "keyword" => 0,
+        "tribe" => 1,
+        "clan" => 2,
+        "family" => 3,
+        _ => 4,
+    }
+}
+
+fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
+    let normalized = match kind {
+        "keyword" | "tribe" | "clan" | "family" => kind,
+        _ => "agent",
+    };
+    match detail.filter(|detail| !detail.is_empty()) {
+        Some(detail) if detail.starts_with(normalized) => detail.to_string(),
+        Some(detail) => format!("{normalized} · {detail}"),
+        None => normalized.to_string(),
+    }
+}
+
 /// Build variable-like placeholder completion items in document order.
 pub fn placeholder_completion_response(
     list: CompletionList,
@@ -601,6 +664,71 @@ mod tests {
             panic!("expected array response");
         };
         assert!(items[0].text_edit.is_some());
+    }
+
+    #[test]
+    fn agent_completion_items_render_distinct_kinds_and_stable_sort_groups() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 2,
+            },
+        };
+        let candidates = [
+            ("keyword", "time=", "wait duration"),
+            ("tribe", "@ops", "tribe · 2 agents"),
+            ("clan", "builders", "clan · 3 members"),
+            ("family", "review", "family · 2 members"),
+            ("agent", "worker", "RUNNING · sase"),
+        ]
+        .into_iter()
+        .map(|(kind, name, detail)| CompletionCandidate {
+            display: name.to_string(),
+            insertion: name.to_string(),
+            detail: Some(detail.to_string()),
+            documentation: None,
+            is_dir: false,
+            name: name.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: String::new(),
+        })
+        .collect();
+        let CompletionResponse::Array(items) = agent_completion_response(
+            CompletionList {
+                candidates,
+                shared_extension: String::new(),
+            },
+            range,
+        ) else {
+            panic!("expected array response");
+        };
+
+        assert_eq!(
+            items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                Some(CompletionItemKind::KEYWORD),
+                Some(CompletionItemKind::ENUM_MEMBER),
+                Some(CompletionItemKind::MODULE),
+                Some(CompletionItemKind::CLASS),
+                Some(CompletionItemKind::VALUE),
+            ]
+        );
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(items[4].sort_text.as_deref(), Some("4:0004"));
+        assert_eq!(
+            items[4]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("agent · RUNNING · sase")
+        );
     }
 
     #[test]

@@ -249,6 +249,7 @@ pub use editor::{
     build_vcs_project_completion_candidates as editor_build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates as editor_build_vcs_ref_completion_candidates,
     build_vcs_repo_completion_candidates as editor_build_vcs_repo_completion_candidates,
+    build_wait_completion_candidates as editor_build_wait_completion_candidates,
     build_xprompt_arg_name_candidates as editor_build_xprompt_arg_name_candidates,
     build_xprompt_completion_candidates as editor_build_xprompt_completion_candidates,
     canonical_directive_name as editor_canonical_directive_name,

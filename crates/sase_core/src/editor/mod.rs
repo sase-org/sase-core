@@ -16,10 +16,11 @@ pub use completion::{
     build_agent_completion_candidates, build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
-    build_xprompt_arg_name_candidates, build_xprompt_completion_candidates,
-    classify_completion_context, classify_completion_context_with_workflows,
-    colon_args_skeleton, detect_vcs_ref_context_at_position,
-    detect_vcs_repo_context_at_position, named_args_skeleton,
+    build_wait_completion_candidates, build_xprompt_arg_name_candidates,
+    build_xprompt_completion_candidates, classify_completion_context,
+    classify_completion_context_with_workflows, colon_args_skeleton,
+    detect_vcs_ref_context_at_position, detect_vcs_repo_context_at_position,
+    named_args_skeleton,
 };
 pub use definition::{definition_at_position, DefinitionTarget};
 pub use diagnostics::analyze_document;

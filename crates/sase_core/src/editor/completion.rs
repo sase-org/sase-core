@@ -280,46 +280,158 @@ pub fn build_agent_completion_candidates(
     }
 
     let partial = token.to_lowercase();
-    let selected = selected_values.iter().collect::<BTreeSet<_>>();
+    let selected = selected_values
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
-    for entry in entries {
-        if entry.name.is_empty()
-            || selected.contains(&entry.name)
-            || !seen.insert(entry.name.clone())
-            || !entry.name.to_lowercase().starts_with(&partial)
+    let mut ordered_entries = entries.iter().collect::<Vec<_>>();
+    ordered_entries
+        .sort_by_key(|entry| agent_kind_rank(agent_entry_kind(entry)));
+    for entry in ordered_entries {
+        let kind = agent_entry_kind(entry);
+        let insertion = entry.name.trim();
+        if insertion.is_empty()
+            || selected.contains(insertion)
+            || !seen.insert(insertion.to_string())
+            || !agent_entry_matches(kind, insertion, &partial)
         {
             continue;
         }
-        let detail = match (entry.status.is_empty(), entry.project.is_empty()) {
-            (false, false) => {
-                Some(format!("{} · {}", entry.status, entry.project))
-            }
-            (false, true) => Some(entry.status.clone()),
-            (true, false) => Some(entry.project.clone()),
-            (true, true) => None,
+        let filter_name = if kind == "tribe" && !partial.starts_with('@') {
+            insertion.strip_prefix('@').unwrap_or(insertion).to_string()
+        } else {
+            insertion.to_string()
         };
+        let detail = agent_entry_detail(entry, kind);
         candidates.push(CompletionCandidate {
-            display: entry.name.clone(),
-            insertion: entry.name.clone(),
+            display: insertion.to_string(),
+            insertion: insertion.to_string(),
             detail,
             documentation: None,
             is_dir: false,
-            name: entry.name.clone(),
+            name: filter_name,
             replacement: replacement_range.map(|range| EditorTextEdit {
                 range,
-                new_text: entry.name.clone(),
+                new_text: insertion.to_string(),
             }),
             additional_edits: Vec::new(),
-            kind: "agent".to_string(),
+            kind: kind.to_string(),
             project: entry.project.clone(),
             status: entry.status.clone(),
         });
     }
-    candidates.sort_by_key(|candidate| candidate.name.to_lowercase());
     CompletionList {
         shared_extension: shared_extension(&candidates, token),
         candidates,
+    }
+}
+
+pub fn build_wait_completion_candidates(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+) -> CompletionList {
+    let partial = token.to_lowercase();
+    let selected = selected_values
+        .iter()
+        .map(|value| value.to_lowercase())
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    if !token.contains('=') {
+        for (keyword, detail) in
+            [("time=", "wait duration"), ("runners=", "runner capacity")]
+        {
+            if !keyword.starts_with(&partial)
+                || selected.iter().any(|value| value.starts_with(keyword))
+            {
+                continue;
+            }
+            candidates.push(CompletionCandidate {
+                display: keyword.to_string(),
+                insertion: keyword.to_string(),
+                detail: Some(detail.to_string()),
+                documentation: None,
+                is_dir: false,
+                name: keyword.to_string(),
+                replacement: replacement_range.map(|range| EditorTextEdit {
+                    range,
+                    new_text: keyword.to_string(),
+                }),
+                additional_edits: Vec::new(),
+                kind: "keyword".to_string(),
+                project: String::new(),
+                status: String::new(),
+            });
+        }
+    }
+    candidates.extend(
+        build_agent_completion_candidates(
+            token,
+            replacement_range,
+            entries,
+            selected_values,
+        )
+        .candidates,
+    );
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
+    }
+}
+
+fn agent_entry_kind(entry: &AgentCompletionEntry) -> &str {
+    match entry.kind.as_str() {
+        "family" => "family",
+        "clan" => "clan",
+        "tribe" => "tribe",
+        _ => "agent",
+    }
+}
+
+fn agent_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "keyword" => 0,
+        "tribe" => 1,
+        "clan" => 2,
+        "family" => 3,
+        _ => 4,
+    }
+}
+
+fn agent_entry_matches(kind: &str, insertion: &str, partial: &str) -> bool {
+    let insertion = insertion.to_lowercase();
+    if kind != "tribe" {
+        return insertion.starts_with(partial);
+    }
+    let bare = insertion.strip_prefix('@').unwrap_or(&insertion);
+    insertion.starts_with(partial) || bare.starts_with(partial)
+}
+
+fn agent_entry_detail(
+    entry: &AgentCompletionEntry,
+    kind: &str,
+) -> Option<String> {
+    if !entry.detail.is_empty() {
+        return Some(entry.detail.clone());
+    }
+    if kind != "agent" {
+        return (entry.member_count > 0).then(|| {
+            let suffix = if entry.member_count == 1 {
+                "member"
+            } else {
+                "members"
+            };
+            format!("{kind} · {} {suffix}", entry.member_count)
+        });
+    }
+    match (entry.status.is_empty(), entry.project.is_empty()) {
+        (false, false) => Some(format!("{} · {}", entry.status, entry.project)),
+        (false, true) => Some(entry.status.clone()),
+        (true, false) => Some(entry.project.clone()),
+        (true, true) => None,
     }
 }
 
@@ -1534,7 +1646,7 @@ fn detect_directive_context_at_position(
         });
     }
 
-    if let Some(target) = directive_arg_token(before) {
+    if let Some(target) = directive_arg_token(line, cursor_in_line) {
         // A non-leading `@<effort>` suffix on a `%model` value completes from
         // the effort vocabulary, mirroring the Python `%model:<model>@<effort>`
         // split. A leading `@` is the model-alias marker and stays in model
@@ -1551,19 +1663,21 @@ fn detect_directive_context_at_position(
             _ => (target.directive_name, target.arg_start),
         };
         let byte_start = line_start + arg_start;
-        let range = document.byte_range_to_range(byte_start, cursor)?;
+        let byte_end = line_start + target.arg_end;
+        let range = document.byte_range_to_range(byte_start, byte_end)?;
+        let token_range = document.byte_range_to_range(byte_start, cursor)?;
         return Some(CompletionContext {
             kind: target.kind,
             token: Some(TokenInfo {
                 text: before[arg_start..].to_string(),
-                range,
+                range: token_range,
                 byte_start,
                 byte_end: cursor,
             }),
             active_xprompt: None,
             active_input: None,
             directive_name: Some(directive_name.to_string()),
-            selected_values: Vec::new(),
+            selected_values: target.selected_values,
             vcs_repo: None,
             vcs_ref: None,
             replacement_range: range,
@@ -1588,10 +1702,16 @@ fn directive_name_token(before: &str) -> Option<(usize, &str)> {
 struct DirectiveArgCompletionTarget {
     directive_name: &'static str,
     arg_start: usize,
+    arg_end: usize,
     kind: CompletionContextKind,
+    selected_values: Vec<String>,
 }
 
-fn directive_arg_token(before: &str) -> Option<DirectiveArgCompletionTarget> {
+fn directive_arg_token(
+    line: &str,
+    cursor: usize,
+) -> Option<DirectiveArgCompletionTarget> {
+    let before = line.get(..cursor)?;
     let percent = before.rfind('%')?;
     let directive = &before[percent + 1..];
     let split = directive.find([':', '('])?;
@@ -1609,8 +1729,50 @@ fn directive_arg_token(before: &str) -> Option<DirectiveArgCompletionTarget> {
     let mut target = DirectiveArgCompletionTarget {
         directive_name: canonical,
         arg_start: sep_idx + 1,
+        arg_end: cursor,
         kind: CompletionContextKind::DirectiveArgument,
+        selected_values: Vec::new(),
     };
+    if canonical == "wait" {
+        let body_start = sep_idx + 1;
+        let body_end = if directive.as_bytes().get(split) == Some(&b'(') {
+            line[body_start..]
+                .find(')')
+                .map(|offset| body_start + offset)
+                .unwrap_or(line.len())
+        } else {
+            line.len()
+        };
+        if cursor > body_end {
+            return None;
+        }
+        let body = line.get(body_start..body_end)?;
+        let cursor_in_body = cursor.checked_sub(body_start)?;
+        let clause_index = body[..cursor_in_body].matches(',').count();
+        let clause_start = body[..cursor_in_body]
+            .rfind(',')
+            .map(|offset| offset + 1)
+            .unwrap_or(0);
+        let clause_end = body[cursor_in_body..]
+            .find(',')
+            .map(|offset| cursor_in_body + offset)
+            .unwrap_or(body.len());
+        let clause = &body[clause_start..clause_end];
+        let leading = clause.len() - clause.trim_start().len();
+        let trailing = clause.len() - clause.trim_end().len();
+        target.arg_start = body_start + clause_start + leading;
+        target.arg_end = body_start + clause_end - trailing;
+        target.selected_values = body
+            .split(',')
+            .enumerate()
+            .filter(|(index, _value)| *index != clause_index)
+            .map(|(_index, value)| value)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect();
+        return Some(target);
+    }
     if canonical != "clan" || directive.as_bytes().get(split) != Some(&b'(') {
         return Some(target);
     }
@@ -1761,6 +1923,22 @@ mod tests {
 
     fn pos(character: u32) -> EditorPosition {
         EditorPosition { line: 0, character }
+    }
+
+    fn agent_target(
+        name: &str,
+        kind: &str,
+        member_count: usize,
+        detail: &str,
+    ) -> AgentCompletionEntry {
+        AgentCompletionEntry {
+            name: name.to_string(),
+            status: String::new(),
+            project: String::new(),
+            kind: kind.to_string(),
+            member_count,
+            detail: detail.to_string(),
+        }
     }
 
     fn entries() -> Vec<XpromptAssistEntry> {
@@ -2204,16 +2382,25 @@ mod tests {
                 name: "planner".to_string(),
                 status: "RUNNING".to_string(),
                 project: "sase".to_string(),
+                kind: String::new(),
+                member_count: 0,
+                detail: String::new(),
             },
             AgentCompletionEntry {
                 name: "coder".to_string(),
                 status: "DONE".to_string(),
                 project: "sase-core".to_string(),
+                kind: String::new(),
+                member_count: 0,
+                detail: String::new(),
             },
             AgentCompletionEntry {
                 name: "reviewer.@".to_string(),
                 status: "DONE".to_string(),
                 project: "sase".to_string(),
+                kind: String::new(),
+                member_count: 0,
+                detail: String::new(),
             },
         ];
         let list = build_agent_completion_candidates(
@@ -2233,6 +2420,131 @@ mod tests {
             list.candidates[0].detail.as_deref(),
             Some("DONE · sase-core")
         );
+    }
+
+    #[test]
+    fn agent_candidates_are_kind_aware_ordered_and_compatible() {
+        let old_entry: AgentCompletionEntry =
+            serde_json::from_value(serde_json::json!({
+                "name": "legacy",
+                "status": "DONE",
+                "project": "sase"
+            }))
+            .unwrap();
+        assert_eq!(old_entry.kind, "");
+
+        let entries = vec![
+            old_entry,
+            agent_target("review", "agent", 1, "DONE · sase"),
+            agent_target("review", "family", 3, "family · 3 members"),
+            agent_target("builders", "clan", 2, "clan · 2 members"),
+            agent_target("@reviewers", "tribe", 4, "tribe · 4 agents"),
+        ];
+        let list = build_agent_completion_candidates("", None, &entries, &[]);
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.kind.as_str(),
+                    candidate.insertion.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tribe", "@reviewers"),
+                ("clan", "builders"),
+                ("family", "review"),
+                ("agent", "legacy"),
+            ]
+        );
+
+        let bare_tribe =
+            build_agent_completion_candidates("rev", None, &entries, &[]);
+        assert_eq!(bare_tribe.candidates[0].insertion, "@reviewers");
+        assert_eq!(bare_tribe.candidates[0].name, "reviewers");
+        let sigil_tribe =
+            build_agent_completion_candidates("@rev", None, &entries, &[]);
+        assert_eq!(sigil_tribe.candidates[0].insertion, "@reviewers");
+        assert_eq!(sigil_tribe.candidates[0].name, "@reviewers");
+    }
+
+    #[test]
+    fn wait_candidates_merge_keywords_and_exclude_selected_values() {
+        let entries = vec![
+            agent_target("worker", "agent", 1, "RUNNING · sase"),
+            agent_target("review", "family", 2, "family · 2 members"),
+            agent_target("builders", "clan", 3, "clan · 3 members"),
+            agent_target("@ops", "tribe", 4, "tribe · 4 agents"),
+        ];
+        let all = build_wait_completion_candidates("", None, &entries, &[]);
+        assert_eq!(
+            all.candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["time=", "runners=", "@ops", "builders", "review", "worker"]
+        );
+
+        let selected = vec!["time=5m".to_string(), "builders".to_string()];
+        let narrowed =
+            build_wait_completion_candidates("", None, &entries, &selected);
+        assert_eq!(
+            narrowed
+                .candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["runners=", "@ops", "review", "worker"]
+        );
+    }
+
+    #[test]
+    fn wait_context_narrows_to_active_clause_and_tracks_selected_values() {
+        for text in [
+            "%wait:planner,@ops, bu",
+            "%wait(planner, @ops, bu",
+            "%w(planner, @ops, bu",
+        ] {
+            let doc = DocumentSnapshot::new(text);
+            let context = classify_completion_context(
+                &doc,
+                pos(text.len() as u32),
+                &entries(),
+            )
+            .expect("wait completion context");
+            let token_start = text.rfind("bu").unwrap();
+            assert_eq!(context.kind, CompletionContextKind::DirectiveArgument);
+            assert_eq!(context.directive_name.as_deref(), Some("wait"));
+            assert_eq!(context.token.as_ref().unwrap().text, "bu");
+            assert_eq!(
+                context.replacement_range,
+                doc.byte_range_to_range(token_start, text.len()).unwrap()
+            );
+            assert_eq!(context.selected_values, vec!["planner", "@ops"]);
+        }
+
+        for text in [
+            "%wait:planner,@ops,builders",
+            "%wait(planner, @ops, builders)",
+        ] {
+            let cursor = text.find("pl").unwrap() + 2;
+            let doc = DocumentSnapshot::new(text);
+            let context = classify_completion_context(
+                &doc,
+                pos(cursor as u32),
+                &entries(),
+            )
+            .expect("earlier wait clause completion context");
+            assert_eq!(context.token.as_ref().unwrap().text, "pl");
+            assert_eq!(context.selected_values, vec!["@ops", "builders"]);
+            assert_eq!(
+                context.replacement_range,
+                doc.byte_range_to_range(
+                    text.find("pl").unwrap(),
+                    text.find("planner").unwrap() + "planner".len(),
+                )
+                .unwrap()
+            );
+        }
     }
 
     #[test]

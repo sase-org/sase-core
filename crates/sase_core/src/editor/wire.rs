@@ -226,6 +226,14 @@ pub struct AgentCompletionEntry {
     pub status: String,
     #[serde(default)]
     pub project: String,
+    /// `agent`, `family`, `clan`, or `tribe`. Missing values from older
+    /// helpers intentionally retain the historical plain-agent behavior.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub member_count: usize,
+    #[serde(default)]
+    pub detail: String,
 }
 
 pub const AGENT_CATALOG_SCHEMA_VERSION: u32 = 1;
