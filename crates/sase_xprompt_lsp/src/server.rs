@@ -1264,7 +1264,7 @@ fn directive_snippet_items(
                 "%{${1:A} | ${2:B}\\}$0".to_string()
             } else {
                 let placeholder = match directive.name {
-                    "clan" | "tribe" => "name",
+                    "clan" => "name",
                     "id" => "agent-id",
                     _ => "value",
                 };
@@ -1289,6 +1289,20 @@ fn directive_snippet_items(
                 items.push(snippet_completion_item(
                     "%id(..., clan=...)".to_string(),
                     "%id(${1:id}, clan=${2:clan})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation.clone(),
+                    replacement_range,
+                ));
+                items.push(snippet_completion_item(
+                    "%id(..., family=...)".to_string(),
+                    "%id(${1:suffix}, family=${2:family})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation.clone(),
+                    replacement_range,
+                ));
+                items.push(snippet_completion_item(
+                    "%id(tribe=...)".to_string(),
+                    "%id(tribe=${1:tribe})$0".to_string(),
                     Some("directive snippet".to_string()),
                     documentation,
                     replacement_range,
@@ -2140,8 +2154,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completes_identity_clan_and_tribe_from_the_public_editor_surface()
-    {
+    async fn completes_identity_and_clan_from_the_public_editor_surface() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2154,28 +2167,16 @@ mod tests {
                 "%id",
                 "id",
                 "i",
-                "Assign an explicit agent ID or attach to an agent family",
+                "Assign an agent ID, clan, family, or user-managed tribe",
             ),
             (
                 "%i",
                 "id",
                 "i",
-                "Assign an explicit agent ID or attach to an agent family",
+                "Assign an agent ID, clan, family, or user-managed tribe",
             ),
             ("%cla", "clan", "c", "Declare a new parallel agent clan"),
             ("%c", "clan", "c", "Declare a new parallel agent clan"),
-            (
-                "%tr",
-                "tribe",
-                "t",
-                "Assign the agent to a user-managed tribe",
-            ),
-            (
-                "%t",
-                "tribe",
-                "t",
-                "Assign the agent to a user-managed tribe",
-            ),
         ] {
             let response = server
                 .completion_for_text(
@@ -2211,7 +2212,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removed_identity_family_and_group_directives_do_not_complete() {
+    async fn removed_identity_directives_do_not_complete() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2220,7 +2221,9 @@ mod tests {
         });
         let server = service.inner();
 
-        for token in ["%name", "%n", "%family", "%f", "%group", "%g"] {
+        for token in [
+            "%name", "%n", "%family", "%f", "%group", "%g", "%tribe", "%t",
+        ] {
             let response = server
                 .completion_for_text(
                     token.to_string(),
@@ -2274,6 +2277,20 @@ mod tests {
                 "clan=",
                 "Derive the full ID and join this agent clan",
             ),
+            (
+                "%id(worker, fa)",
+                14,
+                12,
+                "family=",
+                "Attach this suffix to an existing agent family",
+            ),
+            (
+                "%i(worker, tr)",
+                13,
+                11,
+                "tribe=",
+                "Assign this agent to a user-managed tribe",
+            ),
         ] {
             let response = server
                 .completion_for_text(text.to_string(), Position::new(0, cursor))
@@ -2282,12 +2299,15 @@ mod tests {
             let CompletionResponse::Array(items) = response else {
                 panic!("expected completion array");
             };
-            assert_eq!(items.len(), 1, "{text}");
             assert_text_completion_item(
                 &items, keyword, start, cursor, keyword,
             );
+            let item = items
+                .iter()
+                .find(|item| item.label == keyword)
+                .unwrap_or_else(|| panic!("missing {keyword} completion"));
             let Some(Documentation::MarkupContent(item_documentation)) =
-                items[0].documentation.as_ref()
+                item.documentation.as_ref()
             else {
                 panic!("expected directive keyword documentation");
             };
@@ -2765,9 +2785,10 @@ mod tests {
         let CompletionResponse::Array(items) = response else {
             panic!("expected completion array");
         };
-        assert_snippet_item(&items, "%tribe:...", "%tribe:${1:name}$0");
-        assert!(!items.iter().any(|item| item.label.contains("family")
-            || item.label.contains("group")));
+        assert!(
+            items.is_empty(),
+            "removed %t directive completed: {items:?}"
+        );
 
         for token in ["%id", "%i"] {
             let response = server
@@ -2786,8 +2807,20 @@ mod tests {
                 "%id(..., clan=...)",
                 "%id(${1:id}, clan=${2:clan})$0",
             );
+            assert_snippet_item(
+                &items,
+                "%id(..., family=...)",
+                "%id(${1:suffix}, family=${2:family})$0",
+            );
+            assert_snippet_item(
+                &items,
+                "%id(tribe=...)",
+                "%id(tribe=${1:tribe})$0",
+            );
             assert!(!items.iter().any(|item| item.label.starts_with("%name")
-                || item.label.starts_with("%n:")));
+                || item.label.starts_with("%n:")
+                || item.label.starts_with("%tribe")
+                || item.label.starts_with("%t:")));
         }
     }
 
@@ -2831,7 +2864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn identity_clan_and_tribe_editor_surfaces_use_current_metadata() {
+    async fn identity_and_clan_editor_surfaces_use_current_metadata() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2842,22 +2875,16 @@ mod tests {
 
         for (text, cursor, heading, description) in [
             (
-                "%i(worker, cl)",
+                "%i(worker, family=review)",
                 13,
                 "**%id**",
-                "Assign an explicit agent ID or attach to an agent family",
+                "Assign an agent ID, clan, family, or user-managed tribe",
             ),
             (
                 "%c(research, tr)",
                 15,
                 "**%clan**",
                 "Declare a new parallel agent clan",
-            ),
-            (
-                "%t:research",
-                11,
-                "**%tribe**",
-                "Assign the agent to a user-managed tribe",
             ),
         ] {
             let hover = server
@@ -2875,9 +2902,19 @@ mod tests {
             assert!(markup.value.contains(description), "{text}");
         }
 
+        for text in ["%tribe:research", "%t:research"] {
+            assert!(
+                server
+                    .hover_for_text(text.to_string(), Position::new(0, 1))
+                    .await
+                    .is_none(),
+                "removed directive should not hover: {text}"
+            );
+        }
+
         let current = server
             .diagnostics_for_text(
-                "%id(worker, clan=research) %i:worker %clan(research.@, tribe=research) %c:research %tribe:research %t:research".to_string(),
+                "%id(worker, clan=research) %id(worker, family=review) %id(worker, tribe=review) %id(tribe=review) %i:worker %clan(research.@, tribe=research) %c:research".to_string(),
             )
             .await;
         assert!(!current.iter().any(|diagnostic| matches!(
@@ -2887,7 +2924,7 @@ mod tests {
 
         let removed = server
             .diagnostics_for_text(
-                "%name:x %n:x %family:x %f:x %group:x %g:x %wat:x".to_string(),
+                "%name:x %n:x %family:x %f:x %group:x %g:x %tribe:x %t:x %wat:x".to_string(),
             )
             .await;
         assert_eq!(
@@ -2898,7 +2935,7 @@ mod tests {
                     Some(lsp_types::NumberOrString::String(code)) if code == "unknown_directive"
                 ))
                 .count(),
-            7
+            9
         );
     }
 

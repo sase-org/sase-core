@@ -760,7 +760,7 @@ mod tests {
     #[test]
     fn recognizes_current_directives_but_rejects_removed_spellings() {
         let current = DocumentSnapshot::new(
-            "%id(worker, clan=research) %i:worker %clan(research, tribe=research) %c:research %tribe:research %t:research",
+            "%id(worker, clan=research) %id(worker, family=review) %id(worker, tribe=review) %id(tribe=review) %i:worker %clan(research, tribe=research) %c:research",
         );
         assert_eq!(
             diagnostic_count(
@@ -771,11 +771,13 @@ mod tests {
         );
 
         let removed = DocumentSnapshot::new(
-            "%name:x %n:x %family:x %f:x %group:x %g:x %wat:x",
+            "%name:x %n:x %family:x %f:x %group:x %g:x %tribe:x %t:x %wat:x",
         );
         let diagnostics = analyze_document(&removed, &catalog());
-        assert_eq!(diagnostic_count(&diagnostics, "unknown_directive"), 7);
-        for name in ["name", "n", "family", "f", "group", "g", "wat"] {
+        assert_eq!(diagnostic_count(&diagnostics, "unknown_directive"), 9);
+        for name in [
+            "name", "n", "family", "f", "group", "g", "tribe", "t", "wat",
+        ] {
             assert!(
                 diagnostics.iter().any(|diagnostic| diagnostic.message
                     == format!("Unknown directive `%{name}`")),

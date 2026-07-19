@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(editor)* [**breaking**] move family and tribe identity grammar onto `%id` keyword arguments (sase-7o.3)
+
 ### Fixed
 
 - *(editor)* align xprompt clan and tribe directives across diagnostics, completion, hover, and snippets

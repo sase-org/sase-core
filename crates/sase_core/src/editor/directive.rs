@@ -34,7 +34,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "id",
         alias: Some("i"),
-        description: "Assign an explicit agent ID or attach to an agent family",
+        description: "Assign an agent ID, clan, family, or user-managed tribe",
         takes_argument: true,
         allows_multiple: false,
     },
@@ -65,13 +65,6 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         alias: Some("h"),
         description: "Hide the agent from the default Agents tab display",
         takes_argument: false,
-        allows_multiple: false,
-    },
-    DirectiveMetadata {
-        name: "tribe",
-        alias: Some("t"),
-        description: "Assign the agent to a user-managed tribe",
-        takes_argument: true,
         allows_multiple: false,
     },
     DirectiveMetadata {
@@ -183,7 +176,11 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("runners=", "Wait for runner capacity"),
         ],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
-        "id" => &[("clan=", "Derive the full ID and join this agent clan")],
+        "id" => &[
+            ("clan=", "Derive the full ID and join this agent clan"),
+            ("family=", "Attach this suffix to an existing agent family"),
+            ("tribe=", "Assign this agent to a user-managed tribe"),
+        ],
         "clan" => &[("tribe=", "Assign this clan to a user-managed tribe")],
         _ => &[],
     };
@@ -229,7 +226,6 @@ mod tests {
             ("c", "clan"),
             ("w", "wait"),
             ("a", "auto"),
-            ("t", "tribe"),
             ("(", "alt"),
         ] {
             assert_eq!(canonical_directive_name(alias), Some(canonical));
@@ -243,6 +239,8 @@ mod tests {
         assert_eq!(canonical_directive_name("e"), Some("effort"));
         assert_eq!(canonical_directive_name("name"), None);
         assert_eq!(canonical_directive_name("n"), None);
+        assert_eq!(canonical_directive_name("tribe"), None);
+        assert_eq!(canonical_directive_name("t"), None);
 
         let model = directive_metadata("model").expect("model metadata");
         assert!(!model.allows_multiple);
@@ -256,7 +254,7 @@ mod tests {
         assert!(!metadata.allows_multiple);
         assert_eq!(
             metadata.description,
-            "Assign an explicit agent ID or attach to an agent family"
+            "Assign an agent ID, clan, family, or user-managed tribe"
         );
         assert_eq!(canonical_directive_name("i"), Some("id"));
         assert_eq!(directive_metadata("i").map(|d| d.name), Some("id"));
@@ -274,11 +272,24 @@ mod tests {
         }
 
         let id_args = directive_argument_candidates("id").candidates;
-        assert_eq!(id_args.len(), 1);
-        assert_eq!(id_args[0].insertion, "clan=");
+        assert_eq!(id_args.len(), 3);
         assert_eq!(
-            id_args[0].documentation.as_deref(),
-            Some("Derive the full ID and join this agent clan")
+            id_args
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["clan=", "family=", "tribe="]
+        );
+        assert_eq!(
+            id_args
+                .iter()
+                .map(|candidate| candidate.documentation.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "Derive the full ID and join this agent clan",
+                "Attach this suffix to an existing agent family",
+                "Assign this agent to a user-managed tribe",
+            ]
         );
         assert_eq!(directive_argument_candidates("i").candidates, id_args);
 
@@ -294,39 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn clan_and_tribe_metadata_match_the_editor_contract() {
-        for (name, alias, description) in [
-            ("clan", "c", "Declare a new parallel agent clan"),
-            ("tribe", "t", "Assign the agent to a user-managed tribe"),
-        ] {
-            let metadata =
-                directive_metadata(name).expect("directive metadata");
-            assert_eq!(metadata.alias, Some(alias));
-            assert!(metadata.takes_argument);
-            assert!(!metadata.allows_multiple);
-            assert_eq!(canonical_directive_name(alias), Some(name));
-            assert_eq!(directive_metadata(alias).map(|d| d.name), Some(name));
-            assert_eq!(metadata.description, description);
+    fn clan_metadata_matches_the_editor_contract() {
+        let metadata = directive_metadata("clan").expect("directive metadata");
+        assert_eq!(metadata.alias, Some("c"));
+        assert!(metadata.takes_argument);
+        assert!(!metadata.allows_multiple);
+        assert_eq!(canonical_directive_name("c"), Some("clan"));
+        assert_eq!(directive_metadata("c").map(|d| d.name), Some("clan"));
+        assert_eq!(metadata.description, "Declare a new parallel agent clan");
 
-            for token in [format!("%{}", &name[..2]), format!("%{alias}")] {
-                let completions = build_directive_completion_candidates(&token);
-                assert_eq!(
-                    completions.candidates.len(),
-                    1,
-                    "{token} completion"
-                );
-                let candidate = &completions.candidates[0];
-                let expected_detail = format!("alias %{alias}");
-                assert_eq!(candidate.insertion, format!("%{name}"));
-                assert_eq!(
-                    candidate.detail.as_deref(),
-                    Some(expected_detail.as_str())
-                );
-                assert_eq!(
-                    candidate.documentation.as_deref(),
-                    Some(metadata.description)
-                );
-            }
+        for token in ["%cl", "%c"] {
+            let completions = build_directive_completion_candidates(token);
+            assert_eq!(completions.candidates.len(), 1, "{token} completion");
+            let candidate = &completions.candidates[0];
+            assert_eq!(candidate.insertion, "%clan");
+            assert_eq!(candidate.detail.as_deref(), Some("alias %c"));
+            assert_eq!(
+                candidate.documentation.as_deref(),
+                Some(metadata.description)
+            );
         }
 
         let clan_args = directive_argument_candidates("clan").candidates;
@@ -341,8 +338,8 @@ mod tests {
     }
 
     #[test]
-    fn removed_family_and_group_directives_do_not_resolve_or_complete() {
-        for name in ["family", "f", "group", "g"] {
+    fn removed_identity_directives_do_not_resolve_or_complete() {
+        for name in ["family", "f", "group", "g", "tribe", "t"] {
             assert_eq!(canonical_directive_name(name), None, "{name}");
             assert!(directive_metadata(name).is_none(), "{name}");
             assert!(
@@ -399,14 +396,9 @@ mod tests {
     }
 
     #[test]
-    fn directive_completion_t_prefix_yields_tribe_only() {
+    fn directive_completion_t_prefix_is_empty() {
         let t_completions = build_directive_completion_candidates("%t");
-        let t_names: Vec<&str> = t_completions
-            .candidates
-            .iter()
-            .map(|candidate| candidate.name.as_str())
-            .collect();
-        assert_eq!(t_names, ["tribe"]);
+        assert!(t_completions.candidates.is_empty());
 
         for token in ["%ta", "%ti", "%time"] {
             assert!(

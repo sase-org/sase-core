@@ -1779,8 +1779,8 @@ fn directive_arg_token(
         return Some(target);
     }
 
-    // `%clan` accepts `tribe=` and `%id` accepts `clan=` only after their
-    // positional argument(s). Keep the canonical directive name for hover
+    // `%clan` accepts `tribe=` and `%id` accepts its membership/tag keywords
+    // after a positional argument. Keep the canonical directive name for hover
     // while narrowing keyword completion and replacement to the active clause.
     let body = &directive[split + 1..];
     let Some(comma) = body.rfind(',') else {
@@ -2106,6 +2106,10 @@ mod tests {
             ("%c(research, tr)", 15, 13, "clan", "tribe="),
             ("%id(worker, cl)", 14, 12, "id", "clan="),
             ("%i(worker, cl)", 13, 11, "id", "clan="),
+            ("%id(worker, fa)", 14, 12, "id", "family="),
+            ("%i(worker, fa)", 13, 11, "id", "family="),
+            ("%id(worker, tr)", 14, 12, "id", "tribe="),
+            ("%i(worker, tr)", 13, 11, "id", "tribe="),
         ] {
             let doc = DocumentSnapshot::new(text);
             let context =
@@ -2126,8 +2130,12 @@ mod tests {
 
             let candidates =
                 directive_argument_candidates(directive_name).candidates;
-            assert_eq!(candidates.len(), 1);
-            assert_eq!(candidates[0].insertion, keyword);
+            assert!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.insertion == keyword),
+                "missing {keyword} candidate for {text}: {candidates:?}"
+            );
         }
     }
 

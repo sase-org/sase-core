@@ -238,19 +238,19 @@ mod tests {
     }
 
     #[test]
-    fn directive_argument_hover_uses_current_identity_and_group_metadata() {
+    fn directive_argument_hover_uses_current_identity_and_clan_metadata() {
         for (text, character, heading, description) in [
             (
-                "%id(worker, cl)",
+                "%id(worker, family=review)",
                 14,
                 "**%id**",
-                "Assign an explicit agent ID or attach to an agent family",
+                "Assign an agent ID, clan, family, or user-managed tribe",
             ),
             (
-                "%i(worker, cl)",
+                "%i(worker, tribe=review)",
                 13,
                 "**%id**",
-                "Assign an explicit agent ID or attach to an agent family",
+                "Assign an agent ID, clan, family, or user-managed tribe",
             ),
             (
                 "%clan(research, tr)",
@@ -264,18 +264,6 @@ mod tests {
                 "**%clan**",
                 "Declare a new parallel agent clan",
             ),
-            (
-                "%tribe:research",
-                15,
-                "**%tribe**",
-                "Assign the agent to a user-managed tribe",
-            ),
-            (
-                "%t:research",
-                11,
-                "**%tribe**",
-                "Assign the agent to a user-managed tribe",
-            ),
         ] {
             let hover = hover_at_position(
                 &DocumentSnapshot::new(text),
@@ -285,6 +273,21 @@ mod tests {
             .unwrap_or_else(|| panic!("missing hover for {text}"));
             assert!(hover.markdown.contains(heading), "{text}");
             assert!(hover.markdown.contains(description), "{text}");
+        }
+
+        for text in ["%tribe:research", "%t:research"] {
+            assert!(
+                hover_at_position(
+                    &DocumentSnapshot::new(text),
+                    EditorPosition {
+                        line: 0,
+                        character: 1
+                    },
+                    &[],
+                )
+                .is_none(),
+                "removed directive should not hover: {text}"
+            );
         }
     }
 

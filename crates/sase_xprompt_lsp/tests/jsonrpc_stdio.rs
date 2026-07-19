@@ -918,7 +918,7 @@ async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
 }
 
 #[tokio::test]
-async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
+async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
     let temp = tempfile::tempdir().unwrap();
     let definition_path = temp.path().join("foo.md");
     fs::write(&definition_path, "foo").unwrap();
@@ -966,7 +966,7 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
         != Some(1)
     {}
 
-    let uri = "file:///tmp/sase_prompt_clan_tribe.md";
+    let uri = "file:///tmp/sase_prompt_id_kwargs.md";
     write_message(
         &mut client_writer,
         json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
@@ -982,7 +982,7 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
                     "uri": uri,
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
+                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%id(worker, fa)\n%i(worker, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
                 }
             }
         }),
@@ -1008,7 +1008,12 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
     }
     assert_eq!(
         unknown_directives,
-        ["Unknown directive `%family`", "Unknown directive `%group`"]
+        [
+            "Unknown directive `%tribe`",
+            "Unknown directive `%t`",
+            "Unknown directive `%family`",
+            "Unknown directive `%group`",
+        ]
     );
 
     write_message(
@@ -1019,16 +1024,55 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
             "method": "textDocument/completion",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 1, "character": 15}
+                "position": {"line": 2, "character": 14}
             }
         }),
     )
     .await;
-    let mut keyword_completion = None;
+    let mut family_completion = None;
     for _ in 0..8 {
         let message = read_message(&mut client_reader).await;
         if message.get("id").and_then(Value::as_i64) == Some(2) {
-            keyword_completion = message["result"]
+            family_completion = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "family=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let family_completion =
+        family_completion.expect("expected family= completion item");
+    assert_eq!(
+        family_completion["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 14}
+            },
+            "newText": "family="
+        })
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 3, "character": 13}
+            }
+        }),
+    )
+    .await;
+    let mut tribe_completion = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            tribe_completion = message["result"]
                 .as_array()
                 .and_then(|items| {
                     items.iter().find(|item| item["label"] == "tribe=")
@@ -1037,14 +1081,14 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
             break;
         }
     }
-    let keyword_completion =
-        keyword_completion.expect("expected tribe= completion item");
+    let tribe_completion =
+        tribe_completion.expect("expected tribe= completion item");
     assert_eq!(
-        keyword_completion["textEdit"],
+        tribe_completion["textEdit"],
         json!({
             "range": {
-                "start": {"line": 1, "character": 13},
-                "end": {"line": 1, "character": 15}
+                "start": {"line": 3, "character": 11},
+                "end": {"line": 3, "character": 13}
             },
             "newText": "tribe="
         })
@@ -1057,7 +1101,7 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
             "method": "textDocument/didChange",
             "params": {
                 "textDocument": {"uri": uri, "version": 2},
-                "contentChanges": [{"text": "%c"}]
+                "contentChanges": [{"text": "%i"}]
             }
         }),
     )
@@ -1074,7 +1118,7 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
         &mut client_writer,
         json!({
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": 4,
             "method": "textDocument/completion",
             "params": {
                 "textDocument": {"uri": uri},
@@ -1083,34 +1127,57 @@ async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
         }),
     )
     .await;
-    let mut labels = Vec::new();
+    let mut completion_items = Vec::new();
     for _ in 0..8 {
         let message = read_message(&mut client_reader).await;
-        if message.get("id").and_then(Value::as_i64) == Some(3) {
-            labels = message["result"]
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            completion_items = message["result"]
                 .as_array()
                 .expect("completion array")
-                .iter()
-                .filter_map(|item| item["label"].as_str())
-                .map(str::to_string)
-                .collect();
+                .clone();
             break;
         }
     }
-    for expected in ["%clan", "%clan:...", "%clan(..., tribe=...)"] {
-        assert!(labels.iter().any(|label| label == expected), "{labels:?}");
+    let labels: Vec<&str> = completion_items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for expected in [
+        "%id",
+        "%id:...",
+        "%id(..., clan=...)",
+        "%id(..., family=...)",
+        "%id(tribe=...)",
+    ] {
+        assert!(labels.contains(&expected), "{labels:?}");
+    }
+    assert!(!labels.iter().any(|label| label.starts_with("%tribe")));
+
+    for (label, new_text) in [
+        ("%id(..., clan=...)", "%id(${1:id}, clan=${2:clan})$0"),
+        (
+            "%id(..., family=...)",
+            "%id(${1:suffix}, family=${2:family})$0",
+        ),
+        ("%id(tribe=...)", "%id(tribe=${1:tribe})$0"),
+    ] {
+        let item = completion_items
+            .iter()
+            .find(|item| item["label"] == label)
+            .expect("expected snippet label");
+        assert_eq!(item["textEdit"]["newText"], json!(new_text));
     }
 
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(4)
+        != Some(5)
     {}
     write_message(
         &mut client_writer,

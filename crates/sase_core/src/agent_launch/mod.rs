@@ -2509,7 +2509,9 @@ mod tests {
         // `%time` is no longer an advertised directive. The time floor now
         // travels through `%wait(time=...)`, which still marks the slot as
         // deferred for workspace allocation.
-        assert_eq!(canonical_directive_name("t"), "tribe");
+        // `%tribe` and `%t` are removed identity directives and stay raw.
+        assert_eq!(canonical_directive_name("tribe"), "tribe");
+        assert_eq!(canonical_directive_name("t"), "t");
         assert_eq!(canonical_directive_name("time"), "time");
         assert_eq!(canonical_directive_name("c"), "clan");
         assert_eq!(canonical_directive_name("f"), "f");
