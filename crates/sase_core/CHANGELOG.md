@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/sase-org/sase-core/compare/v0.7.0...v0.8.0) - 2026-07-19
+
+### Added
+
+- *(agent-stats)* add project and ChangeSpec work rollups (sase-70.2)
+- *(agent-stats)* aggregate durable activity logs (sase-6y.2)
+- *(agent-stats)* add run statistics aggregation (sase-6y.1)
+- add axe chop domain engine (sase-6v.1)
+- resolve clan-level tribe metadata
+
 ## [0.7.0](https://github.com/sase-org/sase-core/compare/v0.6.0...v0.7.0) - 2026-07-18
 
 ### Added
