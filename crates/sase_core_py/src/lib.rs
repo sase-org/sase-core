@@ -83,6 +83,7 @@
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
 //! - `resolve_agent_family_parent(request: dict) -> dict`
+//! - `resolve_clan_summary(request: dict) -> dict`
 //! - `resolve_clan_tribe(request: dict) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
@@ -155,6 +156,7 @@ use sase_core::agent_archive::{
     AgentArchiveReviveMarkRequestWire,
 };
 use sase_core::agent_clan_tribe::{
+    resolve_clan_summary as core_resolve_clan_summary,
     resolve_clan_tribe as core_resolve_clan_tribe,
     ClanTribeResolutionRequestWire,
 };
@@ -2555,6 +2557,26 @@ fn py_resolve_agent_family_parent<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "resolve_clan_summary")]
+fn py_resolve_clan_summary<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: ClanTribeResolutionRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid ClanTribeResolutionRequestWire dict: {e}"
+            ))
+        })?;
+    let result = py.allow_threads(|| core_resolve_clan_summary(request));
+    let value = serde_json::to_value(result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(name = "resolve_clan_tribe")]
 fn py_resolve_clan_tribe<'py>(
     py: Python<'py>,
@@ -4518,6 +4540,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_clan_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_tribe, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_list_workspace_claims_from_content,

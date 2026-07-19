@@ -181,7 +181,14 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             ("family=", "Attach this suffix to an existing agent family"),
             ("tribe=", "Assign this agent to a user-managed tribe"),
         ],
-        "clan" => &[("tribe=", "Assign this clan to a user-managed tribe")],
+        "clan" => &[
+            ("tribe=", "Assign this clan to a user-managed tribe"),
+            ("summary=", "Attach a Rich-markup summary to this clan"),
+            (
+                "summary_script=",
+                "Generate this clan's summary with an executable script",
+            ),
+        ],
         _ => &[],
     };
     CompletionList {
@@ -327,11 +334,20 @@ mod tests {
         }
 
         let clan_args = directive_argument_candidates("clan").candidates;
-        assert_eq!(clan_args.len(), 1);
-        assert_eq!(clan_args[0].insertion, "tribe=");
         assert_eq!(
-            clan_args[0].documentation.as_deref(),
-            Some("Assign this clan to a user-managed tribe")
+            clan_args
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["tribe=", "summary=", "summary_script="]
+        );
+        assert_eq!(
+            clan_args[1].documentation.as_deref(),
+            Some("Attach a Rich-markup summary to this clan")
+        );
+        assert_eq!(
+            clan_args[2].documentation.as_deref(),
+            Some("Generate this clan's summary with an executable script")
         );
         assert_eq!(directive_argument_candidates("c").candidates, clan_args);
         assert!(directive_argument_candidates("tribe").candidates.is_empty());

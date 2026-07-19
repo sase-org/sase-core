@@ -2264,6 +2264,20 @@ mod tests {
                 "Assign this clan to a user-managed tribe",
             ),
             (
+                "%clan(research, su)",
+                18,
+                16,
+                "summary=",
+                "Attach a Rich-markup summary to this clan",
+            ),
+            (
+                "%clan(research, su)",
+                18,
+                16,
+                "summary_script=",
+                "Generate this clan's summary with an executable script",
+            ),
+            (
                 "%id(worker, cl)",
                 14,
                 12,

@@ -234,10 +234,18 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
     assert!(!legacy.agent_family_parallel);
     assert!(legacy.agent_clan.is_none());
+    assert!(legacy.clan_summary.is_none());
 
-    let clan: AgentMetaWire =
-        serde_json::from_str(r#"{"agent_clan":"alpha"}"#).unwrap();
+    let clan: AgentMetaWire = serde_json::from_str(
+        r#"{"agent_clan":"alpha","clan_tribe":"research","clan_summary":"[bold]Summary[/bold]"}"#,
+    )
+    .unwrap();
     assert_eq!(clan.agent_clan.as_deref(), Some("alpha"));
+    assert_eq!(clan.clan_tribe.as_deref(), Some("research"));
+    assert_eq!(clan.clan_summary.as_deref(), Some("[bold]Summary[/bold]"));
+    let encoded = serde_json::to_value(&clan).unwrap();
+    let round_tripped: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_tripped, clan);
 }
 
 #[test]
@@ -245,11 +253,17 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     let encoded = serde_json::to_string(&AgentMetaWire::default()).unwrap();
     let workflow = encoded.find("\"workflow_name\"").unwrap();
     let clan = encoded.find("\"agent_clan\"").unwrap();
+    let generation = encoded.find("\"agent_clan_generation\"").unwrap();
+    let tribe = encoded.find("\"clan_tribe\"").unwrap();
+    let summary = encoded.find("\"clan_summary\"").unwrap();
     let family = encoded.find("\"agent_family\"").unwrap();
     let role = encoded.find("\"agent_family_role\"").unwrap();
     let parallel = encoded.find("\"agent_family_parallel\"").unwrap();
     assert!(workflow < clan);
-    assert!(clan < family);
+    assert!(clan < generation);
+    assert!(generation < tribe);
+    assert!(tribe < summary);
+    assert!(summary < family);
     assert!(family < role);
     assert!(role < parallel);
 }

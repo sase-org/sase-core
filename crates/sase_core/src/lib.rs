@@ -54,7 +54,8 @@ pub use agent_archive::{
     AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 pub use agent_clan_tribe::{
-    resolve_clan_tribe, ClanTribeMemberWire, ClanTribeResolutionRequestWire,
+    resolve_clan_summary, resolve_clan_tribe, ClanSummaryResolutionWire,
+    ClanTribeMemberWire, ClanTribeResolutionRequestWire,
     ClanTribeResolutionWire,
 };
 pub use agent_cleanup::{

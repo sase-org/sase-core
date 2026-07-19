@@ -857,6 +857,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         agent_clan,
         agent_clan_generation: coerce_str(data.get("agent_clan_generation")),
         clan_tribe: coerce_str(data.get("clan_tribe")),
+        clan_summary: coerce_str(data.get("clan_summary")),
         agent_family,
         agent_family_role,
         agent_family_parallel: legacy_parallel,

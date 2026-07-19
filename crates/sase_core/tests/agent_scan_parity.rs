@@ -138,6 +138,7 @@ fn build_ace_run_running(root: &Path) {
             "agent_family_parallel": true,
             "agent_clan_generation": "20260718080000",
             "clan_tribe": "research",
+            "clan_summary": "[bold]RESEARCH PROMPT:[/bold]\nStudy clan summaries",
             "pid": 22222,
             "model": "claude-sonnet-4-6",
             "llm_provider": "claude",
@@ -661,6 +662,10 @@ fn running_record_carries_agent_meta() {
         Some("20260718080000")
     );
     assert_eq!(meta.clan_tribe.as_deref(), Some("research"));
+    assert_eq!(
+        meta.clan_summary.as_deref(),
+        Some("[bold]RESEARCH PROMPT:[/bold]\nStudy clan summaries")
+    );
     assert!(meta.agent_family.is_none());
     assert!(meta.agent_family_role.is_none());
     assert!(meta.agent_family_parallel);
@@ -804,6 +809,10 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
         Some("20260718080000")
     );
     assert_eq!(indexed_meta.clan_tribe.as_deref(), Some("research"));
+    assert_eq!(
+        indexed_meta.clan_summary.as_deref(),
+        Some("[bold]RESEARCH PROMPT:[/bold]\nStudy clan summaries")
+    );
     assert!(indexed_meta.agent_family.is_none());
 
     let conn = Connection::open(index).unwrap();

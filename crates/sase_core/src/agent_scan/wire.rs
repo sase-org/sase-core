@@ -222,6 +222,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub clan_tribe: Option<String>,
     #[serde(default)]
+    pub clan_summary: Option<String>,
+    #[serde(default)]
     pub agent_family: Option<String>,
     #[serde(default)]
     pub agent_family_role: Option<String>,

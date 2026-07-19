@@ -28,7 +28,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 13;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 14;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -725,6 +725,9 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 13) {
         migrate_record_json_refresh_v13(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 14) {
+        migrate_record_json_refresh_v14(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp);",
@@ -981,6 +984,14 @@ fn migrate_record_json_refresh_v12(
 /// ``tribe`` field.  Startup detects the old version without opening this
 /// index and schedules the source rebuild off the UI thread.
 fn migrate_record_json_refresh_v13(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v14 refreshes `record_json` with `agent_meta.clan_summary` for clan-level
+/// summary resolution.
+fn migrate_record_json_refresh_v14(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())

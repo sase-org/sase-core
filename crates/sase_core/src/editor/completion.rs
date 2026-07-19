@@ -1779,9 +1779,10 @@ fn directive_arg_token(
         return Some(target);
     }
 
-    // `%clan` accepts `tribe=` and `%id` accepts its membership/tag keywords
-    // after a positional argument. Keep the canonical directive name for hover
-    // while narrowing keyword completion and replacement to the active clause.
+    // `%clan` accepts its metadata keywords and `%id` accepts its
+    // membership/tag keywords after a positional argument. Keep the canonical
+    // directive name for hover while narrowing keyword completion and
+    // replacement to the active clause.
     let body = &directive[split + 1..];
     let Some(comma) = body.rfind(',') else {
         return Some(target);
@@ -2104,6 +2105,8 @@ mod tests {
         for (text, cursor, expected_start, directive_name, keyword) in [
             ("%clan(research, tr)", 18, 16, "clan", "tribe="),
             ("%c(research, tr)", 15, 13, "clan", "tribe="),
+            ("%clan(research, su)", 18, 16, "clan", "summary="),
+            ("%clan(research, su)", 18, 16, "clan", "summary_script="),
             ("%id(worker, cl)", 14, 12, "id", "clan="),
             ("%i(worker, cl)", 13, 11, "id", "clan="),
             ("%id(worker, fa)", 14, 12, "id", "family="),
