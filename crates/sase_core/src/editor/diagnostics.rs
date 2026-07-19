@@ -758,6 +758,32 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_clan_and_tribe_but_rejects_removed_directives() {
+        let current = DocumentSnapshot::new(
+            "%clan(research.@, tribe=research) %c(research, tribe=research) %tribe:research %t:research",
+        );
+        assert_eq!(
+            diagnostic_count(
+                &analyze_document(&current, &catalog()),
+                "unknown_directive"
+            ),
+            0
+        );
+
+        let removed =
+            DocumentSnapshot::new("%family:x %f:x %group:x %g:x %wat:x");
+        let diagnostics = analyze_document(&removed, &catalog());
+        assert_eq!(diagnostic_count(&diagnostics, "unknown_directive"), 5);
+        for name in ["family", "f", "group", "g", "wat"] {
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.message
+                    == format!("Unknown directive `%{name}`")),
+                "missing diagnostic for %{name}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reports_xprompt_argument_contract_diagnostics() {
         for (text, code) in [
             ("#typed", "missing_required_arg"),

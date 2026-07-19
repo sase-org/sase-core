@@ -36,7 +36,11 @@ pub fn hover_at_position(
             });
         }
 
-        if context.kind == CompletionContextKind::DirectiveArgument {
+        if matches!(
+            context.kind,
+            CompletionContextKind::DirectiveArgument
+                | CompletionContextKind::DirectiveArgumentKeyword
+        ) {
             let name = context.directive_name.as_deref()?;
             let metadata = directive_metadata(name)?;
             return Some(HoverPayload {
@@ -231,6 +235,45 @@ mod tests {
         .unwrap();
         assert!(arg_hover.markdown.contains("path"));
         assert!(arg_hover.markdown.contains("Path to review"));
+    }
+
+    #[test]
+    fn directive_argument_hover_uses_canonical_clan_and_tribe_metadata() {
+        for (text, character, heading, description) in [
+            (
+                "%clan(research, tr)",
+                18,
+                "**%clan**",
+                "Join a named parallel agent clan",
+            ),
+            (
+                "%c(research, tr)",
+                15,
+                "**%clan**",
+                "Join a named parallel agent clan",
+            ),
+            (
+                "%tribe:research",
+                15,
+                "**%tribe**",
+                "Assign the agent to a user-managed tribe",
+            ),
+            (
+                "%t:research",
+                11,
+                "**%tribe**",
+                "Assign the agent to a user-managed tribe",
+            ),
+        ] {
+            let hover = hover_at_position(
+                &DocumentSnapshot::new(text),
+                EditorPosition { line: 0, character },
+                &[],
+            )
+            .unwrap_or_else(|| panic!("missing hover for {text}"));
+            assert!(hover.markdown.contains(heading), "{text}");
+            assert!(hover.markdown.contains(description), "{text}");
+        }
     }
 
     #[test]

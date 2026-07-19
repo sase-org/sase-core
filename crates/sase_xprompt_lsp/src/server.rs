@@ -737,10 +737,17 @@ impl XpromptLspServer {
                             token,
                             config.model_catalog.as_deref(),
                         )
+                    } else if name == "clan" {
+                        empty_completion_list()
                     } else {
                         editor_directive_argument_candidates(name)
                     }
                 })
+                .unwrap_or_else(empty_completion_list),
+            CompletionContextKind::DirectiveArgumentKeyword => context
+                .directive_name
+                .as_deref()
+                .map(editor_directive_argument_candidates)
                 .unwrap_or_else(empty_completion_list),
             CompletionContextKind::XpromptArgumentName => context
                 .active_xprompt
@@ -1232,24 +1239,41 @@ fn directive_snippet_items(
                     .alias
                     .is_some_and(|alias| alias.starts_with(partial))
         })
-        .map(|directive| {
+        .flat_map(|directive| {
+            let documentation = Some(
+                editor_directive_metadata(directive.name)
+                    .map(|metadata| metadata.description.to_string())
+                    .unwrap_or_else(|| directive.description.to_string()),
+            );
             let syntax = if directive.name == "alt" {
                 // The advertised alt spelling is the `%{A | B}` brace shorthand.
                 "%{${1:A} | ${2:B}\\}$0".to_string()
             } else {
-                format!("%{}:${{1:value}}$0", directive.name)
+                let placeholder = if matches!(directive.name, "clan" | "tribe")
+                {
+                    "name"
+                } else {
+                    "value"
+                };
+                format!("%{}:${{1:{placeholder}}}$0", directive.name)
             };
-            snippet_completion_item(
+            let mut items = vec![snippet_completion_item(
                 format!("%{}:...", directive.name),
                 syntax,
                 Some("directive snippet".to_string()),
-                Some(
-                    editor_directive_metadata(directive.name)
-                        .map(|metadata| metadata.description.to_string())
-                        .unwrap_or_else(|| directive.description.to_string()),
-                ),
+                documentation.clone(),
                 replacement_range,
-            )
+            )];
+            if directive.name == "clan" {
+                items.push(snippet_completion_item(
+                    "%clan(..., tribe=...)".to_string(),
+                    "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation,
+                    replacement_range,
+                ));
+            }
+            items
         })
         .collect()
 }
@@ -2095,7 +2119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completes_family_directive_from_the_public_editor_surface() {
+    async fn completes_clan_and_tribe_from_the_public_editor_surface() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -2103,36 +2127,128 @@ mod tests {
             )
         });
         let server = service.inner();
-        let response = server
-            .completion_for_text("%fa".to_string(), Position::new(0, 3))
-            .await
-            .unwrap();
+        for (token, name, alias, description) in [
+            ("%cla", "clan", "c", "Join a named parallel agent clan"),
+            ("%c", "clan", "c", "Join a named parallel agent clan"),
+            (
+                "%tr",
+                "tribe",
+                "t",
+                "Assign the agent to a user-managed tribe",
+            ),
+            (
+                "%t",
+                "tribe",
+                "t",
+                "Assign the agent to a user-managed tribe",
+            ),
+        ] {
+            let response = server
+                .completion_for_text(
+                    token.to_string(),
+                    Position::new(0, token.len() as u32),
+                )
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert_eq!(items.len(), 1, "{token}");
+            let item = &items[0];
+            let expected_detail = format!("alias %{alias}");
+            assert_eq!(item.label, format!("%{name}"), "{token}");
+            assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
+            assert_eq!(item.filter_text.as_deref(), Some(name));
+            assert_eq!(item.detail.as_deref(), Some(expected_detail.as_str()));
+            let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+            else {
+                panic!("expected directive completion text edit");
+            };
+            assert_eq!(edit.range.start, Position::new(0, 0));
+            assert_eq!(edit.range.end, Position::new(0, token.len() as u32));
+            assert_eq!(edit.new_text, format!("%{name}"));
+            let Some(Documentation::MarkupContent(documentation)) =
+                item.documentation.as_ref()
+            else {
+                panic!("expected directive completion documentation");
+            };
+            assert_eq!(documentation.value, description);
+        }
+    }
 
-        let CompletionResponse::Array(items) = response else {
-            panic!("expected completion array");
-        };
-        assert_eq!(items.len(), 1);
-        let family = &items[0];
-        assert_eq!(family.label, "%family");
-        assert_eq!(family.kind, Some(CompletionItemKind::TEXT));
-        assert_eq!(family.filter_text.as_deref(), Some("family"));
-        assert_eq!(family.detail.as_deref(), Some("alias %f"));
-        let Some(CompletionTextEdit::Edit(edit)) = family.text_edit.as_ref()
-        else {
-            panic!("expected family completion text edit");
-        };
-        assert_eq!(edit.range.start, Position::new(0, 0));
-        assert_eq!(edit.range.end, Position::new(0, 3));
-        assert_eq!(edit.new_text, "%family");
-        let Some(Documentation::MarkupContent(documentation)) =
-            family.documentation.as_ref()
-        else {
-            panic!("expected family completion documentation");
-        };
-        assert_eq!(
-            documentation.value,
-            "join a parallel agent family rooted at another launch segment"
-        );
+    #[tokio::test]
+    async fn removed_family_and_group_directives_do_not_complete() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        for token in ["%family", "%f", "%group", "%g"] {
+            let response = server
+                .completion_for_text(
+                    token.to_string(),
+                    Position::new(0, token.len() as u32),
+                )
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert!(items.is_empty(), "{token}: {items:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clan_keyword_completion_uses_the_active_fragment_range() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        for (text, cursor, start) in [
+            ("%clan(research, tr)", 18, 16),
+            ("%c(research, tr)", 15, 13),
+        ] {
+            let response = server
+                .completion_for_text(text.to_string(), Position::new(0, cursor))
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert_eq!(items.len(), 1, "{text}");
+            assert_text_completion_item(
+                &items, "tribe=", start, cursor, "tribe=",
+            );
+            let Some(Documentation::MarkupContent(documentation)) =
+                items[0].documentation.as_ref()
+            else {
+                panic!("expected tribe keyword documentation");
+            };
+            assert_eq!(
+                documentation.value,
+                "Assign this clan to a user-managed tribe"
+            );
+        }
+
+        for (text, cursor) in
+            [("%clan(re", 8), ("%clan(research, tribe=blue)", 26)]
+        {
+            let response = server
+                .completion_for_text(text.to_string(), Position::new(0, cursor))
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert!(items.is_empty(), "{text}: {items:?}");
+        }
     }
 
     #[tokio::test]
@@ -2460,6 +2576,69 @@ mod tests {
         assert!(items.is_empty());
     }
 
+    #[tokio::test]
+    async fn snippet_clients_receive_simple_and_combined_clan_forms() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            *config = ServerConfig {
+                snippet_support: true,
+                ..ServerConfig::default()
+            };
+        }
+
+        for token in ["%clan", "%c"] {
+            let response = server
+                .completion_for_text(
+                    token.to_string(),
+                    Position::new(0, token.len() as u32),
+                )
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert_snippet_item(&items, "%clan:...", "%clan:${1:name}$0");
+            assert_snippet_item(
+                &items,
+                "%clan(..., tribe=...)",
+                "%clan(${1:name}, tribe=${2:tribe})$0",
+            );
+            for item in items
+                .iter()
+                .filter(|item| item.kind == Some(CompletionItemKind::SNIPPET))
+            {
+                let Some(CompletionTextEdit::Edit(edit)) =
+                    item.text_edit.as_ref()
+                else {
+                    panic!("expected clan snippet text edit");
+                };
+                assert_eq!(edit.range.start, Position::new(0, 0));
+                assert_eq!(
+                    edit.range.end,
+                    Position::new(0, token.len() as u32)
+                );
+            }
+        }
+
+        let response = server
+            .completion_for_text("%t".to_string(), Position::new(0, 2))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_snippet_item(&items, "%tribe:...", "%tribe:${1:name}$0");
+        assert!(!items.iter().any(|item| item.label.contains("family")
+            || item.label.contains("group")));
+    }
+
     #[test]
     fn directive_snippet_for_alt_uses_brace_shorthand() {
         let range = CoreRange {
@@ -2497,6 +2676,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn clan_and_tribe_hover_and_diagnostics_use_current_metadata() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        for (text, cursor, heading, description) in [
+            (
+                "%c(research, tr)",
+                15,
+                "**%clan**",
+                "Join a named parallel agent clan",
+            ),
+            (
+                "%t:research",
+                11,
+                "**%tribe**",
+                "Assign the agent to a user-managed tribe",
+            ),
+        ] {
+            let hover = server
+                .hover_for_text(text.to_string(), Position::new(0, cursor))
+                .await
+                .unwrap_or_else(|| panic!("missing hover for {text}"));
+            let Hover {
+                contents: lsp_types::HoverContents::Markup(markup),
+                ..
+            } = hover
+            else {
+                panic!("expected markdown hover");
+            };
+            assert!(markup.value.contains(heading), "{text}");
+            assert!(markup.value.contains(description), "{text}");
+        }
+
+        let current = server
+            .diagnostics_for_text(
+                "%clan(research.@, tribe=research) %c(research, tribe=research) %tribe:research %t:research".to_string(),
+            )
+            .await;
+        assert!(!current.iter().any(|diagnostic| matches!(
+            diagnostic.code.as_ref(),
+            Some(lsp_types::NumberOrString::String(code)) if code == "unknown_directive"
+        )));
+
+        let removed = server
+            .diagnostics_for_text(
+                "%family:x %f:x %group:x %g:x %wat:x".to_string(),
+            )
+            .await;
+        assert_eq!(
+            removed
+                .iter()
+                .filter(|diagnostic| matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code)) if code == "unknown_directive"
+                ))
+                .count(),
+            5
+        );
     }
 
     #[tokio::test]

@@ -1534,26 +1534,26 @@ fn detect_directive_context_at_position(
         });
     }
 
-    if let Some((name, arg_start)) = directive_arg_token(before) {
+    if let Some(target) = directive_arg_token(before) {
         // A non-leading `@<effort>` suffix on a `%model` value completes from
         // the effort vocabulary, mirroring the Python `%model:<model>@<effort>`
         // split. A leading `@` is the model-alias marker and stays in model
         // completion context. The replacement range covers only the token after
         // a suffix `@`.
-        let (directive_name, arg_start) = match name {
-            "model" => match before[arg_start..].rfind('@') {
+        let (directive_name, arg_start) = match target.directive_name {
+            "model" => match before[target.arg_start..].rfind('@') {
                 Some(rel_at) if rel_at > 0 => {
-                    ("effort", arg_start + rel_at + 1)
+                    ("effort", target.arg_start + rel_at + 1)
                 }
-                None => (name, arg_start),
-                _ => (name, arg_start),
+                None => (target.directive_name, target.arg_start),
+                _ => (target.directive_name, target.arg_start),
             },
-            _ => (name, arg_start),
+            _ => (target.directive_name, target.arg_start),
         };
         let byte_start = line_start + arg_start;
         let range = document.byte_range_to_range(byte_start, cursor)?;
         return Some(CompletionContext {
-            kind: CompletionContextKind::DirectiveArgument,
+            kind: target.kind,
             token: Some(TokenInfo {
                 text: before[arg_start..].to_string(),
                 range,
@@ -1585,7 +1585,13 @@ fn directive_name_token(before: &str) -> Option<(usize, &str)> {
     None
 }
 
-fn directive_arg_token(before: &str) -> Option<(&'static str, usize)> {
+struct DirectiveArgCompletionTarget {
+    directive_name: &'static str,
+    arg_start: usize,
+    kind: CompletionContextKind,
+}
+
+fn directive_arg_token(before: &str) -> Option<DirectiveArgCompletionTarget> {
     let percent = before.rfind('%')?;
     let directive = &before[percent + 1..];
     let split = directive.find([':', '('])?;
@@ -1599,7 +1605,34 @@ fn directive_arg_token(before: &str) -> Option<(&'static str, usize)> {
     {
         return None;
     }
-    Some((canonical, sep_idx + 1))
+
+    let mut target = DirectiveArgCompletionTarget {
+        directive_name: canonical,
+        arg_start: sep_idx + 1,
+        kind: CompletionContextKind::DirectiveArgument,
+    };
+    if canonical != "clan" || directive.as_bytes().get(split) != Some(&b'(') {
+        return Some(target);
+    }
+
+    // `%clan` accepts the clan name first and the optional `tribe=` keyword
+    // only after a comma. Keep the canonical directive name for hover while
+    // narrowing keyword completion and replacement to the active clause.
+    let body = &directive[split + 1..];
+    let Some(comma) = body.rfind(',') else {
+        return Some(target);
+    };
+    let clause = &body[comma + 1..];
+    let trimmed = clause.trim_start();
+    target.arg_start = sep_idx + 1 + comma + 1 + (clause.len() - trimmed.len());
+    if let Some(equals) = trimmed.find('=') {
+        let value = &trimmed[equals + 1..];
+        target.arg_start +=
+            equals + 1 + (value.len() - value.trim_start().len());
+    } else {
+        target.kind = CompletionContextKind::DirectiveArgumentKeyword;
+    }
+    Some(target)
 }
 
 fn context_for_token(
@@ -1883,6 +1916,80 @@ mod tests {
                 candidates.iter().map(|c| c.insertion.as_str()).collect();
             assert_eq!(values, expected_values, "{text}");
         }
+    }
+
+    #[test]
+    fn clan_keyword_completion_targets_only_the_post_comma_fragment() {
+        let catalog = entries();
+        for (text, cursor, expected_start) in [
+            ("%clan(research, tr)", 18, 16),
+            ("%c(research, tr)", 15, 13),
+        ] {
+            let doc = DocumentSnapshot::new(text);
+            let context =
+                classify_completion_context(&doc, pos(cursor), &catalog)
+                    .expect("clan keyword completion context");
+            assert_eq!(
+                context.kind,
+                CompletionContextKind::DirectiveArgumentKeyword,
+                "{text}"
+            );
+            assert_eq!(context.directive_name.as_deref(), Some("clan"));
+            assert_eq!(context.token.as_ref().unwrap().text, "tr");
+            assert_eq!(
+                context.replacement_range,
+                doc.byte_range_to_range(expected_start, cursor as usize)
+                    .unwrap()
+            );
+
+            let candidates = directive_argument_candidates("clan").candidates;
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].insertion, "tribe=");
+        }
+    }
+
+    #[test]
+    fn clan_keyword_completion_stays_out_of_name_and_value_positions() {
+        let catalog = entries();
+        let doc = DocumentSnapshot::new("%clan(re");
+        let name_context =
+            classify_completion_context(&doc, pos(8), &catalog).unwrap();
+        assert_eq!(name_context.kind, CompletionContextKind::DirectiveArgument);
+        assert_eq!(name_context.directive_name.as_deref(), Some("clan"));
+        assert_eq!(name_context.token.as_ref().unwrap().text, "re");
+
+        let text = "%clan(research, tribe=blue)";
+        let value_start = text.find("blue").unwrap();
+        let doc = DocumentSnapshot::new(text);
+        let value_context = classify_completion_context(
+            &doc,
+            pos((text.len() - 1) as u32),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(
+            value_context.kind,
+            CompletionContextKind::DirectiveArgument
+        );
+        assert_eq!(value_context.directive_name.as_deref(), Some("clan"));
+        assert_eq!(value_context.token.as_ref().unwrap().text, "blue");
+        assert_eq!(
+            value_context.replacement_range,
+            doc.byte_range_to_range(value_start, text.len() - 1)
+                .unwrap()
+        );
+
+        let closed = DocumentSnapshot::new("%clan(research, tribe=blue)");
+        let closed_context = classify_completion_context(
+            &closed,
+            pos(closed.text().len() as u32),
+            &catalog,
+        );
+        assert!(!closed_context.is_some_and(|context| matches!(
+            context.kind,
+            CompletionContextKind::DirectiveArgument
+                | CompletionContextKind::DirectiveArgumentKeyword
+        )));
     }
 
     #[test]

@@ -911,6 +911,209 @@ async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
     server_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn stdio_jsonrpc_clan_tribe_diagnostics_completion_and_snippets() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {
+                    "textDocument": {
+                        "completion": {
+                            "completionItem": {"snippetSupport": true}
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_clan_tribe.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut unknown_directives = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            unknown_directives = message["params"]["diagnostics"]
+                .as_array()
+                .expect("diagnostic array")
+                .iter()
+                .filter(|diagnostic| diagnostic["code"] == "unknown_directive")
+                .filter_map(|diagnostic| diagnostic["message"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert_eq!(
+        unknown_directives,
+        ["Unknown directive `%family`", "Unknown directive `%group`"]
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 15}
+            }
+        }),
+    )
+    .await;
+    let mut keyword_completion = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            keyword_completion = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "tribe=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let keyword_completion =
+        keyword_completion.expect("expected tribe= completion item");
+    assert_eq!(
+        keyword_completion["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 1, "character": 13},
+                "end": {"line": 1, "character": 15}
+            },
+            "newText": "tribe="
+        })
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "%c"}]
+            }
+        }),
+    )
+    .await;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let mut labels = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            labels = message["result"]
+                .as_array()
+                .expect("completion array")
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    for expected in ["%clan", "%clan:...", "%clan(..., tribe=...)"] {
+        assert!(labels.iter().any(|label| label == expected), "{labels:?}");
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(4)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
 async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {
     let body = value.to_string();
     writer

@@ -43,6 +43,7 @@ pub enum CompletionContextKind {
     XpromptArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,
+    DirectiveArgumentKeyword,
     SnippetTrigger,
     VcsProject,
     VcsRepo,
