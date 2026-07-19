@@ -1,6 +1,7 @@
 //! Wire records and deterministic helpers for agent launch.
 
 use crate::effort::split_model_effort;
+use crate::prompt_literals::inline_code_ranges;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -278,6 +279,14 @@ struct DirectiveOccurrence {
     from_backtick_literal: bool,
 }
 
+#[derive(Debug, Clone)]
+struct XPromptOccurrence {
+    name: String,
+    start: usize,
+    end: usize,
+    has_time_argument: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DirectiveArg {
     name: Option<String>,
@@ -488,9 +497,8 @@ fn split_prompt_for_models_with_ids(
         return Ok(Vec::new());
     }
 
-    let mut ignored_ranges = fenced_block_ranges(prompt);
-    ignored_ranges.extend(disabled_region_ranges(prompt));
-    ignored_ranges.extend(alt_inner_ranges(prompt)?);
+    let mut ignored_ranges = launch_literal_zone_ranges(prompt);
+    ignored_ranges.extend(alt_inner_ranges(prompt, &ignored_ranges)?);
 
     let mut valued_directive_spans: Vec<(usize, usize, String)> = Vec::new();
     for directive in directive_occurrences(prompt)? {
@@ -554,8 +562,12 @@ fn multi_model_unsupported_message(source: &str, models: &[String]) -> String {
 fn split_prompt_for_alternatives_with_ids(
     prompt: &str,
 ) -> Result<Option<Vec<AlternativeSlot>>, AgentLaunchFanoutPlanError> {
+    let ignored_ranges = launch_literal_zone_ranges(prompt);
     let mut directives: Vec<AlternativeDirective> = Vec::new();
     for (start, open_start, delimiter) in alt_directive_starts(prompt) {
+        if position_in_ranges(start, &ignored_ranges) {
+            continue;
+        }
         let Some(close_end) = find_matching_delimiter(
             prompt,
             open_start,
@@ -978,8 +990,7 @@ fn extract_repeat_and_name_rust(
         return (None, None, prompt.to_string());
     }
 
-    let mut ignored_ranges = fenced_block_ranges(prompt);
-    ignored_ranges.extend(disabled_region_ranges(prompt));
+    let ignored_ranges = launch_literal_zone_ranges(prompt);
     let mut repeat_count = None;
     let mut explicit_name = None;
     let mut regions = Vec::new();
@@ -1024,18 +1035,31 @@ fn extract_repeat_and_name_rust(
 }
 
 fn has_wait_directive(prompt: &str) -> bool {
-    if prompt.contains('%') && wait_directive_re().is_match(prompt) {
+    let ignored_ranges = launch_literal_zone_ranges(prompt);
+    if prompt.contains('%')
+        && directive_occurrences(prompt)
+            .unwrap_or_default()
+            .iter()
+            .any(|directive| {
+                directive.canonical_name == "wait"
+                    && !position_in_ranges(directive.start, &ignored_ranges)
+            })
+    {
         return true;
     }
-    prompt.contains("#t") && t_time_xprompt_re().is_match(prompt)
+    prompt.contains("#t")
+        && xprompt_occurrences(prompt).iter().any(|reference| {
+            reference.name == "t"
+                && reference.has_time_argument
+                && !position_in_ranges(reference.start, &ignored_ranges)
+        })
 }
 
 fn extract_first_model_value(prompt: &str) -> Option<String> {
     if !prompt.contains('%') {
         return None;
     }
-    let mut ignored_ranges = fenced_block_ranges(prompt);
-    ignored_ranges.extend(disabled_region_ranges(prompt));
+    let ignored_ranges = launch_literal_zone_ranges(prompt);
     for directive in directive_occurrences(prompt).unwrap_or_default() {
         if directive.canonical_name == "model"
             && !position_in_ranges(directive.start, &ignored_ranges)
@@ -1096,6 +1120,72 @@ fn directive_occurrences(
     Ok(out)
 }
 
+fn xprompt_occurrences(prompt: &str) -> Vec<XPromptOccurrence> {
+    xprompt_reference_re()
+        .captures_iter(prompt)
+        .filter_map(|captures| {
+            let marker = captures.get(2)?;
+            let name_match = captures.get(3)?;
+            let name = name_match.as_str().replace("__", "/");
+            let has_time_argument = prompt
+                .as_bytes()
+                .get(name_match.end())
+                .is_some_and(|byte| matches!(byte, b':' | b'('));
+            let mut end = marker.end();
+            if captures.get(4).is_some() {
+                let paren_start = marker.end() - 1;
+                if let Some(paren_end) =
+                    find_matching_paren(prompt, paren_start)
+                {
+                    end = paren_end + 1;
+                }
+            }
+            Some(XPromptOccurrence {
+                name,
+                start: marker.start(),
+                end,
+                has_time_argument,
+            })
+        })
+        .collect()
+}
+
+fn launch_literal_zone_ranges(prompt: &str) -> Vec<(usize, usize)> {
+    let mut ranges = fenced_block_ranges(prompt);
+    ranges.extend(disabled_region_ranges(prompt));
+    if prompt.contains('`') {
+        ranges.extend(launch_inline_literal_ranges(prompt));
+    }
+    ranges
+}
+
+fn launch_inline_literal_ranges(prompt: &str) -> Vec<(usize, usize)> {
+    let mut masks = fenced_block_ranges(prompt);
+    masks.extend(disabled_region_ranges(prompt));
+    masks.extend(
+        directive_occurrences(prompt)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|directive| (directive.start, directive.end)),
+    );
+    masks.extend(
+        xprompt_occurrences(prompt)
+            .into_iter()
+            .map(|reference| (reference.start, reference.end)),
+    );
+    for (start, open_start, delimiter) in alt_directive_starts(prompt) {
+        if let Some(close_end) = find_matching_delimiter(
+            prompt,
+            open_start,
+            delimiter.open(),
+            delimiter.close(),
+        ) {
+            masks.push((start, close_end + 1));
+        }
+    }
+    inline_code_ranges(prompt, &masks)
+}
+
 fn alt_directive_starts(prompt: &str) -> Vec<(usize, usize, AltDelimiter)> {
     alt_directive_re()
         .captures_iter(prompt)
@@ -1114,9 +1204,13 @@ fn alt_directive_starts(prompt: &str) -> Vec<(usize, usize, AltDelimiter)> {
 
 fn alt_inner_ranges(
     prompt: &str,
+    ignored_ranges: &[(usize, usize)],
 ) -> Result<Vec<(usize, usize)>, AgentLaunchFanoutPlanError> {
     let mut ranges = Vec::new();
-    for (_, open_start, delimiter) in alt_directive_starts(prompt) {
+    for (start, open_start, delimiter) in alt_directive_starts(prompt) {
+        if position_in_ranges(start, ignored_ranges) {
+            continue;
+        }
         if let Some(close_end) = find_matching_delimiter(
             prompt,
             open_start,
@@ -1397,23 +1491,21 @@ fn directive_re() -> &'static Regex {
     })
 }
 
+fn xprompt_reference_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)(^|[\s\(\[\{"'])(#!?([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)(?:!!|\?\?)?(?:(\()|:(`[^`]*`|\$\([^)]*\)|\{\{[^}]*\}\}|\{[^}]*\}|[A-Za-z0-9_.~,+/@-]*[A-Za-z0-9_~,+/@-])|(\+))?)"#,
+        )
+        .unwrap()
+    })
+}
+
 fn alt_directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(r#"(?m)(^|[\s\(\[\{"':])(%(?:alt)?\(|%\{)"#).unwrap()
     })
-}
-
-fn wait_directive_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?m)(^|\s)%(?:wait|w)(?:[:+(]|\s|$)").unwrap()
-    })
-}
-
-fn t_time_xprompt_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?m)(^|[\s\(\[\{"'])#t[:(]"#).unwrap())
 }
 
 fn disabled_region_re() -> &'static Regex {
@@ -2439,6 +2531,25 @@ mod tests {
     }
 
     #[test]
+    fn fanout_planner_ignores_wait_forms_inside_adjacent_inline_code() {
+        for prompt in [
+            "keep `foo`/`%wait` and `#t:5m` literal",
+            "prefix`%wait(time=5m)`suffix",
+            "bare #t is not a time reference",
+        ] {
+            let plan =
+                plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+            assert!(!plan.slots[0].wait_for_previous, "prompt was {prompt:?}");
+        }
+
+        for prompt in ["#t:`5m` active", "%wait(time=`5m`) active"] {
+            let plan =
+                plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
+            assert!(plan.slots[0].wait_for_previous, "prompt was {prompt:?}");
+        }
+    }
+
+    #[test]
     fn fanout_planner_deprecated_time_directive_is_not_special() {
         let prompt = "%time:5m\ntwo";
 
@@ -2717,6 +2828,32 @@ mod tests {
     }
 
     #[test]
+    fn fanout_planner_ignores_models_inside_adjacent_inline_code() {
+        let prompt =
+            "keep `foo`/`%m:wrong` then %{left=%m:opus | right=%m:sonnet}";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("model")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].model.as_deref(), Some("opus"));
+        assert_eq!(plan.slots[1].model.as_deref(), Some("sonnet"));
+        assert!(plan
+            .slots
+            .iter()
+            .all(|slot| slot.prompt.contains("`%m:wrong`")));
+    }
+
+    #[test]
+    fn launch_inline_scanner_preserves_argument_parser_precedence() {
+        let prompt = concat!(
+            "#name:`arg with spaces` #research(compare `a` and `b`) ",
+            "%model:`custom model` %wait(time=`5m`)"
+        );
+
+        assert!(launch_inline_literal_ranges(prompt).is_empty());
+    }
+
+    #[test]
     fn fanout_planner_extracts_repeat_slots() {
         let prompt = "%r:3 %n:task %model:opus do work";
 
@@ -2728,6 +2865,19 @@ mod tests {
         assert_eq!(plan.slots[0].prompt, "  %model:opus do work");
         assert!(!plan.slots[0].wait_for_previous);
         assert!(plan.slots[1].wait_for_previous);
+    }
+
+    #[test]
+    fn fanout_planner_ignores_repeat_and_name_inside_adjacent_inline_code() {
+        let prompt =
+            "keep `foo`/`%r:9` and prefix`%n:wrong`suffix %r:2 %n:right work";
+
+        let plan = plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].repeat_name.as_deref(), Some("right"));
+        assert!(plan.slots[0].prompt.contains("`%r:9`"));
+        assert!(plan.slots[0].prompt.contains("`%n:wrong`"));
     }
 
     #[test]
@@ -2752,6 +2902,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("1"), Some("2"), Some("3")]
         );
+    }
+
+    #[test]
+    fn fanout_planner_ignores_alternative_inside_adjacent_inline_code() {
+        let prompt = "keep `foo`/`%{a | b}` then %{x | y}";
+
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert_eq!(plan.slots.len(), 2);
+        assert_eq!(plan.slots[0].prompt, "keep `foo`/`%{a | b}` then x");
+        assert_eq!(plan.slots[1].prompt, "keep `foo`/`%{a | b}` then y");
     }
 
     #[test]

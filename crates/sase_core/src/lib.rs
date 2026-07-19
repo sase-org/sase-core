@@ -31,6 +31,7 @@ pub mod notifications;
 pub mod parser;
 pub mod plan;
 pub mod project_spec;
+pub mod prompt_literals;
 pub mod prompt_stash;
 pub mod query;
 pub mod sections;
@@ -369,6 +370,7 @@ pub use project_spec::{
     PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION, PROJECT_SPEC_ARCHIVE_SUFFIX,
     PROJECT_SPEC_EXTENSION,
 };
+pub use prompt_literals::inline_code_ranges;
 pub use prompt_stash::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
     rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,

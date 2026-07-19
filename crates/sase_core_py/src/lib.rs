@@ -81,6 +81,7 @@
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
+//! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
 //! - `resolve_agent_family_parent(request: dict) -> dict`
 //! - `resolve_clan_tribe(request: dict) -> dict`
 //! - `list_workspace_claims_from_content(content: str) -> list[dict]`
@@ -303,6 +304,7 @@ use sase_core::git_query::{
     parse_git_local_changes as core_parse_git_local_changes,
     parse_git_name_status_z as core_parse_git_name_status_z,
 };
+use sase_core::inline_code_ranges as core_inline_code_ranges;
 use sase_core::notifications::{
     append_notification as core_append_notification,
     append_notification_counts as core_append_notification_counts,
@@ -3876,6 +3878,17 @@ fn py_plan_agent_launch_fanout<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Return single-line inline-code ranges as UTF-8 byte offsets.
+#[pyfunction]
+#[pyo3(name = "inline_code_ranges")]
+#[pyo3(signature = (text, masked_ranges = None))]
+fn py_inline_code_ranges(
+    text: &str,
+    masked_ranges: Option<Vec<(usize, usize)>>,
+) -> Vec<(usize, usize)> {
+    core_inline_code_ranges(text, masked_ranges.as_deref().unwrap_or(&[]))
+}
+
 /// Return parsed RUNNING workspace claims from project-file content.
 #[pyfunction]
 #[pyo3(name = "list_workspace_claims_from_content")]
@@ -4478,6 +4491,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_tribe, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -4691,6 +4705,28 @@ mod tests {
             assert_eq!(spans.as_array().unwrap().len(), 1);
             assert_eq!(spans[0]["text"], json!("inline"));
             assert_eq!(spans[0]["range"]["start"]["character"], json!(1));
+        });
+    }
+
+    #[test]
+    fn inline_code_binding_returns_plain_byte_offset_tuples() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_inline_code_ranges, &module).unwrap(),
+                )
+                .unwrap();
+            let value = module
+                .getattr("inline_code_ranges")
+                .unwrap()
+                .call1(("é`值`/`ß`",))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!([[2, 7], [8, 12]])
+            );
         });
     }
 
