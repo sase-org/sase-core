@@ -48,6 +48,128 @@ fn result_validation_accepts_proposals_and_rejects_workflows() {
 }
 
 #[test]
+fn clan_scoped_proposals_round_trip_without_changing_legacy_proposals() {
+    let parsed = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "proposed_launches": [
+                {
+                    "id": "first",
+                    "prompt": "Split the file.",
+                    "workspace": "gh:sase-org/sase",
+                    "agent_name": "split_file.src_lib.rs.a1b2",
+                    "clan": "toobig-@"
+                },
+                {
+                    "prompt": "Legacy launch.",
+                    "workspace": "git:sase"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        parsed.proposed_launches[0].clan.as_deref(),
+        Some("toobig-@")
+    );
+    assert_eq!(parsed.proposed_launches[1].clan, None);
+    let encoded = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(encoded["proposed_launches"][0]["clan"], json!("toobig-@"));
+    assert_eq!(encoded["proposed_launches"][1]["clan"], json!(null));
+}
+
+#[test]
+fn clan_scoped_proposals_validate_member_and_directive_shapes() {
+    let valid_shapes = [
+        ("research", "worker"),
+        ("research.@", "worker.deep"),
+        ("research", "@"),
+    ];
+    for (clan, member) in valid_shapes {
+        parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "proposed_launches": [{
+                    "prompt": "Do work.",
+                    "workspace": "git:sase",
+                    "agent_name": member,
+                    "clan": clan
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    let invalid = [
+        (None, "research", None, "clan_member_required"),
+        (Some(""), "research", None, "blank_value"),
+        (
+            Some("@"),
+            "research.@",
+            None,
+            "ambiguous_agent_name_template",
+        ),
+        (
+            Some("worker"),
+            "research@@",
+            None,
+            "invalid_agent_name_template",
+        ),
+        (Some("worker"), ".research", None, "malformed_agent_hood"),
+        (
+            Some("worker..review"),
+            "research",
+            None,
+            "malformed_agent_hood",
+        ),
+        (
+            Some("worker"),
+            "research,other",
+            None,
+            "unrepresentable_clan_directive",
+        ),
+        (
+            Some("worker"),
+            "research",
+            Some("review"),
+            "clan_tribe_conflict",
+        ),
+        (
+            Some("worker--review"),
+            "research",
+            None,
+            "invalid_clan_member_name",
+        ),
+    ];
+    for (member, clan, tribe, expected_code) in invalid {
+        let error = parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "proposed_launches": [{
+                    "prompt": "Do work.",
+                    "workspace": "git:sase",
+                    "agent_name": member,
+                    "clan": clan,
+                    "tribe": tribe
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code, expected_code,
+            "clan={clan:?}, member={member:?}"
+        );
+    }
+}
+
+#[test]
 fn result_validation_rejects_forward_wait_and_unknown_fields() {
     let forward = parse_chop_result(
         &json!({
@@ -133,6 +255,90 @@ fn guards_short_circuit_triggers() {
     let decision = evaluate_chop_decision(&request).unwrap();
     assert_eq!(decision.outcome, "skip");
     assert_eq!(decision.provider.as_deref(), Some("changespec"));
+}
+
+#[test]
+fn agent_clan_guard_matches_only_explicit_active_case_sensitive_clans() {
+    let request = |agents: serde_json::Value| -> ChopDecisionRequestWire {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "inhibit_if": [{
+                "provider": "agent_clan",
+                "name_prefix": "toobig-"
+            }],
+            "trigger": {"provider": "always"},
+            "agents": agents,
+            "now": "2026-07-19T12:00:00Z"
+        }))
+        .unwrap()
+    };
+
+    let matching = evaluate_chop_decision(&request(json!([{
+        "name": "toobig-0.split_file.src",
+        "hood": "toobig-0",
+        "agent_clan": "toobig-0",
+        "active": true
+    }])))
+    .unwrap();
+    assert_eq!(matching.outcome, "skip");
+    assert_eq!(matching.provider.as_deref(), Some("agent_clan"));
+    assert_eq!(
+        matching.reason,
+        "inhibited by active agent clan `toobig-0` member `toobig-0.split_file.src`"
+    );
+
+    for agents in [
+        json!([{
+            "name": "toobig-0.inferred_only",
+            "hood": "toobig-0",
+            "active": true
+        }]),
+        json!([{
+            "name": "toobig-0.inactive",
+            "agent_clan": "toobig-0",
+            "active": false
+        }]),
+        json!([{
+            "name": "Toobig-0.case_sensitive",
+            "agent_clan": "Toobig-0",
+            "active": true
+        }]),
+        json!([{
+            "name": "other-0.member",
+            "agent_clan": "other-0",
+            "active": true
+        }]),
+    ] {
+        let decision = evaluate_chop_decision(&request(agents)).unwrap();
+        assert_eq!(decision.outcome, "fire");
+    }
+}
+
+#[test]
+fn agent_clan_guard_short_circuits_trigger_errors() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "inhibit_if": [{
+            "provider": "agent_clan",
+            "name_prefix": "toobig-"
+        }],
+        "trigger": {
+            "provider": "git.commits_since",
+            "project": "",
+            "threshold": 0
+        },
+        "agents": [{
+            "name": "toobig-0.worker",
+            "agent_clan": "toobig-0",
+            "active": true
+        }],
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "skip");
+    assert_eq!(decision.provider.as_deref(), Some("agent_clan"));
 }
 
 #[test]
@@ -358,6 +564,65 @@ fn strict_axe_validation_accepts_new_shape() {
         }))
         .unwrap();
     assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_accepts_keyed_and_tagged_agent_clan_guards() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"lumberjacks": {"guards": {"chops": {
+                "keyed": {
+                    "inhibit_if": {
+                        "agent_clan": {"name_prefix": "toobig-"}
+                    }
+                },
+                "tagged": {
+                    "inhibit_if": [{
+                        "provider": "agent_clan",
+                        "name_prefix": "toobig-"
+                    }]
+                }
+            }}}}
+        }))
+        .unwrap();
+
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_invalid_agent_clan_guards_fail_closed() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"lumberjacks": {"guards": {"chops": {
+                "missing": {"inhibit_if": {"agent_clan": {}}},
+                "blank": {"inhibit_if": [{
+                    "provider": "agent_clan",
+                    "name_prefix": "  "
+                }]},
+                "unknown": {"inhibit_if": {
+                    "agent_clan": {
+                        "name_prefix": "toobig-",
+                        "hood": "toobig"
+                    }
+                }}
+            }}}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+    let codes: Vec<_> =
+        diagnostics.iter().map(|item| item.code.as_str()).collect();
+    assert!(codes.contains(&"nonblank_string_required"));
+    assert!(codes.contains(&"required_missing"));
+    assert!(codes.contains(&"unknown_key"));
+    assert!(diagnostics.iter().any(|item| {
+        item.path.as_deref()
+            == Some(
+                "lumberjacks.guards.chops.unknown.inhibit_if.agent_clan.hood",
+            )
+    }));
 }
 
 #[test]

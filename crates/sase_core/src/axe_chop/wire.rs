@@ -65,6 +65,8 @@ pub struct ChopLaunchProposalWire {
     #[serde(default)]
     pub agent_name: Option<String>,
     #[serde(default)]
+    pub clan: Option<String>,
+    #[serde(default)]
     pub tribe: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
@@ -112,6 +114,8 @@ pub enum ChopGuardConfigWire {
         #[serde(alias = "name")]
         hood: String,
     },
+    #[serde(rename = "agent_clan")]
+    AgentClan { name_prefix: String },
 }
 
 /// Runner-owned checkpoint advancement policy.
@@ -158,6 +162,8 @@ pub struct ChopAgentSnapshotWire {
     pub name: String,
     #[serde(default)]
     pub hood: Option<String>,
+    #[serde(default)]
+    pub agent_clan: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]

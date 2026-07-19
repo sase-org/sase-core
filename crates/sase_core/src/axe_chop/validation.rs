@@ -204,6 +204,11 @@ pub fn validate_chop_proposal(
         "agent name template",
     )?;
     validate_optional_token(
+        proposal.clan.as_deref(),
+        &format!("{base}.clan"),
+        "agent clan template or reference",
+    )?;
+    validate_optional_token(
         proposal.tribe.as_deref(),
         &format!("{base}.tribe"),
         "tribe",
@@ -222,6 +227,23 @@ pub fn validate_chop_proposal(
         proposal.dedupe_key.as_deref(),
         &format!("{base}.dedupe_key"),
     )?;
+    if let Some(clan) = proposal.clan.as_deref() {
+        let member = proposal.agent_name.as_deref().ok_or_else(|| {
+            ChopEngineError::new(
+                "clan_member_required",
+                format!("{base}.agent_name"),
+                "a clan-scoped proposal requires agent_name as its member id",
+            )
+        })?;
+        if proposal.tribe.is_some() {
+            return Err(ChopEngineError::new(
+                "clan_tribe_conflict",
+                format!("{base}.tribe"),
+                "a clan-scoped proposal cannot also set tribe; the runner assigns the clan tribe",
+            ));
+        }
+        validate_clan_member_identity(clan, member, &base)?;
+    }
 
     let env_name = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$")
         .expect("environment name regex is valid");
@@ -298,6 +320,75 @@ fn validate_token(
             "invalid_token",
             path,
             format!("{label} must be a single non-NUL token"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_clan_member_identity(
+    clan: &str,
+    member: &str,
+    base: &str,
+) -> Result<(), ChopEngineError> {
+    validate_dotted_agent_name(clan, &format!("{base}.clan"), "agent clan")?;
+    validate_dotted_agent_name(
+        member,
+        &format!("{base}.agent_name"),
+        "clan member id",
+    )?;
+
+    let composed = format!("{clan}.{member}");
+    if composed.matches('@').count() > 1 {
+        return Err(ChopEngineError::new(
+            "ambiguous_agent_name_template",
+            format!("{base}.agent_name"),
+            format!(
+                "composed clan member name `{composed}` contains multiple `@` template markers"
+            ),
+        ));
+    }
+    if composed.contains("--") {
+        return Err(ChopEngineError::new(
+            "invalid_clan_member_name",
+            format!("{base}.agent_name"),
+            format!(
+                "composed clan member name `{composed}` contains `--`, which is reserved for agent families"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dotted_agent_name(
+    value: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), ChopEngineError> {
+    if value.split('.').any(str::is_empty) {
+        return Err(ChopEngineError::new(
+            "malformed_agent_hood",
+            path,
+            format!(
+                "{label} `{value}` must not start or end with `.` or contain empty dotted hood segments"
+            ),
+        ));
+    }
+    if value.matches('@').count() > 1 {
+        return Err(ChopEngineError::new(
+            "invalid_agent_name_template",
+            path,
+            format!(
+                "{label} `{value}` may contain at most one `@` template marker"
+            ),
+        ));
+    }
+    if value.contains([',', '(', ')', '=']) || value.starts_with('!') {
+        return Err(ChopEngineError::new(
+            "unrepresentable_clan_directive",
+            path,
+            format!(
+                "{label} `{value}` cannot be represented safely in a clan membership directive"
+            ),
         ));
     }
     Ok(())

@@ -616,13 +616,14 @@ fn validate_guard_provider(
     let mut allowed = match provider {
         "changespec" => vec!["name_prefix", "statuses"],
         "agent_hood" => vec!["hood", "name"],
+        "agent_clan" => vec!["name_prefix"],
         _ => {
             diagnostics.push(diagnostic(
                 request,
                 "unknown_guard_provider",
                 path,
                 &format!(
-                    "unknown guard provider `{provider}`; supported providers: changespec, agent_hood"
+                    "unknown guard provider `{provider}`; supported providers: changespec, agent_hood, agent_clan"
                 ),
             ));
             return;
@@ -688,6 +689,20 @@ fn validate_guard_provider(
                 "required_missing",
                 &child_path(path, "hood"),
                 "agent_hood guard requires `hood`",
+            )),
+        },
+        "agent_clan" => match config.get("name_prefix") {
+            Some(prefix) => validate_nonblank_string(
+                request,
+                prefix,
+                &child_path(path, "name_prefix"),
+                diagnostics,
+            ),
+            None => diagnostics.push(diagnostic(
+                request,
+                "required_missing",
+                &child_path(path, "name_prefix"),
+                "agent_clan guard requires `name_prefix`",
             )),
         },
         _ => {}

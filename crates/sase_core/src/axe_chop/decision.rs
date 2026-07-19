@@ -52,6 +52,24 @@ pub fn evaluate_chop_decision(
                     ));
                 }
             }
+            ChopGuardConfigWire::AgentClan { name_prefix } => {
+                if let Some((agent, clan)) =
+                    request.agents.iter().find_map(|row| {
+                        let clan = row.agent_clan.as_deref()?;
+                        (row.active && clan.starts_with(name_prefix))
+                            .then_some((row, clan))
+                    })
+                {
+                    return Ok(decision(
+                        "skip",
+                        format!(
+                            "inhibited by active agent clan `{clan}` member `{}`",
+                            agent.name
+                        ),
+                        Some("agent_clan"),
+                    ));
+                }
+            }
         }
     }
 
@@ -120,6 +138,15 @@ fn validate_request(
                     "blank_value",
                     format!("$.inhibit_if[{index}].hood"),
                     "agent hood must not be blank",
+                ));
+            }
+            ChopGuardConfigWire::AgentClan { name_prefix }
+                if name_prefix.trim().is_empty() =>
+            {
+                return Err(ChopEngineError::new(
+                    "blank_value",
+                    format!("$.inhibit_if[{index}].name_prefix"),
+                    "agent clan name prefix must not be blank",
                 ));
             }
             _ => {}

@@ -4594,6 +4594,74 @@ mod tests {
         });
     }
 
+    #[test]
+    fn chop_clan_contracts_round_trip_through_python_bindings() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let proposal_obj = json_value_to_py(
+                py,
+                &json!({
+                    "prompt": "Split the file.",
+                    "workspace": "git:sase",
+                    "agent_name": "split_file.src_lib.a1b2",
+                    "clan": "toobig-@"
+                }),
+            )
+            .unwrap();
+            let proposal = proposal_obj.bind(py).downcast::<PyDict>().unwrap();
+            let normalized =
+                py_validate_chop_proposal(py, proposal, 0, None).unwrap();
+            let normalized = py_to_json_value(normalized.bind(py)).unwrap();
+            assert_eq!(normalized["clan"], json!("toobig-@"));
+            assert_eq!(
+                normalized["agent_name"],
+                json!("split_file.src_lib.a1b2")
+            );
+
+            let decision_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "inhibit_if": [{
+                        "provider": "agent_clan",
+                        "name_prefix": "toobig-"
+                    }],
+                    "agents": [{
+                        "name": "toobig-0.split_file.src_lib.a1b2",
+                        "agent_clan": "toobig-0",
+                        "active": true
+                    }],
+                    "now": "2026-07-19T12:00:00Z"
+                }),
+            )
+            .unwrap();
+            let decision = decision_obj.bind(py).downcast::<PyDict>().unwrap();
+            let evaluated = py_evaluate_chop_decision(py, decision).unwrap();
+            let evaluated = py_to_json_value(evaluated.bind(py)).unwrap();
+            assert_eq!(evaluated["outcome"], json!("skip"));
+            assert_eq!(evaluated["provider"], json!("agent_clan"));
+
+            let config_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "config": {"lumberjacks": {"guard": {"chops": {
+                        "split": {"inhibit_if": {"agent_clan": {
+                            "name_prefix": "toobig-"
+                        }}}
+                    }}}}
+                }),
+            )
+            .unwrap();
+            let config = config_obj.bind(py).downcast::<PyDict>().unwrap();
+            let diagnostics = py_validate_axe_config(py, config).unwrap();
+            assert_eq!(
+                py_to_json_value(diagnostics.bind(py)).unwrap(),
+                json!([])
+            );
+        });
+    }
+
     fn spec_json(name: &str, status: &str, parent: Option<&str>) -> JsonValue {
         json!({
             "schema_version": 3,
