@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 4;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -229,8 +229,8 @@ pub struct AgentMetaWire {
     pub agent_family_parallel: bool,
     #[serde(default)]
     pub plan_chain_root: bool,
-    #[serde(default)]
-    pub tag: Option<String>,
+    #[serde(default, alias = "tag")]
+    pub tribe: Option<String>,
     #[serde(default)]
     pub output_variables: BTreeMap<String, String>,
     #[serde(default)]

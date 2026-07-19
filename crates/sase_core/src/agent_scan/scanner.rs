@@ -861,7 +861,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         agent_family_role,
         agent_family_parallel: legacy_parallel,
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
-        tag: coerce_str(data.get("tag")),
+        tribe: coerce_str(data.get("tribe"))
+            .or_else(|| coerce_str(data.get("tag"))),
         output_variables: coerce_str_str_map(data.get("output_variables"))
             .unwrap_or_default(),
         output_path: coerce_str(data.get("output_path")),

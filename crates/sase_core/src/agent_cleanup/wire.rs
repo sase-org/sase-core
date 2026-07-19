@@ -7,12 +7,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 3;
 
 pub const CLEANUP_SCOPE_FOCUSED_PANEL: &str = "focused_panel";
 pub const CLEANUP_SCOPE_ALL_PANELS: &str = "all_panels";
 pub const CLEANUP_SCOPE_EXPLICIT_IDENTITIES: &str = "explicit_identities";
-pub const CLEANUP_SCOPE_TAG: &str = "tag";
+pub const CLEANUP_SCOPE_TRIBE: &str = "tribe";
 pub const CLEANUP_SCOPE_CLAN: &str = "clan";
 pub const CLEANUP_SCOPE_FOCUSED_GROUP: &str = "focused_group";
 pub const CLEANUP_SCOPE_CUSTOM_SELECTION: &str = "custom_selection";
@@ -77,7 +77,7 @@ pub struct AgentCleanupTargetWire {
     #[serde(default)]
     pub workspace: Option<i64>,
     #[serde(default)]
-    pub tag: Option<String>,
+    pub tribe: Option<String>,
     #[serde(default)]
     pub agent_clan: Option<String>,
     #[serde(default)]
@@ -107,9 +107,9 @@ pub struct AgentCleanupRequestWire {
     pub scope: String,
     pub mode: String,
     #[serde(default)]
-    pub focused_panel_tag: Option<String>,
+    pub focused_panel_tribe: Option<String>,
     #[serde(default)]
-    pub tag: Option<String>,
+    pub tribe: Option<String>,
     #[serde(default)]
     pub clan_name: Option<String>,
     #[serde(default)]

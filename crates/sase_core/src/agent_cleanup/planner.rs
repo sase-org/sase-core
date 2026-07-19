@@ -19,7 +19,7 @@ use super::wire::{
     CLEANUP_MODE_PREVIEW_ONLY, CLEANUP_SCOPE_ALL_PANELS, CLEANUP_SCOPE_CLAN,
     CLEANUP_SCOPE_CUSTOM_SELECTION, CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
     CLEANUP_SCOPE_FOCUSED_GROUP, CLEANUP_SCOPE_FOCUSED_PANEL,
-    CLEANUP_SCOPE_TAG, CONFIRMATION_SEVERITY_DESTRUCTIVE,
+    CLEANUP_SCOPE_TRIBE, CONFIRMATION_SEVERITY_DESTRUCTIVE,
     CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
     KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_RUNNING, KILL_KIND_WORKFLOW,
     SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
@@ -51,32 +51,35 @@ fn is_workflow_child(target: &AgentCleanupTargetWire) -> bool {
         || target.parent_timestamp.is_some()
 }
 
-fn effective_tag(
+fn effective_tribe(
     target: &AgentCleanupTargetWire,
-    parent_tags: &BTreeMap<String, Option<String>>,
+    parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> Option<String> {
     if is_workflow_child(target) {
         if let Some(parent_ts) = &target.parent_timestamp {
-            if let Some(tag) = parent_tags.get(parent_ts) {
-                return tag.clone();
+            if let Some(tribe) = parent_tribes.get(parent_ts) {
+                return tribe.clone();
             }
         }
     }
-    target.tag.clone()
+    target.tribe.clone()
 }
 
 fn selected_by_scope(
     target: &AgentCleanupTargetWire,
     request: &AgentCleanupRequestWire,
     selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
-    parent_tags: &BTreeMap<String, Option<String>>,
+    parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> bool {
     match request.scope.as_str() {
         CLEANUP_SCOPE_ALL_PANELS => true,
         CLEANUP_SCOPE_FOCUSED_PANEL => {
-            effective_tag(target, parent_tags) == request.focused_panel_tag
+            effective_tribe(target, parent_tribes)
+                == request.focused_panel_tribe
         }
-        CLEANUP_SCOPE_TAG => effective_tag(target, parent_tags) == request.tag,
+        CLEANUP_SCOPE_TRIBE => {
+            effective_tribe(target, parent_tribes) == request.tribe
+        }
         CLEANUP_SCOPE_CLAN => {
             request.clan_name.is_some()
                 && target.agent_clan == request.clan_name
@@ -127,14 +130,19 @@ fn parent_selected_for_child(
     targets: &[AgentCleanupTargetWire],
     request: &AgentCleanupRequestWire,
     selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
-    parent_tags: &BTreeMap<String, Option<String>>,
+    parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> bool {
     if child.parent_timestamp.is_none() {
         return false;
     }
     targets.iter().any(|candidate| {
         parent_matches_child(candidate, child)
-            && selected_by_scope(candidate, request, selected_ids, parent_tags)
+            && selected_by_scope(
+                candidate,
+                request,
+                selected_ids,
+                parent_tribes,
+            )
     })
 }
 
@@ -143,7 +151,7 @@ fn is_direct_child_target(
     targets: &[AgentCleanupTargetWire],
     request: &AgentCleanupRequestWire,
     selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
-    parent_tags: &BTreeMap<String, Option<String>>,
+    parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> bool {
     is_workflow_child(target)
         && scope_allows_direct_child_targets(&request.scope)
@@ -153,7 +161,7 @@ fn is_direct_child_target(
             targets,
             request,
             selected_ids,
-            parent_tags,
+            parent_tribes,
         )
 }
 
@@ -249,19 +257,19 @@ fn workflow_children_by_parent(
     children
 }
 
-fn parent_tags_by_suffix(
+fn parent_tribes_by_suffix(
     targets: &[AgentCleanupTargetWire],
 ) -> BTreeMap<String, Option<String>> {
-    let mut tags = BTreeMap::new();
+    let mut tribes = BTreeMap::new();
     for target in targets {
         if is_workflow_child(target) {
             continue;
         }
         if let Some(raw_suffix) = &target.raw_suffix {
-            tags.insert(raw_suffix.clone(), target.tag.clone());
+            tribes.insert(raw_suffix.clone(), target.tribe.clone());
         }
     }
-    tags
+    tribes
 }
 
 fn add_skip(
@@ -566,7 +574,7 @@ pub fn plan_agent_cleanup(
 
     let selected_ids: BTreeSet<AgentCleanupIdentityWire> =
         request.identities.iter().cloned().collect();
-    let parent_tags = parent_tags_by_suffix(targets);
+    let parent_tribes = parent_tribes_by_suffix(targets);
     let children_by_parent = workflow_children_by_parent(targets);
     let parallel_members_by_parent = parallel_members_by_parent(targets);
 
@@ -592,7 +600,7 @@ pub fn plan_agent_cleanup(
             counts.running += 1;
         }
 
-        if !selected_by_scope(target, request, &selected_ids, &parent_tags) {
+        if !selected_by_scope(target, request, &selected_ids, &parent_tribes) {
             add_skip(&mut skipped_items, target, SKIPPED_NOT_IN_SCOPE, None);
             continue;
         }
@@ -602,7 +610,7 @@ pub fn plan_agent_cleanup(
             targets,
             request,
             &selected_ids,
-            &parent_tags,
+            &parent_tribes,
         );
         if is_workflow_child(target) && !direct_child_target {
             add_skip(
@@ -841,7 +849,7 @@ mod tests {
             artifacts_dir: Some("/tmp/artifacts".to_string()),
             from_changespec: false,
             workspace: None,
-            tag: None,
+            tribe: None,
             agent_clan: None,
             agent_clan_generation: None,
             agent_name: None,
@@ -860,8 +868,8 @@ mod tests {
             schema_version: AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
             scope: scope.to_string(),
             mode: mode.to_string(),
-            focused_panel_tag: None,
-            tag: None,
+            focused_panel_tribe: None,
+            tribe: None,
             clan_name: None,
             clan_generation: None,
             identities: vec![],
@@ -870,19 +878,19 @@ mod tests {
     }
 
     #[test]
-    fn focused_panel_selects_matching_tag_and_dismisses_completed() {
-        let mut untagged = target("run", "untagged", Some("1"), "DONE", None);
-        untagged.tag = None;
-        let mut tagged = target("run", "tagged", Some("2"), "DONE", None);
-        tagged.tag = Some("ops".to_string());
+    fn focused_panel_selects_matching_tribe_and_dismisses_completed() {
+        let mut no_tribe = target("run", "no-tribe", Some("1"), "DONE", None);
+        no_tribe.tribe = None;
+        let mut in_tribe = target("run", "in-tribe", Some("2"), "DONE", None);
+        in_tribe.tribe = Some("ops".to_string());
         let mut request =
             req(CLEANUP_SCOPE_FOCUSED_PANEL, CLEANUP_MODE_DISMISS_COMPLETED);
-        request.focused_panel_tag = Some("ops".to_string());
+        request.focused_panel_tribe = Some("ops".to_string());
 
-        let plan = plan_agent_cleanup(&[untagged, tagged], &request).unwrap();
+        let plan = plan_agent_cleanup(&[no_tribe, in_tribe], &request).unwrap();
 
         assert_eq!(plan.dismiss_items.len(), 1);
-        assert_eq!(plan.dismiss_items[0].identity.cl_name, "tagged");
+        assert_eq!(plan.dismiss_items[0].identity.cl_name, "in-tribe");
         assert_eq!(plan.counts.selected, 1);
         assert_eq!(plan.confirmation_severity, CONFIRMATION_SEVERITY_DISMISS);
     }
@@ -972,19 +980,20 @@ mod tests {
     }
 
     #[test]
-    fn tag_scope_uses_parent_tag_for_workflow_children_but_skips_child_directly(
+    fn tribe_scope_uses_parent_tribe_for_workflow_children_but_skips_child_directly(
     ) {
         let mut parent =
             target("workflow", "parent", Some("p1"), "RUNNING", Some(8));
         parent.workflow = Some("deploy".to_string());
-        parent.tag = Some("ops".to_string());
+        parent.tribe = Some("ops".to_string());
         let mut child =
             target("workflow", "child", Some("c1"), "RUNNING", Some(9));
         child.parent_timestamp = Some("p1".to_string());
         child.parent_workflow = Some("deploy".to_string());
         child.is_workflow_child = true;
-        let mut request = req(CLEANUP_SCOPE_TAG, CLEANUP_MODE_KILL_AND_DISMISS);
-        request.tag = Some("ops".to_string());
+        let mut request =
+            req(CLEANUP_SCOPE_TRIBE, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.tribe = Some("ops".to_string());
 
         let plan = plan_agent_cleanup(&[parent, child], &request).unwrap();
 
@@ -1335,17 +1344,18 @@ mod tests {
         let mut child =
             target("run", "child", Some("child"), "RUNNING", Some(11));
         child.parent_timestamp = Some("root".to_string());
-        child.tag = Some("ops".to_string());
+        child.tribe = Some("ops".to_string());
 
         let mut focused =
             req(CLEANUP_SCOPE_FOCUSED_PANEL, CLEANUP_MODE_KILL_AND_DISMISS);
-        focused.focused_panel_tag = Some("ops".to_string());
-        let mut tagged = req(CLEANUP_SCOPE_TAG, CLEANUP_MODE_KILL_AND_DISMISS);
-        tagged.tag = Some("ops".to_string());
+        focused.focused_panel_tribe = Some("ops".to_string());
+        let mut tribe_request =
+            req(CLEANUP_SCOPE_TRIBE, CLEANUP_MODE_KILL_AND_DISMISS);
+        tribe_request.tribe = Some("ops".to_string());
         let requests = vec![
             req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
             focused,
-            tagged,
+            tribe_request,
         ];
 
         for request in requests {

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAgentGroupRefWire {
@@ -28,8 +28,8 @@ pub struct SavedAgentGroupRefWire {
     pub model: Option<String>,
     #[serde(default)]
     pub llm_provider: Option<String>,
-    #[serde(default)]
-    pub tag: Option<String>,
+    #[serde(default, alias = "tag")]
+    pub tribe: Option<String>,
     #[serde(default)]
     pub prompt_preview: Option<String>,
 }

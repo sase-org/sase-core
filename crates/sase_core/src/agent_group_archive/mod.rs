@@ -144,12 +144,16 @@ fn normalize_group(
     mut group: SavedAgentGroupWire,
 ) -> Result<SavedAgentGroupWire, String> {
     validate_group_id(&group.group_id)?;
-    if group.schema_version != AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION {
+    if !matches!(
+        group.schema_version,
+        1 | AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
+    ) {
         return Err(format!(
             "saved agent group schema mismatch: got {}, expected {}",
             group.schema_version, AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
         ));
     }
+    group.schema_version = AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION;
     if group.created_at.trim().is_empty() {
         return Err(
             "saved agent group created_at must not be empty".to_string()
@@ -437,7 +441,7 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.times_revived, 1);
         assert_eq!(loaded.agent_refs[0].raw_suffix.as_deref(), Some("ts-1"));
-        assert_eq!(loaded.agent_refs[0].tag.as_deref(), Some("backend"));
+        assert_eq!(loaded.agent_refs[0].tribe.as_deref(), Some("backend"));
         assert_eq!(
             loaded.agent_refs[0].prompt_preview.as_deref(),
             Some("Restore this backend worker.")
@@ -577,7 +581,7 @@ mod tests {
         fs::write(
             tmp.path().join("legacy.json"),
             serde_json::json!({
-                "schema_version": AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+                "schema_version": 1,
                 "group_id": "legacy",
                 "created_at": "2026-05-27T12:00:00Z",
                 "source": "marked_agents",
@@ -610,7 +614,7 @@ mod tests {
         fs::write(
             tmp.path().join("legacy-prompt.json"),
             serde_json::json!({
-                "schema_version": AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+                "schema_version": 1,
                 "group_id": "legacy-prompt",
                 "created_at": "2026-05-27T12:00:00Z",
                 "source": "marked_agents",
@@ -636,6 +640,12 @@ mod tests {
         let loaded = load_dismissed_agent_group(tmp.path(), "legacy-prompt")
             .unwrap()
             .unwrap();
+
+        assert_eq!(
+            loaded.schema_version,
+            AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
+        );
+        assert_eq!(loaded.agent_refs[0].tribe.as_deref(), Some("backend"));
 
         assert_eq!(loaded.agent_refs.len(), 1);
         assert_eq!(loaded.agent_refs[0].prompt_preview, None);
@@ -686,7 +696,7 @@ mod tests {
                 start_time: Some("2026-05-27T11:00:00Z".to_string()),
                 model: Some("gpt".to_string()),
                 llm_provider: Some("codex".to_string()),
-                tag: Some("backend".to_string()),
+                tribe: Some("backend".to_string()),
                 prompt_preview: Some(
                     "Restore this backend worker.".to_string(),
                 ),

@@ -996,7 +996,7 @@ fn running_record_carries_wait_completed_at() {
 }
 
 #[test]
-fn running_record_carries_agent_meta_tag() {
+fn running_record_prefers_canonical_agent_meta_tribe() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
     write_json(
@@ -1008,7 +1008,8 @@ fn running_record_carries_agent_meta_tag() {
             .join("agent_meta.json"),
         &json!({
             "name": "running_alpha",
-            "tag": "sase-26",
+            "tag": "legacy",
+            "tribe": "sase-26",
         }),
     );
 
@@ -1017,7 +1018,10 @@ fn running_record_carries_agent_meta_tag() {
     let rec = record_by_timestamp(&snapshot, TS_ACE_RUN_RUNNING);
     let meta = rec.agent_meta.as_ref().unwrap();
 
-    assert_eq!(meta.tag.as_deref(), Some("sase-26"));
+    assert_eq!(meta.tribe.as_deref(), Some("sase-26"));
+    let serialized = serde_json::to_value(meta).unwrap();
+    assert_eq!(serialized["tribe"], json!("sase-26"));
+    assert!(serialized.get("tag").is_none());
 }
 
 #[test]

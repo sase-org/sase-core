@@ -1441,6 +1441,12 @@ fn py_mark_recent_dismissed_agent_group_revived<'py>(
 /// the scope and mode. The returned dict is an `AgentCleanupPlanWire` whose
 /// kill/dismiss lists can be previewed or executed by Python.
 #[pyfunction]
+#[pyo3(name = "agent_cleanup_wire_schema_version")]
+fn py_agent_cleanup_wire_schema_version() -> u32 {
+    sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
 #[pyo3(name = "plan_agent_cleanup")]
 fn py_plan_agent_cleanup<'py>(
     py: Python<'py>,
@@ -4399,6 +4405,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_mark_recent_dismissed_agent_group_revived,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_agent_cleanup_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
@@ -4997,7 +5004,7 @@ mod tests {
                     "project_file": "/tmp/project.sase",
                     "artifacts_dir": "/tmp/artifacts",
                     "workspace": null,
-                    "tag": null,
+                    "tribe": null,
                     "agent_clan": "shipping",
                     "agent_clan_generation": "current-gen",
                     "agent_name": "done",
@@ -5016,8 +5023,8 @@ mod tests {
                     "schema_version": sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION,
                     "scope": "clan",
                     "mode": "dismiss_completed",
-                    "focused_panel_tag": null,
-                    "tag": null,
+                    "focused_panel_tribe": null,
+                    "tribe": null,
                     "clan_name": "shipping",
                     "clan_generation": "current-gen",
                     "identities": [],
