@@ -18,6 +18,8 @@ pub struct PhaseAssignmentWire {
     pub model: String,
     pub size: String,
     pub waits_on: Vec<String>,
+    #[serde(default)]
+    pub blocker_bead_ids: Vec<String>,
     pub wave: usize,
 }
 
@@ -26,6 +28,8 @@ pub struct EpicWorkPlanWire {
     pub epic_id: String,
     pub launch_tag_id: String,
     pub total_phase_count: usize,
+    #[serde(default)]
+    pub phase_bead_ids: Vec<String>,
     pub waves: Vec<Vec<PhaseAssignmentWire>>,
     pub land_agent_name: String,
     pub land_model: String,
@@ -65,17 +69,22 @@ pub fn build_epic_work_plan_from_issues(
         .iter()
         .filter(|issue| issue.parent_id.as_deref() == Some(epic_id))
         .collect();
-    let total_phase_count = children
-        .iter()
-        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
-        .count();
-    let open_phases: Vec<&IssueWire> = children
+    let mut phase_children: Vec<&IssueWire> = children
         .iter()
         .copied()
-        .filter(|issue| {
-            issue.issue_type == IssueTypeWire::Phase
-                && issue.status != StatusWire::Closed
-        })
+        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
+        .collect();
+    phase_children
+        .sort_by_key(|phase| (phase.created_at.as_str(), phase.id.as_str()));
+    let total_phase_count = phase_children.len();
+    let phase_bead_ids = phase_children
+        .iter()
+        .map(|phase| phase.id.clone())
+        .collect();
+    let open_phases: Vec<&IssueWire> = phase_children
+        .iter()
+        .copied()
+        .filter(|issue| issue.status != StatusWire::Closed)
         .collect();
     if open_phases.is_empty() {
         return Err(BeadError::validation(format!(
@@ -83,22 +92,37 @@ pub fn build_epic_work_plan_from_issues(
         )));
     }
 
-    let in_epic_phase_ids: BTreeSet<&str> = children
+    let in_epic_phase_ids: BTreeSet<&str> = phase_children
         .iter()
-        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
         .map(|issue| issue.id.as_str())
         .collect();
-    let open_phase_ids: BTreeSet<&str> =
-        open_phases.iter().map(|issue| issue.id.as_str()).collect();
+    let schedulable_phases: Vec<&IssueWire> = open_phases
+        .iter()
+        .copied()
+        .filter(|phase| {
+            !issues.iter().any(|issue| {
+                issue.parent_id.as_deref() == Some(phase.id.as_str())
+                    && issue.issue_type == IssueTypeWire::Plan
+                    && issue.status != StatusWire::Closed
+            })
+        })
+        .collect();
+    let schedulable_phase_ids: BTreeSet<&str> = schedulable_phases
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect();
 
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for phase in &open_phases {
-        let mut in_epic_open: BTreeSet<&str> = BTreeSet::new();
+    let mut blocker_bead_ids: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for phase in &schedulable_phases {
+        let mut scheduled_blockers: BTreeSet<&str> = BTreeSet::new();
+        let mut in_epic_blockers: BTreeSet<&str> = BTreeSet::new();
         for dep in &phase.dependencies {
             let blocker_id = dep.depends_on_id.as_str();
             if in_epic_phase_ids.contains(blocker_id) {
-                if open_phase_ids.contains(blocker_id) {
-                    in_epic_open.insert(blocker_id);
+                in_epic_blockers.insert(blocker_id);
+                if schedulable_phase_ids.contains(blocker_id) {
+                    scheduled_blockers.insert(blocker_id);
                 }
                 continue;
             }
@@ -117,10 +141,11 @@ pub fn build_epic_work_plan_from_issues(
                 });
             }
         }
-        deps.insert(phase.id.as_str(), in_epic_open);
+        deps.insert(phase.id.as_str(), scheduled_blockers);
+        blocker_bead_ids.insert(phase.id.as_str(), in_epic_blockers);
     }
 
-    let sort_key: BTreeMap<&str, (&str, &str)> = open_phases
+    let sort_key: BTreeMap<&str, (&str, &str)> = schedulable_phases
         .iter()
         .map(|phase| {
             (
@@ -131,7 +156,7 @@ pub fn build_epic_work_plan_from_issues(
         .collect();
     let mut waves: Vec<Vec<&str>> = Vec::new();
     let mut placed: BTreeSet<&str> = BTreeSet::new();
-    let mut remaining = open_phase_ids.clone();
+    let mut remaining = schedulable_phase_ids.clone();
     while !remaining.is_empty() {
         let mut ready: Vec<&str> = remaining
             .iter()
@@ -174,6 +199,12 @@ pub fn build_epic_work_plan_from_issues(
                         .flat_map(|ids| ids.iter().copied())
                         .map(phase_agent_name)
                         .collect();
+                    let blocker_bead_ids = blocker_bead_ids
+                        .get(pid)
+                        .into_iter()
+                        .flat_map(|ids| ids.iter().copied())
+                        .map(str::to_string)
+                        .collect();
                     PhaseAssignmentWire {
                         bead_id: (*pid).to_string(),
                         agent_name: phase_agent_name(pid),
@@ -185,6 +216,7 @@ pub fn build_epic_work_plan_from_issues(
                             .unwrap_or_default()
                             .to_string(),
                         waits_on,
+                        blocker_bead_ids,
                         wave: wave_index,
                     }
                 })
@@ -203,6 +235,7 @@ pub fn build_epic_work_plan_from_issues(
         epic_id: epic_id.to_string(),
         launch_tag_id: epic_id.to_string(),
         total_phase_count,
+        phase_bead_ids,
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
         land_model: epic.model.clone(),
@@ -310,9 +343,11 @@ mod tests {
             vec!["p2", "p3"]
         );
         assert_eq!(plan.waves[2][0].waits_on, vec!["p2", "p3"]);
+        assert_eq!(plan.waves[2][0].blocker_bead_ids, vec!["p2", "p3"]);
         assert_eq!(plan.land_agent_name, "e1.land");
         assert_eq!(plan.land_waits_on, vec!["p1", "p2", "p3", "p4"]);
         assert_eq!(plan.launch_tag_id, "e1");
+        assert_eq!(plan.phase_bead_ids, vec!["p1", "p2", "p3", "p4"]);
     }
 
     #[test]
@@ -339,6 +374,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.total_phase_count, 2);
+        assert_eq!(plan.phase_bead_ids, vec!["p1", "p2"]);
         assert_eq!(plan.waves.len(), 1);
         assert_eq!(plan.waves[0][0].bead_id, "p2");
     }
@@ -422,6 +458,82 @@ mod tests {
         assert_eq!(plan.waves[0].len(), 1);
         assert_eq!(plan.waves[0][0].bead_id, "e1.1");
         assert_eq!(plan.land_waits_on, vec!["e1.1"]);
+    }
+
+    #[test]
+    fn delegated_phase_is_excluded_but_remains_a_bead_blocker() {
+        let delegated = phase("p1", "e1");
+        let child_epic = epic_child("child", "p1");
+        let mut scheduled = phase("p2", "e1");
+        depends(&mut scheduled, "p1");
+
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), delegated, child_epic, scheduled],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.total_phase_count, 2);
+        assert_eq!(plan.phase_bead_ids, vec!["p1", "p2"]);
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0][0].bead_id, "p2");
+        assert!(plan.waves[0][0].waits_on.is_empty());
+        assert_eq!(plan.waves[0][0].blocker_bead_ids, vec!["p1"]);
+        assert_eq!(plan.land_waits_on, vec!["p2"]);
+    }
+
+    #[test]
+    fn delegated_only_plan_has_no_waves() {
+        let delegated = phase("p1", "e1");
+        let child_epic = epic_child("child", "p1");
+
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), delegated, child_epic],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.total_phase_count, 1);
+        assert_eq!(plan.phase_bead_ids, vec!["p1"]);
+        assert!(plan.waves.is_empty());
+        assert!(plan.land_waits_on.is_empty());
+    }
+
+    #[test]
+    fn closed_or_removed_child_plan_does_not_exclude_phase() {
+        let phase_with_closed_child = phase("p1", "e1");
+        let mut closed_child = epic_child("child", "p1");
+        closed_child.status = StatusWire::Closed;
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), phase_with_closed_child, closed_child],
+            "e1",
+        )
+        .unwrap();
+        assert_eq!(plan.waves[0][0].bead_id, "p1");
+
+        let plan_without_child = build_epic_work_plan_from_issues(
+            vec![epic("e1"), phase("p1", "e1")],
+            "e1",
+        )
+        .unwrap();
+        assert_eq!(plan_without_child.waves[0][0].bead_id, "p1");
+    }
+
+    #[test]
+    fn closed_in_epic_blocker_is_only_a_bead_wait() {
+        let mut closed = phase("p1", "e1");
+        closed.status = StatusWire::Closed;
+        let mut scheduled = phase("p2", "e1");
+        depends(&mut scheduled, "p1");
+
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), closed, scheduled],
+            "e1",
+        )
+        .unwrap();
+
+        assert!(plan.waves[0][0].waits_on.is_empty());
+        assert_eq!(plan.waves[0][0].blocker_bead_ids, vec!["p1"]);
     }
 
     #[test]

@@ -5086,7 +5086,7 @@ mod tests {
     }
 
     #[test]
-    fn bead_work_plan_binding_exposes_phase_size() {
+    fn bead_work_plan_binding_exposes_additive_bead_id_fields() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let issues = PyList::empty_bound(py);
@@ -5106,12 +5106,27 @@ mod tests {
                 py,
                 &issues,
                 json!({
+                    "id": "beads-1.0",
+                    "title": "Closed blocker",
+                    "status": "closed",
+                    "issue_type": "phase",
+                    "parent_id": "beads-1"
+                }),
+            );
+            append_json(
+                py,
+                &issues,
+                json!({
                     "id": "beads-1.1",
                     "title": "Large phase",
                     "status": "open",
                     "issue_type": "phase",
                     "parent_id": "beads-1",
-                    "size": "large"
+                    "size": "large",
+                    "dependencies": [{
+                        "issue_id": "beads-1.1",
+                        "depends_on_id": "beads-1.0"
+                    }]
                 }),
             );
 
@@ -5121,8 +5136,24 @@ mod tests {
             .unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
 
+            assert_eq!(value["epic_id"], json!("beads-1"));
+            assert_eq!(value["launch_tag_id"], json!("beads-1"));
+            assert_eq!(value["total_phase_count"], json!(2));
+            assert_eq!(
+                value["phase_bead_ids"],
+                json!(["beads-1.0", "beads-1.1"])
+            );
             assert_eq!(value["waves"][0][0]["bead_id"], json!("beads-1.1"));
+            assert_eq!(value["waves"][0][0]["agent_name"], json!("beads-1.1"));
             assert_eq!(value["waves"][0][0]["size"], json!("large"));
+            assert_eq!(value["waves"][0][0]["waits_on"], json!([]));
+            assert_eq!(
+                value["waves"][0][0]["blocker_bead_ids"],
+                json!(["beads-1.0"])
+            );
+            assert_eq!(value["waves"][0][0]["wave"], json!(0));
+            assert_eq!(value["land_agent_name"], json!("beads-1.land"));
+            assert_eq!(value["land_waits_on"], json!(["beads-1.1"]));
         });
     }
 
