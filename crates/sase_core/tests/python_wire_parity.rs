@@ -236,6 +236,7 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     assert!(legacy.epic_plan_ref.is_none());
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.clan_summary.is_none());
+    assert!(legacy.wait_priority.is_none());
 
     let clan: AgentMetaWire = serde_json::from_str(
         r#"{"agent_clan":"alpha","clan_tribe":"research","clan_summary":"[bold]Summary[/bold]"}"#,
@@ -247,6 +248,17 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     let encoded = serde_json::to_value(&clan).unwrap();
     let round_tripped: AgentMetaWire = serde_json::from_value(encoded).unwrap();
     assert_eq!(round_tripped, clan);
+}
+
+#[test]
+fn agent_meta_wait_priority_matches_python_wire_defaulting() {
+    let explicit: AgentMetaWire =
+        serde_json::from_str(r#"{"wait_priority":3}"#).unwrap();
+    assert_eq!(explicit.wait_priority, Some(3));
+    assert_eq!(serde_json::to_value(&explicit).unwrap()["wait_priority"], 3);
+
+    let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
+    assert_eq!(legacy.wait_priority, None);
 }
 
 #[test]

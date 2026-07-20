@@ -431,6 +431,7 @@ fn build_waiting(root: &Path) {
             "wait_for": ["upstream"],
             "wait_for_beads": ["sase-87.2"],
             "wait_duration": 600.0,
+            "wait_priority": 4,
         }),
     );
     // Intentionally malformed waiting.json; the scanner counts it as a
@@ -1447,6 +1448,13 @@ fn waiting_marker_decode_error_does_not_crash() {
     assert_eq!(meta.wait_for, vec!["upstream".to_string()]);
     assert_eq!(meta.wait_for_beads, vec!["sase-87.2".to_string()]);
     assert_eq!(meta.wait_duration, Some(600.0));
+    assert_eq!(meta.wait_priority, Some(4));
+
+    let legacy = record_by_timestamp(&snapshot, TS_HOME_RUNNING)
+        .agent_meta
+        .as_ref()
+        .unwrap();
+    assert_eq!(legacy.wait_priority, None);
 }
 
 #[test]
