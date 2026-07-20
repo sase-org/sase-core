@@ -16,9 +16,9 @@ pub use search::{
     search_plans, PLAN_SEARCH_FIELD_NAMES, PLAN_SEARCH_WIRE_SCHEMA_VERSION,
 };
 pub use validate::{
-    plan_frontmatter_schema, plan_validate, PlanDiagnosticWire,
-    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanValidationResultWire,
-    ValidatedPlanWire,
+    plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
+    PlanDiagnosticWire, PlanFrontmatterFieldSpecWire, PlanPhaseWire,
+    PlanValidationMode, PlanValidationResultWire, ValidatedPlanWire,
 };
 pub use wire::{
     PlanError, PlanSearchMatchWire, PlanWire, PLAN_WIRE_SCHEMA_VERSION,

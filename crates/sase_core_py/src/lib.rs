@@ -106,7 +106,7 @@
 //! - `validate_axe_config(request: dict) -> list[dict]`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
-//! - `plan_validate(content: str, tier: str) -> dict`
+//! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
@@ -322,8 +322,8 @@ use sase_core::notifications::{
 };
 use sase_core::plan::{
     plan_frontmatter_schema as core_plan_frontmatter_schema,
-    plan_validate as core_plan_validate, search_plans as core_plan_search,
-    PlanError,
+    plan_validate_with_mode as core_plan_validate_with_mode,
+    search_plans as core_plan_search, PlanError,
 };
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
@@ -2154,14 +2154,16 @@ fn py_plan_search<'py>(
 /// Strictly validate one complete markdown plan against an explicit tier.
 #[pyfunction]
 #[pyo3(name = "plan_validate")]
+#[pyo3(signature = (content, tier, mode = "authoring"))]
 fn py_plan_validate<'py>(
     py: Python<'py>,
     content: &str,
     tier: &str,
+    mode: &str,
 ) -> PyResult<PyObject> {
     plan_result_to_py(
         py,
-        py.allow_threads(|| core_plan_validate(content, tier)),
+        py.allow_threads(|| core_plan_validate_with_mode(content, tier, mode)),
     )
 }
 
@@ -4731,17 +4733,21 @@ mod tests {
     fn plan_validation_bindings_round_trip_json_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n    description: Core work section exercises binding parity.\n---\n# Plan\nImplement it.\n";
-            let result = py_plan_validate(py, content, "epic").unwrap();
+            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nparent_bead: sase-7z.1\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n    description: Core work section exercises binding parity.\n    size: medium\n---\n# Plan\nImplement it.\n";
+            let result =
+                py_plan_validate(py, content, "epic", "authoring").unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
             assert_eq!(value["schema_version"], json!(2));
             assert_eq!(value["ok"], json!(true));
             assert_eq!(value["diagnostics"], json!([]));
             assert_eq!(value["plan"]["title"], json!("Binding parity"));
+            assert_eq!(value["plan"]["parent_bead"], json!("sase-7z.1"));
             assert_eq!(value["plan"]["phases"][0]["depends_on"], json!([]));
+            assert_eq!(value["plan"]["phases"][0]["size"], json!("medium"));
 
             let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\n---\n# Plan\nImplement it.\n";
-            let tale_result = py_plan_validate(py, tale, "tale").unwrap();
+            let tale_result =
+                py_plan_validate(py, tale, "tale", "authoring").unwrap();
             let tale_value = py_to_json_value(tale_result.bind(py)).unwrap();
             assert_eq!(tale_value["ok"], json!(true));
             assert_eq!(
@@ -4753,7 +4759,7 @@ mod tests {
                 ("tale", ""),
                 (
                     "epic",
-                    "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section exercises title validation.\n",
+                    "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section exercises title validation.\n    size: small\n",
                 ),
             ] {
                 for title_line in ["", "title: ''\n", "title: 42\n"] {
@@ -4761,7 +4767,8 @@ mod tests {
                         "---\ntier: {tier}\n{title_line}goal: outcome\n{extra}---\nbody\n"
                     );
                     let invalid_result =
-                        py_plan_validate(py, &invalid, tier).unwrap();
+                        py_plan_validate(py, &invalid, tier, "authoring")
+                            .unwrap();
                     let invalid_value =
                         py_to_json_value(invalid_result.bind(py)).unwrap();
                     assert_eq!(invalid_value["ok"], json!(false));
@@ -4782,13 +4789,39 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|field| { field["name"] == json!("phases[].model") }));
+            assert!(schema_value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| { field["name"] == json!("phases[].size") }));
+            assert!(schema_value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| { field["name"] == json!("parent_bead") }));
             let tale_schema = py_plan_frontmatter_schema(py, "tale").unwrap();
             let tale_schema_value =
                 py_to_json_value(tale_schema.bind(py)).unwrap();
             assert_eq!(tale_schema_value[1]["name"], json!("title"));
             assert_eq!(tale_schema_value[1]["required"], json!(true));
 
-            let error = py_plan_validate(py, content, "story").unwrap_err();
+            let legacy = content.replace("    size: medium\n", "");
+            let legacy_result =
+                py_plan_validate(py, &legacy, "epic", "launch").unwrap();
+            let legacy_value =
+                py_to_json_value(legacy_result.bind(py)).unwrap();
+            assert_eq!(legacy_value["ok"], json!(true));
+            assert_eq!(
+                legacy_value["diagnostics"][0]["code"],
+                json!("phase-size-missing")
+            );
+            assert_eq!(
+                legacy_value["plan"]["phases"][0]["size"],
+                json!("small")
+            );
+
+            let error = py_plan_validate(py, content, "story", "authoring")
+                .unwrap_err();
             assert!(error.to_string().contains("unsupported plan tier"));
         });
     }

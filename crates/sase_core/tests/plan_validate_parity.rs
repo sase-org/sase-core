@@ -14,14 +14,17 @@ goal: Stale workspaces are collected safely
 model: claude/opus
 changespec: workspace_gc
 bug_id: 123
+parent_bead: sase-7z.1
 phases:
   - id: core
     title: GC planner
     depends_on: []
+    size: large
   - id: smoke
     title: Smoke exercise
     depends_on: [core]
     description: Exercise the completed workflow
+    size: small
     model: claude/haiku
 ---
 # Plan
@@ -43,7 +46,7 @@ fn plan_validate_matches_python_facade_fixture() {
                 "code": "phase-description-missing",
                 "field_path": "phases[0].description",
                 "message": "phase `core` has no `description`; add one naming its plan-body section and briefly summarizing that section",
-                "line": 9
+                "line": 10
             }
         ],
         "plan": {
@@ -57,6 +60,7 @@ fn plan_validate_matches_python_facade_fixture() {
                     "title": "GC planner",
                     "depends_on": [],
                     "description": null,
+                    "size": "large",
                     "model": null
                 },
                 {
@@ -64,11 +68,13 @@ fn plan_validate_matches_python_facade_fixture() {
                     "title": "Smoke exercise",
                     "depends_on": ["core"],
                     "description": "Exercise the completed workflow",
+                    "size": "small",
                     "model": "claude/haiku"
                 }
             ],
             "changespec": "workspace_gc",
-            "bug_id": 123
+            "bug_id": 123,
+            "parent_bead": "sase-7z.1"
         }
     });
     assert_eq!(rust_value, python_facade_fixture);

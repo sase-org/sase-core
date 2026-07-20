@@ -18,12 +18,13 @@ use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 
 const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
 const SYSTEM_FIELDS: &[&str] = &["create_time", "status", "prompt", "bead_id"];
-const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id"];
+const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id", "parent_bead"];
 const PHASE_FIELDS: &[&str] =
-    &["id", "title", "depends_on", "description", "model"];
+    &["id", "title", "depends_on", "description", "size", "model"];
 
 const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
-const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Only set this explicitly when the user's prompt requested a specific model, or when this phase's agent does not do real consequential work (for example, a phase that exercises or tests the feature's own functionality). Otherwise omit it so the configured `@phase_worker` role alias applies.";
+const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `medium` when the phase is potentially a lot of work and justifies its own plan file, `large` when that plan would itself be large enough for an epic tier, and `small` otherwise. Medium and large phases receive `#plan`; a large phase without an explicit `model` uses `@smartest`.";
+const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Only set this explicitly when the user's prompt requested a specific model, or when this phase's agent does not do real consequential work (for example, a phase that exercises or tests the feature's own functionality). Otherwise omit it so size-derived model routing applies (`@smartest` for large phases and the configured `@phase_worker` role alias otherwise).";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanTier {
@@ -46,6 +47,27 @@ impl PlanTier {
         match self {
             Self::Tale => "tale",
             Self::Epic => "epic",
+        }
+    }
+}
+
+/// Validation policy for authored plans versus legacy launch consumption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanValidationMode {
+    /// Require every field in the current authoring schema.
+    Authoring,
+    /// Accept a missing legacy phase size as `small` with a warning.
+    Launch,
+}
+
+impl PlanValidationMode {
+    fn parse(value: &str) -> Result<Self, PlanError> {
+        match value {
+            "authoring" => Ok(Self::Authoring),
+            "launch" => Ok(Self::Launch),
+            _ => Err(PlanError::validation(format!(
+                "unsupported plan validation mode `{value}`; expected `authoring` or `launch`"
+            ))),
         }
     }
 }
@@ -78,6 +100,7 @@ pub struct PlanPhaseWire {
     pub title: String,
     pub depends_on: Vec<String>,
     pub description: Option<String>,
+    pub size: String,
     pub model: Option<String>,
 }
 
@@ -91,6 +114,7 @@ pub struct ValidatedPlanWire {
     pub phases: Vec<PlanPhaseWire>,
     pub changespec: Option<String>,
     pub bug_id: Option<i64>,
+    pub parent_bead: Option<String>,
 }
 
 /// Complete validation result. Warnings do not make `ok` false.
@@ -107,8 +131,18 @@ pub fn plan_validate(
     content: &str,
     tier: &str,
 ) -> Result<PlanValidationResultWire, PlanError> {
+    plan_validate_with_mode(content, tier, "authoring")
+}
+
+/// Validate a plan with an explicit authoring or launch-consumption policy.
+pub fn plan_validate_with_mode(
+    content: &str,
+    tier: &str,
+    mode: &str,
+) -> Result<PlanValidationResultWire, PlanError> {
     let tier = PlanTier::parse(tier)?;
-    Ok(Validator::new(content, tier).validate())
+    let mode = PlanValidationMode::parse(mode)?;
+    Ok(Validator::new(content, tier, mode).validate())
 }
 
 /// Return the ordered authoritative frontmatter field metadata for a tier.
@@ -163,7 +197,8 @@ pub fn plan_frontmatter_schema(
                 json!([{
                     "id": "core",
                     "title": "Core implementation",
-                    "depends_on": []
+                    "depends_on": [],
+                    "size": "small"
                 }]),
             ),
             field_spec(
@@ -195,6 +230,13 @@ pub fn plan_frontmatter_schema(
                 json!("'Core validator' section: build the shared validation engine and its JSON wire."),
             ),
             field_spec(
+                "phases[].size",
+                "small | medium | large",
+                true,
+                PHASE_SIZE_DESCRIPTION,
+                json!("small"),
+            ),
+            field_spec(
                 "phases[].model",
                 "non-empty string",
                 false,
@@ -214,6 +256,13 @@ pub fn plan_frontmatter_schema(
                 false,
                 "Bug metadata forwarded to the epic bead; requires `changespec`.",
                 json!(12345),
+            ),
+            field_spec(
+                "parent_bead",
+                "non-empty string",
+                false,
+                "SASE-managed parent bead id used when creating a child epic.",
+                json!("sase-7z.1"),
             ),
         ]);
     }
@@ -270,14 +319,16 @@ fn field_spec(
 struct Validator<'a> {
     content: &'a str,
     tier: PlanTier,
+    mode: PlanValidationMode,
     diagnostics: Vec<PlanDiagnosticWire>,
 }
 
 impl<'a> Validator<'a> {
-    fn new(content: &'a str, tier: PlanTier) -> Self {
+    fn new(content: &'a str, tier: PlanTier, mode: PlanValidationMode) -> Self {
         Self {
             content,
             tier,
+            mode,
             diagnostics: Vec::new(),
         }
     }
@@ -330,8 +381,8 @@ impl<'a> Validator<'a> {
         let goal = self.required_non_empty_string(mapping, "goal", &index);
         let model = self.optional_model(mapping, "model", &index);
 
-        let (phases, changespec, bug_id) = match self.tier {
-            PlanTier::Tale => (Vec::new(), None, None),
+        let (phases, changespec, bug_id, parent_bead) = match self.tier {
+            PlanTier::Tale => (Vec::new(), None, None, None),
             PlanTier::Epic => {
                 let changespec = self.optional_non_empty_string(
                     mapping,
@@ -350,8 +401,13 @@ impl<'a> Validator<'a> {
                         &index,
                     );
                 }
+                let parent_bead = self.optional_non_empty_string(
+                    mapping,
+                    "parent_bead",
+                    &index,
+                );
                 let phases = self.validate_phases(mapping, &index);
-                (phases, changespec, bug_id)
+                (phases, changespec, bug_id, parent_bead)
             }
         };
 
@@ -367,6 +423,7 @@ impl<'a> Validator<'a> {
             phases,
             changespec,
             bug_id,
+            parent_bead,
         });
         self.finish(plan)
     }
@@ -596,6 +653,7 @@ impl<'a> Validator<'a> {
                 &description_path,
                 index,
             );
+            let size = self.validate_phase_size(phase, phase_index, index);
             let model_path = format!("{phase_path}.model");
             let model =
                 self.optional_model_at(phase, "model", &model_path, index);
@@ -604,10 +662,70 @@ impl<'a> Validator<'a> {
                 title: title.unwrap_or_default(),
                 depends_on,
                 description,
+                size,
                 model,
             });
         }
         phases
+    }
+
+    fn validate_phase_size(
+        &mut self,
+        mapping: &Mapping,
+        phase_index: usize,
+        index: &SourceIndex,
+    ) -> String {
+        let field_path = format!("phases[{phase_index}].size");
+        let Some(value) = mapping_value(mapping, "size") else {
+            let (severity, message) = match self.mode {
+                PlanValidationMode::Authoring => (
+                    "error",
+                    "required phase field `size` is missing; expected `small`, `medium`, or `large`",
+                ),
+                PlanValidationMode::Launch => (
+                    "warning",
+                    "legacy phase field `size` is missing; treating the phase as `small` for launch",
+                ),
+            };
+            self.push(
+                severity,
+                "phase-size-missing",
+                &field_path,
+                message,
+                index,
+            );
+            return match self.mode {
+                PlanValidationMode::Authoring => String::new(),
+                PlanValidationMode::Launch => "small".to_string(),
+            };
+        };
+        let Some(value) = value.as_str() else {
+            self.push(
+                "error",
+                "phase-size-invalid",
+                &field_path,
+                format!(
+                    "phase `size` must be `small`, `medium`, or `large`, found {}",
+                    yaml_type_name(value)
+                ),
+                index,
+            );
+            return String::new();
+        };
+        let value = value.trim();
+        if !matches!(value, "small" | "medium" | "large") {
+            self.push(
+                "error",
+                "phase-size-invalid",
+                &field_path,
+                format!(
+                    "phase `size` must be `small`, `medium`, or `large`, found `{value}`"
+                ),
+                index,
+            );
+            return String::new();
+        }
+        value.to_string()
     }
 
     fn validate_phase_keys(
@@ -1094,7 +1212,7 @@ mod tests {
     }
 
     fn valid_epic() -> &'static str {
-        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
+        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nparent_bead: ' sase-7z.1 '\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n    size: medium\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    size: small\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
     }
 
     #[test]
@@ -1114,6 +1232,7 @@ mod tests {
                 phases: Vec::new(),
                 changespec: None,
                 bug_id: None,
+                parent_bead: None,
             })
         );
     }
@@ -1180,12 +1299,17 @@ mod tests {
 
     #[test]
     fn tale_epic_fields_are_inert_warnings() {
-        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\nchangespec: ''\nbug_id: nope\n---\nbody\n";
+        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\nchangespec: ''\nbug_id: nope\nparent_bead: sase-7z.1\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert_eq!(
             codes(&result),
-            ["tale-inert-field", "tale-inert-field", "tale-inert-field"]
+            [
+                "tale-inert-field",
+                "tale-inert-field",
+                "tale-inert-field",
+                "tale-inert-field"
+            ]
         );
         assert!(result
             .diagnostics
@@ -1200,7 +1324,7 @@ mod tests {
             ("tale", ""),
             (
                 "epic",
-                "phases:\n  - id: core\n    title: Core\n    depends_on: []\n",
+                "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    size: small\n",
             ),
         ] {
             for (title_line, expected_code) in [
@@ -1231,14 +1355,16 @@ mod tests {
         assert_eq!(plan.title.as_deref(), Some("Validation engine"));
         assert_eq!(plan.changespec.as_deref(), Some("plan_validate"));
         assert_eq!(plan.bug_id, Some(61));
+        assert_eq!(plan.parent_bead.as_deref(), Some("sase-7z.1"));
         assert_eq!(plan.phases.len(), 2);
+        assert_eq!(plan.phases[0].size, "medium");
         assert_eq!(plan.phases[1].depends_on, ["core"]);
         assert_eq!(plan.phases[1].model.as_deref(), Some("claude/haiku"));
     }
 
     #[test]
     fn missing_phase_description_warns_without_changing_the_plan() {
-        let content = "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n---\n# Plan\nImplement it.\n";
+        let content = "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    size: small\n---\n# Plan\nImplement it.\n";
         let result = plan_validate(content, "epic").unwrap();
 
         assert!(result.ok);
@@ -1265,10 +1391,12 @@ mod tests {
                     title: "Core validator".to_string(),
                     depends_on: Vec::new(),
                     description: None,
+                    size: "small".to_string(),
                     model: None,
                 }],
                 changespec: None,
                 bug_id: None,
+                parent_bead: None,
             })
         );
     }
@@ -1288,7 +1416,7 @@ mod tests {
             ]
         );
 
-        let bug_without_changespec = "---\ntier: epic\ngoal: outcome\ntitle: title\nbug_id: 7\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n---\nbody\n";
+        let bug_without_changespec = "---\ntier: epic\ngoal: outcome\ntitle: title\nbug_id: 7\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    size: small\n---\nbody\n";
         assert!(
             codes(&plan_validate(bug_without_changespec, "epic").unwrap())
                 .contains(&"bug-id-without-changespec")
@@ -1306,7 +1434,8 @@ mod tests {
                 "unknown-key",
                 "required-missing",
                 "required-missing",
-                "phase-description-missing"
+                "phase-description-missing",
+                "phase-size-missing"
             ]
         );
         assert_eq!(result.diagnostics[1].field_path, "phases[1].surprise");
@@ -1314,7 +1443,7 @@ mod tests {
 
     #[test]
     fn phase_ids_and_dependency_graph_rules_report_in_one_pass() {
-        let content = "---\ntier: epic\ngoal: outcome\ntitle: title\nphases:\n  - id: Bad slug\n    title: First\n    depends_on: [Bad slug, future, missing, missing]\n  - id: future\n    title: Future\n    depends_on: []\n  - id: future\n    title: Duplicate\n    depends_on: nope\n---\nbody\n";
+        let content = "---\ntier: epic\ngoal: outcome\ntitle: title\nphases:\n  - id: Bad slug\n    title: First\n    depends_on: [Bad slug, future, missing, missing]\n    size: small\n  - id: future\n    title: Future\n    depends_on: []\n    size: medium\n  - id: future\n    title: Duplicate\n    depends_on: nope\n    size: large\n---\nbody\n";
         let result = plan_validate(content, "epic").unwrap();
         let codes = codes(&result);
         for expected in [
@@ -1336,7 +1465,7 @@ mod tests {
 
     #[test]
     fn phase_optional_fields_validate_types_and_model_syntax() {
-        let content = "---\ntier: epic\ngoal: outcome\ntitle: title\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: [wrong]\n    model: |\n      bad\n      model\n---\nbody\n";
+        let content = "---\ntier: epic\ngoal: outcome\ntitle: title\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: [wrong]\n    size: small\n    model: |\n      bad\n      model\n---\nbody\n";
         let result = plan_validate(content, "epic").unwrap();
         assert_eq!(codes(&result), ["type-mismatch", "model-invalid"]);
     }
@@ -1358,7 +1487,7 @@ mod tests {
             ["type-mismatch"]
         );
 
-        let invalid_scalars = "---\ntier: epic\ngoal: outcome\ntitle: title\nmodel: ''\nphases:\n  - id: ''\n    title: ''\n    depends_on: [1, '']\n    model: ''\n---\nbody\n";
+        let invalid_scalars = "---\ntier: epic\ngoal: outcome\ntitle: title\nmodel: ''\nphases:\n  - id: ''\n    title: ''\n    depends_on: [1, '']\n    size: enormous\n    model: ''\n---\nbody\n";
         assert_eq!(
             codes(&plan_validate(invalid_scalars, "epic").unwrap()),
             [
@@ -1368,9 +1497,63 @@ mod tests {
                 "type-mismatch",
                 "value-empty",
                 "phase-description-missing",
+                "phase-size-invalid",
                 "value-empty"
             ]
         );
+    }
+
+    #[test]
+    fn phase_size_is_strict_for_authoring_and_legacy_safe_for_launch() {
+        let missing = "---\ntier: epic\ntitle: Legacy epic\ngoal: Resume it safely\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section resumes legacy work.\n---\nbody\n";
+        let authoring = plan_validate(missing, "epic").unwrap();
+        assert!(!authoring.ok);
+        assert_eq!(codes(&authoring), ["phase-size-missing"]);
+        assert_eq!(authoring.diagnostics[0].severity, "error");
+
+        let launch =
+            plan_validate_with_mode(missing, "epic", "launch").unwrap();
+        assert!(launch.ok);
+        assert_eq!(codes(&launch), ["phase-size-missing"]);
+        assert_eq!(launch.diagnostics[0].severity, "warning");
+        assert_eq!(
+            launch.plan.unwrap().phases[0].size,
+            "small",
+            "legacy launch validation must normalize missing size"
+        );
+
+        for invalid_size in ["enormous", "[]"] {
+            let invalid = missing.replace(
+                "    description: Core section resumes legacy work.\n",
+                &format!(
+                    "    description: Core section resumes legacy work.\n    size: {invalid_size}\n"
+                ),
+            );
+            for mode in ["authoring", "launch"] {
+                let result =
+                    plan_validate_with_mode(&invalid, "epic", mode).unwrap();
+                assert!(!result.ok, "{mode}: {invalid_size}");
+                assert_eq!(codes(&result), ["phase-size-invalid"]);
+            }
+        }
+    }
+
+    #[test]
+    fn parent_bead_is_optional_epic_only_and_type_checked() {
+        let result = plan_validate(valid_epic(), "epic").unwrap();
+        assert_eq!(
+            result.plan.unwrap().parent_bead.as_deref(),
+            Some("sase-7z.1")
+        );
+
+        let invalid = valid_epic()
+            .replace("parent_bead: ' sase-7z.1 '", "parent_bead: [sase-7z.1]");
+        let result = plan_validate(&invalid, "epic").unwrap();
+        assert!(!result.ok);
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.field_path == "parent_bead"
+                && diagnostic.code == "type-mismatch"
+        }));
     }
 
     #[test]
@@ -1392,6 +1575,31 @@ mod tests {
             ]
         );
         let epic = plan_frontmatter_schema("epic").unwrap();
+        assert_eq!(
+            epic.iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "tier",
+                "title",
+                "goal",
+                "model",
+                "phases",
+                "phases[].id",
+                "phases[].title",
+                "phases[].depends_on",
+                "phases[].description",
+                "phases[].size",
+                "phases[].model",
+                "changespec",
+                "bug_id",
+                "parent_bead",
+                "create_time",
+                "status",
+                "prompt",
+                "bead_id"
+            ]
+        );
         let phase_description = epic
             .iter()
             .find(|field| field.name == "phases[].description")
@@ -1409,6 +1617,20 @@ mod tests {
             .find(|field| field.name == "phases[].model")
             .unwrap();
         assert_eq!(phase_model.description, PHASE_MODEL_DESCRIPTION);
+        let phase_size = epic
+            .iter()
+            .find(|field| field.name == "phases[].size")
+            .unwrap();
+        assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
+        assert_eq!(phase_size.field_type, "small | medium | large");
+        assert!(phase_size.required);
+        assert!(
+            !epic
+                .iter()
+                .find(|field| field.name == "parent_bead")
+                .unwrap()
+                .required
+        );
         assert!(
             epic.iter()
                 .find(|field| field.name == "phases[].depends_on")
@@ -1422,6 +1644,9 @@ mod tests {
         let error = plan_validate(valid_tale(), "story").unwrap_err();
         assert_eq!(error.kind, "validation");
         assert!(error.message.contains("tale"));
+        let error = plan_validate_with_mode(valid_tale(), "tale", "resume")
+            .unwrap_err();
+        assert!(error.message.contains("authoring"));
         assert!(plan_frontmatter_schema("story").is_err());
     }
 }
