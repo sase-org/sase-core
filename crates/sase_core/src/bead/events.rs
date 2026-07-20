@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::wire::{
     BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    StatusWire,
+    PhaseSizeWire, StatusWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -241,6 +241,8 @@ pub struct BeadIssueUpdateEventFieldsWire {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub size: Option<PhaseSizeWire>,
+    #[serde(default)]
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
     pub close_reason: Option<Option<String>>,
@@ -263,6 +265,7 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.notes.is_none()
             && self.design.is_none()
             && self.model.is_none()
+            && self.size.is_none()
             && self.closed_at.is_none()
             && self.close_reason.is_none()
             && self.changespec_name.is_none()
@@ -656,6 +659,9 @@ fn apply_update_event_fields(
     }
     if let Some(value) = &fields.model {
         issue.model = value.clone();
+    }
+    if let Some(value) = &fields.size {
+        issue.size = Some(value.clone());
     }
     if let Some(value) = &fields.closed_at {
         issue.closed_at = value.clone();

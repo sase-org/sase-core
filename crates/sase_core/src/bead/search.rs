@@ -6,7 +6,7 @@ use std::path::Path;
 use super::read::{list_issues_in_issues, read_store_issues};
 use super::wire::{
     BeadError, BeadSearchMatchWire, BeadTierWire, IssueTypeWire, IssueWire,
-    StatusWire,
+    PhaseSizeWire, StatusWire,
 };
 
 pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
@@ -18,6 +18,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "owner",
     "assignee",
     "model",
+    "size",
     "changespec_name",
     "changespec_bug_id",
     "status",
@@ -116,6 +117,9 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("status", status_value(&issue.status)),
         field("type", issue_type_value(&issue.issue_type)),
     ];
+    if let Some(size) = &issue.size {
+        fields.push(field("size", phase_size_value(size)));
+    }
     if let Some(tier) = &issue.tier {
         fields.push(field("tier", tier_value(tier)));
     }
@@ -142,6 +146,10 @@ fn tier_value(tier: &BeadTierWire) -> &'static str {
         BeadTierWire::Plan => "plan",
         BeadTierWire::Epic => "epic",
     }
+}
+
+fn phase_size_value(size: &PhaseSizeWire) -> &'static str {
+    size.as_str()
 }
 
 #[cfg(test)]
@@ -209,6 +217,13 @@ mod tests {
                 "needle",
             ),
             (
+                "size",
+                phase_issue_with(|issue| {
+                    issue.size = Some(PhaseSizeWire::Large)
+                }),
+                "large",
+            ),
+            (
                 "changespec_name",
                 plan_issue_with(|issue| {
                     issue.changespec_name = "needle_changespec".to_string();
@@ -252,14 +267,24 @@ mod tests {
     }
 
     #[test]
-    fn field_names_constant_matches_collected_plan_fields() {
-        let issue = plan_issue_with(|_| {});
-        let field_names = searchable_fields(&issue)
+    fn field_names_constant_matches_all_collectable_fields() {
+        let mut field_names = searchable_fields(&plan_issue_with(|_| {}))
             .into_iter()
             .map(|field| field.name)
             .collect::<Vec<_>>();
+        field_names.extend(
+            searchable_fields(&phase_issue_with(|issue| {
+                issue.size = Some(PhaseSizeWire::Small);
+            }))
+            .into_iter()
+            .map(|field| field.name),
+        );
+        field_names.sort_unstable();
+        field_names.dedup();
+        let mut expected = BEAD_SEARCH_FIELD_NAMES.to_vec();
+        expected.sort_unstable();
 
-        assert_eq!(field_names, BEAD_SEARCH_FIELD_NAMES);
+        assert_eq!(field_names, expected);
     }
 
     #[test]
@@ -496,6 +521,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             model: String::new(),
+            size: None,
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),

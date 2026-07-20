@@ -21,8 +21,9 @@ use super::jsonl::{
     write_event_store, write_issues_jsonl,
 };
 use super::wire::{
-    validate_model_value, BeadError, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, StatusWire,
+    deserialize_option_phase_size, validate_model_value, BeadError,
+    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
+    StatusWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -41,6 +42,8 @@ pub struct BeadCreateRequestWire {
     pub design: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default, deserialize_with = "deserialize_option_phase_size")]
+    pub size: Option<PhaseSizeWire>,
     #[serde(default)]
     pub assignee: String,
     #[serde(default)]
@@ -67,6 +70,8 @@ pub struct BeadUpdateFieldsWire {
     pub design: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_phase_size")]
+    pub size: Option<PhaseSizeWire>,
     #[serde(default)]
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
@@ -173,6 +178,7 @@ pub fn create_issue(
         notes: request.notes,
         design: request.design,
         model: normalize_model(request.model)?,
+        size: request.size,
         is_ready_to_work: false,
         changespec_name: request.changespec_name,
         changespec_bug_id: request.changespec_bug_id,
@@ -368,13 +374,15 @@ pub fn close_issues(
     for issue_id in issue_ids {
         let issue = store.get_issue(issue_id)?.clone();
         if issue.issue_type == IssueTypeWire::Plan {
-            let child_ids: Vec<String> =
-                sorted_children(&store.issues, issue_id)
+            let descendant_ids: Vec<String> =
+                sorted_descendants(&store.issues, issue_id)
                     .into_iter()
-                    .filter(|child| child.status != StatusWire::Closed)
-                    .map(|child| child.id.clone())
+                    .filter(|descendant| {
+                        descendant.status != StatusWire::Closed
+                    })
+                    .map(|descendant| descendant.id.clone())
                     .collect();
-            for child_id in child_ids {
+            for child_id in descendant_ids {
                 if let Some(child) =
                     store.close_one(&child_id, &now, reason.clone())?
                 {
@@ -424,7 +432,7 @@ pub fn remove_issue(
     let mut removed = Vec::new();
     if issue.issue_type == IssueTypeWire::Plan {
         removed.extend(
-            sorted_children(&store.issues, issue_id)
+            sorted_descendants(&store.issues, issue_id)
                 .into_iter()
                 .cloned(),
         );
@@ -647,6 +655,9 @@ fn apply_update_fields(
     if let Some(value) = fields.model {
         issue.model = normalize_model(value)?;
     }
+    if let Some(value) = fields.size {
+        issue.size = Some(value);
+    }
     if let Some(value) = fields.closed_at {
         issue.closed_at = value;
     }
@@ -677,6 +688,7 @@ fn event_fields_from_update_fields(
         notes: fields.notes.clone(),
         design: fields.design.clone(),
         model: fields.model.clone().map(normalize_model).transpose()?,
+        size: fields.size.clone(),
         closed_at: fields.closed_at.clone(),
         close_reason: fields.close_reason.clone(),
         changespec_name: fields.changespec_name.clone(),
@@ -877,6 +889,31 @@ fn sorted_children<'a>(
     children
 }
 
+fn sorted_descendants<'a>(
+    issues: &'a [IssueWire],
+    parent_id: &str,
+) -> Vec<&'a IssueWire> {
+    let mut descendants = Vec::new();
+    let mut visited = BTreeSet::from([parent_id.to_string()]);
+    collect_descendants(issues, parent_id, &mut visited, &mut descendants);
+    descendants
+}
+
+fn collect_descendants<'a>(
+    issues: &'a [IssueWire],
+    parent_id: &str,
+    visited: &mut BTreeSet<String>,
+    descendants: &mut Vec<&'a IssueWire>,
+) {
+    for child in sorted_children(issues, parent_id) {
+        if !visited.insert(child.id.clone()) {
+            continue;
+        }
+        collect_descendants(issues, &child.id, visited, descendants);
+        descendants.push(child);
+    }
+}
+
 fn next_top_level_counter(
     issue_prefix: &str,
     config_counter: u64,
@@ -1006,6 +1043,87 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn phase_size_round_trips_through_create_update_events_and_projection() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Sized phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                size: Some(PhaseSizeWire::Medium),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(phase.size, Some(PhaseSizeWire::Medium));
+
+        let updated = update_issue(
+            &beads_dir,
+            &phase.id,
+            BeadUpdateFieldsWire {
+                size: Some(PhaseSizeWire::Large),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(updated.size, Some(PhaseSizeWire::Large));
+
+        let jsonl = fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+        assert!(jsonl.contains(r#""size":"large""#));
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert!(streams.iter().flat_map(|stream| &stream.events).any(
+            |event| {
+                matches!(
+                    &event.payload,
+                    BeadEventPayloadWire::IssueUpdated { fields }
+                        if fields.size == Some(PhaseSizeWire::Large)
+                )
+            }
+        ));
+        let reloaded = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(
+            reloaded.get_issue(&phase.id).unwrap().size,
+            Some(PhaseSizeWire::Large)
+        );
+
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Invalid sized plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                size: Some(PhaseSizeWire::Small),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Only phase issues can carry size metadata");
+    }
+
+    #[test]
     fn create_top_level_uses_current_store_max_and_persists_counter() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sase/sdd/beads");
@@ -1098,6 +1216,144 @@ mod tests {
         assert!(exported
             .contains(r#""id":"sase-1.1","title":"A","status":"closed""#));
         assert!(exported.contains(r#""close_reason":"done""#));
+    }
+
+    #[test]
+    fn close_plan_cascades_through_nested_child_epics() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "Root epic",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-1.1",
+                    "Root phase",
+                    "phase",
+                    Some("sase-1"),
+                    "open",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-1.1.1",
+                    "Child epic",
+                    "plan",
+                    Some("sase-1.1"),
+                    "open",
+                    "2026-01-01T00:02:00Z",
+                ),
+                issue(
+                    "sase-1.1.1.1",
+                    "Child phase",
+                    "phase",
+                    Some("sase-1.1.1"),
+                    "open",
+                    "2026-01-01T00:03:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let result = close_issues(
+            &beads_dir,
+            &["sase-1".to_string()],
+            Some("done".to_string()),
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.issue_ids,
+            vec!["sase-1.1.1.1", "sase-1.1.1", "sase-1.1", "sase-1"]
+        );
+        let store = MutableStore::load(&beads_dir).unwrap();
+        assert!(store
+            .issues
+            .iter()
+            .all(|issue| issue.status == StatusWire::Closed));
+    }
+
+    #[test]
+    fn remove_plan_cascades_through_nested_child_epics() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "Root epic",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-1.1",
+                    "Root phase",
+                    "phase",
+                    Some("sase-1"),
+                    "open",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-1.1.1",
+                    "Child epic",
+                    "plan",
+                    Some("sase-1.1"),
+                    "open",
+                    "2026-01-01T00:02:00Z",
+                ),
+                issue(
+                    "sase-1.1.1.1",
+                    "Child phase",
+                    "phase",
+                    Some("sase-1.1.1"),
+                    "open",
+                    "2026-01-01T00:03:00Z",
+                ),
+                issue(
+                    "sase-2",
+                    "Unrelated",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:04:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let result = remove_issue(&beads_dir, "sase-1").unwrap();
+
+        assert_eq!(
+            result.issue_ids,
+            vec!["sase-1.1.1.1", "sase-1.1.1", "sase-1.1", "sase-1"]
+        );
+        let store = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(
+            store
+                .issues
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-2"]
+        );
     }
 
     #[test]

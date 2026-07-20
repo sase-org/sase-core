@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::read::read_store_issues;
 use super::wire::{
-    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+    BeadError, BeadTierWire, IssueTypeWire, IssueWire, PhaseSizeWire,
+    StatusWire,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +16,7 @@ pub struct PhaseAssignmentWire {
     pub bead_id: String,
     pub agent_name: String,
     pub model: String,
+    pub size: String,
     pub waits_on: Vec<String>,
     pub wave: usize,
 }
@@ -176,6 +178,12 @@ pub fn build_epic_work_plan_from_issues(
                         bead_id: (*pid).to_string(),
                         agent_name: phase_agent_name(pid),
                         model: phase.model.clone(),
+                        size: phase
+                            .size
+                            .as_ref()
+                            .map(PhaseSizeWire::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                         waits_on,
                         wave: wave_index,
                     }
@@ -261,6 +269,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             model: String::new(),
+            size: None,
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
@@ -380,6 +389,7 @@ mod tests {
         epic.model = "claude/opus".to_string();
         let mut p1 = phase("p1", "e1");
         p1.model = "codex/gpt-5.6-sol".to_string();
+        p1.size = Some(PhaseSizeWire::Large);
         let p2 = phase("p2", "e1");
 
         let plan =
@@ -387,9 +397,31 @@ mod tests {
 
         assert_eq!(plan.waves[0][0].bead_id, "p1");
         assert_eq!(plan.waves[0][0].model, "codex/gpt-5.6-sol");
+        assert_eq!(plan.waves[0][0].size, "large");
         assert_eq!(plan.waves[0][1].bead_id, "p2");
         assert_eq!(plan.waves[0][1].model, "");
+        assert_eq!(plan.waves[0][1].size, "");
         assert_eq!(plan.land_model, "claude/opus");
+    }
+
+    #[test]
+    fn child_epics_are_excluded_from_parent_waves() {
+        let plan = build_epic_work_plan_from_issues(
+            vec![
+                epic("e1"),
+                phase("e1.1", "e1"),
+                epic_child("e1.2", "e1"),
+                phase("e1.2.1", "e1.2"),
+            ],
+            "e1",
+        )
+        .unwrap();
+
+        assert_eq!(plan.total_phase_count, 1);
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0].len(), 1);
+        assert_eq!(plan.waves[0][0].bead_id, "e1.1");
+        assert_eq!(plan.land_waits_on, vec!["e1.1"]);
     }
 
     #[test]

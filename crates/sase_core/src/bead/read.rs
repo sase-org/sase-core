@@ -132,6 +132,13 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
             orphan_ids.join(", ")
         ));
     }
+    let orphan_plan_ids = orphan_nested_plan_ids(&issues);
+    if !orphan_plan_ids.is_empty() {
+        messages.push(format!(
+            "WARNING: orphan nested plan records after reduction: {}",
+            orphan_plan_ids.join(", ")
+        ));
+    }
 
     if event_store_is_present && legacy_path.exists() {
         let legacy_issues = read_legacy_jsonl_issues(beads_dir)?;
@@ -140,6 +147,13 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
             messages.push(format!(
                 "WARNING: orphan phase records in issues.jsonl: {}",
                 legacy_orphan_ids.join(", ")
+            ));
+        }
+        let legacy_orphan_plan_ids = orphan_nested_plan_ids(&legacy_issues);
+        if !legacy_orphan_plan_ids.is_empty() {
+            messages.push(format!(
+                "WARNING: orphan nested plan records in issues.jsonl: {}",
+                legacy_orphan_plan_ids.join(", ")
             ));
         }
         if export_issues_to_jsonl(&issues)?
@@ -159,11 +173,22 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
 }
 
 fn orphan_phase_ids(issues: &[IssueWire]) -> Vec<&str> {
+    orphan_child_ids(issues, IssueTypeWire::Phase)
+}
+
+fn orphan_nested_plan_ids(issues: &[IssueWire]) -> Vec<&str> {
+    orphan_child_ids(issues, IssueTypeWire::Plan)
+}
+
+fn orphan_child_ids(
+    issues: &[IssueWire],
+    issue_type: IssueTypeWire,
+) -> Vec<&str> {
     let ids: BTreeSet<&str> =
         issues.iter().map(|issue| issue.id.as_str()).collect();
     issues
         .iter()
-        .filter(|issue| issue.issue_type == IssueTypeWire::Phase)
+        .filter(|issue| issue.issue_type == issue_type)
         .filter_map(|issue| {
             let parent_id = issue.parent_id.as_deref()?;
             (!ids.contains(parent_id)).then_some(issue.id.as_str())

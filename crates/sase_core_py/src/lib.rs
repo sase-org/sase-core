@@ -5086,6 +5086,47 @@ mod tests {
     }
 
     #[test]
+    fn bead_work_plan_binding_exposes_phase_size() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let issues = PyList::empty_bound(py);
+            append_json(
+                py,
+                &issues,
+                json!({
+                    "id": "beads-1",
+                    "title": "Epic",
+                    "status": "open",
+                    "issue_type": "plan",
+                    "tier": "epic",
+                    "parent_id": null
+                }),
+            );
+            append_json(
+                py,
+                &issues,
+                json!({
+                    "id": "beads-1.1",
+                    "title": "Large phase",
+                    "status": "open",
+                    "issue_type": "phase",
+                    "parent_id": "beads-1",
+                    "size": "large"
+                }),
+            );
+
+            let result = py_bead_build_epic_work_plan_from_issues(
+                py, &issues, "beads-1",
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value["waves"][0][0]["bead_id"], json!("beads-1.1"));
+            assert_eq!(value["waves"][0][0]["size"], json!("large"));
+        });
+    }
+
+    #[test]
     fn query_handle_bindings_reject_wrong_handle_types() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

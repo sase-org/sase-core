@@ -28,6 +28,24 @@ pub enum BeadTierWire {
     Epic,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseSizeWire {
+    Small,
+    Medium,
+    Large,
+}
+
+impl PhaseSizeWire {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
 pub struct BeadError {
@@ -106,6 +124,25 @@ where
     Ok(value.filter(|s| !s.is_empty()))
 }
 
+pub(crate) fn deserialize_option_phase_size<'de, D>(
+    deserializer: D,
+) -> Result<Option<PhaseSizeWire>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref() {
+        None | Some("") => Ok(None),
+        Some("small") => Ok(Some(PhaseSizeWire::Small)),
+        Some("medium") => Ok(Some(PhaseSizeWire::Medium)),
+        Some("large") => Ok(Some(PhaseSizeWire::Large)),
+        Some(value) => Err(de::Error::unknown_variant(
+            value,
+            &["small", "medium", "large"],
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DependencyWire {
     pub issue_id: String,
@@ -181,6 +218,12 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub model: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_option_phase_size"
+    )]
+    pub size: Option<PhaseSizeWire>,
     #[serde(default = "false_value")]
     pub is_ready_to_work: bool,
     #[serde(
@@ -218,6 +261,11 @@ impl IssueWire {
         if self.issue_type == IssueTypeWire::Phase && self.is_ready_to_work {
             return Err(BeadError::validation(
                 "Only plan issues can be marked is_ready_to_work",
+            ));
+        }
+        if self.issue_type == IssueTypeWire::Plan && self.size.is_some() {
+            return Err(BeadError::validation(
+                "Only phase issues can carry size metadata",
             ));
         }
         if self.issue_type == IssueTypeWire::Phase
@@ -287,6 +335,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             model: String::new(),
+            size: None,
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
@@ -349,6 +398,7 @@ mod tests {
         assert_eq!(issue.created_at, "");
         assert!(!issue.is_ready_to_work);
         assert_eq!(issue.model, "");
+        assert_eq!(issue.size, None);
         assert_eq!(issue.changespec_name, "");
         assert_eq!(issue.dependencies[0].created_at, "");
     }
@@ -363,6 +413,30 @@ mod tests {
             .unwrap_err()
             .message
             .contains("model cannot contain"));
+    }
+
+    #[test]
+    fn phase_size_accepts_enum_values_and_rejects_plan_usage() {
+        let mut issue = phase(Some("test-0"));
+        issue.size = Some(PhaseSizeWire::Large);
+        issue.validate().unwrap();
+
+        issue.issue_type = IssueTypeWire::Plan;
+        issue.parent_id = None;
+        let error = issue.validate().unwrap_err();
+        assert_eq!(error.message, "Only phase issues can carry size metadata");
+    }
+
+    #[test]
+    fn empty_phase_size_normalizes_to_none_and_invalid_values_fail() {
+        let mut value = serde_json::to_value(phase(Some("test-0"))).unwrap();
+        value["size"] = json!("");
+        let issue: IssueWire = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(issue.size, None);
+
+        value["size"] = json!("huge");
+        let error = serde_json::from_value::<IssueWire>(value).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `huge`"));
     }
 
     #[test]

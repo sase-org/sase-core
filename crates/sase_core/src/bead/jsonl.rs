@@ -302,6 +302,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             model: String::new(),
+            size: None,
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),

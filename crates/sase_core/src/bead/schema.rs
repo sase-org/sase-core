@@ -24,6 +24,12 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     notes       TEXT,
     design      TEXT,
     model       TEXT NOT NULL DEFAULT '',
+    size        TEXT
+                  CHECK(
+                    size IS NULL OR
+                    (issue_type = 'phase' AND
+                     size IN ('small', 'medium', 'large'))
+                  ),
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
@@ -127,6 +133,17 @@ pub fn model_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''"
 }
 
+pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("size"),
+    }
+}
+
+pub fn size_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type='phase' AND size IN ('small','medium','large')))"
+}
+
 pub fn missing_changespec_metadata_columns<'a, I>(
     columns: I,
 ) -> Vec<&'static str>
@@ -182,6 +199,8 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("model       TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("size        TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("issue_type = 'phase'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
@@ -208,6 +227,14 @@ mod tests {
         assert!(!needs_model_migration(None));
         assert!(needs_model_migration(Some("CREATE TABLE issues(id TEXT)")));
         assert!(!needs_model_migration(Some("model TEXT")));
+
+        assert!(!needs_size_migration(None));
+        assert!(needs_size_migration(Some("CREATE TABLE issues(id TEXT)")));
+        assert!(!needs_size_migration(Some("size TEXT")));
+        assert_eq!(
+            size_migration_sql(),
+            "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type='phase' AND size IN ('small','medium','large')))"
+        );
 
         assert!(!needs_tier_migration(None));
         assert!(needs_tier_migration(Some("CREATE TABLE issues(id TEXT)")));
