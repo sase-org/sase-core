@@ -4,9 +4,13 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{
+    params, params_from_iter, Connection, OpenFlags, OptionalExtension,
+    Transaction,
+};
 
 use super::wire::{
+    TelemetryCleanupReportWire, TelemetryCleanupRequestWire,
     TelemetryHistogramBucketWire, TelemetryInstantQueryResultWire,
     TelemetryInstantQueryWire, TelemetryInstantValueWire,
     TelemetryMetricKindWire, TelemetryPointWire, TelemetryPruneReportWire,
@@ -123,6 +127,244 @@ pub fn store_stats(
             last_write_by_subsystem,
         })
     })
+}
+
+/// Preview or delete rows matching any caller-supplied exact label value.
+///
+/// Dry runs open an existing store read-only. Mutating runs delete from all
+/// three tiers in one transaction, rebuild freshness metadata from the rows
+/// that remain, and vacuum only after a successful non-empty commit.
+pub fn cleanup_matching_labels(
+    store_path: &Path,
+    request: TelemetryCleanupRequestWire,
+    busy_timeout: Duration,
+) -> Result<TelemetryCleanupReportWire, String> {
+    validate_cleanup_request(&request)?;
+    let size_before = store_size(store_path);
+    if !store_path.exists() {
+        return Ok(cleanup_report(&request, [0, 0, 0], 0, 0, false));
+    }
+    if request.dry_run {
+        let conn = Connection::open_with_flags(
+            store_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.busy_timeout(bounded_busy_timeout(busy_timeout))
+            .map_err(|e| e.to_string())?;
+        let counts = cleanup_counts(&conn, &request)?;
+        return Ok(cleanup_report(
+            &request,
+            counts,
+            size_before,
+            size_before,
+            false,
+        ));
+    }
+
+    let timeout = bounded_busy_timeout(busy_timeout);
+    let mut conn = open_store(store_path, timeout)?;
+    let counts = cleanup_counts(&conn, &request)?;
+    let total = counts.iter().sum::<u64>();
+    if total == 0 {
+        return Ok(cleanup_report(
+            &request,
+            counts,
+            size_before,
+            store_size(store_path),
+            false,
+        ));
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (table, expected) in ["samples", "rollup_5m", "rollup_1h"]
+        .into_iter()
+        .zip(counts)
+    {
+        let deleted = delete_cleanup_rows(&tx, table, &request)?;
+        if deleted != expected {
+            return Err(format!(
+                "telemetry cleanup count changed for {table}: expected {expected}, deleted {deleted}"
+            ));
+        }
+    }
+    refresh_write_metadata(&tx)?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    conn.execute_batch("VACUUM").map_err(|e| e.to_string())?;
+    let size_after = store_size(store_path);
+    Ok(cleanup_report(
+        &request,
+        counts,
+        size_before,
+        size_after,
+        true,
+    ))
+}
+
+fn validate_cleanup_request(
+    request: &TelemetryCleanupRequestWire,
+) -> Result<(), String> {
+    if request.label_matches.is_empty() {
+        return Err(
+            "telemetry cleanup requires at least one exact label match".into(),
+        );
+    }
+    for (label, values) in &request.label_matches {
+        if label.is_empty() {
+            return Err(
+                "telemetry cleanup label names must not be empty".into()
+            );
+        }
+        if values.is_empty() {
+            return Err(format!(
+                "telemetry cleanup label {label:?} requires at least one exact value"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_report(
+    request: &TelemetryCleanupRequestWire,
+    counts: [u64; 3],
+    size_before: u64,
+    size_after: u64,
+    vacuumed: bool,
+) -> TelemetryCleanupReportWire {
+    TelemetryCleanupReportWire {
+        schema_version: TELEMETRY_WIRE_SCHEMA_VERSION,
+        dry_run: request.dry_run,
+        raw_rows: counts[0],
+        rollup_5m_rows: counts[1],
+        rollup_1h_rows: counts[2],
+        total_rows: counts.iter().sum(),
+        store_size_before_bytes: size_before,
+        store_size_after_bytes: size_after,
+        reclaimed_bytes: size_before.saturating_sub(size_after),
+        vacuumed,
+    }
+}
+
+fn cleanup_counts(
+    conn: &Connection,
+    request: &TelemetryCleanupRequestWire,
+) -> Result<[u64; 3], String> {
+    Ok([
+        count_cleanup_rows(conn, "samples", request)?,
+        count_cleanup_rows(conn, "rollup_5m", request)?,
+        count_cleanup_rows(conn, "rollup_1h", request)?,
+    ])
+}
+
+fn count_cleanup_rows(
+    conn: &Connection,
+    table: &str,
+    request: &TelemetryCleanupRequestWire,
+) -> Result<u64, String> {
+    validate_stats_table(table)?;
+    let (predicate, values) = cleanup_predicate(request);
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
+    let count: i64 = conn
+        .query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    i64_to_u64(count)
+}
+
+fn delete_cleanup_rows(
+    tx: &Transaction<'_>,
+    table: &str,
+    request: &TelemetryCleanupRequestWire,
+) -> Result<u64, String> {
+    validate_stats_table(table)?;
+    let (predicate, values) = cleanup_predicate(request);
+    let sql = format!("DELETE FROM {table} WHERE {predicate}");
+    let deleted = tx
+        .execute(&sql, params_from_iter(values.iter()))
+        .map_err(|e| e.to_string())?;
+    Ok(deleted as u64)
+}
+
+fn cleanup_predicate(
+    request: &TelemetryCleanupRequestWire,
+) -> (String, Vec<String>) {
+    let mut clauses = Vec::new();
+    let mut params = Vec::new();
+    for (label, values) in &request.label_matches {
+        let placeholders = std::iter::repeat("?")
+            .take(values.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM json_each(labels_json) WHERE key = ? AND value IN ({placeholders}))"
+        ));
+        params.push(label.clone());
+        params.extend(values.iter().cloned());
+    }
+    (clauses.join(" OR "), params)
+}
+
+fn refresh_write_metadata(tx: &Transaction<'_>) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM meta WHERE key = 'last_write_ts' OR key LIKE 'last_write_subsystem:%'",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut stmt = tx
+        .prepare(
+            r#"
+            SELECT subsystem, MAX(last_ts) FROM (
+                SELECT subsystem, ts AS last_ts FROM samples
+                UNION ALL
+                SELECT subsystem, last_ts FROM rollup_5m
+                UNION ALL
+                SELECT subsystem, last_ts FROM rollup_1h
+            )
+            GROUP BY subsystem
+            ORDER BY subsystem
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut latest = None;
+    let mut by_subsystem = Vec::new();
+    for row in rows {
+        let (subsystem, timestamp) = row.map_err(|e| e.to_string())?;
+        latest =
+            Some(latest.map_or(timestamp, |prior: i64| prior.max(timestamp)));
+        by_subsystem.push((subsystem, timestamp));
+    }
+    drop(stmt);
+
+    if let Some(timestamp) = latest {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('last_write_ts', ?1)",
+            [timestamp.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for (subsystem, timestamp) in by_subsystem {
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)",
+            params![
+                format!("last_write_subsystem:{subsystem}"),
+                timestamp.to_string()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn store_size(store_path: &Path) -> u64 {
+    fs::metadata(store_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn with_store<T>(
@@ -1700,6 +1942,19 @@ mod tests {
         }
     }
 
+    fn test_data_cleanup_request(dry_run: bool) -> TelemetryCleanupRequestWire {
+        TelemetryCleanupRequestWire {
+            label_matches: BTreeMap::from([
+                (
+                    "llm_provider".into(),
+                    vec!["test-provider".into(), "fakey".into()],
+                ),
+                ("workflow".into(), vec!["test-workflow".into()]),
+            ]),
+            dry_run,
+        }
+    }
+
     #[test]
     fn counter_deltas_aggregate_and_group() {
         let temp = tempdir().unwrap();
@@ -1939,6 +2194,176 @@ mod tests {
         )
         .unwrap();
         assert_eq!(third.rollup_1h_rows_deleted, 1);
+    }
+
+    #[test]
+    fn exact_label_cleanup_previews_and_deletes_every_tier() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("metrics.sqlite");
+        let metric = "sase_agent_runs_total";
+
+        let mut old_test = sample(
+            100,
+            metric,
+            TelemetryMetricKindWire::Counter,
+            "old-test",
+            1.0,
+        );
+        old_test
+            .labels
+            .insert("llm_provider".into(), "test-provider".into());
+        let mut old_production = old_test.clone();
+        old_production.source = "old-production".into();
+        old_production
+            .labels
+            .insert("llm_provider".into(), "codex".into());
+
+        let mut middle_test = sample(
+            1_000,
+            metric,
+            TelemetryMetricKindWire::Counter,
+            "middle-test",
+            1.0,
+        );
+        middle_test
+            .labels
+            .insert("workflow".into(), "test-workflow".into());
+        let mut middle_near_miss = middle_test.clone();
+        middle_near_miss.source = "middle-near-miss".into();
+        middle_near_miss
+            .labels
+            .insert("workflow".into(), "test-workflow-copy".into());
+
+        record_batch(
+            &path,
+            batch(
+                vec![old_test, old_production, middle_test, middle_near_miss],
+                2_000,
+            ),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        prune(
+            &path,
+            TelemetryPruneRequestWire {
+                now_ts: Some(2_000),
+                retention: TelemetryRetentionWire {
+                    raw_seconds: 500,
+                    rollup_5m_seconds: 100_000,
+                    rollup_1h_seconds: 100_000,
+                },
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        prune(
+            &path,
+            TelemetryPruneRequestWire {
+                now_ts: Some(10_000),
+                retention: TelemetryRetentionWire {
+                    raw_seconds: 100_000,
+                    rollup_5m_seconds: 9_500,
+                    rollup_1h_seconds: 100_000,
+                },
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let mut raw_test = sample(
+            10_000,
+            metric,
+            TelemetryMetricKindWire::Counter,
+            "raw-test",
+            1.0,
+        );
+        raw_test
+            .labels
+            .insert("llm_provider".into(), "fakey".into());
+        let mut raw_near_miss = sample(
+            9_000,
+            metric,
+            TelemetryMetricKindWire::Counter,
+            "raw-near-miss",
+            1.0,
+        );
+        raw_near_miss
+            .labels
+            .insert("llm_provider".into(), "fakey-preview".into());
+        record_batch(
+            &path,
+            batch(vec![raw_test, raw_near_miss], 11_000),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let stats_before = store_stats(&path, Duration::from_secs(1)).unwrap();
+        assert_eq!(stats_before.raw_sample_count, 2);
+        assert_eq!(stats_before.rollup_5m_count, 2);
+        assert_eq!(stats_before.rollup_1h_count, 2);
+        assert_eq!(stats_before.last_write_ts, Some(11_000));
+
+        let preview = cleanup_matching_labels(
+            &path,
+            test_data_cleanup_request(true),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(preview.raw_rows, 1);
+        assert_eq!(preview.rollup_5m_rows, 1);
+        assert_eq!(preview.rollup_1h_rows, 1);
+        assert_eq!(preview.total_rows, 3);
+        assert!(preview.dry_run);
+        assert!(!preview.vacuumed);
+        assert_eq!(
+            preview.store_size_before_bytes,
+            preview.store_size_after_bytes
+        );
+        assert_eq!(
+            store_stats(&path, Duration::from_secs(1)).unwrap(),
+            stats_before
+        );
+
+        let deleted = cleanup_matching_labels(
+            &path,
+            test_data_cleanup_request(false),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(deleted.raw_rows, 1);
+        assert_eq!(deleted.rollup_5m_rows, 1);
+        assert_eq!(deleted.rollup_1h_rows, 1);
+        assert_eq!(deleted.total_rows, 3);
+        assert!(deleted.vacuumed);
+        assert!(
+            deleted.store_size_after_bytes <= deleted.store_size_before_bytes
+        );
+        assert_eq!(
+            deleted.reclaimed_bytes,
+            deleted
+                .store_size_before_bytes
+                .saturating_sub(deleted.store_size_after_bytes)
+        );
+
+        let stats_after = store_stats(&path, Duration::from_secs(1)).unwrap();
+        assert_eq!(stats_after.raw_sample_count, 1);
+        assert_eq!(stats_after.rollup_5m_count, 1);
+        assert_eq!(stats_after.rollup_1h_count, 1);
+        assert_eq!(stats_after.last_write_ts, Some(9_000));
+        assert_eq!(stats_after.last_write_by_subsystem["agent"], 9_000);
+
+        let repeated = cleanup_matching_labels(
+            &path,
+            test_data_cleanup_request(false),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(repeated.total_rows, 0);
+        assert!(!repeated.vacuumed);
+        assert_eq!(
+            store_stats(&path, Duration::from_secs(1)).unwrap(),
+            stats_after
+        );
     }
 
     #[test]

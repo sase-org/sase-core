@@ -110,6 +110,7 @@
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
+//! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -355,13 +356,14 @@ use sase_core::status::{
     StatusTransitionRequestWire,
 };
 use sase_core::telemetry::{
+    cleanup_matching_labels as core_telemetry_cleanup_matching_labels,
     prune as core_telemetry_prune,
     query_instant as core_telemetry_query_instant,
     query_range as core_telemetry_query_range,
     record_batch as core_telemetry_record_batch,
-    store_stats as core_telemetry_store_stats, TelemetryInstantQueryWire,
-    TelemetryPruneRequestWire, TelemetryRangeQueryWire,
-    TelemetryRecordBatchWire,
+    store_stats as core_telemetry_store_stats, TelemetryCleanupRequestWire,
+    TelemetryInstantQueryWire, TelemetryPruneRequestWire,
+    TelemetryRangeQueryWire, TelemetryRecordBatchWire,
 };
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
@@ -4163,6 +4165,33 @@ fn py_telemetry_record_batch<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Preview or delete telemetry rows matching exact label values.
+#[pyfunction]
+#[pyo3(
+    name = "telemetry_cleanup_matching_labels",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_telemetry_cleanup_matching_labels<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: TelemetryCleanupRequestWire =
+        telemetry_request_from_pydict(request, "TelemetryCleanupRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_telemetry_cleanup_matching_labels(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
 /// Query current telemetry values with source-aware gauge staleness.
 #[pyfunction]
 #[pyo3(
@@ -4594,6 +4623,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_allocate_and_claim_workspace_from_content,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_telemetry_cleanup_matching_labels, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_record_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_query_instant, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_query_range, m)?)?;
@@ -5649,6 +5679,28 @@ mod tests {
             .unwrap();
             let recorded = py_to_json_value(recorded.bind(py)).unwrap();
             assert_eq!(recorded["samples_recorded"], json!(1));
+
+            let cleanup_obj = json_value_to_py(
+                py,
+                &json!({
+                    "label_matches": {"provider": ["codex"]},
+                    "dry_run": true
+                }),
+            )
+            .unwrap();
+            let cleanup_request =
+                cleanup_obj.bind(py).downcast::<PyDict>().unwrap();
+            let cleanup = py_telemetry_cleanup_matching_labels(
+                py,
+                path.to_str().unwrap(),
+                cleanup_request,
+                1_000,
+            )
+            .unwrap();
+            let cleanup = py_to_json_value(cleanup.bind(py)).unwrap();
+            assert_eq!(cleanup["dry_run"], json!(true));
+            assert_eq!(cleanup["raw_rows"], json!(1));
+            assert_eq!(cleanup["total_rows"], json!(1));
 
             let instant_obj = json_value_to_py(
                 py,

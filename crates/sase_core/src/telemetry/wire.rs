@@ -262,6 +262,33 @@ pub struct TelemetryPruneRequestWire {
     pub retention: TelemetryRetentionWire,
 }
 
+/// Explicit local-store maintenance request for exact label matches.
+///
+/// A row matches when any named label has one of the requested values. Both
+/// label names and values are compared exactly; callers cannot request a
+/// substring or pattern match through this wire shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryCleanupRequestWire {
+    #[serde(default)]
+    pub label_matches: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryCleanupReportWire {
+    pub schema_version: u32,
+    pub dry_run: bool,
+    pub raw_rows: u64,
+    pub rollup_5m_rows: u64,
+    pub rollup_1h_rows: u64,
+    pub total_rows: u64,
+    pub store_size_before_bytes: u64,
+    pub store_size_after_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub vacuumed: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryStoreStatsWire {
     pub schema_version: u32,

@@ -409,10 +409,12 @@ pub use status::{
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
 pub use telemetry::{
+    cleanup_matching_labels as telemetry_cleanup_matching_labels,
     prune as telemetry_prune, query_instant as telemetry_query_instant,
     query_range as telemetry_query_range,
     record_batch as telemetry_record_batch,
-    store_stats as telemetry_store_stats, TelemetryHistogramBucketWire,
+    store_stats as telemetry_store_stats, TelemetryCleanupReportWire,
+    TelemetryCleanupRequestWire, TelemetryHistogramBucketWire,
     TelemetryInstantQueryResultWire, TelemetryInstantQueryWire,
     TelemetryInstantValueWire, TelemetryMetricKindWire, TelemetryPointWire,
     TelemetryPruneReportWire, TelemetryPruneRequestWire,
