@@ -183,6 +183,7 @@ pub use axe_chop::{
 pub use bead::{
     add_dependency as bead_add_dependency,
     blocked_issues as bead_blocked_issues, changespec_metadata_migration_sql,
+    claim_for_agent_launch as bead_claim_for_agent_launch,
     close_issues as bead_close_issues, create_issue as bead_create_issue,
     default_config, doctor as bead_doctor, export_issues_to_jsonl,
     export_jsonl as bead_export_jsonl,

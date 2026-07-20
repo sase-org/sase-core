@@ -1,12 +1,15 @@
 //! Bead store mutations backed by JSONL persistence.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
@@ -25,6 +28,13 @@ use super::wire::{
     BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
     StatusWire,
 };
+
+// Reuse the ignored compatibility database as the advisory lock file so a
+// successful claim cannot introduce durable bead-store content of its own.
+const BEAD_MUTATION_LOCK_FILENAME: &str = "beads.db";
+const BEAD_MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const BEAD_MUTATION_LOCK_RETRY_MIN_MS: u64 = 10;
+const BEAD_MUTATION_LOCK_RETRY_JITTER_MS: u64 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BeadCreateRequestWire {
@@ -234,6 +244,61 @@ pub fn update_issue(
     let mut result = outcome("update", true, vec![issue.id.clone()]);
     result.issue = Some(issue);
     Ok(result)
+}
+
+pub fn claim_for_agent_launch(
+    beads_dir: &Path,
+    issue_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if agent_name.trim().is_empty() {
+        return Err(BeadError::validation(
+            "agent name for bead launch claim cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)
+            .map_err(|error| durable_store_error("read", beads_dir, error))?;
+        let index = store.issue_index(issue_id)?;
+        if store.issues[index].status == StatusWire::Closed {
+            return Err(BeadError {
+                kind: "closed".to_string(),
+                message: format!(
+                    "cannot claim closed bead for agent launch: {issue_id}"
+                ),
+            });
+        }
+
+        let now = now.unwrap_or_else(now_utc);
+        store.issues[index].status = StatusWire::InProgress;
+        store.issues[index].assignee = agent_name.to_string();
+        store.issues[index].updated_at = now.clone();
+        let issue = store.issues[index].clone();
+        issue.validate()?;
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: BeadIssueUpdateEventFieldsWire {
+                    status: Some(StatusWire::InProgress),
+                    assignee: Some(agent_name.to_string()),
+                    ..Default::default()
+                },
+            },
+            &now,
+            &issue.created_by,
+        )?;
+        store
+            .save()
+            .map_err(|error| durable_store_error("write", beads_dir, error))?;
+
+        let mut result =
+            outcome("claim_for_agent_launch", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
 }
 
 pub fn preclaim_epic_work_plan(
@@ -1099,6 +1164,139 @@ fn not_found(issue_id: &str) -> BeadError {
     }
 }
 
+fn durable_store_error(
+    operation: &str,
+    beads_dir: &Path,
+    error: BeadError,
+) -> BeadError {
+    BeadError {
+        kind: error.kind,
+        message: format!(
+            "failed to {operation} durable bead store {}: {}",
+            beads_dir.display(),
+            error.message
+        ),
+    }
+}
+
+fn with_bead_mutation_lock<T>(
+    beads_dir: &Path,
+    operation: impl FnOnce() -> Result<T, BeadError>,
+) -> Result<T, BeadError> {
+    let lock_path = bead_mutation_lock_path(beads_dir);
+    let lock = open_bead_mutation_lock(beads_dir, &lock_path)?;
+    lock_bead_mutation_with_timeout(
+        &lock,
+        beads_dir,
+        &lock_path,
+        BEAD_MUTATION_LOCK_TIMEOUT,
+    )?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock).map_err(|error| BeadError {
+        kind: "lock_release".to_string(),
+        message: format!(
+            "failed to release bead mutation lock {} for store {}: {error}",
+            lock_path.display(),
+            beads_dir.display()
+        ),
+    });
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(unlock_error)) => Err(unlock_error),
+        (Err(error), Err(unlock_error)) => Err(BeadError {
+            kind: unlock_error.kind,
+            message: format!(
+                "{}; the locked mutation also failed with {}: {}",
+                unlock_error.message, error.kind, error.message
+            ),
+        }),
+    }
+}
+
+fn open_bead_mutation_lock(
+    beads_dir: &Path,
+    lock_path: &Path,
+) -> Result<File, BeadError> {
+    if !beads_dir.is_dir() {
+        return Err(BeadError::io(format!(
+            "No beads directory found at {}",
+            beads_dir.display()
+        )));
+    }
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| BeadError {
+            kind: "lock".to_string(),
+            message: format!(
+                "failed to open bead mutation lock {} for store {}: {error}",
+                lock_path.display(),
+                beads_dir.display()
+            ),
+        })
+}
+
+fn lock_bead_mutation_with_timeout(
+    lock: &File,
+    beads_dir: &Path,
+    lock_path: &Path,
+    timeout: Duration,
+) -> Result<(), BeadError> {
+    let started = Instant::now();
+    let mut attempt = 0_u64;
+    loop {
+        match FileExt::try_lock_exclusive(lock) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    return Err(BeadError {
+                        kind: "lock_timeout".to_string(),
+                        message: format!(
+                            "timed out after {}ms waiting for bead mutation lock {} for store {}",
+                            elapsed.as_millis(),
+                            lock_path.display(),
+                            beads_dir.display()
+                        ),
+                    });
+                }
+                let delay = bead_mutation_lock_retry_delay(attempt)
+                    .min(timeout - elapsed);
+                thread::sleep(delay);
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => {
+                return Err(BeadError {
+                    kind: "lock".to_string(),
+                    message: format!(
+                        "failed to acquire bead mutation lock {} for store {}: {error}",
+                        lock_path.display(),
+                        beads_dir.display()
+                    ),
+                })
+            }
+        }
+    }
+}
+
+fn bead_mutation_lock_retry_delay(attempt: u64) -> Duration {
+    let clock_jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::from(duration.subsec_nanos()))
+        .unwrap_or(0);
+    let jitter = clock_jitter.wrapping_add(attempt.wrapping_mul(17))
+        % (BEAD_MUTATION_LOCK_RETRY_JITTER_MS + 1);
+    Duration::from_millis(BEAD_MUTATION_LOCK_RETRY_MIN_MS + jitter)
+}
+
+fn bead_mutation_lock_path(beads_dir: &Path) -> PathBuf {
+    beads_dir.join(BEAD_MUTATION_LOCK_FILENAME)
+}
+
 fn outcome(
     operation: &str,
     changed: bool,
@@ -1120,6 +1318,7 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
 
     #[test]
@@ -1950,6 +2149,251 @@ mod tests {
         .unwrap_err();
 
         assert!(err.message.contains("model cannot contain"));
+    }
+
+    #[test]
+    fn claim_for_agent_launch_claims_open_and_reassigns_in_progress_issue() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let claimed_epic = claim_for_agent_launch(
+            &beads_dir,
+            &epic.id,
+            "land-agent",
+            Some("2026-01-01T00:01:30Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(claimed_epic.issue_type, IssueTypeWire::Plan);
+        assert_eq!(claimed_epic.status, StatusWire::InProgress);
+        assert_eq!(claimed_epic.assignee, "land-agent");
+
+        let first = claim_for_agent_launch(
+            &beads_dir,
+            &phase.id,
+            "agent-1",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        let first_issue = first.issue.unwrap();
+        assert_eq!(first.operation, "claim_for_agent_launch");
+        assert!(first.changed);
+        assert_eq!(first.issue_ids, vec![phase.id.clone()]);
+        assert_eq!(first_issue.status, StatusWire::InProgress);
+        assert_eq!(first_issue.assignee, "agent-1");
+        assert_eq!(first_issue.updated_at, "2026-01-01T00:02:00Z");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let claim_event = streams[0].events.last().unwrap();
+        assert_eq!(claim_event.operation, BeadEventOperationWire::IssueUpdated);
+        assert!(matches!(
+            &claim_event.payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.status == Some(StatusWire::InProgress)
+                    && fields.assignee.as_deref() == Some("agent-1")
+        ));
+        let reduced = reduce_event_streams(&streams).unwrap();
+        let reduced_phase =
+            reduced.iter().find(|issue| issue.id == phase.id).unwrap();
+        assert_eq!(reduced_phase.assignee, "agent-1");
+
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let reassigned = claim_for_agent_launch(
+            &beads_dir,
+            &phase.id,
+            "agent-2",
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(reassigned.status, StatusWire::InProgress);
+        assert_eq!(reassigned.assignee, "agent-2");
+        assert_eq!(reassigned.updated_at, "2026-01-01T00:03:00Z");
+        let projection =
+            fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+        assert!(projection.contains(r#""assignee":"agent-2""#));
+        assert!(projection.contains(r#""updated_at":"2026-01-01T00:03:00Z""#));
+    }
+
+    #[test]
+    fn claim_for_agent_launch_rejects_missing_closed_and_blank_requests() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            issue(
+                "sase-1",
+                "Closed plan",
+                "plan",
+                None,
+                "closed",
+                "2026-01-01T00:00:00Z",
+            ) + "\n",
+        )
+        .unwrap();
+
+        let missing =
+            claim_for_agent_launch(&beads_dir, "sase-missing", "agent", None)
+                .unwrap_err();
+        assert_eq!(missing.kind, "not_found");
+        assert!(missing.message.contains("sase-missing"));
+
+        let closed =
+            claim_for_agent_launch(&beads_dir, "sase-1", "agent", None)
+                .unwrap_err();
+        assert_eq!(closed.kind, "closed");
+        assert!(closed.message.contains("closed bead"));
+
+        for agent_name in ["", "  \t"] {
+            let invalid =
+                claim_for_agent_launch(&beads_dir, "sase-1", agent_name, None)
+                    .unwrap_err();
+            assert_eq!(invalid.kind, "validation");
+            assert!(invalid.message.contains("cannot be empty or blank"));
+        }
+    }
+
+    #[test]
+    fn concurrent_launch_claims_preserve_sibling_events_and_projection() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phases: Vec<IssueWire> = ["First", "Second"]
+            .into_iter()
+            .map(|title| {
+                create_issue(
+                    &beads_dir,
+                    BeadCreateRequestWire {
+                        title: title.to_string(),
+                        issue_type: IssueTypeWire::Phase,
+                        parent_id: Some(epic.id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .issue
+                .unwrap()
+            })
+            .collect();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| {
+                let beads_dir = beads_dir.clone();
+                let bead_id = phase.id.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    claim_for_agent_launch(
+                        &beads_dir,
+                        &bead_id,
+                        &format!("agent-{}", index + 1),
+                        Some(format!("2026-01-01T00:0{}:00Z", index + 1)),
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let claim_events: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::IssueUpdated
+                    && phases.iter().any(|phase| phase.id == event.issue_id)
+            })
+            .collect();
+        assert_eq!(claim_events.len(), 2);
+        let projected =
+            import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
+                .unwrap()
+                .issues;
+        for (index, phase) in phases.iter().enumerate() {
+            let issue =
+                projected.iter().find(|issue| issue.id == phase.id).unwrap();
+            assert_eq!(issue.status, StatusWire::InProgress);
+            assert_eq!(issue.assignee, format!("agent-{}", index + 1));
+        }
+    }
+
+    #[test]
+    fn bead_mutation_lock_contention_times_out() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        let lock_path = bead_mutation_lock_path(&beads_dir);
+        let holder = open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
+        FileExt::lock_exclusive(&holder).unwrap();
+        let contender =
+            open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
+
+        let started = Instant::now();
+        let error = lock_bead_mutation_with_timeout(
+            &contender,
+            &beads_dir,
+            &lock_path,
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "lock_timeout");
+        assert!(error.message.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        FileExt::unlock(&holder).unwrap();
     }
 
     #[test]

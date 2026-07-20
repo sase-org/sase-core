@@ -261,6 +261,7 @@ use sase_core::bead::{
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
+    claim_for_agent_launch as core_bead_claim_for_agent_launch,
     close_issues as core_bead_close_issues,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
     execute_bead_cli as core_execute_bead_cli,
@@ -2278,6 +2279,26 @@ fn py_bead_update<'py>(
         py,
         py.allow_threads(|| {
             core_bead_update_issue(&beads_dir, issue_id, fields)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_claim_for_agent_launch", signature = (beads_dir, bead_id, agent_name, now=None))]
+fn py_bead_claim_for_agent_launch<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    bead_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_claim_for_agent_launch(
+                &beads_dir, bead_id, agent_name, now,
+            )
         }),
     )
 }
@@ -4476,6 +4497,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_preclaim_epic_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
