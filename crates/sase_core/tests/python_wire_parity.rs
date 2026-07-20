@@ -233,6 +233,7 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
 
     let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
     assert!(!legacy.agent_family_parallel);
+    assert!(legacy.epic_plan_ref.is_none());
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.clan_summary.is_none());
 
@@ -251,6 +252,9 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
 #[test]
 fn agent_meta_clan_field_order_matches_python_wire() {
     let encoded = serde_json::to_string(&AgentMetaWire::default()).unwrap();
+    let sdd_plan = encoded.find("\"sdd_plan_path\"").unwrap();
+    let epic_plan = encoded.find("\"epic_plan_ref\"").unwrap();
+    let question = encoded.find("\"question_request_path\"").unwrap();
     let workflow = encoded.find("\"workflow_name\"").unwrap();
     let clan = encoded.find("\"agent_clan\"").unwrap();
     let generation = encoded.find("\"agent_clan_generation\"").unwrap();
@@ -259,6 +263,8 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     let family = encoded.find("\"agent_family\"").unwrap();
     let role = encoded.find("\"agent_family_role\"").unwrap();
     let parallel = encoded.find("\"agent_family_parallel\"").unwrap();
+    assert!(sdd_plan < epic_plan);
+    assert!(epic_plan < question);
     assert!(workflow < clan);
     assert!(clan < generation);
     assert!(generation < tribe);
@@ -266,6 +272,18 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     assert!(summary < family);
     assert!(family < role);
     assert!(role < parallel);
+}
+
+#[test]
+fn agent_meta_parent_epic_plan_reference_round_trips() {
+    let meta: AgentMetaWire = serde_json::from_str(
+        r#"{"sdd_plan_path":"plans/authored.md","epic_plan_ref":"plans/parent.md"}"#,
+    )
+    .unwrap();
+    assert_eq!(meta.sdd_plan_path.as_deref(), Some("plans/authored.md"));
+    assert_eq!(meta.epic_plan_ref.as_deref(), Some("plans/parent.md"));
+    let encoded = serde_json::to_value(&meta).unwrap();
+    assert_eq!(encoded["epic_plan_ref"], "plans/parent.md");
 }
 
 #[test]

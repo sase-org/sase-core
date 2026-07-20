@@ -32,7 +32,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 15;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 16;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -785,6 +785,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "clan_summary", "TEXT")?;
         migrate_clan_context_projection_v15(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 16) {
+        migrate_record_json_refresh_v16(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -1061,6 +1064,15 @@ fn migrate_record_json_refresh_v14(
 /// The Python lifecycle rebuilds older indexes from source after detecting
 /// this schema bump, populating the new columns for existing records.
 fn migrate_clan_context_projection_v15(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v16 refreshes `record_json` with `agent_meta.epic_plan_ref` so indexed
+/// snapshot consumers retain the phase's parent-epic relationship after the
+/// phase-authored plan replaces `sdd_plan_path`.
+fn migrate_record_json_refresh_v16(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())

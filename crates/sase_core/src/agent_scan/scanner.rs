@@ -847,6 +847,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         plan_path: coerce_str(data.get("plan_path")),
         sdd_prompt_path: coerce_str(data.get("sdd_prompt_path")),
         sdd_plan_path: coerce_str(data.get("sdd_plan_path")),
+        epic_plan_ref: coerce_str(data.get("epic_plan_ref")),
         question_request_path: coerce_str(data.get("question_request_path")),
         question_response_path: coerce_str(data.get("question_response_path")),
         question_session_id: coerce_str(data.get("question_session_id")),

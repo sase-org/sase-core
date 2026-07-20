@@ -864,6 +864,39 @@ fn explicit_agent_clan_preserves_sequential_family_fields() {
 }
 
 #[test]
+fn scanner_keeps_parent_epic_and_authored_plan_references_separate() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260720120000");
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "sase-83.1--code",
+            "sdd_plan_path": "plans/provider_update_snapshot.md",
+            "epic_plan_ref": "plans/agent_cli_update_awareness.md",
+            "epic_bead_id": "sase-83",
+            "phase_bead_id": "sase-83.1",
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+    assert_eq!(
+        meta.sdd_plan_path.as_deref(),
+        Some("plans/provider_update_snapshot.md")
+    );
+    assert_eq!(
+        meta.epic_plan_ref.as_deref(),
+        Some("plans/agent_cli_update_awareness.md")
+    );
+}
+
+#[test]
 fn running_record_carries_string_output_variables() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));

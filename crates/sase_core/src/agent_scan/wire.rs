@@ -192,6 +192,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub sdd_plan_path: Option<String>,
     #[serde(default)]
+    pub epic_plan_ref: Option<String>,
+    #[serde(default)]
     pub question_request_path: Option<String>,
     #[serde(default)]
     pub question_response_path: Option<String>,
