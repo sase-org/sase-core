@@ -34,7 +34,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "id",
         alias: Some("i"),
-        description: "Assign an agent ID, clan, family, or user-managed tribe",
+        description: "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
         takes_argument: true,
         allows_multiple: false,
     },
@@ -178,6 +178,7 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
         ],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
         "id" => &[
+            ("bead=", "Associate this launch with a bead"),
             ("clan=", "Derive the full ID and join this agent clan"),
             ("family=", "Attach this suffix to an existing agent family"),
             ("tribe=", "Assign this agent to a user-managed tribe"),
@@ -262,7 +263,7 @@ mod tests {
         assert!(!metadata.allows_multiple);
         assert_eq!(
             metadata.description,
-            "Assign an agent ID, clan, family, or user-managed tribe"
+            "Assign an agent ID with optional bead, clan, family, or user-managed tribe"
         );
         assert_eq!(canonical_directive_name("i"), Some("id"));
         assert_eq!(directive_metadata("i").map(|d| d.name), Some("id"));
@@ -280,13 +281,13 @@ mod tests {
         }
 
         let id_args = directive_argument_candidates("id").candidates;
-        assert_eq!(id_args.len(), 3);
+        assert_eq!(id_args.len(), 4);
         assert_eq!(
             id_args
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
-            ["clan=", "family=", "tribe="]
+            ["bead=", "clan=", "family=", "tribe="]
         );
         assert_eq!(
             id_args
@@ -294,6 +295,7 @@ mod tests {
                 .map(|candidate| candidate.documentation.as_deref().unwrap())
                 .collect::<Vec<_>>(),
             [
+                "Associate this launch with a bead",
                 "Derive the full ID and join this agent clan",
                 "Attach this suffix to an existing agent family",
                 "Assign this agent to a user-managed tribe",

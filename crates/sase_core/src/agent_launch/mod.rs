@@ -125,6 +125,8 @@ pub struct LaunchFanoutSlotWire {
     #[serde(default)]
     pub repeat_name: Option<String>,
     #[serde(default)]
+    pub bead_id: Option<String>,
+    #[serde(default)]
     pub wait_for_previous: bool,
 }
 
@@ -406,6 +408,7 @@ pub fn plan_agent_launch_fanout(
                     workflow_name: None,
                     model: None,
                     repeat_name: None,
+                    bead_id: None,
                     wait_for_previous: has_wait_directive(prompt),
                 }],
                 requires_sequential_naming_wait: false,
@@ -985,14 +988,15 @@ fn is_line_start(rendered: &str, index: usize) -> bool {
 
 fn extract_repeat_and_id_rust(
     prompt: &str,
-) -> (Option<u32>, Option<String>, String) {
+) -> (Option<u32>, Option<String>, Option<String>, String) {
     if !prompt.contains('%') {
-        return (None, None, prompt.to_string());
+        return (None, None, None, prompt.to_string());
     }
 
     let ignored_ranges = launch_literal_zone_ranges(prompt);
     let mut repeat_count = None;
     let mut explicit_id = None;
+    let mut bead_id = None;
     let mut regions = Vec::new();
 
     for directive in directive_occurrences(prompt).unwrap_or_default() {
@@ -1013,16 +1017,24 @@ fn extract_repeat_and_id_rust(
         if directive.canonical_name == "repeat" {
             repeat_count = raw_arg.parse::<u32>().ok();
         } else {
-            explicit_id = if raw_arg.is_empty() {
-                None
-            } else {
-                Some(raw_arg)
-            };
+            for (index, arg) in directive.args.iter().enumerate() {
+                let (name, value) = split_named_directive_arg(arg);
+                match name.as_deref() {
+                    Some("bead") => {
+                        bead_id =
+                            Some(unquote_directive_arg_value(value.trim()));
+                    }
+                    None if index == 0 && !arg.is_empty() => {
+                        explicit_id = Some(arg.clone());
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
     if !matches!(repeat_count, Some(count) if count > 1) {
-        return (None, None, prompt.to_string());
+        return (None, None, None, prompt.to_string());
     }
 
     let mut cleaned = prompt.to_string();
@@ -1031,7 +1043,7 @@ fn extract_repeat_and_id_rust(
     }
     cleaned = leading_blank_line_re().replace(&cleaned, "").to_string();
     cleaned = strip_disabled_region_markers(&cleaned);
-    (repeat_count, explicit_id, cleaned)
+    (repeat_count, explicit_id, bead_id, cleaned)
 }
 
 fn has_wait_directive(prompt: &str) -> bool {
@@ -1551,6 +1563,7 @@ fn plan_multi_prompt_fanout(prompt: &str) -> LaunchFanoutPlanWire {
                 workflow_name: None,
                 model: None,
                 repeat_name: None,
+                bead_id: None,
             })
             .collect(),
         requires_sequential_naming_wait: true,
@@ -1579,6 +1592,7 @@ fn plan_alternative_fanout(
                 workflow_name: None,
                 model: None,
                 repeat_name: None,
+                bead_id: None,
             })
             .collect(),
         requires_sequential_naming_wait: false,
@@ -1608,6 +1622,7 @@ fn plan_model_fanout(
                     workflow_name: None,
                     model,
                     repeat_name: None,
+                    bead_id: None,
                 }
             })
             .collect(),
@@ -1617,7 +1632,8 @@ fn plan_model_fanout(
 }
 
 fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
-    let (count, explicit_id, stripped) = extract_repeat_and_id_rust(prompt);
+    let (count, explicit_id, bead_id, stripped) =
+        extract_repeat_and_id_rust(prompt);
     let slots = match count {
         Some(count) if count > 1 => (0..count)
             .map(|idx| LaunchFanoutSlotWire {
@@ -1629,6 +1645,7 @@ fn plan_repeat_fanout(prompt: &str) -> LaunchFanoutPlanWire {
                 workflow_name: None,
                 model: None,
                 repeat_name: explicit_id.clone(),
+                bead_id: bead_id.clone(),
                 wait_for_previous: idx > 0,
             })
             .collect(),
@@ -2254,6 +2271,7 @@ mod tests {
                 workflow_name: None,
                 model: None,
                 repeat_name: Some("task.1".to_string()),
+                bead_id: Some("sase-8f.2".to_string()),
                 wait_for_previous: false,
             }],
             requires_sequential_naming_wait: false,
@@ -2261,6 +2279,7 @@ mod tests {
         };
         let value = serde_json::to_value(&plan).unwrap();
         assert_eq!(value["slots"][0]["repeat_name"], json!("task.1"));
+        assert_eq!(value["slots"][0]["bead_id"], json!("sase-8f.2"));
         assert_eq!(value["slots"][0]["alt_id"], json!(null));
         let back: LaunchFanoutPlanWire = serde_json::from_value(value).unwrap();
         assert_eq!(back, plan);
@@ -2874,6 +2893,35 @@ mod tests {
             assert!(!plan.slots[0].wait_for_previous);
             assert!(plan.slots[1].wait_for_previous);
         }
+    }
+
+    #[test]
+    fn fanout_planner_preserves_repeat_bead_association() {
+        for prompt in [
+            "%repeat:2 %id(task, bead=sase-8f.2) do work",
+            "%r:2 %i(bead=sase-8f.2) do work",
+        ] {
+            let plan =
+                plan_agent_launch_fanout(prompt, Some("repeat")).unwrap();
+
+            assert_eq!(plan.slots.len(), 2);
+            assert!(plan
+                .slots
+                .iter()
+                .all(|slot| slot.bead_id.as_deref() == Some("sase-8f.2")));
+            assert!(plan
+                .slots
+                .iter()
+                .all(|slot| !slot.prompt.contains("bead=sase-8f.2")));
+        }
+
+        let named = plan_agent_launch_fanout(
+            "%r:2 %id(task, clan=research, bead=`sase-8f.2`) do work",
+            Some("repeat"),
+        )
+        .unwrap();
+        assert_eq!(named.slots[0].repeat_name.as_deref(), Some("task"));
+        assert_eq!(named.slots[0].bead_id.as_deref(), Some("sase-8f.2"));
     }
 
     #[test]

@@ -244,13 +244,13 @@ mod tests {
                 "%id(worker, family=review)",
                 14,
                 "**%id**",
-                "Assign an agent ID, clan, family, or user-managed tribe",
+                "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
             ),
             (
                 "%i(worker, tribe=review)",
                 13,
                 "**%id**",
-                "Assign an agent ID, clan, family, or user-managed tribe",
+                "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
             ),
             (
                 "%clan(research, tr)",
