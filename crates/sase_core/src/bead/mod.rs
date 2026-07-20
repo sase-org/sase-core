@@ -31,7 +31,8 @@ pub use events::{
 };
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
-    JsonlLoadOutcome,
+    repair_event_store_manifest, BeadEventManifestRepairOutcomeWire,
+    BeadEventManifestRepairStatusWire, JsonlLoadOutcome,
 };
 pub use mutation::{
     add_dependency, claim_for_agent_launch, close_issues, create_issue,

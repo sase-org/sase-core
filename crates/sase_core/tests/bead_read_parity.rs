@@ -3,7 +3,8 @@ use std::fs;
 use sase_core::{
     bead_blocked_issues, bead_doctor, bead_get_epic_children, bead_list_issues,
     bead_ready_issues, bead_show_issue, bead_stats, import_issues_from_jsonl,
-    import_issues_to_event_streams, BeadEventStoreManifestWire,
+    import_issues_to_event_streams, repair_event_store_manifest,
+    BeadEventManifestRepairStatusWire, BeadEventStoreManifestWire,
     BeadEventStreamWire,
 };
 use tempfile::tempdir;
@@ -107,6 +108,113 @@ fn event_store_wins_over_stale_legacy_projection() {
     assert!(bead_doctor(&beads_dir).unwrap().contains(
         &"WARNING: issues.jsonl projection drift from bead events".to_string()
     ));
+}
+
+#[test]
+fn event_manifest_repair_recounts_missing_or_stale_metadata_idempotently() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    let canonical_jsonl = issue(
+        "beads-1",
+        "Canonical Epic",
+        "plan",
+        None,
+        "open",
+        "2026-01-01T00:00:00Z",
+        "",
+    ) + "\n";
+    let canonical_issues =
+        import_issues_from_jsonl_content(&canonical_jsonl).unwrap();
+    write_event_store(&beads_dir, &canonical_issues).unwrap();
+    let manifest_path = beads_dir.join("events/manifest.json");
+    fs::write(
+        &manifest_path,
+        r#"{"schema_version":1,"stream_count":0,"generated_from":"issues.jsonl","migration_tool":"sase-core bead events"}"#,
+    )
+    .unwrap();
+
+    let repaired = repair_event_store_manifest(&beads_dir).unwrap();
+    assert_eq!(repaired.status, BeadEventManifestRepairStatusWire::Repaired);
+    assert_eq!(repaired.stream_count, 1);
+    let manifest: BeadEventStoreManifestWire =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap())
+            .unwrap();
+    assert_eq!(manifest.stream_count, 1);
+
+    let unchanged = repair_event_store_manifest(&beads_dir).unwrap();
+    assert_eq!(unchanged.status, BeadEventManifestRepairStatusWire::Noop);
+
+    fs::remove_file(&manifest_path).unwrap();
+    let recreated = repair_event_store_manifest(&beads_dir).unwrap();
+    assert_eq!(
+        recreated.status,
+        BeadEventManifestRepairStatusWire::Repaired
+    );
+    assert!(manifest_path.exists());
+}
+
+#[test]
+fn event_manifest_repair_refuses_invalid_canonical_streams() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("beads");
+    let streams_dir = beads_dir.join("events/streams");
+    fs::create_dir_all(&streams_dir).unwrap();
+    let manifest_path = beads_dir.join("events/manifest.json");
+    fs::write(&manifest_path, "stale manifest\n").unwrap();
+    fs::write(streams_dir.join("beads-1.jsonl"), "not json\n").unwrap();
+    let before = fs::read(&manifest_path).unwrap();
+
+    let outcome = repair_event_store_manifest(&beads_dir).unwrap();
+
+    assert_eq!(
+        outcome.status,
+        BeadEventManifestRepairStatusWire::InvalidStream
+    );
+    assert!(outcome.error.unwrap().contains("invalid bead event stream"));
+    assert_eq!(fs::read(&manifest_path).unwrap(), before);
+}
+
+#[test]
+fn event_manifest_repair_refuses_unsupported_event_schema() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    let canonical_jsonl = issue(
+        "beads-1",
+        "Canonical Epic",
+        "plan",
+        None,
+        "open",
+        "2026-01-01T00:00:00Z",
+        "",
+    ) + "\n";
+    let canonical_issues =
+        import_issues_from_jsonl_content(&canonical_jsonl).unwrap();
+    write_event_store(&beads_dir, &canonical_issues).unwrap();
+    let stream_path = beads_dir.join("events/streams/beads-1.jsonl");
+    let mut event: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(&stream_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    event["schema_version"] = serde_json::json!(2);
+    fs::write(&stream_path, serde_json::to_string(&event).unwrap() + "\n")
+        .unwrap();
+
+    let outcome = repair_event_store_manifest(&beads_dir).unwrap();
+
+    assert_eq!(
+        outcome.status,
+        BeadEventManifestRepairStatusWire::InvalidStream
+    );
+    assert!(outcome
+        .error
+        .unwrap()
+        .contains("unsupported bead event schema_version: 2"));
 }
 
 #[test]

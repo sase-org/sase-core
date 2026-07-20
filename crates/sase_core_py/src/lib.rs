@@ -278,6 +278,7 @@ use sase_core::bead::{
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
     remove_issue as core_bead_remove_issue,
+    repair_event_store_manifest as core_repair_event_store_manifest,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue, stats as core_bead_stats,
     sync_is_clean as core_bead_sync_is_clean,
@@ -2406,6 +2407,19 @@ fn py_bead_event_store_manifest<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_repair_event_store_manifest")]
+fn py_bead_repair_event_store_manifest<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_repair_event_store_manifest(&beads_dir)),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_remove")]
 fn py_bead_remove<'py>(
     py: Python<'py>,
@@ -4504,6 +4518,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_merge_event_streams, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_reduce_event_streams, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_event_store_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_repair_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;
@@ -5128,6 +5143,28 @@ mod tests {
             let root =
                 beads_dir.parent().unwrap().parent().unwrap().to_path_buf();
             let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn bead_manifest_repair_binding_round_trips_structured_outcome() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let beads_dir = temp_beads_dir();
+
+            let result = py_bead_repair_event_store_manifest(
+                py,
+                beads_dir.to_str().unwrap(),
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value["status"], json!("noop"));
+            assert_eq!(value["stream_count"], json!(0));
+            assert!(value["manifest_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("events/manifest.json"));
         });
     }
 

@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::events::{
-    BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
+    reduce_event_streams, BeadEventRecordWire, BeadEventStoreManifestWire,
+    BeadEventStreamWire,
 };
 use super::wire::{
     deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
@@ -23,6 +24,23 @@ pub struct JsonlLoadOutcome {
     pub blank_lines: usize,
     pub invalid_json_lines: usize,
     pub invalid_record_lines: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadEventManifestRepairStatusWire {
+    Noop,
+    Repaired,
+    InvalidStream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadEventManifestRepairOutcomeWire {
+    pub status: BeadEventManifestRepairStatusWire,
+    pub manifest_path: String,
+    pub stream_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub fn parse_issues_jsonl(input: &str) -> JsonlLoadOutcome {
@@ -110,6 +128,89 @@ pub fn event_streams_dir(beads_dir: &Path) -> PathBuf {
     beads_dir.join("events").join("streams")
 }
 
+pub fn repair_event_store_manifest(
+    beads_dir: &Path,
+) -> Result<BeadEventManifestRepairOutcomeWire, BeadError> {
+    let manifest_path = event_manifest_path(beads_dir);
+    let streams_dir = event_streams_dir(beads_dir);
+    let manifest_path_text = manifest_path.to_string_lossy().into_owned();
+    if !manifest_path.exists() && !streams_dir.exists() {
+        return Ok(BeadEventManifestRepairOutcomeWire {
+            status: BeadEventManifestRepairStatusWire::Noop,
+            manifest_path: manifest_path_text,
+            stream_count: 0,
+            error: None,
+        });
+    }
+
+    let streams = match read_event_streams_without_manifest(beads_dir) {
+        Ok(streams) => streams,
+        Err(error) => {
+            return Ok(BeadEventManifestRepairOutcomeWire {
+                status: BeadEventManifestRepairStatusWire::InvalidStream,
+                manifest_path: manifest_path_text,
+                stream_count: 0,
+                error: Some(error.to_string()),
+            });
+        }
+    };
+    if let Err(error) = reduce_event_streams(&streams) {
+        return Ok(BeadEventManifestRepairOutcomeWire {
+            status: BeadEventManifestRepairStatusWire::InvalidStream,
+            manifest_path: manifest_path_text,
+            stream_count: streams.len(),
+            error: Some(error.to_string()),
+        });
+    }
+
+    let canonical = BeadEventStoreManifestWire::from_streams(&streams);
+    let needs_repair = if manifest_path.exists() {
+        let manifest_text =
+            fs::read_to_string(&manifest_path).map_err(|err| {
+                BeadError::io(format!(
+                    "failed to read bead events manifest {}: {err}",
+                    manifest_path.display()
+                ))
+            })?;
+        match serde_json::from_str::<BeadEventStoreManifestWire>(&manifest_text)
+        {
+            Ok(stored) => {
+                if let Err(error) = stored.validate() {
+                    return Ok(BeadEventManifestRepairOutcomeWire {
+                        status:
+                            BeadEventManifestRepairStatusWire::InvalidStream,
+                        manifest_path: manifest_path_text,
+                        stream_count: streams.len(),
+                        error: Some(error.to_string()),
+                    });
+                }
+                stored != canonical
+            }
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
+
+    if !needs_repair {
+        return Ok(BeadEventManifestRepairOutcomeWire {
+            status: BeadEventManifestRepairStatusWire::Noop,
+            manifest_path: manifest_path_text,
+            stream_count: streams.len(),
+            error: None,
+        });
+    }
+
+    let manifest_json = serde_json::to_vec_pretty(&canonical)?;
+    write_file_atomic(&manifest_path, &manifest_json)?;
+    Ok(BeadEventManifestRepairOutcomeWire {
+        status: BeadEventManifestRepairStatusWire::Repaired,
+        manifest_path: manifest_path_text,
+        stream_count: streams.len(),
+        error: None,
+    })
+}
+
 pub fn read_event_store(
     beads_dir: &Path,
 ) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
@@ -124,6 +225,20 @@ pub fn read_event_store(
         serde_json::from_str(&manifest_text)?;
     manifest.validate()?;
 
+    let streams = read_event_streams_without_manifest(beads_dir)?;
+    if manifest.stream_count != streams.len() {
+        return Err(BeadError::validation(format!(
+            "bead event manifest stream_count mismatch: {} != {}",
+            manifest.stream_count,
+            streams.len()
+        )));
+    }
+    Ok((manifest, streams))
+}
+
+fn read_event_streams_without_manifest(
+    beads_dir: &Path,
+) -> Result<Vec<BeadEventStreamWire>, BeadError> {
     let streams_dir = event_streams_dir(beads_dir);
     let mut stream_paths = Vec::new();
     for entry in fs::read_dir(&streams_dir).map_err(|err| {
@@ -145,19 +260,20 @@ pub fn read_event_store(
     }
     stream_paths.sort();
 
-    if manifest.stream_count != stream_paths.len() {
-        return Err(BeadError::validation(format!(
-            "bead event manifest stream_count mismatch: {} != {}",
-            manifest.stream_count,
-            stream_paths.len()
-        )));
-    }
-
-    let streams = stream_paths
+    let mut stream_ids = BTreeSet::new();
+    stream_paths
         .into_iter()
-        .map(|path| read_event_stream_file(&path))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((manifest, streams))
+        .map(|path| {
+            let stream = read_event_stream_file(&path)?;
+            if !stream_ids.insert(stream.stream_id.clone()) {
+                return Err(BeadError::validation(format!(
+                    "duplicate bead event stream: {}",
+                    stream.stream_id
+                )));
+            }
+            Ok(stream)
+        })
+        .collect()
 }
 
 pub fn write_event_store(

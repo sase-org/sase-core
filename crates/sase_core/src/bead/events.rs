@@ -407,24 +407,129 @@ pub fn merge_bead_event_streams(
         )));
     }
 
-    let mut merged = theirs.clone();
+    validate_append_only_branch(base, ours, "ours")?;
+    validate_append_only_branch(base, theirs, "theirs")?;
+
     let base_events = event_keys(&base.events)?;
-    let theirs_events = event_keys(&theirs.events)?;
-    let mut ordinal = merged.events.len();
-    for event in &ours.events {
-        let event_key = serde_json::to_string(event)?;
-        if base_events.contains(&event_key)
-            || theirs_events.contains(&event_key)
-        {
-            continue;
+    let mut nodes: BTreeMap<String, BeadEventRecordWire> = BTreeMap::new();
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for branch in [ours, theirs] {
+        let mut previous: Option<String> = None;
+        for event in branch.events.iter().skip(base.events.len()) {
+            let key = serde_json::to_string(event)?;
+            if base_events.contains(&key) {
+                continue;
+            }
+            nodes.entry(key.clone()).or_insert_with(|| event.clone());
+            if let Some(previous_key) = previous.as_ref() {
+                if previous_key != &key {
+                    edges
+                        .entry(previous_key.clone())
+                        .or_default()
+                        .insert(key.clone());
+                }
+            }
+            previous = Some(key);
         }
-        ordinal += 1;
+    }
+
+    let mut indegrees: BTreeMap<String, usize> =
+        nodes.keys().map(|key| (key.clone(), 0)).collect();
+    for targets in edges.values() {
+        for target in targets {
+            *indegrees.get_mut(target).ok_or_else(|| {
+                BeadError::validation(
+                    "bead event merge contains an unknown causal successor",
+                )
+            })? += 1;
+        }
+    }
+
+    let mut ready = BTreeSet::new();
+    for (key, event) in &nodes {
+        if indegrees[key] == 0 {
+            ready.insert(event_union_key(event, key));
+        }
+    }
+
+    let mut ordered_keys = Vec::with_capacity(nodes.len());
+    while let Some((_, _, _, key)) = ready.pop_first() {
+        ordered_keys.push(key.clone());
+        if let Some(targets) = edges.get(&key) {
+            for target in targets {
+                let indegree = indegrees.get_mut(target).ok_or_else(|| {
+                    BeadError::validation(
+                        "bead event merge contains an unknown causal successor",
+                    )
+                })?;
+                *indegree -= 1;
+                if *indegree == 0 {
+                    let event = nodes.get(target).ok_or_else(|| {
+                        BeadError::validation(
+                            "bead event merge contains an unknown event",
+                        )
+                    })?;
+                    ready.insert(event_union_key(event, target));
+                }
+            }
+        }
+    }
+    if ordered_keys.len() != nodes.len() {
+        return Err(BeadError::validation(format!(
+            "cannot merge bead event stream {} with conflicting causal order",
+            base.stream_id
+        )));
+    }
+
+    let mut merged = base.clone();
+    for key in ordered_keys {
+        let event = nodes.get(&key).ok_or_else(|| {
+            BeadError::validation("bead event merge contains an unknown event")
+        })?;
+        let ordinal = merged.events.len() + 1;
         merged
             .events
             .push(renumber_event(event, &merged.stream_id, ordinal)?);
     }
     merged.validate()?;
     Ok(merged)
+}
+
+fn validate_append_only_branch(
+    base: &BeadEventStreamWire,
+    branch: &BeadEventStreamWire,
+    branch_name: &str,
+) -> Result<(), BeadError> {
+    if branch.events.len() < base.events.len() {
+        return Err(BeadError::validation(format!(
+            "cannot merge non-append-only bead event stream {}: {branch_name} deleted base events",
+            base.stream_id
+        )));
+    }
+    for (index, (base_event, branch_event)) in
+        base.events.iter().zip(&branch.events).enumerate()
+    {
+        if base_event != branch_event {
+            return Err(BeadError::validation(format!(
+                "cannot merge non-append-only bead event stream {}: {branch_name} rewrote base event {}",
+                base.stream_id,
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn event_union_key(
+    event: &BeadEventRecordWire,
+    serialized: &str,
+) -> (String, usize, String, String) {
+    (
+        event.timestamp.clone(),
+        event_operation_priority(event.operation),
+        event.event_id.clone(),
+        serialized.to_string(),
+    )
 }
 
 fn event_keys(
