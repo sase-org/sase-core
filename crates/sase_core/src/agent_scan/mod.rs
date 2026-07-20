@@ -11,6 +11,7 @@
 //! full phase plan and `..._phase3a_handoff.md` for the wire contract
 //! Phase 3B reproduces here.
 
+mod context;
 pub mod index;
 pub mod layout;
 pub mod scanner;
@@ -41,9 +42,10 @@ pub use scanner::{
 pub use wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, PlanPathMarkerWire,
-    PromptStepMarkerWire, RunningMarkerWire, WaitingMarkerWire,
-    WorkflowStateWire, WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
-    DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
-    WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+    AgentArtifactScanWire, AgentClanContextWire, AgentMetaWire, DoneMarkerWire,
+    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
+    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
+    AGENT_SCAN_WIRE_SCHEMA_VERSION, DONE_WORKFLOW_DIR_NAMES,
+    DONE_WORKFLOW_DIR_PREFIXES, WORKFLOW_STATE_DIR_NAMES,
+    WORKFLOW_STATE_DIR_PREFIXES,
 };

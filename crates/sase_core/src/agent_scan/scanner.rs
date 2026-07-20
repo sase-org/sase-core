@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use super::context::resolve_clan_context_from_records;
 use super::layout::{
     collect_workflow_artifact_candidates, parse_agent_artifact_path,
     resolve_agent_artifact_path,
@@ -106,6 +107,7 @@ pub fn scan_agent_artifacts(
     }
 
     sort_records(&mut records, options.newest_first);
+    let clan_context = resolve_clan_context_from_records(&records);
 
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -113,6 +115,7 @@ pub fn scan_agent_artifacts(
         options,
         stats,
         records,
+        clan_context,
     }
 }
 
@@ -183,6 +186,7 @@ pub fn scan_agent_artifact_dirs(
     }
 
     sort_records(&mut records, options.newest_first);
+    let clan_context = resolve_clan_context_from_records(&records);
 
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -190,6 +194,7 @@ pub fn scan_agent_artifact_dirs(
         options,
         stats,
         records,
+        clan_context,
     }
 }
 

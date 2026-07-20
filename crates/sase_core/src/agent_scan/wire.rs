@@ -522,6 +522,30 @@ pub struct AgentArtifactRecordWire {
     pub has_done_marker: bool,
 }
 
+/// Authoritative resolved attributes for one represented clan generation.
+///
+/// These values are semantic context for visible records, not additional
+/// agent rows. Declaration sources may therefore be terminal, hidden, or
+/// outside a bounded history window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentClanContextWire {
+    pub agent_clan: String,
+    #[serde(default)]
+    pub agent_clan_generation: Option<String>,
+    #[serde(default)]
+    pub clan_tribe: Option<String>,
+    #[serde(default)]
+    pub clan_summary: Option<String>,
+    #[serde(default)]
+    pub clan_tribe_source_launch_timestamp: Option<String>,
+    #[serde(default)]
+    pub clan_tribe_source_identity: Option<String>,
+    #[serde(default)]
+    pub clan_summary_source_launch_timestamp: Option<String>,
+    #[serde(default)]
+    pub clan_summary_source_identity: Option<String>,
+}
+
 /// Top-level snapshot returned by [`scan_agent_artifacts`].
 ///
 /// [`scan_agent_artifacts`]: super::scan_agent_artifacts
@@ -533,6 +557,8 @@ pub struct AgentArtifactScanWire {
     pub stats: AgentArtifactScanStatsWire,
     #[serde(default)]
     pub records: Vec<AgentArtifactRecordWire>,
+    #[serde(default)]
+    pub clan_context: Vec<AgentClanContextWire>,
 }
 
 /// Return true iff `name` is one of the workflow folder names the

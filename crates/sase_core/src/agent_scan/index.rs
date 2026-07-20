@@ -15,9 +15,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_clan_tribe::ClanTribeMemberWire;
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_launch::list_workspace_claims_from_content;
 
+use super::context::{
+    clan_key_from_meta, represented_clan_keys, resolve_clan_context,
+};
 use super::scanner::{
     project_allowed_by_filter, project_filter_for_scan,
     scan_agent_artifact_dir, scan_agent_artifacts,
@@ -28,7 +32,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 14;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 15;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -498,6 +502,7 @@ pub fn query_agent_artifact_index(
             ))
     });
     stats.artifact_dirs_visited = records.len() as u64;
+    let clan_context = select_clan_context(&conn, &records)?;
 
     Ok(AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -505,7 +510,50 @@ pub fn query_agent_artifact_index(
         options,
         stats,
         records,
+        clan_context,
     })
+}
+
+fn select_clan_context(
+    conn: &Connection,
+    records: &[AgentArtifactRecordWire],
+) -> Result<Vec<super::wire::AgentClanContextWire>, String> {
+    let keys = represented_clan_keys(records);
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut members = Vec::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT agent_clan, agent_clan_generation, clan_tribe, \
+                    clan_summary, timestamp, artifact_dir \
+             FROM agent_artifacts \
+             WHERE agent_clan = ?1 \
+               AND (agent_clan_generation = ?2 \
+                    OR (?2 IS NULL AND agent_clan_generation IS NULL)) \
+               AND (NULLIF(TRIM(clan_tribe), '') IS NOT NULL \
+                    OR NULLIF(TRIM(clan_summary), '') IS NOT NULL)",
+        )
+        .map_err(|error| error.to_string())?;
+    for (agent_clan, agent_clan_generation) in &keys {
+        let rows = stmt
+            .query_map(params![agent_clan, agent_clan_generation], |row| {
+                Ok(ClanTribeMemberWire {
+                    agent_clan: row.get(0)?,
+                    agent_clan_generation: row.get(1)?,
+                    clan_tribe: row.get(2)?,
+                    clan_summary: row.get(3)?,
+                    launch_timestamp: row.get(4)?,
+                    identity: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            members.push(row.map_err(|error| error.to_string())?);
+        }
+    }
+    Ok(resolve_clan_context(keys, members))
 }
 
 /// Return artifact directories related to one logical agent lineage.
@@ -604,6 +652,9 @@ fn open_index_with_busy_timeout(
             workflow_dir_name TEXT NOT NULL,
             workflow_name TEXT,
             agent_clan TEXT,
+            agent_clan_generation TEXT,
+            clan_tribe TEXT,
+            clan_summary TEXT,
             agent_family TEXT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -728,9 +779,17 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 14) {
         migrate_record_json_refresh_v14(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 15) {
+        ensure_agent_artifacts_column(&conn, "agent_clan_generation", "TEXT")?;
+        ensure_agent_artifacts_column(&conn, "clan_tribe", "TEXT")?;
+        ensure_agent_artifacts_column(&conn, "clan_summary", "TEXT")?;
+        migrate_clan_context_projection_v15(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
-         ON agent_artifacts(agent_clan, timestamp);",
+         ON agent_artifacts(agent_clan, timestamp); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
+         ON agent_artifacts(agent_clan, agent_clan_generation, timestamp);",
     )
     .map_err(|e| e.to_string())?;
 
@@ -997,6 +1056,16 @@ fn migrate_record_json_refresh_v14(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v15 denormalizes generation-scoped clan declarations so bounded index
+/// queries can resolve semantic context without parsing historical row JSON.
+/// The Python lifecycle rebuilds older indexes from source after detecting
+/// this schema bump, populating the new columns for existing records.
+fn migrate_clan_context_projection_v15(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
 fn upsert_record(
     conn: &Connection,
     projects_root: &Path,
@@ -1018,14 +1087,15 @@ fn upsert_record(
             step_index, step_name, retry_of_timestamp, retried_as_timestamp,
             retry_chain_root_timestamp, retry_attempt, agent_meta_sig, done_sig,
             running_sig, waiting_sig, pending_question_sig,
-            workflow_state_sig, plan_path_sig, prompt_steps_sig, record_json,
+            workflow_state_sig, plan_path_sig, prompt_steps_sig,
+            agent_clan_generation, clan_tribe, clan_summary, record_json,
             indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            CURRENT_TIMESTAMP
+            ?41, ?42, ?43, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -1066,6 +1136,9 @@ fn upsert_record(
             workflow_state_sig = excluded.workflow_state_sig,
             plan_path_sig = excluded.plan_path_sig,
             prompt_steps_sig = excluded.prompt_steps_sig,
+            agent_clan_generation = excluded.agent_clan_generation,
+            clan_tribe = excluded.clan_tribe,
+            clan_summary = excluded.clan_summary,
             record_json = excluded.record_json,
             indexed_at = CURRENT_TIMESTAMP
         "#,
@@ -1109,6 +1182,9 @@ fn upsert_record(
             signatures.workflow_state,
             signatures.plan_path,
             signatures.prompt_steps,
+            summary.agent_clan_generation,
+            summary.clan_tribe,
+            summary.clan_summary,
             record_json,
         ],
     )
@@ -1905,6 +1981,9 @@ struct RecordSummary {
     agent_name: Option<String>,
     workflow_name: Option<String>,
     agent_clan: Option<String>,
+    agent_clan_generation: Option<String>,
+    clan_tribe: Option<String>,
+    clan_summary: Option<String>,
     agent_family: Option<String>,
     model: Option<String>,
     llm_provider: Option<String>,
@@ -1949,6 +2028,7 @@ impl RecordSummary {
         }
         .to_string();
 
+        let clan_key = meta.and_then(clan_key_from_meta);
         Self {
             status,
             agent_type: if workflow_state.is_some() {
@@ -1968,7 +2048,12 @@ impl RecordSummary {
             workflow_name: meta
                 .and_then(|m| m.workflow_name.clone())
                 .or_else(|| workflow_state.map(|w| w.workflow_name.clone())),
-            agent_clan: meta.and_then(|m| m.agent_clan.clone()),
+            agent_clan: clan_key.as_ref().map(|(clan, _)| clan.clone()),
+            agent_clan_generation: clan_key
+                .as_ref()
+                .and_then(|(_, generation)| generation.clone()),
+            clan_tribe: meta.and_then(|m| m.clan_tribe.clone()),
+            clan_summary: meta.and_then(|m| m.clan_summary.clone()),
             agent_family: meta.and_then(|m| m.agent_family.clone()),
             model: meta
                 .and_then(|m| m.model.clone())
@@ -2097,7 +2182,14 @@ mod tests {
     }
 
     fn artifact(root: &Path, ts: &str) -> PathBuf {
-        root.join("proj").join("artifacts").join("ace-run").join(ts)
+        artifact_for_project(root, "proj", ts)
+    }
+
+    fn artifact_for_project(root: &Path, project: &str, ts: &str) -> PathBuf {
+        root.join(project)
+            .join("artifacts")
+            .join("ace-run")
+            .join(ts)
     }
 
     #[test]
@@ -2793,6 +2885,228 @@ mod tests {
         .unwrap();
         assert_eq!(all.records.len(), 1);
         assert_eq!(all.records[0].timestamp, "20260514123000");
+    }
+
+    #[test]
+    fn bounded_query_retains_dismissed_clan_declaration_as_context() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let declarer =
+            artifact_for_project(&projects, "declarations", "20260701000000");
+        write_json(
+            &declarer.join("agent_meta.json"),
+            json!({
+                "name": "toobig-0.declarer",
+                "cl_name": "cl_declarer",
+                "agent_clan": "toobig-0",
+                "agent_clan_generation": "generation-1",
+                "clan_tribe": "chop",
+                "clan_summary": "Chop generation"
+            }),
+        );
+        write_json(
+            &declarer.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1782864000.0,
+                "name": "toobig-0.declarer",
+                "cl_name": "cl_declarer"
+            }),
+        );
+
+        for (timestamp, name) in [
+            ("20260701000001", "toobig-0.joiner-a"),
+            ("20260701000002", "toobig-0.joiner-b"),
+        ] {
+            let joiner = artifact(&projects, timestamp);
+            write_json(
+                &joiner.join("agent_meta.json"),
+                json!({
+                    "name": name,
+                    "agent_clan": "toobig-0",
+                    "agent_clan_generation": "generation-1"
+                }),
+            );
+            write_json(
+                &joiner.join("waiting.json"),
+                json!({"waiting_for": ["predecessor"]}),
+            );
+        }
+        for (offset, timestamp) in
+            ["20260702000000", "20260703000000", "20260704000000"]
+                .into_iter()
+                .enumerate()
+        {
+            let completed = artifact(&projects, timestamp);
+            write_json(
+                &completed.join("done.json"),
+                json!({
+                    "outcome": "completed",
+                    "finished_at": 1782950400.0 + offset as f64,
+                    "name": format!("recent-{offset}"),
+                    "cl_name": format!("cl_recent_{offset}")
+                }),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "cl_declarer".to_string(),
+                raw_suffix: Some("20260701000000".to_string()),
+            }],
+        )
+        .unwrap();
+
+        let bounded = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(1),
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire {
+                only_projects: vec!["proj".to_string()],
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(bounded.records.len(), 3);
+        assert!(!bounded
+            .records
+            .iter()
+            .any(|record| record.timestamp == "20260701000000"));
+        let context = bounded
+            .clan_context
+            .iter()
+            .find(|context| context.agent_clan == "toobig-0")
+            .unwrap();
+        assert_eq!(
+            context.agent_clan_generation.as_deref(),
+            Some("generation-1")
+        );
+        assert_eq!(context.clan_tribe.as_deref(), Some("chop"));
+        assert_eq!(context.clan_summary.as_deref(), Some("Chop generation"));
+        assert_eq!(
+            context.clan_tribe_source_launch_timestamp.as_deref(),
+            Some("20260701000000")
+        );
+
+        let visible_history = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(!visible_history
+            .records
+            .iter()
+            .any(|record| record.timestamp == "20260701000000"));
+        assert_eq!(
+            visible_history.clan_context[0].clan_tribe.as_deref(),
+            Some("chop")
+        );
+    }
+
+    #[test]
+    fn indexed_clan_context_honors_latest_declarations_and_generations() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for (timestamp, generation, tribe, summary) in [
+            ("20260710000000", "g1", "alpha", Some("g1 summary")),
+            ("20260710000001", "g1", "beta", None),
+            ("20260710000002", "g2", "other", Some("g2 summary")),
+        ] {
+            let declaration = artifact(&projects, timestamp);
+            write_json(
+                &declaration.join("agent_meta.json"),
+                json!({
+                    "name": format!("declaration-{timestamp}"),
+                    "agent_clan": "shared",
+                    "agent_clan_generation": generation,
+                    "clan_tribe": tribe,
+                    "clan_summary": summary
+                }),
+            );
+            write_json(
+                &declaration.join("done.json"),
+                json!({"outcome": "completed", "name": "declaration"}),
+            );
+        }
+        for (timestamp, generation) in [
+            ("20260710000003", "g1"),
+            ("20260710000004", "g2"),
+            ("20260710000005", "g3"),
+        ] {
+            let joiner = artifact(&projects, timestamp);
+            write_json(
+                &joiner.join("agent_meta.json"),
+                json!({
+                    "name": format!("joiner-{generation}"),
+                    "agent_clan": "shared",
+                    "agent_clan_generation": generation
+                }),
+            );
+            write_json(&joiner.join("waiting.json"), json!({}));
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 3);
+        let context = |generation: &str| {
+            snapshot
+                .clan_context
+                .iter()
+                .find(|context| {
+                    context.agent_clan_generation.as_deref() == Some(generation)
+                })
+                .unwrap()
+        };
+        assert_eq!(context("g1").clan_tribe.as_deref(), Some("beta"));
+        assert_eq!(context("g1").clan_summary.as_deref(), Some("g1 summary"));
+        assert_eq!(context("g2").clan_tribe.as_deref(), Some("other"));
+        assert_eq!(context("g2").clan_summary.as_deref(), Some("g2 summary"));
+        assert_eq!(context("g3").clan_tribe, None);
+        assert_eq!(context("g3").clan_summary, None);
     }
 
     #[test]
