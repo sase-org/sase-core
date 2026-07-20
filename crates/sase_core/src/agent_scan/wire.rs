@@ -276,6 +276,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub wait_for: Vec<String>,
     #[serde(default)]
+    pub wait_for_beads: Vec<String>,
+    #[serde(default)]
     pub wait_duration: Option<f64>,
     #[serde(default)]
     pub wait_until: Option<String>,
@@ -331,6 +333,8 @@ pub struct RunningMarkerWire {
 pub struct WaitingMarkerWire {
     #[serde(default)]
     pub waiting_for: Vec<String>,
+    #[serde(default)]
+    pub wait_for_beads: Vec<String>,
     #[serde(default)]
     pub wait_duration: Option<f64>,
     #[serde(default)]

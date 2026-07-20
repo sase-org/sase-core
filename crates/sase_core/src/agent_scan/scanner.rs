@@ -893,6 +893,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         plan_action: coerce_str(data.get("plan_action")),
         plan_committed: coerce_strict_bool(data.get("plan_committed")),
         wait_for: coerce_str_list(data.get("wait_for")),
+        wait_for_beads: coerce_str_list(data.get("wait_for_beads")),
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         wait_completed_at: coerce_str(data.get("wait_completed_at")),
@@ -967,6 +968,7 @@ fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {
 fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
     WaitingMarkerWire {
         waiting_for: coerce_str_list(data.get("waiting_for")),
+        wait_for_beads: coerce_str_list(data.get("wait_for_beads")),
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         wait_runners: coerce_int(data.get("wait_runners")),

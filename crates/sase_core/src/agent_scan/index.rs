@@ -32,7 +32,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 16;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 17;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",

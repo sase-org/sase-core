@@ -429,6 +429,7 @@ fn build_waiting(root: &Path) {
         &json!({
             "name": "waiter",
             "wait_for": ["upstream"],
+            "wait_for_beads": ["sase-87.2"],
             "wait_duration": 600.0,
         }),
     );
@@ -1444,6 +1445,7 @@ fn waiting_marker_decode_error_does_not_crash() {
     assert!(rec.waiting.is_none());
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.wait_for, vec!["upstream".to_string()]);
+    assert_eq!(meta.wait_for_beads, vec!["sase-87.2".to_string()]);
     assert_eq!(meta.wait_duration, Some(600.0));
 }
 
@@ -1461,6 +1463,7 @@ fn waiting_marker_carries_runner_slot_fields() {
         &waiting_path,
         &json!({
             "waiting_for": ["upstream"],
+            "wait_for_beads": ["sase-87.2", "sase-87.3"],
             "wait_duration": 600.0,
             "wait_until": "2026-07-12T19:30:00Z",
             "wait_runners": 3,
@@ -1477,6 +1480,10 @@ fn waiting_marker_carries_runner_slot_fields() {
         .unwrap();
 
     assert_eq!(waiting.waiting_for, vec!["upstream".to_string()]);
+    assert_eq!(
+        waiting.wait_for_beads,
+        vec!["sase-87.2".to_string(), "sase-87.3".to_string()]
+    );
     assert_eq!(waiting.wait_duration, Some(600.0));
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
     assert_eq!(waiting.wait_runners, Some(3));
