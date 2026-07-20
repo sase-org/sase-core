@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use fs2::FileExt;
@@ -14,6 +14,8 @@ use super::wire::{
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
     NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
+
+const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn read_notifications_snapshot(
     path: &Path,
@@ -525,6 +527,7 @@ fn write_notifications_atomic(
 ) -> Result<(), String> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    reap_stale_temp_siblings(path, SystemTime::now());
     let tmp_path = temp_path_for(path);
     let write_result = (|| {
         let file = OpenOptions::new()
@@ -551,6 +554,51 @@ fn write_notifications_atomic(
         let _ = fs::remove_file(&tmp_path);
     }
     write_result
+}
+
+fn reap_stale_temp_siblings(path: &Path, now: SystemTime) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("notifications.jsonl");
+    let prefix = format!(".{filename}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix)
+            || !name.ends_with(".tmp")
+            || name.len() <= prefix.len() + ".tmp".len()
+        {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age <= STALE_TEMP_MAX_AGE {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
 }
 
 fn snapshot_from_rows(

@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File, FileTimes};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::{Duration, SystemTime};
 
 use sase_core::notifications::{
     append_notification, append_notification_counts,
@@ -146,6 +147,43 @@ fn notification_append_and_rewrite_round_trip_jsonl() {
     let snapshot = read_notifications_snapshot(&path, true).unwrap();
     assert_eq!(snapshot.notifications, vec![added, n]);
     assert_eq!(snapshot.stats.loaded_rows, 2);
+}
+
+#[test]
+fn notification_rewrite_reaps_only_targeted_stale_temp_siblings() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let stale = path
+        .parent()
+        .unwrap()
+        .join(".notifications.jsonl.stale.tmp");
+    let fresh = path
+        .parent()
+        .unwrap()
+        .join(".notifications.jsonl.fresh.tmp");
+    let unrelated = path.parent().unwrap().join(".other.jsonl.stale.tmp");
+    let near_match = path.parent().unwrap().join(".notifications.jsonl.tmp");
+    for temp_path in [&stale, &fresh, &unrelated, &near_match] {
+        fs::write(temp_path, b"temp").unwrap();
+    }
+    let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+    let old_times = FileTimes::new().set_modified(old);
+    for temp_path in [&stale, &unrelated, &near_match] {
+        File::options()
+            .write(true)
+            .open(temp_path)
+            .unwrap()
+            .set_times(old_times)
+            .unwrap();
+    }
+
+    rewrite_notifications(&path, &[notification("one")]).unwrap();
+
+    assert!(!stale.exists());
+    assert!(fresh.exists());
+    assert!(unrelated.exists());
+    assert!(near_match.exists());
 }
 
 #[test]
