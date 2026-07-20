@@ -17,7 +17,14 @@ use super::read::split_frontmatter;
 use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 
 const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
-const SYSTEM_FIELDS: &[&str] = &["create_time", "status", "prompt", "bead_id"];
+const SYSTEM_FIELDS: &[&str] = &[
+    "create_time",
+    "status",
+    "prompt",
+    "bead",
+    "parent",
+    "bead_id",
+];
 const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id", "parent_bead"];
 const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
@@ -115,6 +122,8 @@ pub struct ValidatedPlanWire {
     pub changespec: Option<String>,
     pub bug_id: Option<i64>,
     pub parent_bead: Option<String>,
+    pub bead: Option<String>,
+    pub parent: Option<String>,
 }
 
 /// Complete validation result. Warnings do not make `ok` false.
@@ -290,6 +299,20 @@ pub fn plan_frontmatter_schema(
             json!("202607/prompts/example.md"),
         ),
         field_spec(
+            "bead",
+            "non-empty string",
+            false,
+            "bead id of the agent that proposed this plan, written by SASE",
+            json!("sase-88.1"),
+        ),
+        field_spec(
+            "parent",
+            "non-empty string",
+            false,
+            "parent epic plan file reference written by SASE",
+            json!("sase/repos/plans/202607/example.md"),
+        ),
+        field_spec(
             "bead_id",
             "system-managed value",
             false,
@@ -380,6 +403,8 @@ impl<'a> Validator<'a> {
         let title = self.required_non_empty_string(mapping, "title", &index);
         let goal = self.required_non_empty_string(mapping, "goal", &index);
         let model = self.optional_model(mapping, "model", &index);
+        let bead = self.optional_non_empty_string(mapping, "bead", &index);
+        let parent = self.optional_non_empty_string(mapping, "parent", &index);
 
         let (phases, changespec, bug_id, parent_bead) = match self.tier {
             PlanTier::Tale => (Vec::new(), None, None, None),
@@ -424,6 +449,8 @@ impl<'a> Validator<'a> {
             changespec,
             bug_id,
             parent_bead,
+            bead,
+            parent,
         });
         self.finish(plan)
     }
@@ -1212,12 +1239,12 @@ mod tests {
     }
 
     fn valid_epic() -> &'static str {
-        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nparent_bead: ' sase-7z.1 '\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n    size: medium\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    size: small\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
+        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nparent_bead: ' sase-7z.1 '\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n    size: medium\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    size: small\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
     }
 
     #[test]
     fn valid_tale_returns_normalized_plan_and_accepts_system_fields() {
-        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
+        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert!(result.diagnostics.is_empty());
@@ -1233,6 +1260,8 @@ mod tests {
                 changespec: None,
                 bug_id: None,
                 parent_bead: None,
+                bead: Some("sase-88.1".to_string()),
+                parent: Some("sase/repos/plans/202607/parent.md".to_string(),),
             })
         );
     }
@@ -1356,6 +1385,11 @@ mod tests {
         assert_eq!(plan.changespec.as_deref(), Some("plan_validate"));
         assert_eq!(plan.bug_id, Some(61));
         assert_eq!(plan.parent_bead.as_deref(), Some("sase-7z.1"));
+        assert_eq!(plan.bead.as_deref(), Some("sase-88.1"));
+        assert_eq!(
+            plan.parent.as_deref(),
+            Some("sase/repos/plans/202607/parent.md")
+        );
         assert_eq!(plan.phases.len(), 2);
         assert_eq!(plan.phases[0].size, "medium");
         assert_eq!(plan.phases[1].depends_on, ["core"]);
@@ -1397,6 +1431,8 @@ mod tests {
                 changespec: None,
                 bug_id: None,
                 parent_bead: None,
+                bead: None,
+                parent: None,
             })
         );
     }
@@ -1557,6 +1593,50 @@ mod tests {
     }
 
     #[test]
+    fn managed_plan_links_are_optional_on_both_tiers_and_type_checked() {
+        for tier in ["tale", "epic"] {
+            let extra = match tier {
+                "tale" => String::new(),
+                "epic" => "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section validates managed plan links.\n    size: small\n"
+                    .to_string(),
+                _ => unreachable!(),
+            };
+            let valid = format!(
+                "---\ntier: {tier}\ntitle: Managed links\ngoal: Validate managed links\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\n{extra}---\nbody\n"
+            );
+            let result = plan_validate(&valid, tier).unwrap();
+            assert!(result.ok, "{tier}: {:?}", result.diagnostics);
+            let plan = result.plan.unwrap();
+            assert_eq!(plan.bead.as_deref(), Some("sase-88.1"));
+            assert_eq!(
+                plan.parent.as_deref(),
+                Some("sase/repos/plans/202607/parent.md")
+            );
+
+            for (field, value, code) in [
+                ("bead", "'   '", "value-empty"),
+                ("bead", "[sase-88.1]", "type-mismatch"),
+                ("parent", "'   '", "value-empty"),
+                ("parent", "[parent.md]", "type-mismatch"),
+            ] {
+                let invalid = valid.replace(
+                    &format!("{field}: ' sase-88.1 '"),
+                    &format!("{field}: {value}"),
+                );
+                let invalid = invalid.replace(
+                    &format!("{field}: ' sase/repos/plans/202607/parent.md '"),
+                    &format!("{field}: {value}"),
+                );
+                let result = plan_validate(&invalid, tier).unwrap();
+                assert!(!result.ok, "{tier}: {field}: {value}");
+                assert!(result.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.field_path == field && diagnostic.code == code
+                }));
+            }
+        }
+    }
+
+    #[test]
     fn schema_is_ordered_and_contains_exact_phase_guidance() {
         let tale = plan_frontmatter_schema("tale").unwrap();
         assert_eq!(
@@ -1571,6 +1651,8 @@ mod tests {
                 "create_time",
                 "status",
                 "prompt",
+                "bead",
+                "parent",
                 "bead_id"
             ]
         );
@@ -1597,6 +1679,8 @@ mod tests {
                 "create_time",
                 "status",
                 "prompt",
+                "bead",
+                "parent",
                 "bead_id"
             ]
         );
@@ -1624,6 +1708,21 @@ mod tests {
         assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
         assert_eq!(phase_size.field_type, "small | medium | large");
         assert!(phase_size.required);
+        for (name, description) in [
+            (
+                "bead",
+                "bead id of the agent that proposed this plan, written by SASE",
+            ),
+            ("parent", "parent epic plan file reference written by SASE"),
+        ] {
+            for schema in [&tale, &epic] {
+                let field =
+                    schema.iter().find(|field| field.name == name).unwrap();
+                assert_eq!(field.field_type, "non-empty string");
+                assert!(!field.required);
+                assert_eq!(field.description, description);
+            }
+        }
         assert!(
             !epic
                 .iter()

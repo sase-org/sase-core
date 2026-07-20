@@ -4733,7 +4733,7 @@ mod tests {
     fn plan_validation_bindings_round_trip_json_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nparent_bead: sase-7z.1\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n    description: Core work section exercises binding parity.\n    size: medium\n---\n# Plan\nImplement it.\n";
+            let content = "---\ntier: epic\ntitle: Binding parity\ngoal: The binding returns normalized data\nparent_bead: sase-7z.1\nbead: sase-88.1\nparent: sase/repos/plans/202607/parent.md\nphases:\n  - id: core\n    title: Core work\n    depends_on: []\n    description: Core work section exercises binding parity.\n    size: medium\n---\n# Plan\nImplement it.\n";
             let result =
                 py_plan_validate(py, content, "epic", "authoring").unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
@@ -4742,10 +4742,15 @@ mod tests {
             assert_eq!(value["diagnostics"], json!([]));
             assert_eq!(value["plan"]["title"], json!("Binding parity"));
             assert_eq!(value["plan"]["parent_bead"], json!("sase-7z.1"));
+            assert_eq!(value["plan"]["bead"], json!("sase-88.1"));
+            assert_eq!(
+                value["plan"]["parent"],
+                json!("sase/repos/plans/202607/parent.md")
+            );
             assert_eq!(value["plan"]["phases"][0]["depends_on"], json!([]));
             assert_eq!(value["plan"]["phases"][0]["size"], json!("medium"));
 
-            let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\n---\n# Plan\nImplement it.\n";
+            let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\nbead: sase-88.1\nparent: sase/repos/plans/202607/parent.md\n---\n# Plan\nImplement it.\n";
             let tale_result =
                 py_plan_validate(py, tale, "tale", "authoring").unwrap();
             let tale_value = py_to_json_value(tale_result.bind(py)).unwrap();
@@ -4753,6 +4758,11 @@ mod tests {
             assert_eq!(
                 tale_value["plan"]["title"],
                 json!("Tale binding parity")
+            );
+            assert_eq!(tale_value["plan"]["bead"], json!("sase-88.1"));
+            assert_eq!(
+                tale_value["plan"]["parent"],
+                json!("sase/repos/plans/202607/parent.md")
             );
 
             for (tier, extra) in [
@@ -4799,11 +4809,25 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|field| { field["name"] == json!("parent_bead") }));
+            for field_name in ["bead", "parent"] {
+                assert!(schema_value
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field["name"] == json!(field_name)));
+            }
             let tale_schema = py_plan_frontmatter_schema(py, "tale").unwrap();
             let tale_schema_value =
                 py_to_json_value(tale_schema.bind(py)).unwrap();
             assert_eq!(tale_schema_value[1]["name"], json!("title"));
             assert_eq!(tale_schema_value[1]["required"], json!(true));
+            for field_name in ["bead", "parent"] {
+                assert!(tale_schema_value
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field["name"] == json!(field_name)));
+            }
 
             let legacy = content.replace("    size: medium\n", "");
             let legacy_result =

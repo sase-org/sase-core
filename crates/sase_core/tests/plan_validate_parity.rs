@@ -15,6 +15,8 @@ model: claude/opus
 changespec: workspace_gc
 bug_id: 123
 parent_bead: sase-7z.1
+bead: sase-88.1
+parent: sase/repos/plans/202607/parent.md
 phases:
   - id: core
     title: GC planner
@@ -46,7 +48,7 @@ fn plan_validate_matches_python_facade_fixture() {
                 "code": "phase-description-missing",
                 "field_path": "phases[0].description",
                 "message": "phase `core` has no `description`; add one naming its plan-body section and briefly summarizing that section",
-                "line": 10
+                "line": 12
             }
         ],
         "plan": {
@@ -74,7 +76,9 @@ fn plan_validate_matches_python_facade_fixture() {
             ],
             "changespec": "workspace_gc",
             "bug_id": 123,
-            "parent_bead": "sase-7z.1"
+            "parent_bead": "sase-7z.1",
+            "bead": "sase-88.1",
+            "parent": "sase/repos/plans/202607/parent.md"
         }
     });
     assert_eq!(rust_value, python_facade_fixture);
