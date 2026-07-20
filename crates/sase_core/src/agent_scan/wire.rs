@@ -342,6 +342,8 @@ pub struct WaitingMarkerWire {
     #[serde(default)]
     pub wait_runners: Option<i64>,
     #[serde(default)]
+    pub wait_priority: Option<i64>,
+    #[serde(default)]
     pub wait_runners_explicit: bool,
     #[serde(default)]
     pub slot_requested_at: Option<String>,

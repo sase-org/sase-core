@@ -174,6 +174,7 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
         "wait" => &[
             ("time=", "Set a minimum wait duration"),
             ("runners=", "Wait for runner capacity"),
+            ("priority=", "Set runner queue priority (lower runs first)"),
         ],
         "repeat" => &[("2", "Run twice"), ("3", "Run three times")],
         "id" => &[
@@ -487,7 +488,7 @@ mod tests {
         let candidates = directive_argument_candidates("wait").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["time=", "runners="]);
+        assert_eq!(values, ["time=", "runners=", "priority="]);
         assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 }

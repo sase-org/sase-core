@@ -341,9 +341,11 @@ pub fn build_wait_completion_candidates(
         .collect::<Vec<_>>();
     let mut candidates = Vec::new();
     if !token.contains('=') {
-        for (keyword, detail) in
-            [("time=", "wait duration"), ("runners=", "runner capacity")]
-        {
+        for (keyword, detail) in [
+            ("time=", "wait duration"),
+            ("runners=", "runner capacity"),
+            ("priority=", "runner queue priority (lower runs first)"),
+        ] {
             if !keyword.starts_with(&partial)
                 || selected.iter().any(|value| value.starts_with(keyword))
             {
@@ -2519,7 +2521,15 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["time=", "runners=", "@ops", "builders", "review", "worker"]
+            vec![
+                "time=",
+                "runners=",
+                "priority=",
+                "@ops",
+                "builders",
+                "review",
+                "worker"
+            ]
         );
 
         let selected = vec!["time=5m".to_string(), "builders".to_string()];
@@ -2531,7 +2541,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["runners=", "@ops", "review", "worker"]
+            vec!["runners=", "priority=", "@ops", "review", "worker"]
         );
     }
 

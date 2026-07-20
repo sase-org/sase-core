@@ -972,6 +972,7 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         wait_runners: coerce_int(data.get("wait_runners")),
+        wait_priority: coerce_int(data.get("wait_priority")),
         wait_runners_explicit: coerce_bool_truthy(
             data.get("wait_runners_explicit"),
         ),

@@ -1472,9 +1472,31 @@ fn waiting_marker_carries_runner_slot_fields() {
         }),
     );
 
-    let snapshot =
+    let old_marker_snapshot =
         scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
-    let waiting = record_by_timestamp(&snapshot, TS_WAITING)
+    let old_marker = record_by_timestamp(&old_marker_snapshot, TS_WAITING)
+        .waiting
+        .as_ref()
+        .unwrap();
+    assert_eq!(old_marker.wait_priority, None);
+
+    write_json(
+        &waiting_path,
+        &json!({
+            "waiting_for": ["upstream"],
+            "wait_for_beads": ["sase-87.2", "sase-87.3"],
+            "wait_duration": 600.0,
+            "wait_until": "2026-07-12T19:30:00Z",
+            "wait_runners": 3,
+            "wait_priority": 5,
+            "wait_runners_explicit": true,
+            "slot_requested_at": "2026-07-12T19:20:00Z",
+        }),
+    );
+
+    let new_marker_snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let waiting = record_by_timestamp(&new_marker_snapshot, TS_WAITING)
         .waiting
         .as_ref()
         .unwrap();
@@ -1487,6 +1509,7 @@ fn waiting_marker_carries_runner_slot_fields() {
     assert_eq!(waiting.wait_duration, Some(600.0));
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
     assert_eq!(waiting.wait_runners, Some(3));
+    assert_eq!(waiting.wait_priority, Some(5));
     assert!(waiting.wait_runners_explicit);
     assert_eq!(
         waiting.slot_requested_at.as_deref(),

@@ -2433,15 +2433,22 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["time=", "runners=", "@ops", "builders", "review"]
+            vec![
+                "time=",
+                "runners=",
+                "priority=",
+                "@ops",
+                "builders",
+                "review"
+            ]
         );
         assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-        assert_eq!(items[2].kind, Some(CompletionItemKind::ENUM_MEMBER));
-        assert_eq!(items[3].kind, Some(CompletionItemKind::MODULE));
-        assert_eq!(items[4].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[2].sort_text.as_deref(), Some("1:0002"));
+        assert_eq!(items[3].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[4].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[5].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[3].sort_text.as_deref(), Some("1:0003"));
         assert_eq!(
-            items[3]
+            items[4]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
