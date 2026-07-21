@@ -221,12 +221,22 @@ fn searchable_fields(plan: &PlanWire) -> Vec<SearchField<'_>> {
 /// All frontmatter values except `status`, which is searched as its own field
 /// (`plan.status`); excluding it here avoids double-counting a status match.
 fn frontmatter_blob(plan: &PlanWire) -> String {
-    plan.frontmatter
+    let mut values = plan
+        .frontmatter
         .iter()
-        .filter(|(key, _)| key.as_str() != "status")
+        .filter(|(key, _)| {
+            !matches!(key.as_str(), "status" | "plan" | "prompt")
+        })
         .map(|(_, value)| value.as_str())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    if !plan.prompt_link.is_empty() {
+        if !values.is_empty() {
+            values.push('\n');
+        }
+        values.push_str(&plan.prompt_link);
+    }
+    values
 }
 
 fn repo_boost(plan: &PlanWire) -> f64 {
@@ -541,7 +551,7 @@ mod tests {
                 "frontmatter",
                 plan_with(|p| {
                     p.frontmatter
-                        .insert("prompt".to_string(), "findfm".to_string());
+                        .insert("goal".to_string(), "findfm".to_string());
                 }),
                 "findfm",
             ),
@@ -589,6 +599,19 @@ mod tests {
     }
 
     #[test]
+    fn counterpart_label_remains_searchable_as_frontmatter_metadata() {
+        let plan = plan_with(|plan| {
+            plan.prompt_link = "202607/prompts/searchable.md".to_string();
+            plan.body = "Body without metadata.".to_string();
+        });
+
+        let results = search(vec![plan], Some("searchable.md"));
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_fields, vec!["frontmatter".to_string()]);
+    }
+
+    #[test]
     fn matches_case_insensitive_unicode_substrings() {
         let plan = plan_with(|p| p.title = "CAFÉ auth".to_string());
 
@@ -613,7 +636,7 @@ mod tests {
         let frontmatter = plan_with(|p| {
             p.relpath = "b-frontmatter.md".to_string();
             p.frontmatter
-                .insert("prompt".to_string(), "needle".to_string());
+                .insert("goal".to_string(), "needle".to_string());
         });
         let body = plan_with(|p| {
             p.relpath = "c-body.md".to_string();

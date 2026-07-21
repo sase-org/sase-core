@@ -108,8 +108,9 @@
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
-//! - `sdd_frontmatter_link_parse(value: str) -> dict`
-//! - `sdd_frontmatter_link_render(label: str, target: str) -> str`
+//! - `sdd_artifact_link_parse(document: str) -> dict`
+//! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
+//! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -326,11 +327,12 @@ use sase_core::notifications::{
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::plan::{
-    parse_sdd_frontmatter_link as core_parse_sdd_frontmatter_link,
+    parse_sdd_artifact_link as core_parse_sdd_artifact_link,
     plan_frontmatter_schema as core_plan_frontmatter_schema,
     plan_validate_with_mode as core_plan_validate_with_mode,
-    render_sdd_frontmatter_link as core_render_sdd_frontmatter_link,
-    search_plans as core_plan_search, PlanError,
+    render_sdd_artifact_link as core_render_sdd_artifact_link,
+    search_plans as core_plan_search,
+    upsert_sdd_artifact_link as core_upsert_sdd_artifact_link, PlanError,
 };
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
@@ -2188,24 +2190,48 @@ fn py_plan_frontmatter_schema<'py>(
     )
 }
 
-/// Parse one canonical or historical SDD frontmatter link value.
+/// Parse canonical and historical artifact links from one SDD document.
 #[pyfunction]
-#[pyo3(name = "sdd_frontmatter_link_parse")]
-fn py_sdd_frontmatter_link_parse<'py>(
+#[pyo3(name = "sdd_artifact_link_parse")]
+fn py_sdd_artifact_link_parse<'py>(
     py: Python<'py>,
-    value: &str,
+    document: &str,
 ) -> PyResult<PyObject> {
-    plan_result_to_py(py, Ok(core_parse_sdd_frontmatter_link(value)))
+    plan_result_to_py(py, Ok(core_parse_sdd_artifact_link(document)))
 }
 
-/// Render one canonical clickable SDD frontmatter link value.
+/// Render one canonical typed SDD artifact-link bullet.
 #[pyfunction]
-#[pyo3(name = "sdd_frontmatter_link_render")]
-fn py_sdd_frontmatter_link_render(
+#[pyo3(name = "sdd_artifact_link_render")]
+fn py_sdd_artifact_link_render(
+    link_type: &str,
     label: &str,
     target: &str,
 ) -> PyResult<String> {
-    core_render_sdd_frontmatter_link(label, target).map_err(plan_error_to_pyerr)
+    core_render_sdd_artifact_link(link_type, label, target)
+        .map_err(plan_error_to_pyerr)
+}
+
+/// Install a canonical artifact link and optionally remove its legacy field.
+#[pyfunction]
+#[pyo3(name = "sdd_artifact_link_upsert")]
+fn py_sdd_artifact_link_upsert(
+    document: &str,
+    link_type: &str,
+    label: &str,
+    target: &str,
+    remove_legacy: bool,
+    allow_resolved_mixed: bool,
+) -> PyResult<String> {
+    core_upsert_sdd_artifact_link(
+        document,
+        link_type,
+        label,
+        target,
+        remove_legacy,
+        allow_resolved_mixed,
+    )
+    .map_err(plan_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -4556,8 +4582,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_frontmatter_schema, m)?)?;
-    m.add_function(wrap_pyfunction!(py_sdd_frontmatter_link_parse, m)?)?;
-    m.add_function(wrap_pyfunction!(py_sdd_frontmatter_link_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -4944,20 +4971,22 @@ mod tests {
     }
 
     #[test]
-    fn sdd_frontmatter_link_bindings_match_core_contract() {
+    fn sdd_artifact_link_bindings_match_core_contract() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let rendered = py_sdd_frontmatter_link_render(
+            let rendered = py_sdd_artifact_link_render(
+                "PROMPT",
                 "202607/prompts/example.md",
                 "prompts/example.md",
             )
             .unwrap();
             assert_eq!(
                 rendered,
-                "[202607/prompts/example.md](prompts/example.md)"
+                "- **PROMPT:** [202607/prompts/example.md](prompts/example.md)"
             );
 
-            let parsed = py_sdd_frontmatter_link_parse(py, &rendered).unwrap();
+            let document = format!("{rendered}\n\n# Plan\n");
+            let parsed = py_sdd_artifact_link_parse(py, &document).unwrap();
             let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
             assert_eq!(parsed_value["kind"], json!("canonical"));
             assert_eq!(
@@ -4966,19 +4995,35 @@ mod tests {
             );
             assert_eq!(parsed_value["target"], json!("prompts/example.md"));
 
-            let legacy =
-                py_sdd_frontmatter_link_parse(py, "202607/prompts/example.md")
-                    .unwrap();
+            assert_eq!(parsed_value["body"], json!("# Plan\n"));
+
+            let legacy = py_sdd_artifact_link_parse(
+                py,
+                "---\nprompt: 202607/prompts/example.md\n---\n# Plan\n",
+            )
+            .unwrap();
             let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
             assert_eq!(legacy_value["kind"], json!("legacy"));
             assert_eq!(
-                legacy_value["path"],
+                legacy_value["legacy"]["reference"],
                 json!("202607/prompts/example.md")
             );
 
-            assert!(py_sdd_frontmatter_link_render(
+            let updated = py_sdd_artifact_link_upsert(
+                "# Plan\n",
+                "PROMPT",
                 "202607/prompts/example.md",
-                "/absolute.md"
+                "prompts/example.md",
+                true,
+                false,
+            )
+            .unwrap();
+            assert_eq!(updated, format!("{rendered}\n\n# Plan\n"));
+
+            assert!(py_sdd_artifact_link_render(
+                "PROMPT",
+                "202607/prompts/example.md",
+                "/absolute.md",
             )
             .is_err());
         });

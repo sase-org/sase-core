@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde_yaml::Value;
 
-use super::frontmatter_link::sdd_frontmatter_link_reference;
+use super::artifact_link::{
+    parse_sdd_artifact_link, SddArtifactDocumentWire, SddArtifactLinkKindWire,
+    SddArtifactLinkTypeWire,
+};
 use super::wire::{PlanError, PlanWire};
 
 pub const PLAN_READ_WIRE_SCHEMA_VERSION: u64 = 1;
@@ -136,7 +139,9 @@ fn build_plan(
         .and_then(|stem| stem.to_str())
         .unwrap_or_default()
         .to_string();
-    let (frontmatter_text, body) = split_frontmatter(&content);
+    let artifact_link = parse_sdd_artifact_link(&content);
+    let (frontmatter_text, _) = split_frontmatter(&content);
+    let body = artifact_link.body.clone();
     let frontmatter = frontmatter_text
         .as_deref()
         .map(parse_frontmatter_map)
@@ -148,10 +153,19 @@ fn build_plan(
     };
     let title = derive_title(&body).unwrap_or_else(|| humanize(&name));
     let status = frontmatter.get("status").cloned().unwrap_or_default();
-    let prompt_link = frontmatter
-        .get("prompt")
-        .map(|value| sdd_frontmatter_link_reference(value))
-        .unwrap_or_default();
+    let expected_link = if file
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some("prompts")
+    {
+        SddArtifactLinkTypeWire::Plan
+    } else {
+        SddArtifactLinkTypeWire::Prompt
+    };
+    let prompt_link =
+        artifact_link_reference(&artifact_link, expected_link, root, file)
+            .unwrap_or_default();
     let created_at = frontmatter
         .get("create_time")
         .and_then(|raw| normalize_datetime(raw))
@@ -172,6 +186,52 @@ fn build_plan(
         body,
         frontmatter,
     })
+}
+
+fn artifact_link_reference(
+    link: &SddArtifactDocumentWire,
+    expected: SddArtifactLinkTypeWire,
+    root: &Path,
+    file: &Path,
+) -> Option<String> {
+    if link.kind != SddArtifactLinkKindWire::Mixed {
+        return link.reference_for(expected);
+    }
+    if link.link_type != Some(expected) {
+        return None;
+    }
+    let canonical = file.parent()?.join(link.target.as_deref()?);
+    let legacy = link.legacy.as_ref()?;
+    let legacy_path = if legacy.format == "markdown" {
+        file.parent()?.join(&legacy.target)
+    } else {
+        resolve_legacy_artifact_path(root, &legacy.target)
+    };
+    if canonical.canonicalize().ok()? == legacy_path.canonicalize().ok()? {
+        link.label.clone()
+    } else {
+        None
+    }
+}
+
+fn resolve_legacy_artifact_path(root: &Path, target: &str) -> PathBuf {
+    let target = Path::new(target);
+    if target.is_absolute() {
+        return target.to_path_buf();
+    }
+    for candidate in [
+        root.join(target),
+        root.parent().unwrap_or(root).join(target),
+        root.parent()
+            .and_then(Path::parent)
+            .unwrap_or(root)
+            .join(target),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    root.join(target)
 }
 
 fn plan_kind_from_tier(
@@ -555,25 +615,85 @@ mod tests {
     }
 
     #[test]
-    fn projects_canonical_prompt_link_label_and_preserves_raw_frontmatter() {
+    fn projects_canonical_prompt_link_label_without_polluting_plan_content() {
         let temp = tempdir().unwrap();
         let sdd = temp.path().join("sdd");
         write(
             &sdd.join("plans").join("202607").join("linked.md"),
             "---\n\
-             prompt: '[202607/prompts/linked.md](prompts/linked.md)'\n\
              tier: tale\n\
              ---\n\
-             # Linked plan\n",
+             \n\
+             - **PROMPT:** [202607/prompts/linked.md](prompts/linked.md)\n\
+             \n\
+             # Linked plan\n\
+             \n\
+             Real summary.\n",
         );
 
         let plans = read_plans(Some(&sdd), None, None).unwrap();
 
         assert_eq!(plans[0].prompt_link, "202607/prompts/linked.md");
-        assert_eq!(
-            plans[0].frontmatter.get("prompt").unwrap(),
-            "[202607/prompts/linked.md](prompts/linked.md)"
+        assert!(!plans[0].frontmatter.contains_key("prompt"));
+        assert_eq!(plans[0].title, "Linked plan");
+        assert_eq!(plans[0].summary, "Real summary.");
+        assert_eq!(plans[0].body, "# Linked plan\n\nReal summary.\n");
+    }
+
+    #[test]
+    fn prompt_directory_projects_plan_bullet_label() {
+        let temp = tempdir().unwrap();
+        let prompts = temp.path().join("prompts");
+        write(
+            &prompts.join("linked.md"),
+            "- **PLAN:** [../202607/linked.md](../linked.md)\n\nOriginal prompt.\n",
         );
+
+        let plans = read_plans(None, Some(&prompts), None).unwrap();
+
+        assert_eq!(plans[0].prompt_link, "../202607/linked.md");
+        assert_eq!(plans[0].title, "Linked");
+        assert_eq!(plans[0].summary, "Original prompt.");
+        assert_eq!(plans[0].body, "Original prompt.\n");
+    }
+
+    #[test]
+    fn mixed_transition_projects_label_only_when_paths_agree() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        let plan = sdd.join("plans").join("202607").join("linked.md");
+        let prompt = sdd
+            .join("plans")
+            .join("202607")
+            .join("prompts")
+            .join("linked.md");
+        write(&prompt, "Original prompt.\n");
+        write(
+            &plan,
+            "---\n\
+             prompt: plans/202607/prompts/linked.md\n\
+             tier: tale\n\
+             ---\n\
+             \n\
+             - **PROMPT:** [sdd/plans/202607/prompts/linked.md](prompts/linked.md)\n\
+             \n\
+             # Linked plan\n",
+        );
+
+        let plans = read_plans(Some(&sdd), None, None).unwrap();
+
+        assert_eq!(plans[0].prompt_link, "sdd/plans/202607/prompts/linked.md");
+
+        fs::write(
+            &plan,
+            fs::read_to_string(&plan).unwrap().replace(
+                "plans/202607/prompts/linked.md",
+                "plans/202607/other.md",
+            ),
+        )
+        .unwrap();
+        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        assert_eq!(plans[0].prompt_link, "");
     }
 
     #[test]
