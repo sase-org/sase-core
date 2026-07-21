@@ -157,9 +157,11 @@ pub use agent_stats::{
     AgentProjectWorkStatsWire, AgentProviderStatsWire,
     AgentQuestionActivityStatsWire, AgentQuestionStatsWire,
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
-    AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
-    AgentStatsCountWire, AgentStatsDistributionWire,
-    AgentStatsRuntimeGroupByWire, AgentWorkStatsWire, AgentWorkspaceStatsWire,
+    AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRunnerOccupancyWire,
+    AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
+    AgentRuntimeGroupStatsWire, AgentStatsCountWire,
+    AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{

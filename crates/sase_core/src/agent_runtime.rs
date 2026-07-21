@@ -19,6 +19,10 @@ pub struct ClanRuntimeMemberWire {
     pub stopped_at: Option<String>,
     #[serde(default)]
     pub finished_at: Option<f64>,
+    /// Whether the source artifact has a terminal marker. This distinguishes
+    /// a live member from a malformed terminal record with no usable end.
+    #[serde(default)]
+    pub has_done_marker: bool,
     #[serde(default)]
     pub plan_submitted_at: Vec<String>,
     #[serde(default)]
@@ -41,6 +45,7 @@ impl ClanRuntimeMemberWire {
             run_started_at: meta.and_then(|value| value.run_started_at.clone()),
             stopped_at: meta.and_then(|value| value.stopped_at.clone()),
             finished_at: record.done.as_ref().and_then(|done| done.finished_at),
+            has_done_marker: record.has_done_marker,
             plan_submitted_at: meta
                 .map(|value| value.plan_submitted_at.clone())
                 .unwrap_or_default(),
@@ -71,9 +76,22 @@ pub struct ClanRuntimeWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Interval {
-    start: f64,
-    end: f64,
+pub(crate) struct ActiveInterval {
+    pub(crate) start: f64,
+    pub(crate) end: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActiveIntervalError {
+    InvalidStart,
+    InvalidTerminal,
+    ImpossibleBounds,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ActiveIntervalDerivation {
+    pub(crate) intervals: Vec<ActiveInterval>,
+    pub(crate) live_at_end: bool,
 }
 
 /// Measure the union of member active intervals through `now_epoch_seconds`.
@@ -101,27 +119,12 @@ pub fn aggregate_clan_runtime(
     let mut intervals = Vec::new();
     let mut active = false;
     for member in members {
-        let Some(start) =
-            member.run_started_at.as_deref().and_then(parse_timestamp)
+        let Ok(derived) = derive_active_intervals(member, now_epoch_seconds)
         else {
             continue;
         };
-        if start > now_epoch_seconds {
-            continue;
-        }
-
-        let terminal = member_terminal(member).filter(|end| *end >= start);
-        let end = terminal.unwrap_or(now_epoch_seconds).min(now_epoch_seconds);
-        if end < start {
-            continue;
-        }
-
-        let exclusions = member_human_waits(member, start, end);
-        let member_is_active = terminal.is_none()
-            && !point_is_excluded(now_epoch_seconds, &exclusions);
-        active |= member_is_active;
-        intervals
-            .extend(subtract_intervals(Interval { start, end }, &exclusions));
+        active |= derived.live_at_end;
+        intervals.extend(derived.intervals);
     }
 
     ClanRuntimeWire {
@@ -142,21 +145,94 @@ pub fn aggregate_clan_runtime_records(
     aggregate_clan_runtime(&members, now_epoch_seconds)
 }
 
-fn member_terminal(member: &ClanRuntimeMemberWire) -> Option<f64> {
-    let stopped = member.stopped_at.as_deref().and_then(parse_timestamp);
-    let finished = member.finished_at.filter(|value| value.is_finite());
-    match (stopped, finished) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
+/// Derive the active, human-wait-free intervals for one member, capped at an
+/// exclusive query end. Runner analytics clips these same intervals at its
+/// lower analysis bound; clan/family runtime consumes them from run start.
+pub(crate) fn derive_active_intervals(
+    member: &ClanRuntimeMemberWire,
+    query_end: f64,
+) -> Result<ActiveIntervalDerivation, ActiveIntervalError> {
+    if !query_end.is_finite() {
+        return Err(ActiveIntervalError::ImpossibleBounds);
     }
+    let start = member
+        .run_started_at
+        .as_deref()
+        .and_then(parse_runtime_timestamp)
+        .ok_or(ActiveIntervalError::InvalidStart)?;
+    let terminal = member_terminal(member)?;
+    if terminal.is_some_and(|end| end <= start) {
+        return Err(ActiveIntervalError::ImpossibleBounds);
+    }
+    let end = terminal.unwrap_or(query_end).min(query_end);
+    if end <= start {
+        return Ok(ActiveIntervalDerivation::default());
+    }
+
+    let exclusions = member_human_waits(member, start, end);
+    let live_at_end =
+        terminal.is_none() && !point_is_excluded(query_end, &exclusions);
+    Ok(ActiveIntervalDerivation {
+        intervals: subtract_intervals(
+            ActiveInterval { start, end },
+            &exclusions,
+        ),
+        live_at_end,
+    })
+}
+
+/// Return whether an artifact represents a user agent governed by runner-slot
+/// admission. Terminal records remain eligible for historical analytics.
+pub(crate) fn is_runner_eligible_record(
+    record: &AgentArtifactRecordWire,
+) -> bool {
+    if record.workflow_dir_name != crate::agent_scan::ACE_RUN_WORKFLOW_DIR {
+        return false;
+    }
+    let Some(meta) = record.agent_meta.as_ref() else {
+        return false;
+    };
+    if meta.parent_timestamp.is_some() && !meta.agent_family_parallel {
+        return false;
+    }
+    record
+        .workflow_state
+        .as_ref()
+        .map_or(true, |state| state.appears_as_agent)
+}
+
+fn member_terminal(
+    member: &ClanRuntimeMemberWire,
+) -> Result<Option<f64>, ActiveIntervalError> {
+    let mut declared = member.has_done_marker;
+    let mut candidates = Vec::new();
+    if let Some(value) = member.stopped_at.as_deref() {
+        declared = true;
+        if let Some(parsed) = parse_runtime_timestamp(value) {
+            candidates.push(parsed);
+        }
+    }
+    if let Some(value) = member.finished_at {
+        declared = true;
+        if value.is_finite() {
+            candidates.push(value);
+        }
+    }
+    if candidates.is_empty() {
+        return if declared {
+            Err(ActiveIntervalError::InvalidTerminal)
+        } else {
+            Ok(None)
+        };
+    }
+    Ok(candidates.into_iter().min_by(f64::total_cmp))
 }
 
 fn member_human_waits(
     member: &ClanRuntimeMemberWire,
     start: f64,
     end: f64,
-) -> Vec<Interval> {
+) -> Vec<ActiveInterval> {
     let mut waits = Vec::new();
     let mut feedback = parsed_sorted(&member.feedback_submitted_at);
 
@@ -169,13 +245,13 @@ fn member_human_waits(
         {
             let resolved = feedback.remove(index).min(end);
             if resolved > submitted {
-                waits.push(Interval {
+                waits.push(ActiveInterval {
                     start: submitted,
                     end: resolved,
                 });
             }
         } else if !member.plan_approved && end > submitted {
-            waits.push(Interval {
+            waits.push(ActiveInterval {
                 start: submitted,
                 end,
             });
@@ -185,7 +261,7 @@ fn member_human_waits(
     if member.question_response_path.is_none() {
         for submitted in parsed_sorted(&member.questions_submitted_at) {
             if submitted >= start && submitted < end {
-                waits.push(Interval {
+                waits.push(ActiveInterval {
                     start: submitted,
                     end,
                 });
@@ -196,10 +272,10 @@ fn member_human_waits(
     if let Some(submitted) = member
         .pending_question_submitted_at
         .as_deref()
-        .and_then(parse_timestamp)
+        .and_then(parse_runtime_timestamp)
         .filter(|value| *value >= start && *value < end)
     {
-        waits.push(Interval {
+        waits.push(ActiveInterval {
             start: submitted,
             end,
         });
@@ -211,13 +287,16 @@ fn member_human_waits(
 fn parsed_sorted(values: &[String]) -> Vec<f64> {
     let mut parsed = values
         .iter()
-        .filter_map(|value| parse_timestamp(value))
+        .filter_map(|value| parse_runtime_timestamp(value))
         .collect::<Vec<_>>();
     parsed.sort_by(f64::total_cmp);
     parsed
 }
 
-fn parse_timestamp(value: &str) -> Option<f64> {
+pub(crate) fn parse_runtime_timestamp(value: &str) -> Option<f64> {
+    if let Ok(seconds) = value.parse::<f64>() {
+        return seconds.is_finite().then_some(seconds);
+    }
     if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
         return Some(datetime_seconds(parsed.with_timezone(&Utc)));
     }
@@ -234,9 +313,9 @@ fn datetime_seconds(value: DateTime<Utc>) -> f64 {
 }
 
 fn subtract_intervals(
-    base: Interval,
-    exclusions: &[Interval],
-) -> Vec<Interval> {
+    base: ActiveInterval,
+    exclusions: &[ActiveInterval],
+) -> Vec<ActiveInterval> {
     if base.end <= base.start {
         return Vec::new();
     }
@@ -249,7 +328,7 @@ fn subtract_intervals(
             continue;
         }
         if exclusion_start > cursor {
-            active.push(Interval {
+            active.push(ActiveInterval {
                 start: cursor,
                 end: exclusion_start,
             });
@@ -257,7 +336,7 @@ fn subtract_intervals(
         cursor = cursor.max(exclusion_end);
     }
     if cursor < base.end {
-        active.push(Interval {
+        active.push(ActiveInterval {
             start: cursor,
             end: base.end,
         });
@@ -265,19 +344,19 @@ fn subtract_intervals(
     active
 }
 
-fn point_is_excluded(point: f64, exclusions: &[Interval]) -> bool {
+fn point_is_excluded(point: f64, exclusions: &[ActiveInterval]) -> bool {
     exclusions
         .iter()
         .any(|interval| interval.start <= point && point <= interval.end)
 }
 
-fn merge_intervals(intervals: &mut [Interval]) -> Vec<Interval> {
+fn merge_intervals(intervals: &mut [ActiveInterval]) -> Vec<ActiveInterval> {
     intervals.sort_by(|left, right| {
         left.start
             .total_cmp(&right.start)
             .then_with(|| left.end.total_cmp(&right.end))
     });
-    let mut merged: Vec<Interval> = Vec::new();
+    let mut merged: Vec<ActiveInterval> = Vec::new();
     for interval in intervals.iter().copied() {
         if interval.end <= interval.start {
             continue;
@@ -293,7 +372,7 @@ fn merge_intervals(intervals: &mut [Interval]) -> Vec<Interval> {
     merged
 }
 
-fn union_measure(intervals: &mut [Interval]) -> f64 {
+fn union_measure(intervals: &mut [ActiveInterval]) -> f64 {
     merge_intervals(intervals)
         .iter()
         .map(|interval| interval.end - interval.start)
@@ -418,6 +497,38 @@ mod tests {
         value.plan_submitted_at = vec!["also-bad".to_string()];
         assert_eq!(
             aggregate_clan_runtime(&[value], BASE + 100.0),
+            ClanRuntimeWire::default()
+        );
+    }
+
+    #[test]
+    fn earliest_valid_stop_or_finish_is_shared_runtime_end() {
+        let mut value = member(0, Some(80));
+        value.finished_at = Some(BASE + 20.0);
+        value.has_done_marker = true;
+        let result = aggregate_clan_runtime(&[value], BASE + 100.0);
+        assert_eq!(result.wall_clock_seconds, 20.0);
+        assert!(!result.active);
+
+        let mut fallback = member(0, None);
+        fallback.stopped_at = Some("not-a-time".to_string());
+        fallback.finished_at = Some(BASE + 30.0);
+        fallback.has_done_marker = true;
+        let result = aggregate_clan_runtime(&[fallback], BASE + 100.0);
+        assert_eq!(result.wall_clock_seconds, 30.0);
+    }
+
+    #[test]
+    fn malformed_terminal_and_reversed_segments_are_rejected() {
+        let malformed = ClanRuntimeMemberWire {
+            run_started_at: Some(BASE.to_string()),
+            stopped_at: Some("not-a-time".to_string()),
+            ..ClanRuntimeMemberWire::default()
+        };
+        let mut reversed = member(20, Some(10));
+        reversed.has_done_marker = true;
+        assert_eq!(
+            aggregate_clan_runtime(&[malformed, reversed], BASE + 100.0),
             ClanRuntimeWire::default()
         );
     }

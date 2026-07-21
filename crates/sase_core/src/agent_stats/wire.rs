@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 3;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -239,6 +239,52 @@ pub struct AgentRuntimeGroupStatsWire {
     pub max_seconds: f64,
 }
 
+/// Exact wall-clock duration and share observed at one runner count.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunnerOccupancyWire {
+    pub runners: u64,
+    pub seconds: f64,
+    pub share: f64,
+}
+
+/// One bounded, contiguous slice of the runner-occupancy trend.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunnerTrendSliceWire {
+    pub start_ts: f64,
+    pub end_ts: f64,
+    pub average_runners: f64,
+    pub peak_runners: u64,
+    pub busy_seconds: f64,
+    pub runner_seconds: f64,
+}
+
+/// Historical runner-slot occupancy over one effective analysis window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunnerStatsWire {
+    /// Inclusive effective analysis boundary. For all-time requests this is
+    /// the first valid active runner segment, not the Unix epoch sentinel.
+    pub start_ts: f64,
+    /// Exclusive effective analysis boundary.
+    pub end_ts: f64,
+    pub peak_runners: u64,
+    pub peak_seconds: f64,
+    pub average_runners: f64,
+    pub busy_seconds: f64,
+    pub busy_share: f64,
+    pub runner_seconds: f64,
+    /// Ordered, dense rows from zero runners through `peak_runners`.
+    #[serde(default)]
+    pub distribution: Vec<AgentRunnerOccupancyWire>,
+    /// Chronological, contiguous slices bounded by the backend limit.
+    #[serde(default)]
+    pub trend: Vec<AgentRunnerTrendSliceWire>,
+    /// Overlap candidates whose cached `record_json` could not be decoded.
+    pub malformed_rows_skipped: u64,
+    /// Eligible records with missing, malformed, reversed, or zero-length
+    /// runtime boundaries.
+    pub invalid_intervals_skipped: u64,
+}
+
 /// Everything needed by the run-backed Statistics views in one response.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentRunStatsResponseWire {
@@ -264,6 +310,10 @@ pub struct AgentRunStatsResponseWire {
     pub buckets: Vec<AgentRunBucketWire>,
     #[serde(default)]
     pub runtime_groups: Vec<AgentRuntimeGroupStatsWire>,
+    /// Runner occupancy is absent only when an all-time request has no valid
+    /// active runner coverage (or when reading an older/partial payload).
+    #[serde(default)]
+    pub runners: Option<AgentRunnerStatsWire>,
     /// In-window rows whose cached `record_json` could not be decoded.
     pub malformed_rows_skipped: u64,
 }
@@ -313,4 +363,25 @@ pub struct AgentActivityStatsResponseWire {
     pub malformed_rows_skipped: u64,
     /// Plan proposals whose referenced or mirrored markdown could not be read.
     pub unresolved_plan_files: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    #[test]
+    fn older_run_stats_payload_without_runners_deserializes() {
+        let mut payload =
+            serde_json::to_value(AgentRunStatsResponseWire::default()).unwrap();
+        let Value::Object(fields) = &mut payload else {
+            panic!("run statistics response must serialize as an object");
+        };
+        fields.remove("runners");
+
+        let decoded: AgentRunStatsResponseWire =
+            serde_json::from_value(payload).unwrap();
+        assert!(decoded.runners.is_none());
+    }
 }

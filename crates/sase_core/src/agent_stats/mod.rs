@@ -1,5 +1,6 @@
 mod activity;
 mod run;
+mod runner;
 mod wire;
 
 pub use activity::query_activity_stats;
@@ -12,6 +13,7 @@ pub use wire::{
     AgentProviderStatsWire, AgentQuestionActivityStatsWire,
     AgentQuestionStatsWire, AgentRetryStatsWire, AgentRunBucketWire,
     AgentRunStatsRequestWire, AgentRunStatsResponseWire, AgentRunTotalsWire,
+    AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
     AgentWorkStatsWire, AgentWorkspaceStatsWire,
