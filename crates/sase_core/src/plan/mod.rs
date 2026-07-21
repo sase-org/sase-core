@@ -6,11 +6,16 @@
 //! covers the wire model, discovery (read layer), and the search/filter/rank
 //! engine built on top of it.
 
+pub mod frontmatter_link;
 pub mod read;
 pub mod search;
 pub mod validate;
 pub mod wire;
 
+pub use frontmatter_link::{
+    parse_sdd_frontmatter_link, render_sdd_frontmatter_link,
+    sdd_frontmatter_link_reference, SddFrontmatterLinkWire,
+};
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use search::{
     search_plans, PLAN_SEARCH_FIELD_NAMES, PLAN_SEARCH_WIRE_SCHEMA_VERSION,

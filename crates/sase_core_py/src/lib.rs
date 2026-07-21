@@ -108,6 +108,8 @@
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
+//! - `sdd_frontmatter_link_parse(value: str) -> dict`
+//! - `sdd_frontmatter_link_render(label: str, target: str) -> str`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -324,8 +326,10 @@ use sase_core::notifications::{
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::plan::{
+    parse_sdd_frontmatter_link as core_parse_sdd_frontmatter_link,
     plan_frontmatter_schema as core_plan_frontmatter_schema,
     plan_validate_with_mode as core_plan_validate_with_mode,
+    render_sdd_frontmatter_link as core_render_sdd_frontmatter_link,
     search_plans as core_plan_search, PlanError,
 };
 use sase_core::project_spec::{
@@ -2182,6 +2186,26 @@ fn py_plan_frontmatter_schema<'py>(
         py,
         py.allow_threads(|| core_plan_frontmatter_schema(tier)),
     )
+}
+
+/// Parse one canonical or historical SDD frontmatter link value.
+#[pyfunction]
+#[pyo3(name = "sdd_frontmatter_link_parse")]
+fn py_sdd_frontmatter_link_parse<'py>(
+    py: Python<'py>,
+    value: &str,
+) -> PyResult<PyObject> {
+    plan_result_to_py(py, Ok(core_parse_sdd_frontmatter_link(value)))
+}
+
+/// Render one canonical clickable SDD frontmatter link value.
+#[pyfunction]
+#[pyo3(name = "sdd_frontmatter_link_render")]
+fn py_sdd_frontmatter_link_render(
+    label: &str,
+    target: &str,
+) -> PyResult<String> {
+    core_render_sdd_frontmatter_link(label, target).map_err(plan_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -4532,6 +4556,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_frontmatter_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_frontmatter_link_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_frontmatter_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -4914,6 +4940,47 @@ mod tests {
             let error = py_plan_validate(py, content, "story", "authoring")
                 .unwrap_err();
             assert!(error.to_string().contains("unsupported plan tier"));
+        });
+    }
+
+    #[test]
+    fn sdd_frontmatter_link_bindings_match_core_contract() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let rendered = py_sdd_frontmatter_link_render(
+                "202607/prompts/example.md",
+                "prompts/example.md",
+            )
+            .unwrap();
+            assert_eq!(
+                rendered,
+                "[202607/prompts/example.md](prompts/example.md)"
+            );
+
+            let parsed = py_sdd_frontmatter_link_parse(py, &rendered).unwrap();
+            let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(parsed_value["kind"], json!("canonical"));
+            assert_eq!(
+                parsed_value["label"],
+                json!("202607/prompts/example.md")
+            );
+            assert_eq!(parsed_value["target"], json!("prompts/example.md"));
+
+            let legacy =
+                py_sdd_frontmatter_link_parse(py, "202607/prompts/example.md")
+                    .unwrap();
+            let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
+            assert_eq!(legacy_value["kind"], json!("legacy"));
+            assert_eq!(
+                legacy_value["path"],
+                json!("202607/prompts/example.md")
+            );
+
+            assert!(py_sdd_frontmatter_link_render(
+                "202607/prompts/example.md",
+                "/absolute.md"
+            )
+            .is_err());
         });
     }
 

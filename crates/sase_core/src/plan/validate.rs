@@ -295,8 +295,8 @@ pub fn plan_frontmatter_schema(
             "prompt",
             "system-managed value",
             false,
-            "Prompt snapshot reference maintained by SASE.",
-            json!("202607/prompts/example.md"),
+            "Clickable prompt snapshot reference maintained by SASE.",
+            json!("[202607/prompts/example.md](prompts/example.md)"),
         ),
         field_spec(
             "bead",
@@ -1706,6 +1706,11 @@ mod tests {
             .find(|field| field.name == "phases[].size")
             .unwrap();
         assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
+        let prompt = tale.iter().find(|field| field.name == "prompt").unwrap();
+        assert_eq!(
+            prompt.example,
+            json!("[202607/prompts/example.md](prompts/example.md)")
+        );
         assert_eq!(phase_size.field_type, "small | medium | large");
         assert!(phase_size.required);
         for (name, description) in [

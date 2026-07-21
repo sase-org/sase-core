@@ -360,10 +360,12 @@ pub use notifications::{
 };
 pub use parser::parse_project_bytes;
 pub use plan::{
-    plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
-    read_plans, search_plans, PlanDiagnosticWire, PlanError,
-    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanSearchMatchWire,
-    PlanValidationMode, PlanValidationResultWire, PlanWire, ValidatedPlanWire,
+    parse_sdd_frontmatter_link, plan_frontmatter_schema, plan_validate,
+    plan_validate_with_mode, read_plans, render_sdd_frontmatter_link,
+    sdd_frontmatter_link_reference, search_plans, PlanDiagnosticWire,
+    PlanError, PlanFrontmatterFieldSpecWire, PlanPhaseWire,
+    PlanSearchMatchWire, PlanValidationMode, PlanValidationResultWire,
+    PlanWire, SddFrontmatterLinkWire, ValidatedPlanWire,
     PLAN_READ_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };

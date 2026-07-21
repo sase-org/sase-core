@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde_yaml::Value;
 
+use super::frontmatter_link::sdd_frontmatter_link_reference;
 use super::wire::{PlanError, PlanWire};
 
 pub const PLAN_READ_WIRE_SCHEMA_VERSION: u64 = 1;
@@ -147,7 +148,10 @@ fn build_plan(
     };
     let title = derive_title(&body).unwrap_or_else(|| humanize(&name));
     let status = frontmatter.get("status").cloned().unwrap_or_default();
-    let prompt_link = frontmatter.get("prompt").cloned().unwrap_or_default();
+    let prompt_link = frontmatter
+        .get("prompt")
+        .map(|value| sdd_frontmatter_link_reference(value))
+        .unwrap_or_default();
     let created_at = frontmatter
         .get("create_time")
         .and_then(|raw| normalize_datetime(raw))
@@ -548,6 +552,28 @@ mod tests {
         // Frontmatter is stripped from the body.
         assert!(!plan.body.contains("create_time"));
         assert!(plan.body.starts_with("# Unified auth"));
+    }
+
+    #[test]
+    fn projects_canonical_prompt_link_label_and_preserves_raw_frontmatter() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        write(
+            &sdd.join("plans").join("202607").join("linked.md"),
+            "---\n\
+             prompt: '[202607/prompts/linked.md](prompts/linked.md)'\n\
+             tier: tale\n\
+             ---\n\
+             # Linked plan\n",
+        );
+
+        let plans = read_plans(Some(&sdd), None, None).unwrap();
+
+        assert_eq!(plans[0].prompt_link, "202607/prompts/linked.md");
+        assert_eq!(
+            plans[0].frontmatter.get("prompt").unwrap(),
+            "[202607/prompts/linked.md](prompts/linked.md)"
+        );
     }
 
     #[test]
