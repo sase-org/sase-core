@@ -1445,6 +1445,7 @@ dependencies = [
  "sase_core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

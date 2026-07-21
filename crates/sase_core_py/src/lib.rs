@@ -93,6 +93,11 @@
 //! - `config_inventory(request: dict) -> dict`
 //! - `config_plan_edit(request: dict) -> dict`
 //! - `config_validate(request: dict) -> list[dict]`
+//! - `effort_override_get(sase_home: str, now: float | None = None) -> dict | None`
+//! - `effort_override_set_relative(sase_home: str, effort: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `effort_override_set_until(sase_home: str, effort: str, expires_at: float, source: str, now: float | None = None) -> dict`
+//! - `effort_override_clear(sase_home: str) -> bool`
+//! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `parse_chop_result(document: str) -> dict`
 //! - `validate_chop_result(result: dict) -> dict`
 //! - `validate_chop_proposal(proposal: dict, index: int, prior_ids: list[str]) -> dict`
@@ -146,7 +151,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
@@ -307,6 +312,14 @@ use sase_core::config::{
 use sase_core::content_layout::{
     resolve_layout_candidates as core_resolve_layout_candidates,
     sase_content_layout as core_sase_content_layout, LayoutCollisionPolicyWire,
+};
+use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
+use sase_core::effort_override::{
+    clear_effort_override as core_clear_effort_override,
+    get_effort_override as core_get_effort_override,
+    set_effort_override_relative as core_set_effort_override_relative,
+    set_effort_override_until as core_set_effort_override_until,
+    EffortOverrideError as EffortOverrideDomainError,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -3831,6 +3844,159 @@ fn py_config_validate<'py>(
     json_value_to_py(py, &json)
 }
 
+// --- Temporary default reasoning-effort override -------------------------
+
+fn effort_override_error_to_pyerr(err: EffortOverrideDomainError) -> PyErr {
+    match err {
+        EffortOverrideDomainError::Validation(message) => {
+            PyValueError::new_err(message)
+        }
+        EffortOverrideDomainError::LockTimeout => {
+            PyTimeoutError::new_err(err.to_string())
+        }
+        EffortOverrideDomainError::Io(_)
+        | EffortOverrideDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+fn effort_override_now(now: Option<f64>) -> PyResult<f64> {
+    if let Some(value) = now {
+        return Ok(value);
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "could not read the current Unix timestamp: {error}"
+            ))
+        })
+}
+
+fn effort_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal effort serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "effort_override_wire_schema_version")]
+fn py_effort_override_wire_schema_version() -> u32 {
+    sase_core::EFFORT_OVERRIDE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "effort_override_get", signature = (sase_home, now = None))]
+fn py_effort_override_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_get_effort_override(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(effort_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "effort_override_set_relative",
+    signature = (
+        sase_home,
+        effort,
+        source,
+        duration_seconds = None,
+        now = None
+    )
+)]
+fn py_effort_override_set_relative<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    effort: &str,
+    source: &str,
+    duration_seconds: Option<f64>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_effort_override_relative(
+        &PathBuf::from(sase_home),
+        effort,
+        duration_seconds,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(effort_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "effort_override_set_until",
+    signature = (sase_home, effort, expires_at, source, now = None)
+)]
+fn py_effort_override_set_until<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    effort: &str,
+    expires_at: f64,
+    source: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_effort_override_until(
+        &PathBuf::from(sase_home),
+        effort,
+        expires_at,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(effort_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(name = "effort_override_clear")]
+fn py_effort_override_clear(sase_home: &str) -> PyResult<bool> {
+    core_clear_effort_override(&PathBuf::from(sase_home))
+        .map_err(effort_override_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "resolve_effective_effort",
+    signature = (
+        explicit_effort = None,
+        alias_effort = None,
+        temporary_effort = None,
+        configured_effort = None
+    )
+)]
+fn py_resolve_effective_effort<'py>(
+    py: Python<'py>,
+    explicit_effort: Option<&str>,
+    alias_effort: Option<&str>,
+    temporary_effort: Option<&str>,
+    configured_effort: Option<&str>,
+) -> PyResult<PyObject> {
+    effort_wire_to_py(
+        py,
+        &core_resolve_effective_effort(
+            explicit_effort,
+            alias_effort,
+            temporary_effort,
+            configured_effort,
+        ),
+    )
+}
+
 // --- Canonical project/home content layout -------------------------------
 
 /// Return the shared canonical/legacy SASE content layout and xprompt order.
@@ -4652,6 +4818,15 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_effort_override_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_effort_override_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_effort_override_set_relative, m)?)?;
+    m.add_function(wrap_pyfunction!(py_effort_override_set_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_effort_override_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_layout_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
@@ -4736,6 +4911,73 @@ mod tests {
                 value["tags"][0]["destination"],
                 json!("https://github.com/o/r/blob/main/202607/p.md")
             );
+        });
+    }
+
+    #[test]
+    fn effort_override_bindings_round_trip_and_resolve() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_effort_override_wire_schema_version(),
+                sase_core::EFFORT_OVERRIDE_WIRE_SCHEMA_VERSION
+            );
+            let written = py_effort_override_set_relative(
+                py,
+                &home,
+                "high",
+                "binding-test",
+                Some(900.0),
+                Some(now),
+            )
+            .unwrap();
+            let written_value = py_to_json_value(written.bind(py)).unwrap();
+            assert_eq!(written_value["effort"], json!("high"));
+            assert_eq!(written_value["expires_at"], json!(now + 900.0));
+
+            let loaded = py_effort_override_get(py, &home, Some(now)).unwrap();
+            assert_eq!(
+                py_to_json_value(loaded.bind(py)).unwrap(),
+                written_value
+            );
+
+            let resolved = py_resolve_effective_effort(
+                py,
+                None,
+                None,
+                Some("high"),
+                Some("low"),
+            )
+            .unwrap();
+            let resolved_value = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(resolved_value["level"], json!("high"));
+            assert_eq!(resolved_value["source"], json!("temporary_override"));
+            assert_eq!(resolved_value["explicit"], json!(false));
+
+            assert!(py_effort_override_clear(&home).unwrap());
+            assert!(!py_effort_override_clear(&home).unwrap());
+        });
+    }
+
+    #[test]
+    fn effort_override_binding_rejects_invalid_values() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        Python::with_gil(|py| {
+            let error = py_effort_override_set_until(
+                py,
+                &home,
+                "turbo",
+                2.0,
+                "test",
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 

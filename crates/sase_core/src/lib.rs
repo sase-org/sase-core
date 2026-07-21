@@ -25,6 +25,7 @@ pub mod config;
 pub mod content_layout;
 pub mod editor;
 pub mod effort;
+pub mod effort_override;
 pub mod git_query;
 pub mod host_bridge;
 pub mod notifications;
@@ -296,7 +297,17 @@ pub use editor::{
     DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
     PLACEHOLDER_MAX_INNER_CHARS, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
-pub use effort::{is_valid_effort, split_model_effort, EFFORT_LEVELS_ORDERED};
+pub use effort::{
+    is_valid_effort, resolve_effective_effort, split_model_effort,
+    EffectiveEffortResolutionWire, EffectiveEffortSource,
+    EFFORT_LEVELS_ORDERED,
+};
+pub use effort_override::{
+    clear_effort_override, effort_override_state_path, get_effort_override,
+    set_effort_override_relative, set_effort_override_until,
+    EffortOverrideError, EffortOverrideWire, EFFORT_OVERRIDE_STATE_FILENAME,
+    EFFORT_OVERRIDE_WIRE_SCHEMA_VERSION,
+};
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,
     parse_git_conflicted_files, parse_git_local_changes,

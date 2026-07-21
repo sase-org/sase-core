@@ -42,6 +42,60 @@ pub fn split_model_effort(model: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Provenance of the resolved reasoning-effort value.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveEffortSource {
+    Explicit,
+    Alias,
+    TemporaryOverride,
+    Configured,
+    ProviderDefault,
+}
+
+/// Canonical effective-effort resolution shared by every frontend.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveEffortResolutionWire {
+    pub level: Option<String>,
+    pub source: EffectiveEffortSource,
+    pub explicit: bool,
+}
+
+/// Resolve launch effort with the domain's single precedence definition.
+pub fn resolve_effective_effort(
+    explicit_effort: Option<&str>,
+    alias_effort: Option<&str>,
+    temporary_effort: Option<&str>,
+    configured_effort: Option<&str>,
+) -> EffectiveEffortResolutionWire {
+    let candidates = [
+        (explicit_effort, EffectiveEffortSource::Explicit, true),
+        (alias_effort, EffectiveEffortSource::Alias, false),
+        (
+            temporary_effort,
+            EffectiveEffortSource::TemporaryOverride,
+            false,
+        ),
+        (configured_effort, EffectiveEffortSource::Configured, false),
+    ];
+    for (candidate, source, explicit) in candidates {
+        if let Some(level) = candidate.filter(|value| is_valid_effort(value)) {
+            return EffectiveEffortResolutionWire {
+                level: Some(level.to_string()),
+                source,
+                explicit,
+            };
+        }
+    }
+    EffectiveEffortResolutionWire {
+        level: None,
+        source: EffectiveEffortSource::ProviderDefault,
+        explicit: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +132,61 @@ mod tests {
             split_model_effort("foo@bar/baz@high"),
             ("foo@bar/baz", Some("high"))
         );
+    }
+
+    #[test]
+    fn resolves_effective_effort_precedence_and_source() {
+        let cases = [
+            (
+                (Some("max"), Some("high"), Some("medium"), Some("low")),
+                Some("max"),
+                EffectiveEffortSource::Explicit,
+                true,
+            ),
+            (
+                (None, Some("high"), Some("medium"), Some("low")),
+                Some("high"),
+                EffectiveEffortSource::Alias,
+                false,
+            ),
+            (
+                (None, None, Some("medium"), Some("low")),
+                Some("medium"),
+                EffectiveEffortSource::TemporaryOverride,
+                false,
+            ),
+            (
+                (None, None, None, Some("low")),
+                Some("low"),
+                EffectiveEffortSource::Configured,
+                false,
+            ),
+            (
+                (None, None, None, None),
+                None,
+                EffectiveEffortSource::ProviderDefault,
+                false,
+            ),
+        ];
+        for (inputs, level, source, explicit) in cases {
+            let resolved = resolve_effective_effort(
+                inputs.0, inputs.1, inputs.2, inputs.3,
+            );
+            assert_eq!(resolved.level.as_deref(), level);
+            assert_eq!(resolved.source, source);
+            assert_eq!(resolved.explicit, explicit);
+        }
+    }
+
+    #[test]
+    fn invalid_candidates_are_skipped() {
+        let resolved = resolve_effective_effort(
+            Some("turbo"),
+            Some("HIGH"),
+            Some("medium"),
+            Some("low"),
+        );
+        assert_eq!(resolved.level.as_deref(), Some("medium"));
+        assert_eq!(resolved.source, EffectiveEffortSource::TemporaryOverride);
     }
 }
