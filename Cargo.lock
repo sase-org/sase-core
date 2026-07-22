@@ -1426,6 +1426,7 @@ dependencies = [
  "chrono",
  "fs2",
  "hex",
+ "libc",
  "regex",
  "rusqlite",
  "serde",

@@ -1,14 +1,184 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use crate::agent_launch::{
+    list_workspace_claims_from_content, WorkspaceClaimWire,
+};
 use crate::agent_runtime::{
     derive_active_intervals, is_runner_eligible_record, ActiveInterval,
-    ClanRuntimeMemberWire,
+    ActiveIntervalError, ClanRuntimeMemberWire,
 };
-use crate::agent_scan::AgentArtifactRecordWire;
+use crate::agent_scan::{AgentArtifactRecordWire, RunningMarkerWire};
 
 use super::wire::{
     AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
 };
 
 pub(super) const MAX_RUNNER_TREND_SLICES: usize = 512;
+
+pub(super) trait RunnerLivenessProbe {
+    fn is_live(&self, record: &AgentArtifactRecordWire) -> bool;
+}
+
+impl<F> RunnerLivenessProbe for F
+where
+    F: Fn(&AgentArtifactRecordWire) -> bool,
+{
+    fn is_live(&self, record: &AgentArtifactRecordWire) -> bool {
+        self(record)
+    }
+}
+
+/// Current-host liveness proof for an open-ended runner record.
+///
+/// A PID is necessary but not sufficient: it must still name a non-zombie
+/// SASE/Python process and remain attached to the record's home running marker
+/// or project workspace claim. The project-file cache is scoped to one query.
+#[derive(Debug, Default)]
+pub(super) struct HostRunnerLivenessProbe {
+    project_claims: RefCell<BTreeMap<PathBuf, Option<Vec<WorkspaceClaimWire>>>>,
+}
+
+impl RunnerLivenessProbe for HostRunnerLivenessProbe {
+    fn is_live(&self, record: &AgentArtifactRecordWire) -> bool {
+        if record.has_done_marker || record.done.is_some() {
+            return false;
+        }
+        let meta = match record.agent_meta.as_ref() {
+            Some(meta) => meta,
+            None => return false,
+        };
+        if meta
+            .stopped_at
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return false;
+        }
+
+        let pid = match meta
+            .pid
+            .or_else(|| record.running.as_ref().and_then(|marker| marker.pid))
+        {
+            Some(pid) if pid > 1 && pid <= i64::from(i32::MAX) => pid,
+            _ => return false,
+        };
+        if !process_is_live_agent(pid as i32) {
+            return false;
+        }
+
+        if record.project_name == "home" {
+            return home_running_marker_matches(record, pid);
+        }
+        self.workspace_claim_matches(record, pid)
+    }
+}
+
+impl HostRunnerLivenessProbe {
+    fn workspace_claim_matches(
+        &self,
+        record: &AgentArtifactRecordWire,
+        pid: i64,
+    ) -> bool {
+        let project_file = PathBuf::from(&record.project_file);
+        let mut cache = self.project_claims.borrow_mut();
+        let claims = cache.entry(project_file.clone()).or_insert_with(|| {
+            fs::read_to_string(&project_file)
+                .ok()
+                .map(|content| list_workspace_claims_from_content(&content))
+        });
+        let Some(claims) = claims.as_ref() else {
+            return false;
+        };
+        let workspace_num = record
+            .agent_meta
+            .as_ref()
+            .and_then(|meta| meta.workspace_num)
+            .and_then(|value| u32::try_from(value).ok());
+        claims.iter().any(|claim| {
+            let identity_matches = match claim.artifacts_timestamp.as_deref() {
+                Some(timestamp) => timestamp == record.timestamp,
+                None => workspace_num
+                    .is_some_and(|value| value == claim.workspace_num),
+            };
+            identity_matches && i64::from(claim.pid) == pid
+        })
+    }
+}
+
+fn home_running_marker_matches(
+    record: &AgentArtifactRecordWire,
+    pid: i64,
+) -> bool {
+    let path = Path::new(&record.artifact_dir).join("running.json");
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<RunningMarkerWire>(&content)
+        .ok()
+        .and_then(|marker| marker.pid)
+        == Some(pid)
+}
+
+fn process_is_live_agent(pid: i32) -> bool {
+    if !process_exists(pid) {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+        match fs::read_to_string(proc_dir.join("status")) {
+            Ok(status) => {
+                if status.lines().any(|line| {
+                    line.strip_prefix("State:").is_some_and(|value| {
+                        value.trim_start().starts_with('Z')
+                    })
+                }) {
+                    return false;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return false,
+            Err(_) => {}
+        }
+
+        match fs::read(proc_dir.join("cmdline")) {
+            Ok(command) => {
+                if !command.windows(4).any(|part| part == b"sase")
+                    && !command.windows(6).any(|part| part == b"python")
+                {
+                    return false;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => return false,
+            Err(_) => {}
+        }
+    }
+
+    true
+}
+
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: signal 0 performs an existence/permission probe and does not
+    // deliver a signal. `pid` was validated as a positive process ID.
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
+}
+
+#[cfg(not(unix))]
+fn process_exists(_pid: i32) -> bool {
+    false
+}
 
 #[derive(Debug, Default)]
 pub(super) struct RunnerStatsBuilder {
@@ -34,16 +204,24 @@ impl RunnerStatsBuilder {
         record: &AgentArtifactRecordWire,
         requested_start: f64,
         requested_end: f64,
+        liveness: &dyn RunnerLivenessProbe,
     ) {
         if !is_runner_eligible_record(record) {
             return;
         }
         let member = ClanRuntimeMemberWire::from_record(record);
-        let Ok(derived) = derive_active_intervals(&member, requested_end)
-        else {
+        let derived = match derive_active_intervals(&member, requested_end) {
+            Ok(derived) => derived,
+            Err(ActiveIntervalError::InvalidStart) => return,
+            Err(_) => {
+                self.invalid_intervals_skipped += 1;
+                return;
+            }
+        };
+        if derived.open_ended && !liveness.is_live(record) {
             self.invalid_intervals_skipped += 1;
             return;
-        };
+        }
         self.intervals
             .extend(derived.intervals.into_iter().filter_map(|interval| {
                 let start = interval.start.max(requested_start);
@@ -274,7 +452,26 @@ fn trend_slices(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+    use tempfile::tempdir;
+
     use super::*;
+
+    fn open_record(name: &str, start: Option<&str>) -> AgentArtifactRecordWire {
+        serde_json::from_value(json!({
+            "project_name": "proj",
+            "project_dir": "/tmp/proj",
+            "project_file": "/tmp/proj/proj.sase",
+            "workflow_dir_name": "ace-run",
+            "artifact_dir": format!("/tmp/proj/artifacts/ace-run/{name}"),
+            "timestamp": name,
+            "agent_meta": {
+                "name": name,
+                "run_started_at": start
+            }
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn simultaneous_boundaries_do_not_create_phantom_occupancy() {
@@ -319,5 +516,73 @@ mod tests {
             trend.last().unwrap().end_ts - trend.last().unwrap().start_ts
                 < 20.0
         );
+    }
+
+    #[test]
+    fn open_intervals_require_liveness_and_missing_starts_are_not_invalid() {
+        let mut builder = RunnerStatsBuilder::default();
+        let live = |record: &AgentArtifactRecordWire| {
+            record
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.name.as_deref())
+                == Some("live")
+        };
+        builder.add_record(&open_record("stale", Some("0")), 0.0, 100.0, &live);
+        builder.add_record(&open_record("live", Some("20")), 0.0, 100.0, &live);
+        builder.add_record(&open_record("never", None), 0.0, 100.0, &live);
+
+        let result = builder.finish(0.0, 100.0, 100, false).unwrap();
+        assert_eq!(result.runner_seconds, 80.0);
+        assert_eq!(result.distribution[0].seconds, 20.0);
+        assert_eq!(result.distribution[1].seconds, 80.0);
+        assert_eq!(result.invalid_intervals_skipped, 1);
+    }
+
+    #[test]
+    fn host_liveness_requires_current_matching_claim_identity() {
+        let tmp = tempdir().unwrap();
+        let project_file = tmp.path().join("proj.sase");
+        let artifact_dir = tmp.path().join("artifacts/ace-run/20260722010101");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        let pid = std::process::id();
+        fs::write(
+            &project_file,
+            format!("RUNNING:\n  #7 | {pid} | run | demo | 20260722010101\n"),
+        )
+        .unwrap();
+        let mut record = open_record("live", Some("10"));
+        record.project_file = project_file.to_string_lossy().into_owned();
+        record.artifact_dir = artifact_dir.to_string_lossy().into_owned();
+        record.timestamp = "20260722010101".to_string();
+        let meta = record.agent_meta.as_mut().unwrap();
+        meta.pid = Some(i64::from(pid));
+        meta.workspace_num = Some(7);
+
+        assert!(HostRunnerLivenessProbe::default().is_live(&record));
+
+        fs::write(
+            &project_file,
+            format!(
+                "RUNNING:\n  #7 | {} | run | demo | 20260722010101\n",
+                pid + 1
+            ),
+        )
+        .unwrap();
+        assert!(!HostRunnerLivenessProbe::default().is_live(&record));
+
+        record.project_name = "home".to_string();
+        fs::write(
+            artifact_dir.join("running.json"),
+            serde_json::to_vec(&json!({"pid": pid})).unwrap(),
+        )
+        .unwrap();
+        assert!(HostRunnerLivenessProbe::default().is_live(&record));
+        fs::write(
+            artifact_dir.join("running.json"),
+            serde_json::to_vec(&json!({"pid": pid + 1})).unwrap(),
+        )
+        .unwrap();
+        assert!(!HostRunnerLivenessProbe::default().is_live(&record));
     }
 }

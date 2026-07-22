@@ -92,6 +92,10 @@ pub(crate) enum ActiveIntervalError {
 pub(crate) struct ActiveIntervalDerivation {
     pub(crate) intervals: Vec<ActiveInterval>,
     pub(crate) live_at_end: bool,
+    /// The member declared no terminal boundary and was therefore capped at
+    /// the caller's query end. Consumers that report current occupancy must
+    /// corroborate this with host liveness before accepting the intervals.
+    pub(crate) open_ended: bool,
 }
 
 /// Measure the union of member active intervals through `now_epoch_seconds`.
@@ -178,6 +182,7 @@ pub(crate) fn derive_active_intervals(
             &exclusions,
         ),
         live_at_end,
+        open_ended: terminal.is_none(),
     })
 }
 

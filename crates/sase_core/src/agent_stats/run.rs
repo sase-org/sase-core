@@ -13,7 +13,9 @@ use crate::effort::{is_valid_effort, EFFORT_LEVELS_ORDERED};
 use crate::parser::parse_project_bytes;
 use crate::project_spec::{preferred_project_spec_path, project_spec_basename};
 
-use super::runner::RunnerStatsBuilder;
+use super::runner::{
+    HostRunnerLivenessProbe, RunnerLivenessProbe, RunnerStatsBuilder,
+};
 use super::wire::{
     AgentChangeSpecWorkStatsWire, AgentCommitStatsWire, AgentPlanStatsWire,
     AgentProjectWorkStatsWire, AgentProviderStatsWire, AgentQuestionStatsWire,
@@ -125,6 +127,18 @@ pub fn query_run_stats(
     index_path: &Path,
     request: AgentRunStatsRequestWire,
 ) -> Result<AgentRunStatsResponseWire, String> {
+    query_run_stats_with_liveness(
+        index_path,
+        request,
+        &HostRunnerLivenessProbe::default(),
+    )
+}
+
+fn query_run_stats_with_liveness(
+    index_path: &Path,
+    request: AgentRunStatsRequestWire,
+    liveness: &dyn RunnerLivenessProbe,
+) -> Result<AgentRunStatsResponseWire, String> {
     let bucket_count = validate_request(&request)?;
     let conn = Connection::open_with_flags(
         index_path,
@@ -215,7 +229,12 @@ pub fn query_run_stats(
             continue;
         };
         if runner_candidate {
-            runner_stats.add_record(&record, requested_start, requested_end);
+            runner_stats.add_record(
+                &record,
+                requested_start,
+                requested_end,
+                liveness,
+            );
         }
         if !launch_in_window {
             continue;
@@ -364,6 +383,13 @@ fn runner_overlap_candidate(
     if row.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
         return false;
     }
+    let Some(started) = row.started_at.as_deref().and_then(parse_timestamp)
+    else {
+        // A record that never reached run_started_at never held a runner slot.
+        // Keep this cached-column rejection ahead of JSON decoding so old
+        // waiting/abandoned artifacts do not become interval diagnostics.
+        return false;
+    };
     if row
         .finished_at
         .filter(|value| value.is_finite())
@@ -371,13 +397,7 @@ fn runner_overlap_candidate(
     {
         return false;
     }
-    if row
-        .started_at
-        .as_deref()
-        .and_then(parse_timestamp)
-        .or_else(|| parse_artifact_timestamp(&row.timestamp))
-        .is_some_and(|started| started >= requested_end)
-    {
+    if started >= requested_end {
         return false;
     }
     true
@@ -1843,8 +1863,19 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let result =
-            query_run_stats(&index, runner_request(0, 100, 30)).unwrap();
+        let live_probe = |record: &AgentArtifactRecordWire| {
+            record
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.name.as_deref())
+                == Some("live")
+        };
+        let result = query_run_stats_with_liveness(
+            &index,
+            runner_request(0, 100, 30),
+            &live_probe,
+        )
+        .unwrap();
         let runners = result.runners.as_ref().unwrap();
 
         assert_eq!(result.schema_version, 3);
@@ -1874,6 +1905,169 @@ mod tests {
         assert_eq!(runners.trend[3].start_ts, (RUNNER_BASE + 90) as f64);
         assert_eq!(runners.trend[3].end_ts, (RUNNER_BASE + 100) as f64);
         assert_eq!(runners.trend[3].runner_seconds, 0.0);
+        assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_query_filters_stale_and_never_started_records() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(10),
+            json!({"name": "first", "run_started_at": runner_time(10)}),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 30) as f64
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(30),
+            json!({"name": "boundary", "run_started_at": runner_time(30)}),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 40) as f64
+            })),
+            false,
+        );
+        let live = add_run(
+            &projects,
+            &runner_artifact_timestamp(20),
+            json!({"name": "live", "run_started_at": runner_time(20)}),
+            None,
+            false,
+        );
+        write_json(
+            &live.join("pending_question.json"),
+            json!({"submitted_at": runner_time(35)}),
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({"name": "stale", "run_started_at": runner_time(0)}),
+            None,
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(5),
+            json!({"name": "never-started", "pid": 12345}),
+            None,
+            false,
+        );
+        add_project_run(
+            &projects,
+            "other",
+            &runner_artifact_timestamp(0),
+            json!({"name": "other", "run_started_at": runner_time(0)}),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 40) as f64
+            })),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let mut request = runner_request(0, 40, 10);
+        request.project = Some("proj".to_string());
+        let live_probe = |record: &AgentArtifactRecordWire| {
+            record
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.name.as_deref())
+                == Some("live")
+        };
+        let result =
+            query_run_stats_with_liveness(&index, request, &live_probe)
+                .unwrap();
+        let runners = result.runners.as_ref().unwrap();
+
+        assert_eq!(result.totals.runs, 5);
+        assert_eq!(runners.peak_runners, 2);
+        assert_eq!(runners.peak_seconds, 15.0);
+        assert_eq!(runners.average_runners, 1.125);
+        assert_eq!(runners.busy_seconds, 30.0);
+        assert_eq!(runners.runner_seconds, 45.0);
+        assert_eq!(
+            runners
+                .distribution
+                .iter()
+                .map(|row| (row.runners, row.seconds))
+                .collect::<Vec<_>>(),
+            vec![(0, 10.0), (1, 15.0), (2, 15.0)]
+        );
+        assert_eq!(runners.invalid_intervals_skipped, 1);
+        assert_eq!(runners.malformed_rows_skipped, 0);
+        assert_eq!(
+            runners
+                .trend
+                .iter()
+                .map(|slice| (slice.peak_runners, slice.runner_seconds))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.0), (1, 10.0), (2, 20.0), (2, 15.0)]
+        );
+        assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_query_requires_matching_live_workspace_claim() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let timestamp = runner_artifact_timestamp(10);
+        let pid = std::process::id();
+        add_run(
+            &projects,
+            &timestamp,
+            json!({
+                "name": "host-live",
+                "pid": pid,
+                "workspace_num": 7,
+                "run_started_at": runner_time(10)
+            }),
+            None,
+            false,
+        );
+        let project_file = projects.join("proj/proj.sase");
+        fs::write(
+            &project_file,
+            format!("RUNNING:\n  #7 | {pid} | run | demo | {timestamp}\n"),
+        )
+        .unwrap();
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let result =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = result.runners.as_ref().unwrap();
+        assert_eq!(runners.runner_seconds, 90.0);
+        assert_eq!(runners.invalid_intervals_skipped, 0);
+
+        fs::write(
+            &project_file,
+            format!(
+                "RUNNING:\n  #7 | {} | run | demo | {timestamp}\n",
+                pid + 1
+            ),
+        )
+        .unwrap();
+        let result =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = result.runners.as_ref().unwrap();
+        assert_eq!(runners.runner_seconds, 0.0);
+        assert_eq!(runners.invalid_intervals_skipped, 1);
         assert_runner_conservation(runners);
     }
 
@@ -2127,7 +2321,7 @@ mod tests {
         assert!(valid.exists());
         assert_eq!(result.malformed_rows_skipped, 1);
         assert_eq!(runners.malformed_rows_skipped, 1);
-        assert_eq!(runners.invalid_intervals_skipped, 5);
+        assert_eq!(runners.invalid_intervals_skipped, 4);
         assert_eq!(runners.runner_seconds, 20.0);
         assert_eq!(runners.distribution[0].seconds, 80.0);
         assert_eq!(runners.distribution[1].seconds, 20.0);
