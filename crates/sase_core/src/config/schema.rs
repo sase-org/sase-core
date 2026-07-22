@@ -37,7 +37,10 @@ fn flatten(
     depth: usize,
     out: &mut Vec<ConfigFieldWire>,
 ) {
-    for (key, raw) in props {
+    let mut keys: Vec<_> = props.keys().collect();
+    keys.sort();
+    for key in keys {
+        let raw = &props[key];
         let resolved = resolve_ref(root, raw);
         let obj = resolved.as_object().cloned().unwrap_or_default();
         let path = if parent.is_empty() {

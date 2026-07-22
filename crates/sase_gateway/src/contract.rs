@@ -3,13 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 use crate::wire::GATEWAY_WIRE_SCHEMA_VERSION;
 
 pub fn api_v1_contract_snapshot() -> Value {
-    json!({
+    sort_object_keys(json!({
         "schema_version": GATEWAY_WIRE_SCHEMA_VERSION,
         "contract": "sase_mobile_gateway_api_v1",
         "base_path": "/api/v1",
@@ -877,7 +877,26 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             "authorization_header": "Authorization: Bearer sase_mobile_<token>"
         }
-    })
+    }))
+}
+
+fn sort_object_keys(value: Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(sort_object_keys).collect())
+        }
+        Value::Object(items) => {
+            let mut entries: Vec<_> = items.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, sort_object_keys(value)))
+                    .collect::<Map<_, _>>(),
+            )
+        }
+        scalar => scalar,
+    }
 }
 
 pub fn write_api_v1_contract_snapshot(

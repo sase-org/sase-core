@@ -70,7 +70,31 @@ pub fn merge_layers(layers: &[ConfigLayerInputWire]) -> Value {
             result = deep_merge_objects(&result, obj, strategy);
         }
     }
-    Value::Object(result)
+    canonicalize_value(&Value::Object(result))
+}
+
+/// Restore the generic config backend's historical lexical object ordering.
+///
+/// AXE composition preserves authored mapping order, but the generic config
+/// contracts predate that requirement and expose lexically ordered JSON
+/// objects. Keep that public behavior stable even though the workspace now
+/// enables `serde_json`'s insertion-order map representation.
+pub fn canonicalize_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.iter().map(canonicalize_value).collect())
+        }
+        Value::Object(items) => {
+            let mut keys: Vec<_> = items.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| (key.clone(), canonicalize_value(&items[key])))
+                    .collect(),
+            )
+        }
+        scalar => scalar.clone(),
+    }
 }
 
 /// Resolve a dotted key path against a value, returning the nested value if

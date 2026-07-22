@@ -234,12 +234,60 @@ pub struct ConfigEditRequestWire {
     #[serde(default)]
     pub layers: Vec<ConfigLayerInputWire>,
     pub target_layer: String,
-    pub path: String,
+    /// Legacy dotted field path. New callers should prefer `key_path` when
+    /// mapping keys may themselves contain dots.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Exact field path segments. When both path forms are supplied they
+    /// must describe the same display path.
+    #[serde(default)]
+    pub key_path: Option<Vec<String>>,
     pub op: ConfigEditOpWire,
     #[serde(default)]
     pub deprecations: BTreeMap<String, String>,
     #[serde(default)]
     pub unsupported: Vec<String>,
+}
+
+impl ConfigEditRequestWire {
+    /// Resolve the legacy/exact path inputs into exact segments and a stable
+    /// dotted display path.
+    pub fn resolved_path(&self) -> Result<(Vec<String>, String), ConfigError> {
+        let dotted = self.path.as_deref();
+        if dotted.is_some_and(str::is_empty) {
+            return Err(ConfigError::validation("edit path must not be empty"));
+        }
+        let exact = self.key_path.as_ref();
+        if exact.is_some_and(|segments| {
+            segments.is_empty() || segments.iter().any(String::is_empty)
+        }) {
+            return Err(ConfigError::validation(
+                "edit key_path must contain non-empty segments",
+            ));
+        }
+
+        match (dotted, exact) {
+            (None, None) => Err(ConfigError::validation(
+                "edit request requires path or key_path",
+            )),
+            (Some(path), None) => Ok((
+                path.split('.').map(str::to_string).collect(),
+                path.to_string(),
+            )),
+            (None, Some(segments)) => {
+                Ok((segments.clone(), segments.join(".")))
+            }
+            (Some(path), Some(segments)) => {
+                let display = segments.join(".");
+                if path != display {
+                    return Err(ConfigError::validation(format!(
+                        "contradictory edit path `{path}` and key_path `{display}`"
+                    )));
+                }
+                Ok((segments.clone(), path.to_string()))
+            }
+        }
+    }
 }
 
 /// The logical, frontend-agnostic write plan. `key_path` is the dotted path

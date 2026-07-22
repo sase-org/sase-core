@@ -5,7 +5,7 @@
 //! analogue), and diagnostics (deprecated/unsupported keys, layer load
 //! errors, and schema-validation issues against the effective merge).
 
-use super::merge::{get_at_path, merge_layers};
+use super::merge::{canonicalize_value, get_at_path, merge_layers};
 use super::schema::build_field_model;
 use super::validate::validate_config;
 use super::wire::{
@@ -42,7 +42,7 @@ pub fn build_inventory(
             if let Some(raw) = get_at_path(&layer.value, &segments) {
                 contributions.push(ConfigContributionWire {
                     layer: layer.name.clone(),
-                    raw_value: raw.clone(),
+                    raw_value: canonicalize_value(raw),
                     winning: false,
                 });
             }

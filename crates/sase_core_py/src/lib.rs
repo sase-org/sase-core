@@ -310,12 +310,15 @@ use sase_core::commit_footer::{
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
 use sase_core::config::{
+    compose_axe_config as core_compose_axe_config,
     config_field_model as core_config_field_model,
     config_inventory as core_config_inventory,
     config_plan_edit as core_config_plan_edit,
-    config_validate as core_config_validate, ConfigEditRequestWire,
-    ConfigError as ConfigDomainError, ConfigInventoryRequestWire,
-    ConfigValidateRequestWire,
+    config_validate as core_config_validate,
+    plan_axe_entry_mutation as core_plan_axe_entry_mutation,
+    AxeConfigComposeRequestWire, AxeEntryMutationRequestWire,
+    ConfigEditRequestWire, ConfigError as ConfigDomainError,
+    ConfigInventoryRequestWire, ConfigValidateRequestWire,
 };
 use sase_core::content_layout::{
     resolve_layout_candidates as core_resolve_layout_candidates,
@@ -3875,6 +3878,51 @@ fn py_config_plan_edit<'py>(
     json_value_to_py(py, &json)
 }
 
+/// Compose the ordered AXE layer stack and return exact-key provenance and
+/// entity inventory alongside the effective config.
+#[pyfunction]
+#[pyo3(name = "axe_config_compose")]
+fn py_axe_config_compose<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: AxeConfigComposeRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AXE composition request: {e}"
+            ))
+        })?;
+    let result =
+        core_compose_axe_config(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Plan an exact-key sparse AXE lumberjack/chop contribution mutation.
+#[pyfunction]
+#[pyo3(name = "axe_config_plan_entry")]
+fn py_axe_config_plan_entry<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: AxeEntryMutationRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AXE entry mutation request: {e}"
+            ))
+        })?;
+    let result =
+        core_plan_axe_entry_mutation(&req).map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Schema-validate a candidate merged config, returning diagnostic dicts.
 ///
 /// *request* is a `ConfigValidateRequestWire`-shape dict: `schema` + `config`.
@@ -4980,6 +5028,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
+    m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_effort_override_wire_schema_version,
         m

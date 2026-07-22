@@ -8,7 +8,9 @@
 
 use serde_json::{Map, Value};
 
-use super::merge::{get_at_path, merge_layers, set_at_path, unset_at_path};
+use super::merge::{
+    canonicalize_value, get_at_path, merge_layers, set_at_path, unset_at_path,
+};
 use super::validate::validate_config;
 use super::wire::{
     ConfigDiagnosticWire, ConfigEditPlanWire, ConfigEditRequestWire,
@@ -20,6 +22,7 @@ use super::wire::{
 pub fn plan_edit(
     request: &ConfigEditRequestWire,
 ) -> Result<ConfigEditPlanWire, ConfigError> {
+    let (key_path, display_path) = request.resolved_path()?;
     let target_idx = request
         .layers
         .iter()
@@ -38,21 +41,19 @@ pub fn plan_edit(
             severity: "warning".to_string(),
             code: "target_not_writable".to_string(),
             message: format!("layer `{}` is not writable", target.name),
-            path: Some(request.path.clone()),
+            path: Some(display_path.clone()),
             layer: Some(target.name.clone()),
         });
     }
-
-    let key_path: Vec<String> =
-        request.path.split('.').map(str::to_string).collect();
 
     let mut target_obj: Map<String, Value> =
         target.value.as_object().cloned().unwrap_or_default();
 
     let (op, new_value, has_value) = match request.op.kind.as_str() {
         "set" => {
-            set_at_path(&mut target_obj, &key_path, request.op.value.clone())?;
-            ("set", request.op.value.clone(), true)
+            let value = canonicalize_value(&request.op.value);
+            set_at_path(&mut target_obj, &key_path, value.clone())?;
+            ("set", value, true)
         }
         "unset" => {
             unset_at_path(&mut target_obj, &key_path);
@@ -74,7 +75,7 @@ pub fn plan_edit(
     let before = get_at_path(&original_merged, &segments).cloned();
     let after = get_at_path(&candidate_merged, &segments).cloned();
     let preview = ConfigEffectivePreviewWire {
-        path: request.path.clone(),
+        path: display_path,
         has_before: before.is_some(),
         before: before.clone().unwrap_or(Value::Null),
         has_after: after.is_some(),

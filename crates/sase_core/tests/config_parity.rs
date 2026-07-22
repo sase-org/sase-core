@@ -8,10 +8,11 @@
 
 use sase_core::config::merge::merge_layers;
 use sase_core::{
-    config_field_model, config_inventory, config_plan_edit, config_validate,
-    ConfigEditRequestWire, ConfigFieldStateWire, ConfigFieldWire,
-    ConfigInventoryRequestWire, ConfigInventoryWire, ConfigLayerInputWire,
-    ConfigValidateRequestWire,
+    compose_axe_config, config_field_model, config_inventory, config_plan_edit,
+    config_validate, plan_axe_entry_mutation, AxeConfigComposeRequestWire,
+    AxeEntryMutationRequestWire, ConfigEditRequestWire, ConfigFieldStateWire,
+    ConfigFieldWire, ConfigInventoryRequestWire, ConfigInventoryWire,
+    ConfigLayerInputWire, ConfigValidateRequestWire,
 };
 use serde_json::{json, Value};
 
@@ -591,4 +592,268 @@ fn plan_edit_unknown_target_errors() {
     }))
     .unwrap();
     assert!(config_plan_edit(&request).is_err());
+}
+
+#[test]
+fn plan_edit_exact_key_path_preserves_dotted_mapping_keys() {
+    let request: ConfigEditRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": [
+            {"name": "user", "path": "/tmp/sase.yml",
+             "writable": true, "value": {}}
+        ],
+        "target_layer": "user",
+        "key_path": ["axe", "lumberjacks", "release.check", "interval"],
+        "op": {"kind": "set", "value": 5}
+    }))
+    .unwrap();
+    let plan = config_plan_edit(&request).unwrap();
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec!["axe", "lumberjacks", "release.check", "interval"]
+    );
+    assert_eq!(
+        plan.candidate_config["axe"]["lumberjacks"]["release.check"]
+            ["interval"],
+        json!(5)
+    );
+    assert_eq!(
+        plan.effective_preview.path,
+        "axe.lumberjacks.release.check.interval"
+    );
+}
+
+#[test]
+fn plan_edit_rejects_missing_empty_and_contradictory_paths() {
+    for path_fields in [
+        json!({}),
+        json!({"path": ""}),
+        json!({"key_path": []}),
+        json!({"path": "axe.x", "key_path": ["axe", "y"]}),
+    ] {
+        let mut request = json!({
+            "schema": {"type": "object"},
+            "layers": [{"name": "user", "writable": true, "value": {}}],
+            "target_layer": "user",
+            "op": {"kind": "set", "value": 1}
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(path_fields.as_object().unwrap().clone());
+        let request: ConfigEditRequestWire =
+            serde_json::from_value(request).unwrap();
+        assert!(config_plan_edit(&request).is_err());
+    }
+}
+
+fn axe_layers() -> Vec<ConfigLayerInputWire> {
+    serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks.main": {
+                "interval": 10,
+                "chops": [
+                    {"name": "release.check", "script": "run-release", "enabled": true},
+                    {"name": "space name", "script": "run-space"}
+                ]
+            }}}}
+        },
+        {
+            "name": "overlay:sase_work.yml", "kind": "overlay",
+            "path": "/tmp/sase_work.yml", "writable": true,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks.main": {
+                "chops": {"release.check": {"description": "patched"}}
+            }}}}
+        }
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn axe_composition_retains_legacy_defaults_and_exact_key_provenance() {
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: axe_layers(),
+    })
+    .unwrap();
+    let chops =
+        &result.effective_config["axe"]["lumberjacks"]["checks.main"]["chops"];
+    assert_eq!(
+        chops.as_object().unwrap().keys().collect::<Vec<_>>(),
+        vec!["release.check", "space name"]
+    );
+    assert_eq!(chops["release.check"]["script"], json!("run-release"));
+    assert_eq!(chops["release.check"]["description"], json!("patched"));
+    assert_eq!(chops["space name"]["script"], json!("run-space"));
+    assert!(result.provenance.iter().any(|item| {
+        item.key_path
+            == [
+                "axe",
+                "lumberjacks",
+                "checks.main",
+                "chops",
+                "release.check",
+                "description",
+            ]
+            && item.layer.starts_with("overlay:sase_work.yml:")
+    }));
+    let entry = result
+        .entries
+        .iter()
+        .find(|entry| entry.selector.chop.as_deref() == Some("release.check"))
+        .unwrap();
+    assert_eq!(entry.selector.lumberjack, "checks.main");
+    assert_eq!(entry.contributions.len(), 1);
+    assert_eq!(entry.contributions[0].representation, "keyed_map");
+}
+
+#[test]
+fn axe_sparse_mutation_keeps_inherited_fields_and_matches_candidate_composition(
+) {
+    let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": axe_layers(),
+        "target_layer": "overlay:sase_work.yml",
+        "selector": {"kind": "chop", "lumberjack": "checks.main", "chop": "release.check"},
+        "operations": [
+            {"kind": "set", "key_path": ["enabled"], "value": false},
+            {"kind": "unset", "key_path": ["description"]}
+        ]
+    }))
+    .unwrap();
+    let plan = plan_axe_entry_mutation(&request).unwrap();
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec![
+            "axe",
+            "lumberjacks",
+            "checks.main",
+            "chops",
+            "release.check"
+        ]
+    );
+    assert_eq!(plan.write_plan.new_value, json!({"enabled": false}));
+    assert_eq!(plan.effective_preview.after["script"], json!("run-release"));
+    assert_eq!(plan.effective_preview.after["enabled"], json!(false));
+    assert_eq!(
+        plan.candidate_config,
+        plan.candidate_composition.effective_config
+    );
+}
+
+#[test]
+fn axe_mutation_promotes_target_legacy_list_without_dropping_entries() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user", "path": "/tmp/sase.yml", "writable": true,
+            "list_strategy": "replace",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": ["base", {"name": "other", "enabled": true}]
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": layers,
+        "target_layer": "user",
+        "selector": {"kind": "chop", "lumberjack": "checks", "chop": "base"},
+        "operations": [{"kind": "set", "key_path": ["description"], "value": "new"}]
+    }))
+    .unwrap();
+    let plan = plan_axe_entry_mutation(&request).unwrap();
+    assert!(plan.promoted_legacy_list);
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec!["axe", "lumberjacks", "checks", "chops"]
+    );
+    assert_eq!(plan.write_plan.new_value["base"]["description"], "new");
+    assert_eq!(plan.write_plan.new_value["other"]["enabled"], true);
+}
+
+#[test]
+fn axe_inventory_marks_generated_instances_as_base_owned() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user", "path": "/tmp/sase.yml", "writable": true,
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": {"fan.out": {
+                    "script": "fan",
+                    "for_each": [
+                        {"target": {"name": "one"}, "overrides": {"enabled": false}}
+                    ]
+                }}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: layers.clone(),
+    })
+    .unwrap();
+    let generated = result
+        .entries
+        .iter()
+        .find(|entry| entry.selector.chop.as_deref() == Some("fan.out[one]"))
+        .unwrap();
+    assert!(generated.generated);
+    assert!(!generated.mutable);
+    assert_eq!(generated.target_key.as_deref(), Some("one"));
+    assert_eq!(
+        generated
+            .base_selector
+            .as_ref()
+            .and_then(|selector| selector.chop.as_deref()),
+        Some("fan.out")
+    );
+    assert_eq!(generated.effective["enabled"], false);
+    assert!(generated.field_provenance.iter().any(|item| {
+        item.key_path.last().map(String::as_str) == Some("enabled")
+            && item.layer == "for_each target override"
+    }));
+    let mutation: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": layers,
+        "target_layer": "user",
+        "selector": {"kind": "chop", "lumberjack": "checks", "chop": "fan.out[one]"},
+        "operations": [{"kind": "set", "key_path": ["enabled"], "value": true}]
+    }))
+    .unwrap();
+    assert!(plan_axe_entry_mutation(&mutation).is_err());
+}
+
+#[test]
+fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default", "writable": false,
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": ["duplicate"]
+            }}}}
+        },
+        {
+            "name": "overlay:test.yml", "path": "/tmp/test.yml", "writable": true,
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": ["duplicate", 42, {"name": "duplicate"}]
+            }, "other": {
+                "chops": {"expected": {"name": "actual"}}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result =
+        compose_axe_config(&AxeConfigComposeRequestWire { layers }).unwrap();
+    for code in [
+        "duplicate_chop_identity",
+        "type_mismatch",
+        "chop_identity_mismatch",
+    ] {
+        assert!(result.diagnostics.iter().any(|item| {
+            item.code == code
+                && item.layer.as_deref()
+                    == Some("overlay:test.yml:/tmp/test.yml")
+        }));
+    }
 }

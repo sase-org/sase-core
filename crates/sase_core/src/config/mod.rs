@@ -15,6 +15,7 @@
 //! The merge mirrors `sase.config.core._deep_merge` exactly so the two can
 //! never silently diverge (see the parity tests).
 
+pub mod axe;
 pub mod merge;
 pub mod plan;
 pub mod provenance;
@@ -24,6 +25,13 @@ pub mod wire;
 
 use serde_json::Value;
 
+pub use axe::{
+    compose_axe_config, plan_axe_entry_mutation, AxeConfigComposeRequestWire,
+    AxeConfigCompositionWire, AxeEntryMutationPlanWire,
+    AxeEntryMutationRequestWire, AxeEntryPreviewWire, AxeEntrySelectorWire,
+    AxeFieldOperationWire, AxeFieldProvenanceWire, AxeInventoryEntryWire,
+    AxeRawContributionWire,
+};
 pub use wire::{
     ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,
     ConfigEditOpWire, ConfigEditPlanWire, ConfigEditRequestWire,

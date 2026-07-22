@@ -228,13 +228,17 @@ pub use commit_footer::{
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
 pub use config::{
-    config_field_model, config_inventory, config_plan_edit, config_validate,
-    ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,
-    ConfigEditOpWire, ConfigEditPlanWire, ConfigEditRequestWire,
-    ConfigEffectivePreviewWire, ConfigError, ConfigFieldModelWire,
-    ConfigFieldStateWire, ConfigFieldWire, ConfigInventoryRequestWire,
-    ConfigInventoryWire, ConfigLayerInputWire, ConfigSourceWire,
-    ConfigValidateRequestWire, ConfigWritePlanWire,
+    compose_axe_config, config_field_model, config_inventory, config_plan_edit,
+    config_validate, plan_axe_entry_mutation, AxeConfigComposeRequestWire,
+    AxeConfigCompositionWire, AxeEntryMutationPlanWire,
+    AxeEntryMutationRequestWire, AxeEntryPreviewWire, AxeEntrySelectorWire,
+    AxeFieldOperationWire, AxeFieldProvenanceWire, AxeInventoryEntryWire,
+    AxeRawContributionWire, ConfigConstraintsWire, ConfigContributionWire,
+    ConfigDiagnosticWire, ConfigEditOpWire, ConfigEditPlanWire,
+    ConfigEditRequestWire, ConfigEffectivePreviewWire, ConfigError,
+    ConfigFieldModelWire, ConfigFieldStateWire, ConfigFieldWire,
+    ConfigInventoryRequestWire, ConfigInventoryWire, ConfigLayerInputWire,
+    ConfigSourceWire, ConfigValidateRequestWire, ConfigWritePlanWire,
     ListStrategy as ConfigListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
 };
 pub use content_layout::{
