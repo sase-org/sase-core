@@ -28,6 +28,7 @@ pub mod effort;
 pub mod effort_override;
 pub mod git_query;
 pub mod host_bridge;
+pub mod machine_hood;
 pub mod notifications;
 pub mod parser;
 pub mod plan;
@@ -338,6 +339,10 @@ pub use host_bridge::{
     MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
     MobileXpromptInputWire, StaticHelperHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use machine_hood::{
+    machine_hood_of, qualify_machine_agent_name, strip_machine_agent_name,
+    validate_machine_name, MachineNameError,
 };
 pub use notifications::{
     append_notification, append_notification_counts,

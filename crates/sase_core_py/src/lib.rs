@@ -76,6 +76,10 @@
 //! - `match_agent_name_template(template: str, concrete: str) -> str | None`
 //! - `compare_agent_name_template_tokens(left: str, right: str) -> int`
 //! - `agent_name_template_tokens_after(after: str | None, count: int) -> list[str]`
+//! - `validate_machine_name(name: str) -> None`
+//! - `qualify_machine_agent_name(name: str, machine_name: str) -> str`
+//! - `strip_machine_agent_name(name: str, machine_name: str) -> str`
+//! - `machine_hood_of(name: str, known_machines: list[str]) -> str | None`
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
@@ -333,6 +337,12 @@ use sase_core::git_query::{
     parse_git_name_status_z as core_parse_git_name_status_z,
 };
 use sase_core::inline_code_ranges as core_inline_code_ranges;
+use sase_core::machine_hood::{
+    machine_hood_of as core_machine_hood_of,
+    qualify_machine_agent_name as core_qualify_machine_agent_name,
+    strip_machine_agent_name as core_strip_machine_agent_name,
+    validate_machine_name as core_validate_machine_name,
+};
 use sase_core::notifications::{
     append_notification as core_append_notification,
     append_notification_counts as core_append_notification_counts,
@@ -496,6 +506,39 @@ fn py_agent_name_template_tokens_after(
 ) -> PyResult<Vec<String>> {
     core_agent_name_template_tokens_after(after, count)
         .map_err(|err| PyValueError::new_err(format!("{err}")))
+}
+
+/// Validate a machine name (non-empty, `^[a-z_]+$`); raise `ValueError`
+/// otherwise.
+#[pyfunction]
+#[pyo3(name = "validate_machine_name")]
+fn py_validate_machine_name(name: &str) -> PyResult<()> {
+    core_validate_machine_name(name)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))
+}
+
+/// Prepend `<machine_name>.` to an agent name unless already qualified.
+#[pyfunction]
+#[pyo3(name = "qualify_machine_agent_name")]
+fn py_qualify_machine_agent_name(name: &str, machine_name: &str) -> String {
+    core_qualify_machine_agent_name(name, machine_name)
+}
+
+/// Strip a leading `<machine_name>.` from an agent name when present.
+#[pyfunction]
+#[pyo3(name = "strip_machine_agent_name")]
+fn py_strip_machine_agent_name(name: &str, machine_name: &str) -> String {
+    core_strip_machine_agent_name(name, machine_name)
+}
+
+/// Return the leading hood segment of `name` when it names a known machine.
+#[pyfunction]
+#[pyo3(name = "machine_hood_of")]
+fn py_machine_hood_of(
+    name: &str,
+    known_machines: Vec<String>,
+) -> Option<String> {
+    core_machine_hood_of(name, &known_machines)
 }
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
@@ -4754,6 +4797,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_agent_name_template_tokens_after, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_machine_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_qualify_machine_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_strip_machine_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_machine_hood_of, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
@@ -5037,6 +5084,40 @@ mod tests {
                 value["tags"][0]["destination"],
                 json!("https://github.com/o/r/blob/main/202607/p.md")
             );
+        });
+    }
+
+    #[test]
+    fn machine_hood_bindings_qualify_strip_and_classify() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|_py| {
+            py_validate_machine_name("athena").unwrap();
+            assert!(py_validate_machine_name("Athena").is_err());
+            assert!(py_validate_machine_name("").is_err());
+
+            assert_eq!(
+                py_qualify_machine_agent_name("foo--code", "athena"),
+                "athena.foo--code"
+            );
+            assert_eq!(
+                py_qualify_machine_agent_name("athena.foo", "athena"),
+                "athena.foo"
+            );
+            assert_eq!(
+                py_strip_machine_agent_name("athena.foo", "athena"),
+                "foo"
+            );
+            assert_eq!(
+                py_strip_machine_agent_name("zeus.bar", "athena"),
+                "zeus.bar"
+            );
+
+            let known = vec!["athena".to_string(), "zeus".to_string()];
+            assert_eq!(
+                py_machine_hood_of("zeus.bar", known.clone()),
+                Some("zeus".to_string())
+            );
+            assert_eq!(py_machine_hood_of("foo", known), None);
         });
     }
 
