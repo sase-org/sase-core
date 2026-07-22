@@ -5276,7 +5276,8 @@ mod tests {
                     "prompt": "Split the file.",
                     "workspace": "git:sase",
                     "agent_name": "split_file.src_lib.a1b2",
-                    "clan": "toobig-@"
+                    "clan": "toobig-@",
+                    "clan_summary": "[bold]Large module[/bold]"
                 }),
             )
             .unwrap();
@@ -5285,6 +5286,10 @@ mod tests {
                 py_validate_chop_proposal(py, proposal, 0, None).unwrap();
             let normalized = py_to_json_value(normalized.bind(py)).unwrap();
             assert_eq!(normalized["clan"], json!("toobig-@"));
+            assert_eq!(
+                normalized["clan_summary"],
+                json!("[bold]Large module[/bold]")
+            );
             assert_eq!(
                 normalized["agent_name"],
                 json!("split_file.src_lib.a1b2")

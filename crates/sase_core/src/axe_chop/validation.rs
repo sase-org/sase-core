@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use regex::Regex;
@@ -8,6 +8,8 @@ use super::wire::{
     ChopEngineError, ChopLaunchProposalWire, ChopResultDocumentWire,
     ChopResultStatusWire, ProposalWaitOnWire, CHOP_RESULT_SCHEMA_VERSION,
 };
+
+const CLAN_SUMMARY_MAX_BYTES: usize = 32 * 1024;
 
 /// Parse and validate one versioned chop result JSON document.
 pub fn parse_chop_result(
@@ -105,8 +107,26 @@ pub fn validate_chop_result(
 
     let mut prior_ids = Vec::new();
     let mut all_ids = BTreeSet::new();
+    let mut clan_summaries: BTreeMap<&str, (&str, usize)> = BTreeMap::new();
     for (index, proposal) in result.proposed_launches.iter().enumerate() {
         validate_chop_proposal(proposal, index, &prior_ids)?;
+        if let (Some(clan), Some(summary)) =
+            (proposal.clan.as_deref(), proposal.clan_summary.as_deref())
+        {
+            if let Some((agreed, first_index)) = clan_summaries.get(clan) {
+                if summary != *agreed {
+                    return Err(ChopEngineError::new(
+                        "conflicting_clan_summary",
+                        format!("$.proposed_launches[{index}].clan_summary"),
+                        format!(
+                            "clan summary for raw clan `{clan}` conflicts with proposal {first_index}"
+                        ),
+                    ));
+                }
+            } else {
+                clan_summaries.insert(clan, (summary, index));
+            }
+        }
         if let Some(id) = proposal.id.as_ref() {
             if !all_ids.insert(id.clone()) {
                 return Err(ChopEngineError::new(
@@ -208,6 +228,19 @@ pub fn validate_chop_proposal(
         &format!("{base}.clan"),
         "agent clan template or reference",
     )?;
+    if let Some(summary) = proposal.clan_summary.as_deref() {
+        validate_literal_clan_summary(
+            summary,
+            &format!("{base}.clan_summary"),
+        )?;
+        if proposal.clan.is_none() {
+            return Err(ChopEngineError::new(
+                "clan_summary_requires_clan",
+                format!("{base}.clan_summary"),
+                "clan_summary is only valid on a clan-scoped proposal",
+            ));
+        }
+    }
     validate_optional_token(
         proposal.tribe.as_deref(),
         &format!("{base}.tribe"),
@@ -288,6 +321,48 @@ pub fn validate_chop_proposal(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_literal_clan_summary(
+    value: &str,
+    path: &str,
+) -> Result<(), ChopEngineError> {
+    if value.trim().is_empty() {
+        return Err(ChopEngineError::new(
+            "blank_value",
+            path,
+            "clan summary must not be blank",
+        ));
+    }
+    if value.contains('\0') {
+        return Err(ChopEngineError::new(
+            "invalid_clan_summary",
+            path,
+            "clan summary must not contain NUL bytes",
+        ));
+    }
+    if value.len() > CLAN_SUMMARY_MAX_BYTES {
+        return Err(ChopEngineError::new(
+            "clan_summary_too_large",
+            path,
+            format!("clan summary must not exceed {CLAN_SUMMARY_MAX_BYTES} UTF-8 bytes"),
+        ));
+    }
+    if value.contains("]]") {
+        return Err(ChopEngineError::new(
+            "unrepresentable_clan_summary",
+            path,
+            "clan summary must not contain the `]]` text-block terminator",
+        ));
+    }
+    if value.contains('+') {
+        return Err(ChopEngineError::new(
+            "unrepresentable_clan_summary",
+            path,
+            "clan summary must not contain `+`, which xprompt argument decoding changes to a space",
+        ));
     }
     Ok(())
 }

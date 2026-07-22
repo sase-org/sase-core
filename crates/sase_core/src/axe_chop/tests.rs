@@ -59,7 +59,8 @@ fn clan_scoped_proposals_round_trip_without_changing_legacy_proposals() {
                     "prompt": "Split the file.",
                     "workspace": "gh:sase-org/sase",
                     "agent_name": "split_file.src_lib.rs.a1b2",
-                    "clan": "toobig-@"
+                    "clan": "toobig-@",
+                    "clan_summary": "[bold]Large modules[/bold]\nSplit by responsibility."
                 },
                 {
                     "prompt": "Legacy launch.",
@@ -75,10 +76,153 @@ fn clan_scoped_proposals_round_trip_without_changing_legacy_proposals() {
         parsed.proposed_launches[0].clan.as_deref(),
         Some("toobig-@")
     );
+    assert_eq!(
+        parsed.proposed_launches[0].clan_summary.as_deref(),
+        Some("[bold]Large modules[/bold]\nSplit by responsibility.")
+    );
     assert_eq!(parsed.proposed_launches[1].clan, None);
+    assert_eq!(parsed.proposed_launches[1].clan_summary, None);
     let encoded = serde_json::to_value(&parsed).unwrap();
     assert_eq!(encoded["proposed_launches"][0]["clan"], json!("toobig-@"));
+    assert_eq!(
+        encoded["proposed_launches"][0]["clan_summary"],
+        json!("[bold]Large modules[/bold]\nSplit by responsibility.")
+    );
     assert_eq!(encoded["proposed_launches"][1]["clan"], json!(null));
+    assert!(encoded["proposed_launches"][1]
+        .as_object()
+        .is_some_and(|proposal| !proposal.contains_key("clan_summary")));
+}
+
+#[test]
+fn clan_summary_validation_is_field_specific_and_text_block_safe() {
+    let valid_boundary = "é".repeat(16_384);
+    parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "proposed_launches": [{
+                "prompt": "Do work.",
+                "workspace": "git:sase",
+                "agent_name": "worker",
+                "clan": "research",
+                "clan_summary": valid_boundary
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let invalid = [
+        (json!("  \n\t"), "blank_value"),
+        (json!("contains\u{0000}nul"), "invalid_clan_summary"),
+        (json!("x".repeat(32 * 1024 + 1)), "clan_summary_too_large"),
+        (json!("closes ]] early"), "unrepresentable_clan_summary"),
+        (json!("one+two"), "unrepresentable_clan_summary"),
+    ];
+    for (summary, expected_code) in invalid {
+        let error = parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "proposed_launches": [{
+                    "prompt": "Do work.",
+                    "workspace": "git:sase",
+                    "agent_name": "worker",
+                    "clan": "research",
+                    "clan_summary": summary
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        assert_eq!(error.path, "$.proposed_launches[0].clan_summary");
+    }
+
+    let missing_clan = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "proposed_launches": [{
+                "prompt": "Do work.",
+                "workspace": "git:sase",
+                "clan_summary": "No clan"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(missing_clan.code, "clan_summary_requires_clan");
+    assert_eq!(missing_clan.path, "$.proposed_launches[0].clan_summary");
+}
+
+#[test]
+fn clan_summaries_agree_per_raw_clan_before_launch() {
+    parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "proposed_launches": [
+                {
+                    "prompt": "Research first.",
+                    "workspace": "git:sase",
+                    "agent_name": "first",
+                    "clan": "research-@",
+                    "clan_summary": "[bold]Research[/bold]"
+                },
+                {
+                    "prompt": "Research second.",
+                    "workspace": "git:sase",
+                    "agent_name": "second",
+                    "clan": "research-@"
+                },
+                {
+                    "prompt": "Research third.",
+                    "workspace": "git:sase",
+                    "agent_name": "third",
+                    "clan": "research-@",
+                    "clan_summary": "[bold]Research[/bold]"
+                },
+                {
+                    "prompt": "Review independently.",
+                    "workspace": "git:sase",
+                    "agent_name": "reviewer",
+                    "clan": "review-@",
+                    "clan_summary": "[italic]Review[/italic]"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let conflict = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "proposed_launches": [
+                {
+                    "prompt": "Research first.",
+                    "workspace": "git:sase",
+                    "agent_name": "first",
+                    "clan": "research-@",
+                    "clan_summary": "Research"
+                },
+                {
+                    "prompt": "Research second.",
+                    "workspace": "git:sase",
+                    "agent_name": "second",
+                    "clan": "research-@",
+                    "clan_summary": "Different"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(conflict.code, "conflicting_clan_summary");
+    assert_eq!(conflict.path, "$.proposed_launches[1].clan_summary");
 }
 
 #[test]

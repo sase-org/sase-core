@@ -66,6 +66,8 @@ pub struct ChopLaunchProposalWire {
     pub agent_name: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan_summary: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
     #[serde(default)]
