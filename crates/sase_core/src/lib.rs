@@ -35,6 +35,7 @@ pub mod project_spec;
 pub mod prompt_literals;
 pub mod prompt_stash;
 pub mod query;
+pub mod runner_limit_override;
 pub mod sections;
 pub mod status;
 pub mod suffix;
@@ -409,6 +410,13 @@ pub use query::{
     project_dir_name, strip_reverted_suffix, tokenize_query, QueryCorpus,
     QueryErrorWire, QueryEvaluationContext, QueryExprWire, QueryProgram,
     QueryProgramWire, QueryTokenKind, QueryTokenWire,
+};
+pub use runner_limit_override::{
+    clear_runner_limit_override, get_runner_limit_override,
+    runner_limit_override_state_path, set_runner_limit_override_relative,
+    set_runner_limit_override_until, RunnerLimitOverrideError,
+    RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
+    RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
 };
 pub use status::{
     apply_status_update as apply_status_update_lines, get_next_suffix_number,

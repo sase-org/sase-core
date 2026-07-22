@@ -97,6 +97,10 @@
 //! - `effort_override_set_relative(sase_home: str, effort: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `effort_override_set_until(sase_home: str, effort: str, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `effort_override_clear(sase_home: str) -> bool`
+//! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
+//! - `runner_limit_override_set_relative(sase_home: str, limit: int, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `runner_limit_override_set_until(sase_home: str, limit: int, expires_at: float, source: str, now: float | None = None) -> dict`
+//! - `runner_limit_override_clear(sase_home: str) -> bool`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `parse_chop_result(document: str) -> dict`
 //! - `validate_chop_result(result: dict) -> dict`
@@ -365,6 +369,13 @@ use sase_core::prompt_stash::{
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
     QueryCorpus as CoreQueryCorpus, QueryProgram as CoreQueryProgram,
+};
+use sase_core::runner_limit_override::{
+    clear_runner_limit_override as core_clear_runner_limit_override,
+    get_runner_limit_override as core_get_runner_limit_override,
+    set_runner_limit_override_relative as core_set_runner_limit_override_relative,
+    set_runner_limit_override_until as core_set_runner_limit_override_until,
+    RunnerLimitOverrideError as RunnerLimitOverrideDomainError,
 };
 use sase_core::status::{
     apply_status_update as core_apply_status_update,
@@ -3969,6 +3980,110 @@ fn py_effort_override_clear(sase_home: &str) -> PyResult<bool> {
         .map_err(effort_override_error_to_pyerr)
 }
 
+// --- Temporary maximum-running-agents override -----------------------
+
+fn runner_limit_override_error_to_pyerr(
+    err: RunnerLimitOverrideDomainError,
+) -> PyErr {
+    match err {
+        RunnerLimitOverrideDomainError::Validation(message) => {
+            PyValueError::new_err(message)
+        }
+        RunnerLimitOverrideDomainError::LockTimeout => {
+            PyTimeoutError::new_err(err.to_string())
+        }
+        RunnerLimitOverrideDomainError::Io(_)
+        | RunnerLimitOverrideDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "runner_limit_override_wire_schema_version")]
+fn py_runner_limit_override_wire_schema_version() -> u32 {
+    sase_core::RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "runner_limit_override_get",
+    signature = (sase_home, now = None)
+)]
+fn py_runner_limit_override_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_get_runner_limit_override(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(runner_limit_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "runner_limit_override_set_relative",
+    signature = (
+        sase_home,
+        limit,
+        source,
+        duration_seconds = None,
+        now = None
+    )
+)]
+fn py_runner_limit_override_set_relative<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    limit: u64,
+    source: &str,
+    duration_seconds: Option<f64>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_runner_limit_override_relative(
+        &PathBuf::from(sase_home),
+        limit,
+        duration_seconds,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(runner_limit_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "runner_limit_override_set_until",
+    signature = (sase_home, limit, expires_at, source, now = None)
+)]
+fn py_runner_limit_override_set_until<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    limit: u64,
+    expires_at: f64,
+    source: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_runner_limit_override_until(
+        &PathBuf::from(sase_home),
+        limit,
+        expires_at,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(runner_limit_override_error_to_pyerr)?;
+    effort_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(name = "runner_limit_override_clear")]
+fn py_runner_limit_override_clear(sase_home: &str) -> PyResult<bool> {
+    core_clear_runner_limit_override(&PathBuf::from(sase_home))
+        .map_err(runner_limit_override_error_to_pyerr)
+}
+
 #[pyfunction]
 #[pyo3(
     name = "resolve_effective_effort",
@@ -4826,6 +4941,17 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_effort_override_set_relative, m)?)?;
     m.add_function(wrap_pyfunction!(py_effort_override_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_effort_override_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_runner_limit_override_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_runner_limit_override_get, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_runner_limit_override_set_relative,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_runner_limit_override_set_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_runner_limit_override_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_layout_candidates, m)?)?;
@@ -4973,6 +5099,84 @@ mod tests {
                 &home,
                 "turbo",
                 2.0,
+                "test",
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn runner_limit_override_bindings_round_trip_and_replace() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_runner_limit_override_wire_schema_version(),
+                sase_core::RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION
+            );
+            let first = py_runner_limit_override_set_relative(
+                py,
+                &home,
+                1,
+                "binding-test",
+                Some(900.0),
+                Some(now),
+            )
+            .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            assert_eq!(first_value["limit"], json!(1));
+            assert_eq!(first_value["expires_at"], json!(now + 900.0));
+
+            let replacement = py_runner_limit_override_set_until(
+                py,
+                &home,
+                12,
+                now + 60.0,
+                "binding-test",
+                Some(now),
+            )
+            .unwrap();
+            let replacement_value =
+                py_to_json_value(replacement.bind(py)).unwrap();
+            assert_eq!(replacement_value["limit"], json!(12));
+
+            let loaded =
+                py_runner_limit_override_get(py, &home, Some(now)).unwrap();
+            assert_eq!(
+                py_to_json_value(loaded.bind(py)).unwrap(),
+                replacement_value
+            );
+            assert!(py_runner_limit_override_clear(&home).unwrap());
+            assert!(!py_runner_limit_override_clear(&home).unwrap());
+        });
+    }
+
+    #[test]
+    fn runner_limit_override_binding_rejects_invalid_values() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        Python::with_gil(|py| {
+            let error = py_runner_limit_override_set_relative(
+                py,
+                &home,
+                0,
+                "test",
+                None,
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = py_runner_limit_override_set_until(
+                py,
+                &home,
+                1,
+                1.0,
                 "test",
                 Some(1.0),
             )
