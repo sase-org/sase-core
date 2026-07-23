@@ -30,8 +30,8 @@ const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
 
 const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
-const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `medium` when the phase is potentially a lot of work and justifies its own plan file, `large` when that plan would itself be large enough for an epic tier, and `small` otherwise. Medium and large phases receive `#plan`; a large phase without an explicit `model` uses `@smartest`.";
-const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Only set this explicitly when the user's prompt requested a specific model, or when this phase's agent does not do real consequential work (for example, a phase that exercises or tests the feature's own functionality). Otherwise omit it so size-derived model routing applies (`@smartest` for large phases and the configured `@phase_worker` role alias otherwise).";
+const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `xsmall` only for the very simplest tasks that need almost no reasoning, such as launching SASE agents purely to observe their output while testing a SASE agent feature. Use `small` for focused work implemented directly and `medium` for substantial work still implemented directly from its phase description. Use `large` for work that needs a separate planning handoff and may itself justify an epic plan. Use `xlarge` rarely: it admits the task is too large to plan effectively alone, or deliberately defers planning part of a feature until other parts are implemented; choose it only when fairly confident the phase agent will itself author an epic plan. Only `large` and `xlarge` phases receive `#plan`. Without an explicit `model`, the five sizes route through `@xsmall_phase_worker`, `@small_phase_worker`, `@medium_phase_worker`, `@smart`, and `@smartest`, respectively.";
+const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Set this explicitly only when the user's prompt requested a specific model; an explicit model overrides size-derived routing for every size. Otherwise omit it. For a phase that only exercises or observes a SASE agent feature and does no consequential work, use `size: xsmall` instead of a cheap model override.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanTier {
@@ -240,7 +240,7 @@ pub fn plan_frontmatter_schema(
             ),
             field_spec(
                 "phases[].size",
-                "small | medium | large",
+                "xsmall | small | medium | large | xlarge",
                 true,
                 PHASE_SIZE_DESCRIPTION,
                 json!("small"),
@@ -700,7 +700,7 @@ impl<'a> Validator<'a> {
             let (severity, message) = match self.mode {
                 PlanValidationMode::Authoring => (
                     "error",
-                    "required phase field `size` is missing; expected `small`, `medium`, or `large`",
+                    "required phase field `size` is missing; expected `xsmall`, `small`, `medium`, `large`, or `xlarge`",
                 ),
                 PlanValidationMode::Launch => (
                     "warning",
@@ -725,7 +725,7 @@ impl<'a> Validator<'a> {
                 "phase-size-invalid",
                 &field_path,
                 format!(
-                    "phase `size` must be `small`, `medium`, or `large`, found {}",
+                    "phase `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found {}",
                     yaml_type_name(value)
                 ),
                 index,
@@ -733,13 +733,14 @@ impl<'a> Validator<'a> {
             return String::new();
         };
         let value = value.trim();
-        if !matches!(value, "small" | "medium" | "large") {
+        if !matches!(value, "xsmall" | "small" | "medium" | "large" | "xlarge")
+        {
             self.push(
                 "error",
                 "phase-size-invalid",
                 &field_path,
                 format!(
-                    "phase `size` must be `small`, `medium`, or `large`, found `{value}`"
+                    "phase `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found `{value}`"
                 ),
                 index,
             );
@@ -1565,6 +1566,18 @@ mod tests {
                 assert_eq!(codes(&result), ["phase-size-invalid"]);
             }
         }
+
+        for valid_size in ["xsmall", "small", "medium", "large", "xlarge"] {
+            let valid = missing.replace(
+                "    description: Core section resumes legacy work.\n",
+                &format!(
+                    "    description: Core section resumes legacy work.\n    size: {valid_size}\n"
+                ),
+            );
+            let result = plan_validate(&valid, "epic").unwrap();
+            assert!(result.ok, "{valid_size}: {:?}", result.diagnostics);
+            assert_eq!(result.plan.unwrap().phases[0].size, valid_size);
+        }
     }
 
     #[test]
@@ -1698,7 +1711,10 @@ mod tests {
             .unwrap();
         assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
         assert!(tale.iter().all(|field| field.name != "prompt"));
-        assert_eq!(phase_size.field_type, "small | medium | large");
+        assert_eq!(
+            phase_size.field_type,
+            "xsmall | small | medium | large | xlarge"
+        );
         assert!(phase_size.required);
         for (name, description) in [
             (

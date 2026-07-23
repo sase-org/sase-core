@@ -50,8 +50,9 @@ pub use schema::{
     changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
     issue_type_migration_sql, missing_changespec_metadata_columns,
     model_migration_sql, needs_is_ready_to_work_migration,
-    needs_issue_type_migration, needs_model_migration, needs_size_migration,
-    size_migration_sql, BEAD_SQLITE_SCHEMA,
+    needs_issue_type_migration, needs_model_migration,
+    needs_size_check_relax_migration, needs_size_migration,
+    size_check_relax_migration_sql, size_migration_sql, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{

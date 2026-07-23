@@ -31,17 +31,21 @@ pub enum BeadTierWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseSizeWire {
+    Xsmall,
     Small,
     Medium,
     Large,
+    Xlarge,
 }
 
 impl PhaseSizeWire {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Xsmall => "xsmall",
             Self::Small => "small",
             Self::Medium => "medium",
             Self::Large => "large",
+            Self::Xlarge => "xlarge",
         }
     }
 }
@@ -133,12 +137,14 @@ where
     let value = Option::<String>::deserialize(deserializer)?;
     match value.as_deref() {
         None | Some("") => Ok(None),
+        Some("xsmall") => Ok(Some(PhaseSizeWire::Xsmall)),
         Some("small") => Ok(Some(PhaseSizeWire::Small)),
         Some("medium") => Ok(Some(PhaseSizeWire::Medium)),
         Some("large") => Ok(Some(PhaseSizeWire::Large)),
+        Some("xlarge") => Ok(Some(PhaseSizeWire::Xlarge)),
         Some(value) => Err(de::Error::unknown_variant(
             value,
-            &["small", "medium", "large"],
+            &["xsmall", "small", "medium", "large", "xlarge"],
         )),
     }
 }
@@ -416,11 +422,27 @@ mod tests {
     }
 
     #[test]
-    fn phase_size_accepts_enum_values_and_rejects_plan_usage() {
-        let mut issue = phase(Some("test-0"));
-        issue.size = Some(PhaseSizeWire::Large);
-        issue.validate().unwrap();
+    fn phase_size_round_trips_all_enum_values_and_rejects_plan_usage() {
+        for (size, expected) in [
+            (PhaseSizeWire::Xsmall, "xsmall"),
+            (PhaseSizeWire::Small, "small"),
+            (PhaseSizeWire::Medium, "medium"),
+            (PhaseSizeWire::Large, "large"),
+            (PhaseSizeWire::Xlarge, "xlarge"),
+        ] {
+            let mut issue = phase(Some("test-0"));
+            issue.size = Some(size.clone());
+            issue.validate().unwrap();
 
+            let value = serde_json::to_value(&issue).unwrap();
+            assert_eq!(value["size"], expected);
+            let round_tripped: IssueWire =
+                serde_json::from_value(value).unwrap();
+            assert_eq!(round_tripped.size, Some(size));
+        }
+
+        let mut issue = phase(Some("test-0"));
+        issue.size = Some(PhaseSizeWire::Xlarge);
         issue.issue_type = IssueTypeWire::Plan;
         issue.parent_id = None;
         let error = issue.validate().unwrap_err();
