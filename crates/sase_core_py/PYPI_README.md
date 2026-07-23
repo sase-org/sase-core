@@ -22,6 +22,15 @@ without a local Rust toolchain.
 - `parse_git_name_status_z`, `parse_git_branch_name`,
   `derive_git_workspace_name`, `parse_git_conflicted_files`,
   `parse_git_local_changes` — git query parsers.
+- `axe_status_wire_schema_version()` — portable AXE status contract version.
+- `classify_axe_status(request)` — pure AXE lifecycle and worker-health
+  classification from already-collected host observations.
+
+`classify_axe_status` performs no filesystem, process, or clock access. Python
+supplies lock/PID liveness, marker ages, runner occupancy, lumberjack reports,
+and any typed collection error; Rust validates and normalizes those
+observations into the stable status snapshot shared by human and JSON
+frontends.
 
 ## Source
 

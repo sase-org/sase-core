@@ -117,6 +117,8 @@
 //! - `expand_chop_targets(request: dict) -> dict`
 //! - `parse_chop_duration(value: str) -> int`
 //! - `validate_axe_config(request: dict) -> list[dict]`
+//! - `axe_status_wire_schema_version() -> int`
+//! - `classify_axe_status(request: dict) -> dict`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
@@ -272,6 +274,10 @@ use sase_core::axe_chop::{
     ChopResultDocumentWire, ChopTargetExpansionRequestWire,
     CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
     CHOP_STATE_SCHEMA_VERSION,
+};
+use sase_core::axe_status::{
+    classify_axe_status as core_classify_axe_status, AxeStatusError,
+    AxeStatusRequestWire, AXE_STATUS_SCHEMA_VERSION,
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
@@ -3596,6 +3602,42 @@ fn py_placeholder_spans(py: Python<'_>, text: &str) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+// --- Portable AXE runtime status -----------------------------------------
+
+fn axe_status_error_to_pyerr(error: AxeStatusError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Return the supported AXE runtime status wire schema version.
+#[pyfunction]
+#[pyo3(name = "axe_status_wire_schema_version")]
+fn py_axe_status_wire_schema_version() -> u32 {
+    AXE_STATUS_SCHEMA_VERSION
+}
+
+/// Classify already-collected AXE runtime observations without host I/O.
+#[pyfunction]
+#[pyo3(name = "classify_axe_status")]
+fn py_classify_axe_status<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AxeStatusRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid AxeStatusRequestWire dict: {error}"
+            ))
+        })?;
+    let snapshot = py
+        .allow_threads(|| core_classify_axe_status(&request))
+        .map_err(axe_status_error_to_pyerr)?;
+    let value = serde_json::to_value(snapshot).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Axe chop engine bindings --------------------------------------------
 
 fn chop_error_to_pyerr(error: ChopEngineError) -> PyErr {
@@ -5010,6 +5052,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_axe_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_result_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_state_schema_version, m)?)?;
@@ -5313,6 +5357,188 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    fn healthy_axe_status_request_json() -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "generated_at": "2026-07-23T12:00:00-04:00",
+            "desired_state": {
+                "state": "running",
+                "source": "binding-test",
+                "timestamp": "2026-07-23T11:55:00-04:00"
+            },
+            "orchestrator": {
+                "lifecycle_lock_held": true,
+                "lock_holder": {"pid": 100, "live": true},
+                "orchestrator_pid_file": {"pid": 100, "live": true},
+                "legacy_pid_file": {"pid": null, "live": null}
+            },
+            "maintenance": null,
+            "hook_runners": {"current": 1, "maximum": 3},
+            "agent_runners": {"current": 2, "maximum": 4},
+            "lumberjacks": [{
+                "name": "hooks",
+                "configured": true,
+                "interval_seconds": 60,
+                "configured_chops": ["zeta", "alpha", "zeta"],
+                "recorded_pid": 200,
+                "reported_state": "running",
+                "process_live": true,
+                "started_at": "2026-07-23T11:50:00-04:00",
+                "start_age_seconds": 600,
+                "heartbeat_at": "2026-07-23T11:59:30-04:00",
+                "heartbeat_age_seconds": 30,
+                "cycles_run": 10,
+                "errors_encountered": 2,
+                "uptime_seconds": 600
+            }],
+            "latest_lifecycle_event": {
+                "event": "start",
+                "timestamp": "2026-07-23T11:50:00-04:00",
+                "source": "binding-test",
+                "outcome": "started",
+                "success": true,
+                "reason": null,
+                "orchestrator_pid": 100,
+                "age_seconds": 600
+            },
+            "collection_error": null
+        })
+    }
+
+    #[test]
+    fn axe_status_binding_returns_exact_plain_python_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_axe_status_wire_schema_version(),
+                AXE_STATUS_SCHEMA_VERSION
+            );
+            let request_obj =
+                json_value_to_py(py, &healthy_axe_status_request_json())
+                    .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_axe_status(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "schema_version": 1,
+                    "generated_at": "2026-07-23T12:00:00-04:00",
+                    "state": "running",
+                    "health": "healthy",
+                    "summary": "AXE is running and healthy.",
+                    "exit_code": 0,
+                    "desired_state": {
+                        "state": "running",
+                        "source": "binding-test",
+                        "timestamp": "2026-07-23T11:55:00-04:00"
+                    },
+                    "orchestrator": {
+                        "state": "running",
+                        "coherence": "coherent",
+                        "live_pids": [100],
+                        "lifecycle_lock_held": true,
+                        "lock_holder": {"pid": 100, "live": true},
+                        "orchestrator_pid_file": {"pid": 100, "live": true},
+                        "legacy_pid_file": {"pid": null, "live": null}
+                    },
+                    "maintenance": null,
+                    "hook_runners": {"current": 1, "maximum": 3},
+                    "agent_runners": {"current": 2, "maximum": 4},
+                    "lumberjacks": [{
+                        "name": "hooks",
+                        "state": "running",
+                        "stale_threshold_seconds": 180,
+                        "configured": true,
+                        "interval_seconds": 60,
+                        "configured_chops": ["alpha", "zeta"],
+                        "recorded_pid": 200,
+                        "reported_state": "running",
+                        "process_live": true,
+                        "started_at": "2026-07-23T11:50:00-04:00",
+                        "start_age_seconds": 600,
+                        "heartbeat_at": "2026-07-23T11:59:30-04:00",
+                        "heartbeat_age_seconds": 30,
+                        "cycles_run": 10,
+                        "errors_encountered": 2,
+                        "uptime_seconds": 600
+                    }],
+                    "latest_lifecycle_event": {
+                        "event": "start",
+                        "timestamp": "2026-07-23T11:50:00-04:00",
+                        "source": "binding-test",
+                        "outcome": "started",
+                        "success": true,
+                        "reason": null,
+                        "orchestrator_pid": 100,
+                        "age_seconds": 600
+                    },
+                    "issues": [],
+                    "collection_error": null
+                })
+            );
+            assert!(result.bind(py).downcast::<PyDict>().is_ok());
+            let keys = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                keys,
+                vec![
+                    "schema_version",
+                    "generated_at",
+                    "state",
+                    "health",
+                    "summary",
+                    "exit_code",
+                    "desired_state",
+                    "orchestrator",
+                    "maintenance",
+                    "hook_runners",
+                    "agent_runners",
+                    "lumberjacks",
+                    "latest_lifecycle_event",
+                    "issues",
+                    "collection_error",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn axe_status_binding_maps_schema_structural_and_unknown_errors_to_value_error(
+    ) {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mut schema = healthy_axe_status_request_json();
+            schema["schema_version"] = json!(2);
+
+            let mut structural = healthy_axe_status_request_json();
+            structural["lumberjacks"][0]["interval_seconds"] = JsonValue::Null;
+
+            let mut unknown = healthy_axe_status_request_json();
+            unknown
+                .as_object_mut()
+                .unwrap()
+                .insert("surprise".to_string(), json!(true));
+
+            for (value, expected) in [
+                (schema, "schema_version_mismatch"),
+                (structural, "missing_interval"),
+                (unknown, "unknown field `surprise`"),
+            ] {
+                let request_obj = json_value_to_py(py, &value).unwrap();
+                let request =
+                    request_obj.bind(py).downcast::<PyDict>().unwrap();
+                let error = py_classify_axe_status(py, request).unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py));
+                assert!(error.to_string().contains(expected), "{}", error);
+            }
         });
     }
 

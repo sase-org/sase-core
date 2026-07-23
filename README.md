@@ -207,15 +207,23 @@ JSON object) are absorbed silently and counted on
 
 ## Python binding (`sase_core_rs`)
 
-`crates/sase_core_py` is a `cdylib` that builds the Python extension module `sase_core_rs`. It exposes one function:
+`crates/sase_core_py` is a `cdylib` that builds the Python extension module
+`sase_core_rs`. Among its JSON-shaped APIs are:
 
 ```python
 sase_core_rs.parse_project_bytes(path: str, data: bytes) -> list[dict]
+sase_core_rs.axe_status_wire_schema_version() -> int
+sase_core_rs.classify_axe_status(request: dict) -> dict
 ```
 
 The result is plain Python `dict`/`list`/`str`/`int`/`bool`/`None` mirroring the `ChangeSpecWire` JSON shape — no PyO3
 classes leak across the boundary in Phase 1. A Rust `ParseErrorWire` is surfaced as a Python `ValueError` whose message
 is the wire error's `Display` form (`"kind: message (file_path)"`).
+
+For AXE status, Python supplies already-collected lock, process, marker,
+runner, and lumberjack observations. Rust performs pure validation,
+normalization, and classification without filesystem or process I/O and
+returns only plain Python dictionaries, lists, scalars, and `None`.
 
 Building the wheel requires a Python interpreter on the host (`maturin develop` or `maturin build` from
 `crates/sase_core_py`). It is opt-in: the Python `sase` install does not require Rust, and `SASE_CORE_BACKEND=python`

@@ -19,6 +19,7 @@ pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
 pub mod axe_chop;
+pub mod axe_status;
 pub mod bead;
 pub mod commit_footer;
 pub mod config;
@@ -184,6 +185,18 @@ pub use axe_chop::{
     ChopTargetInstanceWire, ChopTargetSourceFiltersWire, ChopTriggerConfigWire,
     ProposalWaitOnWire, CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
     CHOP_STATE_SCHEMA_VERSION,
+};
+pub use axe_status::{
+    classify_axe_status, AxeDesiredStateValueWire, AxeDesiredStateWire,
+    AxeLifecycleEventKindWire, AxeLifecycleEventWire,
+    AxeLumberjackObservationWire, AxeLumberjackReportedStateWire,
+    AxeLumberjackStateWire, AxeLumberjackStatusWire, AxeMaintenanceWire,
+    AxeOrchestratorCoherenceWire, AxeOrchestratorObservationWire,
+    AxeOrchestratorStateWire, AxeOrchestratorStatusWire,
+    AxeProcessObservationWire, AxeRunnerOccupancyWire,
+    AxeStatusCollectionErrorWire, AxeStatusError, AxeStatusHealthWire,
+    AxeStatusIssueSeverityWire, AxeStatusIssueWire, AxeStatusRequestWire,
+    AxeStatusSnapshotWire, AxeStatusStateWire, AXE_STATUS_SCHEMA_VERSION,
 };
 pub use bead::{
     add_dependency as bead_add_dependency,
