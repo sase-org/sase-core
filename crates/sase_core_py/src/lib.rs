@@ -138,6 +138,7 @@
 //!   runtime, project, and ChangeSpec work rollups)
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
 //!   `-> dict` (project-filterable skills and memories plus global documents)
+//! - `compose_snippet_catalog(templates: dict[str, str]) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -315,6 +316,7 @@ use sase_core::commit_footer::{
     update_commit_footer as core_update_commit_footer, CommitFooterUpdateWire,
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
+use sase_core::compose_snippet_catalog as core_compose_snippet_catalog;
 use sase_core::config::{
     compose_axe_config as core_compose_axe_config,
     config_field_model as core_config_field_model,
@@ -548,6 +550,19 @@ fn py_machine_hood_of(
     known_machines: Vec<String>,
 ) -> Option<String> {
     core_machine_hood_of(name, &known_machines)
+}
+
+#[pyfunction]
+#[pyo3(name = "compose_snippet_catalog")]
+fn py_compose_snippet_catalog<'py>(
+    py: Python<'py>,
+    templates: BTreeMap<String, String>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let composed = core_compose_snippet_catalog(&templates);
+    let result = PyDict::new_bound(py);
+    result.set_item("templates", composed.templates)?;
+    result.set_item("alias_provenance", composed.alias_provenance)?;
+    Ok(result)
 }
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
@@ -4891,6 +4906,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_qualify_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_strip_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_machine_hood_of, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
@@ -5212,6 +5228,46 @@ mod tests {
                 Some("zeus".to_string())
             );
             assert_eq!(py_machine_hood_of("foo", known), None);
+        });
+    }
+
+    #[test]
+    fn compose_snippet_catalog_binding_returns_plain_dict_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_compose_snippet_catalog, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            let templates = PyDict::new_bound(py);
+            templates.set_item("foo", "foo #[helper] $1$0").unwrap();
+            templates.set_item("helper", "helper $1$0").unwrap();
+
+            let result = module
+                .getattr("compose_snippet_catalog")
+                .unwrap()
+                .call1((templates,))
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
+
+            assert_eq!(
+                value,
+                json!({
+                    "templates": {
+                        "Foo": "Foo helper $1 $2$0",
+                        "Helper": "Helper $1$0",
+                        "foo": "foo helper $1 $2$0",
+                        "helper": "helper $1$0"
+                    },
+                    "alias_provenance": {
+                        "Foo": "foo",
+                        "Helper": "helper"
+                    }
+                })
+            );
         });
     }
 

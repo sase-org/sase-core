@@ -480,6 +480,7 @@ pub use wire::{
     TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 pub use xprompt_catalog::{
-    load_editor_snippet_catalog, load_editor_xprompt_catalog,
+    compose_snippet_catalog, load_editor_snippet_catalog,
+    load_editor_xprompt_catalog, ComposedSnippetCatalog,
     XpromptCatalogLoadError, XpromptCatalogLoadOptions,
 };

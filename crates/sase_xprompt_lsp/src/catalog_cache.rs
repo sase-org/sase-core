@@ -1008,7 +1008,7 @@ mod tests {
         fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("nativezz.md"),
-            "---\nsnippet: nativezz\ninput: {target: word}\n---\nFix {{ target }}.",
+            "---\nsnippet: nativezz\ninput: {target: word}\n---\nfix {{ target }}.",
         )
         .unwrap();
         let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
@@ -1025,11 +1025,20 @@ mod tests {
             .await
             .unwrap();
 
-        let entry = entries
+        let lower = entries
             .iter()
             .find(|entry| entry.trigger == "nativezz")
             .unwrap();
-        assert_eq!(entry.template, "Fix $1.$0");
+        assert_eq!(lower.template, "fix $1.$0");
+        let capitalized = entries
+            .iter()
+            .find(|entry| entry.trigger == "Nativezz")
+            .unwrap();
+        assert_eq!(capitalized.template, "Fix $1.$0");
+        assert_eq!(capitalized.source, lower.source);
+        assert_eq!(capitalized.xprompt_name, lower.xprompt_name);
+        assert_eq!(capitalized.description, lower.description);
+        assert_eq!(capitalized.source_path_display, lower.source_path_display);
     }
 
     fn root_with_rust_entry() -> tempfile::TempDir {

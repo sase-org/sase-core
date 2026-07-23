@@ -50,6 +50,12 @@ impl XpromptCatalogLoadOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedSnippetCatalog {
+    pub templates: BTreeMap<String, String>,
+    pub alias_provenance: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogInput {
     name: String,
     type_name: String,
@@ -243,7 +249,15 @@ pub fn load_editor_snippet_catalog(
         .iter()
         .map(|(trigger, entry)| (trigger.clone(), entry.template.clone()))
         .collect::<BTreeMap<_, _>>();
-    for (trigger, template) in resolve_snippet_references(&raw_templates) {
+    let composed = compose_snippet_catalog(&raw_templates);
+    for (alias, source) in &composed.alias_provenance {
+        if let Some(source_entry) = entries_by_trigger.get(source).cloned() {
+            let mut alias_entry = source_entry;
+            alias_entry.trigger = alias.clone();
+            entries_by_trigger.insert(alias.clone(), alias_entry);
+        }
+    }
+    for (trigger, template) in composed.templates {
         if let Some(entry) = entries_by_trigger.get_mut(&trigger) {
             entry.template = template;
         }
@@ -593,6 +607,39 @@ fn resolve_snippet_references(
         .keys()
         .map(|trigger| (trigger.clone(), resolver.resolve(trigger)))
         .collect()
+}
+
+pub fn compose_snippet_catalog(
+    explicit_templates: &BTreeMap<String, String>,
+) -> ComposedSnippetCatalog {
+    let resolved_explicit = resolve_snippet_references(explicit_templates);
+    let mut combined_templates = resolved_explicit.clone();
+    let mut alias_provenance = BTreeMap::new();
+
+    for (trigger, template) in &resolved_explicit {
+        let alias = uppercase_first_scalar(trigger);
+        if alias == *trigger || combined_templates.contains_key(&alias) {
+            continue;
+        }
+        combined_templates
+            .insert(alias.clone(), uppercase_first_scalar(template));
+        alias_provenance.insert(alias, trigger.clone());
+    }
+
+    ComposedSnippetCatalog {
+        templates: resolve_snippet_references(&combined_templates),
+        alias_provenance,
+    }
+}
+
+fn uppercase_first_scalar(value: &str) -> String {
+    let Some(first) = value.chars().next() else {
+        return String::new();
+    };
+    let mut uppercased = String::with_capacity(value.len());
+    uppercased.extend(first.to_uppercase());
+    uppercased.push_str(&value[first.len_utf8()..]);
+    uppercased
 }
 
 struct SnippetReferenceResolver<'a> {
@@ -2662,6 +2709,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            xprompts.join("capital.md"),
+            "---\nsnippet: Review\ndescription: Explicit capitalized review\n---\nAuthored capital review",
+        )
+        .unwrap();
+        fs::write(
             root.join("sase/sase.yml"),
             "ace:\n  snippets:\n    review: User review $0\n    plan: Plan $1$0\n",
         )
@@ -2684,7 +2736,15 @@ mod tests {
         assert!(response.stats.total_count >= 2);
         assert_eq!(by_trigger["review"].source, "user_config");
         assert_eq!(by_trigger["review"].template, "User review $0");
+        assert_eq!(by_trigger["Review"].source, "xprompt");
+        assert_eq!(by_trigger["Review"].template, "Authored capital review$0");
+        assert_eq!(
+            by_trigger["Review"].description.as_deref(),
+            Some("Explicit capitalized review")
+        );
         assert_eq!(by_trigger["plan"].template, "Plan $1$0");
+        assert_eq!(by_trigger["Plan"].template, "Plan $1$0");
+        assert_eq!(by_trigger["Plan"].source, "user_config");
         assert!(!by_trigger.contains_key("bad-trigger!"));
     }
 
@@ -2696,7 +2756,7 @@ mod tests {
         fs::create_dir_all(&xprompts).unwrap();
         fs::write(
             xprompts.join("fix.md"),
-            "---\nsnippet: fixit\ninput:\n  bug: word\n  area:\n    type: line\n    default: parser\n  empty:\n    type: line\n    default:\n---\nFix {{ bug }} in {{ area }}{{ empty }}. Then {2} or {3:done}.",
+            "---\nsnippet: fixit\ndescription: Fix a bug\ninput:\n  bug: word\n  area:\n    type: line\n    default: parser\n  empty:\n    type: line\n    default:\n---\nfix {{ bug }} in {{ area }}{{ empty }}. Then {2} or {3:done}.",
         )
         .unwrap();
         fs::write(
@@ -2721,10 +2781,96 @@ mod tests {
 
         assert_eq!(
             by_trigger["fixit"].template,
-            "Fix $1 in parser. Then $2 or done.$0"
+            "fix $1 in parser. Then $2 or done.$0"
         );
         assert_eq!(by_trigger["fixit"].xprompt_name.as_deref(), Some("fix"));
+        assert_eq!(
+            by_trigger["Fixit"].template,
+            "Fix $1 in parser. Then $2 or done.$0"
+        );
+        assert_eq!(by_trigger["Fixit"].source, by_trigger["fixit"].source);
+        assert_eq!(
+            by_trigger["Fixit"].xprompt_name,
+            by_trigger["fixit"].xprompt_name
+        );
+        assert_eq!(
+            by_trigger["Fixit"].description,
+            by_trigger["fixit"].description
+        );
+        assert_eq!(
+            by_trigger["Fixit"].source_path_display,
+            by_trigger["fixit"].source_path_display
+        );
+        assert_eq!(response.stats.total_count, response.entries.len() as u64);
         assert!(!by_trigger.contains_key("complex"));
+    }
+
+    #[test]
+    fn composes_capitalized_aliases_and_preserves_remaining_case() {
+        let catalog =
+            BTreeMap::from([("foo".to_string(), "foo bar BAZ".to_string())]);
+
+        let composed = compose_snippet_catalog(&catalog);
+
+        assert_eq!(composed.templates["foo"], "foo bar BAZ");
+        assert_eq!(composed.templates["Foo"], "Foo bar BAZ");
+        assert_eq!(composed.alias_provenance["Foo"], "foo");
+    }
+
+    #[test]
+    fn composes_unicode_aliases_and_handles_unchanged_leading_scalars() {
+        let catalog = BTreeMap::from([
+            ("éclair".to_string(), "élan suite".to_string()),
+            ("ßeta".to_string(), "ßeta suite".to_string()),
+            ("Already".to_string(), "already".to_string()),
+            ("1digit".to_string(), "digit".to_string()),
+            ("_private".to_string(), "private".to_string()),
+            ("empty".to_string(), String::new()),
+            ("punct".to_string(), "$1 lower$0".to_string()),
+        ]);
+
+        let composed = compose_snippet_catalog(&catalog);
+
+        assert_eq!(composed.templates["Éclair"], "Élan suite");
+        assert_eq!(composed.alias_provenance["Éclair"], "éclair");
+        assert_eq!(composed.templates["SSeta"], "SSeta suite");
+        assert_eq!(composed.alias_provenance["SSeta"], "ßeta");
+        assert!(!composed.alias_provenance.contains_key("Already"));
+        assert!(!composed.alias_provenance.contains_key("1digit"));
+        assert!(!composed.alias_provenance.contains_key("_private"));
+        assert_eq!(composed.templates["Empty"], "");
+        assert_eq!(composed.templates["Punct"], "$1 lower$0");
+    }
+
+    #[test]
+    fn explicit_capitalized_trigger_wins_alias_collision() {
+        let catalog = BTreeMap::from([
+            ("foo".to_string(), "lower source".to_string()),
+            ("Foo".to_string(), "authored capital".to_string()),
+        ]);
+
+        let composed = compose_snippet_catalog(&catalog);
+
+        assert_eq!(composed.templates["foo"], "lower source");
+        assert_eq!(composed.templates["Foo"], "authored capital");
+        assert!(composed.alias_provenance.is_empty());
+    }
+
+    #[test]
+    fn aliases_use_composed_templates_and_references_can_target_aliases() {
+        let catalog = BTreeMap::from([
+            ("base".to_string(), "base $1$0".to_string()),
+            ("wrapper".to_string(), "#[base] end $1$0".to_string()),
+            ("capital_ref".to_string(), "#[Base] then $1$0".to_string()),
+        ]);
+
+        let composed = compose_snippet_catalog(&catalog);
+
+        assert_eq!(composed.templates["Base"], "Base $1$0");
+        assert_eq!(composed.templates["wrapper"], "base $1 end $2$0");
+        assert_eq!(composed.templates["Wrapper"], "Base $1 end $2$0");
+        assert_eq!(composed.templates["capital_ref"], "Base $1 then $2$0");
+        assert_eq!(composed.templates["Capital_ref"], "Base $1 then $2$0");
     }
 
     #[test]
@@ -2827,8 +2973,8 @@ mod tests {
                     (trigger.to_string(), template.to_string())
                 })
                 .collect::<BTreeMap<_, _>>();
-            let resolved = resolve_snippet_references(&catalog);
-            assert_eq!(resolved[trigger], expected, "{trigger}");
+            let composed = compose_snippet_catalog(&catalog);
+            assert_eq!(composed.templates[trigger], expected, "{trigger}");
         }
     }
 
