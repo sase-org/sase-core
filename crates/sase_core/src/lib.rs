@@ -13,6 +13,7 @@ pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_family;
 pub mod agent_group_archive;
+pub mod agent_identity;
 pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_runtime;
@@ -103,6 +104,23 @@ pub use agent_group_archive::{
     SavedAgentGroupPageWire, SavedAgentGroupRefWire,
     SavedAgentGroupSummaryWire, SavedAgentGroupWire,
     AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+};
+pub use agent_identity::{
+    agent_link_target, agent_local_hood, agent_name_ancestors,
+    agent_name_in_hood, classify_agent_ownership, globalize_agent_name,
+    globalize_legacy_agent_name, localize_agent_name,
+    normalize_agent_archive_name, parse_agent_family_name,
+    rewrite_agent_relationship_batch, strip_global_agent_name,
+    validate_agent_relationship_batch, validate_agent_username,
+    AgentContainerKind, AgentFamilyNameWire, AgentIdentityError,
+    AgentLinkTargetWire, AgentOwnerIdentity, AgentOwnershipClassification,
+    AgentRelationshipBatchWire, AgentRelationshipError, AgentRelationshipKind,
+    AgentRelationshipTargetWire, AgentRelationshipWire, AgentRunContainerWire,
+    AgentRunWire, AgentSourceOwnerIdentity,
+    RewrittenAgentRelationshipBatchWire, RewrittenAgentRelationshipTargetWire,
+    RewrittenAgentRelationshipWire, RewrittenAgentRunContainerWire,
+    RewrittenAgentRunWire, ValidatedAgentRelationshipSummaryWire,
+    AGENT_RELATIONSHIP_SCHEMA_VERSION,
 };
 pub use agent_launch::{
     allocate_and_claim_workspace_from_content, allocate_launch_timestamp_batch,

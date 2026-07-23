@@ -80,6 +80,22 @@
 //! - `qualify_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `strip_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `machine_hood_of(name: str, known_machines: list[str]) -> str | None`
+//! - `validate_agent_username(username: str) -> None`
+//! - `validate_agent_owner(username: str, machine_name: str) -> None`
+//! - `classify_agent_ownership(source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
+//! - `normalize_agent_archive_name(name: str) -> str`
+//! - `globalize_agent_name(local_name: str, username: str, machine_name: str) -> str`
+//! - `globalize_legacy_agent_name(legacy_name: str, username: str, machine_name: str) -> str`
+//! - `strip_global_agent_name(global_name: str, username: str, machine_name: str) -> str`
+//! - `localize_agent_name(global_name: str, source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
+//! - `parse_agent_family_name(name: str) -> dict`
+//! - `agent_local_hood(name: str) -> str`
+//! - `agent_name_in_hood(name: str, hood: str) -> bool`
+//! - `agent_name_ancestors(name: str) -> list[str]`
+//! - `agent_link_target(name: str, username: str, machine_name: str) -> dict`
+//! - `agent_relationship_schema_version() -> int`
+//! - `validate_agent_relationship_batch(batch: dict) -> dict`
+//! - `rewrite_agent_relationship_batch(batch: dict, destination_ids: dict[str, str]) -> dict`
 //! - `agent_launch_wire_schema_version() -> int`
 //! - `prepare_agent_launch(request: dict, python_executable: str, runner_script: str, output_root: str, sase_tmpdir: str | None = None, preallocated_env: dict | None = None) -> dict`
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
@@ -207,6 +223,24 @@ use sase_core::agent_group_archive::{
     record_recent_dismissed_agent_group as core_record_recent_dismissed_agent_group,
     save_dismissed_agent_group as core_save_dismissed_agent_group,
     SavedAgentGroupWire,
+};
+use sase_core::agent_identity::{
+    agent_link_target as core_agent_link_target,
+    agent_local_hood as core_agent_local_hood,
+    agent_name_ancestors as core_agent_name_ancestors,
+    agent_name_in_hood as core_agent_name_in_hood,
+    classify_agent_ownership as core_classify_agent_ownership,
+    globalize_agent_name as core_globalize_agent_name,
+    globalize_legacy_agent_name as core_globalize_legacy_agent_name,
+    localize_agent_name as core_localize_agent_name,
+    normalize_agent_archive_name as core_normalize_agent_archive_name,
+    parse_agent_family_name as core_parse_agent_family_name,
+    rewrite_agent_relationship_batch as core_rewrite_agent_relationship_batch,
+    strip_global_agent_name as core_strip_global_agent_name,
+    validate_agent_relationship_batch as core_validate_agent_relationship_batch,
+    validate_agent_username as core_validate_agent_username,
+    AgentOwnerIdentity, AgentRelationshipBatchWire, AgentSourceOwnerIdentity,
+    AGENT_RELATIONSHIP_SCHEMA_VERSION,
 };
 use sase_core::agent_launch::{
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
@@ -550,6 +584,253 @@ fn py_machine_hood_of(
     known_machines: Vec<String>,
 ) -> Option<String> {
     core_machine_hood_of(name, &known_machines)
+}
+
+// The machine-hood bindings above are migration shims. New code should use
+// the explicit owner-aware domain below.
+
+fn explicit_owner(
+    username: &str,
+    machine_name: &str,
+) -> PyResult<AgentOwnerIdentity> {
+    AgentOwnerIdentity::new(username, machine_name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+fn source_owner(
+    source_username: Option<&str>,
+    source_machine_name: &str,
+) -> PyResult<AgentSourceOwnerIdentity> {
+    let source = match source_username {
+        Some(username) => AgentSourceOwnerIdentity::V2 {
+            owner: explicit_owner(username, source_machine_name)?,
+        },
+        None => AgentSourceOwnerIdentity::UsernameUnknownV1 {
+            machine_name: source_machine_name.to_string(),
+        },
+    };
+    source
+        .validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(source)
+}
+
+fn identity_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal agent identity serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_agent_username")]
+fn py_validate_agent_username(username: &str) -> PyResult<()> {
+    core_validate_agent_username(username)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_agent_owner")]
+fn py_validate_agent_owner(username: &str, machine_name: &str) -> PyResult<()> {
+    explicit_owner(username, machine_name).map(|_| ())
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "classify_agent_ownership",
+    signature = (
+        source_machine_name,
+        target_username,
+        target_machine_name,
+        source_username = None
+    )
+)]
+fn py_classify_agent_ownership(
+    source_machine_name: &str,
+    target_username: &str,
+    target_machine_name: &str,
+    source_username: Option<&str>,
+) -> PyResult<String> {
+    let source = source_owner(source_username, source_machine_name)?;
+    let target = explicit_owner(target_username, target_machine_name)?;
+    core_classify_agent_ownership(&source, &target)
+        .map(|classification| classification.as_str().to_string())
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "normalize_agent_archive_name")]
+fn py_normalize_agent_archive_name(name: &str) -> PyResult<String> {
+    core_normalize_agent_archive_name(name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "globalize_agent_name")]
+fn py_globalize_agent_name(
+    local_name: &str,
+    username: &str,
+    machine_name: &str,
+) -> PyResult<String> {
+    core_globalize_agent_name(
+        local_name,
+        &explicit_owner(username, machine_name)?,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "globalize_legacy_agent_name")]
+fn py_globalize_legacy_agent_name(
+    legacy_name: &str,
+    username: &str,
+    machine_name: &str,
+) -> PyResult<String> {
+    core_globalize_legacy_agent_name(
+        legacy_name,
+        &explicit_owner(username, machine_name)?,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "strip_global_agent_name")]
+fn py_strip_global_agent_name(
+    global_name: &str,
+    username: &str,
+    machine_name: &str,
+) -> PyResult<String> {
+    core_strip_global_agent_name(
+        global_name,
+        &explicit_owner(username, machine_name)?,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "localize_agent_name",
+    signature = (
+        global_name,
+        source_machine_name,
+        target_username,
+        target_machine_name,
+        source_username = None
+    )
+)]
+fn py_localize_agent_name(
+    global_name: &str,
+    source_machine_name: &str,
+    target_username: &str,
+    target_machine_name: &str,
+    source_username: Option<&str>,
+) -> PyResult<String> {
+    core_localize_agent_name(
+        global_name,
+        &source_owner(source_username, source_machine_name)?,
+        &explicit_owner(target_username, target_machine_name)?,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "parse_agent_family_name")]
+fn py_parse_agent_family_name(
+    py: Python<'_>,
+    name: &str,
+) -> PyResult<PyObject> {
+    let parsed = core_parse_agent_family_name(name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    identity_wire_to_py(py, &parsed)
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_local_hood")]
+fn py_agent_local_hood(name: &str) -> PyResult<String> {
+    core_agent_local_hood(name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_name_in_hood")]
+fn py_agent_name_in_hood(name: &str, hood: &str) -> PyResult<bool> {
+    core_agent_name_in_hood(name, hood)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_name_ancestors")]
+fn py_agent_name_ancestors(name: &str) -> PyResult<Vec<String>> {
+    core_agent_name_ancestors(name)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_link_target")]
+fn py_agent_link_target(
+    py: Python<'_>,
+    name: &str,
+    username: &str,
+    machine_name: &str,
+) -> PyResult<PyObject> {
+    let target =
+        core_agent_link_target(name, &explicit_owner(username, machine_name)?)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    identity_wire_to_py(py, &target)
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_relationship_schema_version")]
+fn py_agent_relationship_schema_version() -> u32 {
+    AGENT_RELATIONSHIP_SCHEMA_VERSION
+}
+
+fn relationship_batch_from_pydict(
+    batch: &Bound<'_, PyDict>,
+) -> PyResult<AgentRelationshipBatchWire> {
+    let value = py_to_json_value(batch.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "invalid agent relationship batch: {error}"
+        ))
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_agent_relationship_batch")]
+fn py_validate_agent_relationship_batch(
+    py: Python<'_>,
+    batch: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let batch = relationship_batch_from_pydict(batch)?;
+    let summary = core_validate_agent_relationship_batch(&batch)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    identity_wire_to_py(py, &summary)
+}
+
+#[pyfunction]
+#[pyo3(name = "rewrite_agent_relationship_batch")]
+fn py_rewrite_agent_relationship_batch(
+    py: Python<'_>,
+    batch: &Bound<'_, PyDict>,
+    destination_ids: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let batch = relationship_batch_from_pydict(batch)?;
+    let destination_ids = serde_json::from_value::<BTreeMap<String, String>>(
+        py_to_json_value(destination_ids.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!("invalid destination ID map: {error}"))
+    })?;
+    let rewritten =
+        core_rewrite_agent_relationship_batch(&batch, &destination_ids)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    identity_wire_to_py(py, &rewritten)
 }
 
 #[pyfunction]
@@ -4906,6 +5187,22 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_qualify_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_strip_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_machine_hood_of, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_username, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_agent_ownership, m)?)?;
+    m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_globalize_legacy_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_strip_global_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_localize_agent_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_agent_family_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_local_hood, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_name_in_hood, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_name_ancestors, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_link_target, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_relationship_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_relationship_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
@@ -5228,6 +5525,196 @@ mod tests {
                 Some("zeus".to_string())
             );
             assert_eq!(py_machine_hood_of("foo", known), None);
+        });
+    }
+
+    #[test]
+    fn agent_identity_bindings_are_exported_and_preserve_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "validate_agent_username",
+                "validate_agent_owner",
+                "classify_agent_ownership",
+                "normalize_agent_archive_name",
+                "globalize_agent_name",
+                "globalize_legacy_agent_name",
+                "strip_global_agent_name",
+                "localize_agent_name",
+                "parse_agent_family_name",
+                "agent_local_hood",
+                "agent_name_in_hood",
+                "agent_name_ancestors",
+                "agent_link_target",
+                "agent_relationship_schema_version",
+                "validate_agent_relationship_batch",
+                "rewrite_agent_relationship_batch",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            py_validate_agent_username("alice").unwrap();
+            assert!(py_validate_agent_username("Alice").is_err());
+            py_validate_agent_owner("alice", "athena").unwrap();
+            assert!(py_validate_agent_owner("alice", "athena1").is_err());
+            assert_eq!(
+                py_classify_agent_ownership(
+                    "zeus",
+                    "alice",
+                    "athena",
+                    Some("alice"),
+                )
+                .unwrap(),
+                "same_user_other_machine"
+            );
+            assert_eq!(
+                py_globalize_agent_name(
+                    "260722.foo.bar--code",
+                    "alice",
+                    "athena"
+                )
+                .unwrap(),
+                "alice.athena.foo.bar--code"
+            );
+            assert_eq!(
+                py_localize_agent_name(
+                    "bob.athena.foo",
+                    "athena",
+                    "alice",
+                    "athena",
+                    Some("bob"),
+                )
+                .unwrap(),
+                "bob.athena.foo"
+            );
+
+            let family =
+                py_parse_agent_family_name(py, "foo.bar--code").unwrap();
+            assert_eq!(
+                py_to_json_value(family.bind(py)).unwrap(),
+                json!({
+                    "kind": "member",
+                    "family_name": "foo.bar",
+                    "member_role": "code"
+                })
+            );
+            let link =
+                py_agent_link_target(py, "foo.bar--code", "alice", "athena")
+                    .unwrap();
+            assert_eq!(
+                py_to_json_value(link.bind(py)).unwrap(),
+                json!({
+                    "kind": "family",
+                    "path": "families/alice.athena.foo.bar.md",
+                    "anchor": "member-code"
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn relationship_bindings_validate_and_rewrite_plain_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(py_agent_relationship_schema_version(), 2);
+            let batch_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 2,
+                    "owner": {
+                        "username": "alice",
+                        "machine_name": "athena"
+                    },
+                    "runs": [
+                        {
+                            "source_run_id": "run-1",
+                            "global_name": "alice.athena.foo",
+                            "owner": {
+                                "username": "alice",
+                                "machine_name": "athena"
+                            }
+                        },
+                        {
+                            "source_run_id": "run-2",
+                            "global_name": "alice.athena.foo--code",
+                            "owner": {
+                                "username": "alice",
+                                "machine_name": "athena"
+                            }
+                        }
+                    ],
+                    "containers": [{
+                        "kind": "family",
+                        "global_name": "alice.athena.foo",
+                        "owner": {
+                            "username": "alice",
+                            "machine_name": "athena"
+                        },
+                        "member_source_run_ids": ["run-1", "run-2"]
+                    }],
+                    "relationships": [{
+                        "kind": "parent",
+                        "source_run_id": "run-2",
+                        "target": {
+                            "kind": "source_run_id",
+                            "source_run_id": "run-1"
+                        },
+                        "required": true
+                    }]
+                }),
+            )
+            .unwrap();
+            let batch = batch_obj.bind(py).downcast::<PyDict>().unwrap();
+            let summary =
+                py_validate_agent_relationship_batch(py, batch).unwrap();
+            let summary = py_to_json_value(summary.bind(py)).unwrap();
+            assert_eq!(summary["run_count"], json!(2));
+            assert_eq!(summary["run_order"], json!(["run-1", "run-2"]));
+
+            let mapping_obj = json_value_to_py(
+                py,
+                &json!({"run-1": "dest-1", "run-2": "dest-2"}),
+            )
+            .unwrap();
+            let mapping = mapping_obj.bind(py).downcast::<PyDict>().unwrap();
+            let rewritten =
+                py_rewrite_agent_relationship_batch(py, batch, mapping)
+                    .unwrap();
+            let rewritten = py_to_json_value(rewritten.bind(py)).unwrap();
+            assert_eq!(
+                rewritten["runs"][0]["destination_run_id"],
+                json!("dest-1")
+            );
+            assert_eq!(
+                rewritten["relationships"][0]["source_destination_run_id"],
+                json!("dest-2")
+            );
+            assert_eq!(
+                rewritten["relationships"][0]["target"]["destination_run_id"],
+                json!("dest-1")
+            );
+
+            let malformed_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 2,
+                    "owner": {
+                        "username": "Alice",
+                        "machine_name": "athena"
+                    },
+                    "runs": [],
+                    "containers": [],
+                    "relationships": []
+                }),
+            )
+            .unwrap();
+            let malformed =
+                malformed_obj.bind(py).downcast::<PyDict>().unwrap();
+            assert!(
+                py_validate_agent_relationship_batch(py, malformed).is_err()
+            );
         });
     }
 
