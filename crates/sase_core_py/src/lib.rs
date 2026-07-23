@@ -144,6 +144,8 @@
 //! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
+//! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
+//! - `bead_size_check_relax_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -328,6 +330,7 @@ use sase_core::bead::{
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
+    needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
     open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     read_event_store_issues as core_bead_read_event_store_issues,
@@ -338,8 +341,9 @@ use sase_core::bead::{
     remove_issue as core_bead_remove_issue,
     repair_event_store_manifest as core_repair_event_store_manifest,
     search_issues as core_bead_search_issues,
-    show_issue as core_bead_show_issue, stats as core_bead_stats,
-    sync_is_clean as core_bead_sync_is_clean,
+    show_issue as core_bead_show_issue,
+    size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
+    stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
@@ -2380,6 +2384,23 @@ fn py_list_project_records<'py>(
 }
 
 // --- Bead read bindings ---------------------------------------------------
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_needs_size_check_relax_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_size_check_relax_migration(
+    create_table_sql: Option<&str>,
+) -> bool {
+    core_bead_needs_size_check_relax_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_size_check_relax_migration_sql")]
+fn py_bead_size_check_relax_migration_sql() -> &'static str {
+    core_bead_size_check_relax_migration_sql()
+}
 
 #[pyfunction]
 #[pyo3(name = "bead_read_store")]
@@ -5304,6 +5325,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_apply_project_aliases_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_project_name_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_list_project_records, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_needs_size_check_relax_migration,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_size_check_relax_migration_sql,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
@@ -6636,6 +6665,34 @@ mod tests {
             let root =
                 beads_dir.parent().unwrap().parent().unwrap().to_path_buf();
             let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn bead_size_check_relax_bindings_are_exported_and_forward_core_policy() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "bead_needs_size_check_relax_migration",
+                "bead_size_check_relax_migration_sql",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            assert!(!py_bead_needs_size_check_relax_migration(None));
+            assert!(py_bead_needs_size_check_relax_migration(Some(
+                "size TEXT CHECK(size IN ('small','medium','large'))"
+            )));
+            assert!(!py_bead_needs_size_check_relax_migration(Some(
+                "size TEXT CHECK(size IN \
+                 ('xsmall','small','medium','large','xlarge'))"
+            )));
+            assert_eq!(
+                py_bead_size_check_relax_migration_sql(),
+                core_bead_size_check_relax_migration_sql()
+            );
         });
     }
 
