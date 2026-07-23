@@ -2119,60 +2119,60 @@ impl GatewayState {
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
-    wire: ApiErrorWire,
+    wire: Box<ApiErrorWire>,
 }
 
 impl ApiError {
     fn unauthorized(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::Unauthorized,
                 message: "authentication is required for this endpoint"
                     .to_string(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn not_found(path: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::NotFound,
                 message: "route not found".to_string(),
                 target: Some(path.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn notification_not_found(id: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::NotFound,
                 message: "notification not found".to_string(),
                 target: Some(id.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn push_subscription_not_found(id: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::NotFound,
                 message: "push subscription not found".to_string(),
                 target: Some(id.into()),
                 details: None,
-            },
+            }),
         }
     }
 
@@ -2182,78 +2182,78 @@ impl ApiError {
     ) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::InvalidRequest,
                 message: message.into(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn pairing_expired(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::PairingExpired,
                 message: "pairing code expired".to_string(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn pairing_rejected(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::PairingRejected,
                 message: "pairing code rejected".to_string(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn attachment_expired(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::GONE,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::AttachmentExpired,
                 message: "attachment token is expired".to_string(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn internal(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::Internal,
                 message: "gateway internal error".to_string(),
                 target: Some(target.into()),
                 details: None,
-            },
+            }),
         }
     }
 
     fn from_store(error: StoreError) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code: ApiErrorCodeWire::Internal,
                 message: error.to_string(),
                 target: Some("device_store".to_string()),
                 details: None,
-            },
+            }),
         }
     }
 
@@ -2350,13 +2350,13 @@ impl ApiError {
         };
         Self {
             status,
-            wire: ApiErrorWire {
+            wire: Box::new(ApiErrorWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 code,
                 message: error.to_string(),
                 target: Some(target),
                 details: None,
-            },
+            }),
         }
     }
 
@@ -2394,7 +2394,7 @@ impl ApiErrorCodeWire {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.wire)).into_response()
+        (self.status, Json(*self.wire)).into_response()
     }
 }
 
