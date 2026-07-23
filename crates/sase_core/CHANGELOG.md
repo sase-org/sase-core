@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/sase-org/sase-core/compare/v0.8.0...v0.9.0) - 2026-07-23
+
+### Added
+
+- *(xprompt)* compose capitalized snippet aliases (sase-8u.1)
+- *(axe)* add portable runtime status classifier (sase-8t.1)
+- *(config)* add exact AXE composition planning (sase-8m.1)
+- *(axe)* support clan summaries in chop proposals (sase-8l.1)
+- *(machine_hood)* add machine agent hood canonicalization helpers (sase-8k.2)
+- persist runner limit overrides
+- *(agent-stats)* add runner occupancy analytics (sase-8j.1)
+- add default effort override domain APIs
+- *(plan)* add document-level artifact link contract
+- add SDD frontmatter link contract
+- *(telemetry)* add exact-label cleanup API (sase-8g.11)
+- *(agent)* carry bead IDs through repeat launches (sase-8f.2)
+- *(beads)* add atomic agent launch claims (sase-8f.1)
+- *(wait)* expose queue priority in scans and completions (sase-8c.1)
+- *(agent-scan)* expose bead wait markers (sase-87.5)
+- *(plan)* expose managed bead links (sase-88.1)
+- *(beads)* support delegated phase scheduling (sase-87.1)
+- *(agent-scan)* expose parent epic plan references
+- *(bead)* support phase sizing and nested cascades (sase-7z.2)
+- *(plan)* validate phase sizing and parent beads (sase-7z.1)
+- *(agent-clans)* resolve clan summaries (sase-7r.1)
+- *(axe)* add clan-aware chop contracts (sase-7q.1)
+- *(axe)* validate log rotation temp age (sase-7p.1)
+- *(editor)* [**breaking**] move family and tribe grammar onto %id (sase-7o.3)
+- *(agent-launch)* [**breaking**] adopt id directive grammar (sase-7n.1)
+- *(agent-tribes)* [**breaking**] canonicalize tribe wire contracts (sase-7j.1)
+- *(axe)* support releasing chop once-per keys (sase-7i.1)
+- *(editor)* complete grouped agent references in the LSP (sase-7h.1)
+- *(editor)* [**breaking**] use bare plus for project completion
+- *(agent-cleanup)* add clan planning scope (sase-74.1)
+- *(axe)* add per-run tokens to chop agent names
+
+### Fixed
+
+- *(stats)* validate open runner occupancy
+- *(notifications)* reap stale atomic temp files (sase-8g.10)
+- *(beads)* reconcile concurrent event streams (sase-8g.7)
+- *(agent-scan)* retain runner wait priority (sase-8g.3)
+- *(agent-scan)* preserve clan context in bounded snapshots
+- *(axe)* validate restart backoff configuration (sase-7p.2)
+- *(editor)* align clan and tribe xprompt directives
+- recognize adjacent inline literals during launch planning
+
 ### Changed
 
 - *(editor)* [**breaking**] move family and tribe identity grammar onto `%id` keyword arguments (sase-7o.3)
