@@ -1137,6 +1137,7 @@ fn direct_child_counter(parent_id: &str, issue_id: &str) -> Option<u64> {
 fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
     match value {
         "open" => Ok(StatusWire::Open),
+        "claimed" => Ok(StatusWire::Claimed),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(

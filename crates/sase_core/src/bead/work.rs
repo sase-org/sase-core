@@ -380,6 +380,19 @@ mod tests {
     }
 
     #[test]
+    fn claimed_phase_is_still_scheduled() {
+        let mut claimed = phase("p1", "e1");
+        claimed.status = StatusWire::Claimed;
+
+        let plan =
+            build_epic_work_plan_from_issues(vec![epic("e1"), claimed], "e1")
+                .unwrap();
+
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0][0].bead_id, "p1");
+    }
+
+    #[test]
     fn parent_does_not_change_epic_launch_tag() {
         let plan = build_epic_work_plan_from_issues(
             vec![epic("p0"), epic_child("e1", "p0"), phase("p1", "e1")],

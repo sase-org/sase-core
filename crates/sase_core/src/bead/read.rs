@@ -288,7 +288,12 @@ fn has_active_blocker(
         status_by_id
             .get(dep.depends_on_id.as_str())
             .is_some_and(|status| {
-                matches!(*status, StatusWire::Open | StatusWire::InProgress)
+                matches!(
+                    *status,
+                    StatusWire::Open
+                        | StatusWire::Claimed
+                        | StatusWire::InProgress
+                )
             })
     })
 }
@@ -328,6 +333,7 @@ fn parse_issue_types(
 fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
     match value {
         "open" => Ok(StatusWire::Open),
+        "claimed" => Ok(StatusWire::Claimed),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(
@@ -369,6 +375,7 @@ fn sort_by_created_at(issues: &mut [IssueWire]) {
 fn status_as_str(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
+        StatusWire::Claimed => "claimed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -378,5 +385,79 @@ fn issue_type_as_str(issue_type: &IssueTypeWire) -> &'static str {
     match issue_type {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bead::wire::{DependencyWire, IssueTypeWire};
+
+    fn phase(id: &str, status: StatusWire) -> IssueWire {
+        IssueWire {
+            id: id.to_string(),
+            title: id.to_string(),
+            status,
+            issue_type: IssueTypeWire::Phase,
+            tier: None,
+            parent_id: Some("epic".to_string()),
+            owner: String::new(),
+            assignee: String::new(),
+            created_at: String::new(),
+            created_by: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            description: String::new(),
+            notes: String::new(),
+            design: String::new(),
+            model: String::new(),
+            size: None,
+            is_ready_to_work: false,
+            changespec_name: String::new(),
+            changespec_bug_id: String::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn claimed_dependency_is_an_active_blocker() {
+        let blocker = phase("blocker", StatusWire::Claimed);
+        let mut dependent = phase("dependent", StatusWire::Open);
+        dependent.dependencies.push(DependencyWire {
+            issue_id: dependent.id.clone(),
+            depends_on_id: blocker.id.clone(),
+            created_at: String::new(),
+            created_by: String::new(),
+        });
+
+        let blocked =
+            blocked_issues_in_issues(vec![blocker, dependent]).unwrap();
+        assert_eq!(
+            blocked
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dependent"]
+        );
+    }
+
+    #[test]
+    fn claimed_status_filter_is_parsed_and_counted() {
+        let issues = vec![
+            phase("claimed", StatusWire::Claimed),
+            phase("open", StatusWire::Open),
+        ];
+        let claimed = list_issues_in_issues(
+            issues.clone(),
+            Some(&["claimed".to_string()]),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "claimed");
+        assert_eq!(stats_for_issues(&issues).get("claimed"), Some(&1));
     }
 }

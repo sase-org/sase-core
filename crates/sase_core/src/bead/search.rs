@@ -129,6 +129,7 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
 fn status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
+        StatusWire::Claimed => "claimed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }

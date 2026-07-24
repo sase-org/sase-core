@@ -8,6 +8,7 @@ use thiserror::Error;
 pub enum StatusWire {
     #[default]
     Open,
+    Claimed,
     InProgress,
     Closed,
 }
@@ -447,6 +448,17 @@ mod tests {
         issue.parent_id = None;
         let error = issue.validate().unwrap_err();
         assert_eq!(error.message, "Only phase issues can carry size metadata");
+    }
+
+    #[test]
+    fn claimed_status_round_trips_through_serde() {
+        let mut issue = phase(Some("test-0"));
+        issue.status = StatusWire::Claimed;
+
+        let value = serde_json::to_value(&issue).unwrap();
+        assert_eq!(value["status"], "claimed");
+        let round_tripped: IssueWire = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped.status, StatusWire::Claimed);
     }
 
     #[test]

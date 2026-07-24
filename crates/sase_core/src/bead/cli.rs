@@ -183,6 +183,14 @@ fn handle_show(
         writeln!(stdout, "Assignee: {}", issue.assignee)
             .expect("writing to String cannot fail");
     }
+    if issue.status == StatusWire::Claimed {
+        writeln!(
+            stdout,
+            "Claimed by: {} (agent has not started working yet)",
+            issue.assignee
+        )
+        .expect("writing to String cannot fail");
+    }
     if !issue.model.is_empty() {
         writeln!(stdout, "Model: {}", issue.model)
             .expect("writing to String cannot fail");
@@ -426,9 +434,10 @@ fn handle_stats(
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
     let stats = stats_for_issues(&issues);
     let stdout = format!(
-        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n",
+        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n",
         stats.get("total").copied().unwrap_or(0),
         stats.get("open").copied().unwrap_or(0),
+        stats.get("claimed").copied().unwrap_or(0),
         stats.get("in_progress").copied().unwrap_or(0),
         stats.get("closed").copied().unwrap_or(0),
         stats.get("plan").copied().unwrap_or(0),
@@ -982,6 +991,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
     }
     if statuses.is_empty() {
         statuses.push(StatusWire::Open);
+        statuses.push(StatusWire::Claimed);
         statuses.push(StatusWire::InProgress);
     }
     Some(ListFilters {
@@ -1456,6 +1466,7 @@ const ANSI_BOLD_BLUE: &str = "\x1b[1;34m";
 const ANSI_HIGHLIGHT: &str = "\x1b[30;43m";
 const ANSI_HIGHLIGHT_RESET: &str = "\x1b[39;49m";
 const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_MAGENTA: &str = "\x1b[35m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_CYAN: &str = "\x1b[36m";
 
@@ -1466,6 +1477,7 @@ fn color_status_icon(status: &StatusWire, color: bool) -> String {
     }
     let code = match status {
         StatusWire::Open => ANSI_CYAN,
+        StatusWire::Claimed => ANSI_MAGENTA,
         StatusWire::InProgress => ANSI_YELLOW,
         StatusWire::Closed => ANSI_GREEN,
     };
@@ -1597,7 +1609,12 @@ fn has_active_blocker(
         status_by_id
             .get(dep.depends_on_id.as_str())
             .is_some_and(|status| {
-                matches!(*status, StatusWire::Open | StatusWire::InProgress)
+                matches!(
+                    *status,
+                    StatusWire::Open
+                        | StatusWire::Claimed
+                        | StatusWire::InProgress
+                )
             })
     })
 }
@@ -1645,6 +1662,7 @@ fn sort_by_created_at(issues: &mut [IssueWire]) {
 fn parse_status(value: &str) -> Option<StatusWire> {
     match value {
         "open" => Some(StatusWire::Open),
+        "claimed" => Some(StatusWire::Claimed),
         "in_progress" => Some(StatusWire::InProgress),
         "closed" => Some(StatusWire::Closed),
         _ => None,
@@ -1675,6 +1693,7 @@ fn is_ready_surface_issue(issue: &IssueWire) -> bool {
 fn status_icon(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "○",
+        StatusWire::Claimed => "◎",
         StatusWire::InProgress => "◐",
         StatusWire::Closed => "✓",
     }
@@ -1683,6 +1702,7 @@ fn status_icon(status: &StatusWire) -> &'static str {
 fn status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
+        StatusWire::Claimed => "claimed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -1691,6 +1711,7 @@ fn status_value(status: &StatusWire) -> &'static str {
 fn status_upper(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "OPEN",
+        StatusWire::Claimed => "CLAIMED",
         StatusWire::InProgress => "IN_PROGRESS",
         StatusWire::Closed => "CLOSED",
     }
@@ -1819,6 +1840,87 @@ mod tests {
         assert_eq!(
             outcome.stdout,
             "◐ beads-1.1 · Fix Auth Token\n  Rotate auth tokens safely.\n"
+        );
+    }
+
+    #[test]
+    fn claimed_status_is_in_default_list_with_claim_details_and_color() {
+        let mut claimed = phase_issue(
+            "beads-1.1",
+            "Claimed phase",
+            "Waiting to start.",
+            StatusWire::Claimed,
+            "2026-01-01T00:01:00Z",
+        );
+        claimed.assignee = "agent-one".to_string();
+        let store = seed_issues(vec![
+            claimed,
+            phase_issue(
+                "beads-1.2",
+                "Closed phase",
+                "",
+                StatusWire::Closed,
+                "2026-01-01T00:02:00Z",
+            ),
+        ]);
+
+        let list = execute_search(&store.beads_dir, &["list"]);
+        assert_eq!(list.stdout, "◎ beads-1.1 · Claimed phase ← beads-1\n");
+
+        let show = execute_search(&store.beads_dir, &["show", "beads-1.1"]);
+        assert!(show
+            .stdout
+            .starts_with("◎ beads-1.1 · Claimed phase   [CLAIMED]\n"));
+        assert!(show.stdout.contains(
+            "Claimed by: agent-one (agent has not started working yet)\n"
+        ));
+
+        let search = execute_search(
+            &store.beads_dir,
+            &["search", "waiting", "--color", "always"],
+        );
+        assert!(search.stdout.contains("\x1b[35m◎\x1b[0m"));
+    }
+
+    #[test]
+    fn stats_prints_claimed_between_open_and_in_progress() {
+        let store = seed_issues(vec![
+            phase_issue(
+                "beads-1.1",
+                "Open phase",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+            phase_issue(
+                "beads-1.2",
+                "Claimed phase",
+                "",
+                StatusWire::Claimed,
+                "2026-01-01T00:02:00Z",
+            ),
+            phase_issue(
+                "beads-1.3",
+                "Active phase",
+                "",
+                StatusWire::InProgress,
+                "2026-01-01T00:03:00Z",
+            ),
+        ]);
+
+        let stats = execute_search(&store.beads_dir, &["stats"]);
+        assert_eq!(
+            stats.stdout,
+            concat!(
+                "Issue Statistics\n",
+                "  Total:       3\n",
+                "  Open:        1\n",
+                "  Claimed:     1\n",
+                "  In Progress: 1\n",
+                "  Closed:      0\n",
+                "  Plans:       0\n",
+                "  Phases:      3\n",
+            )
         );
     }
 
