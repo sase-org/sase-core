@@ -952,6 +952,9 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         hidden: coerce_bool_truthy(data.get("hidden")),
         repeat_stopped: coerce_bool_truthy(data.get("repeat_stopped")),
         stopped_by: coerce_str(data.get("stopped_by")),
+        imported_transaction_key: coerce_str(
+            data.get("imported_transaction_key"),
+        ),
     }
 }
 

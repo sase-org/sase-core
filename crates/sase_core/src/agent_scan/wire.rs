@@ -168,6 +168,9 @@ pub struct DoneMarkerWire {
     /// Name of the chain predecessor that set `STOP`, when recorded.
     #[serde(default)]
     pub stopped_by: Option<String>,
+    /// Project-scoped import journal key for transaction-gated history.
+    #[serde(default)]
+    pub imported_transaction_key: Option<String>,
 }
 
 /// Compact projection of `agent_meta.json`.

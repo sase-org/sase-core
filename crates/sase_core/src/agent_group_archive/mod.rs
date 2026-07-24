@@ -700,9 +700,13 @@ mod tests {
                 prompt_preview: Some(
                     "Restore this backend worker.".to_string(),
                 ),
+                reasoning_effort: Some("high".to_string()),
+                source_run_id: Some("run-source-1".to_string()),
             }],
             revived_at: None,
             times_revived: 0,
+            canonical_global_family: None,
+            source_snapshot_digest: None,
         }
     }
 }

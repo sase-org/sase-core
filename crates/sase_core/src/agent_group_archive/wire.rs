@@ -32,6 +32,10 @@ pub struct SavedAgentGroupRefWire {
     pub tribe: Option<String>,
     #[serde(default)]
     pub prompt_preview: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub source_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +62,10 @@ pub struct SavedAgentGroupWire {
     pub revived_at: Option<String>,
     #[serde(default)]
     pub times_revived: i64,
+    #[serde(default)]
+    pub canonical_global_family: Option<String>,
+    #[serde(default)]
+    pub source_snapshot_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
