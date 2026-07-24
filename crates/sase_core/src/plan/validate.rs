@@ -30,7 +30,7 @@ const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
 
 const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
-const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `xsmall` only for the very simplest tasks that need almost no reasoning, such as launching SASE agents purely to observe their output while testing a SASE agent feature. Use `small` for focused work implemented directly and `medium` for substantial work still implemented directly from its phase description. Use `large` for work that needs a separate planning handoff and may itself justify an epic plan. Use `xlarge` rarely: it admits the task is too large to plan effectively alone, or deliberately defers planning part of a feature until other parts are implemented; choose it only when fairly confident the phase agent will itself author an epic plan. Only `large` and `xlarge` phases receive `#plan`. Without an explicit `model`, the five sizes route through `@xsmall_phase_worker`, `@small_phase_worker`, `@medium_phase_worker`, `@smart`, and `@smartest`, respectively.";
+const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `xsmall` only for the very simplest tasks that need almost no reasoning, such as launching SASE agents purely to observe their output while testing a SASE agent feature. Use `small` for focused work implemented directly and `medium` for substantial work still implemented directly from its phase description. Use `large` for work that needs a separate planning handoff and may itself justify an epic plan. Use `xlarge` rarely: it admits the task is too large to plan effectively alone, or deliberately defers planning part of a feature until other parts are implemented; choose it only when fairly confident the phase agent will itself author an epic plan. Only `large` and `xlarge` phases receive `#plan`. Without an explicit `model`, the five sizes route through `@xsmall_phase_worker`, `@small_phase_worker`, `@medium_phase_worker`, `@large_phase_worker`, and `@xlarge_phase_worker`, respectively.";
 const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Set this explicitly only when the user's prompt requested a specific model; an explicit model overrides size-derived routing for every size. Otherwise omit it. For a phase that only exercises or observes a SASE agent feature and does no consequential work, use `size: xsmall` instead of a cheap model override.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1710,6 +1710,18 @@ mod tests {
             .find(|field| field.name == "phases[].size")
             .unwrap();
         assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
+        for alias in [
+            "@xsmall_phase_worker",
+            "@small_phase_worker",
+            "@medium_phase_worker",
+            "@large_phase_worker",
+            "@xlarge_phase_worker",
+        ] {
+            assert!(
+                phase_size.description.contains(alias),
+                "phase-size guidance is missing `{alias}`"
+            );
+        }
         assert!(tale.iter().all(|field| field.name != "prompt"));
         assert_eq!(
             phase_size.field_type,
