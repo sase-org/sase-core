@@ -339,6 +339,7 @@ use sase_core::bead::{
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
     remove_issue as core_bead_remove_issue,
+    remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
@@ -2879,6 +2880,20 @@ fn py_bead_remove<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_remove_many")]
+fn py_bead_remove_many<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_remove_issues(&beads_dir, &issue_ids)),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_dep_add")]
 #[pyo3(signature = (beads_dir, issue_id, depends_on_id, now=None))]
 fn py_bead_dep_add<'py>(
@@ -5362,6 +5377,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_repair_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_remove_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_unmark_ready_to_work, m)?)?;
@@ -6665,6 +6681,60 @@ mod tests {
             let root =
                 beads_dir.parent().unwrap().parent().unwrap().to_path_buf();
             let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn bead_remove_many_binding_is_exported_and_removes_multiple_roots() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_remove").is_ok());
+            assert!(module.getattr("bead_remove_many").is_ok());
+
+            let beads_dir = temp_beads_dir();
+            fs::write(
+                beads_dir.join("issues.jsonl"),
+                [
+                    json!({
+                        "id": "beads-1",
+                        "title": "First",
+                        "status": "open",
+                        "issue_type": "plan",
+                        "parent_id": null,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z"
+                    }),
+                    json!({
+                        "id": "beads-2",
+                        "title": "Second",
+                        "status": "open",
+                        "issue_type": "plan",
+                        "parent_id": null,
+                        "created_at": "2026-01-01T00:01:00Z",
+                        "updated_at": "2026-01-01T00:01:00Z"
+                    }),
+                ]
+                .into_iter()
+                .map(|issue| serde_json::to_string(&issue).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+
+            let result = py_bead_remove_many(
+                py,
+                beads_dir.to_str().unwrap(),
+                vec!["beads-2".to_string(), "beads-1".to_string()],
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value["issue_ids"], json!(["beads-2", "beads-1"]));
+            assert_eq!(value["issues"][0]["id"], json!("beads-2"));
+            assert_eq!(value["issues"][1]["id"], json!("beads-1"));
         });
     }
 

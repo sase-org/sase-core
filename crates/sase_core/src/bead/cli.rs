@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::mutation::{
-    add_dependency, close_issues, create_issue, open_issue, remove_issue,
+    add_dependency, close_issues, create_issue, open_issue, remove_issues,
     update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
     BeadUpdateFieldsWire,
 };
@@ -865,10 +865,10 @@ fn handle_rm(
     args: &[String],
     write_beads_dir: &Path,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    if args.len() != 1 {
+    if args.is_empty() {
         return Ok(defer());
     }
-    match remove_issue(write_beads_dir, &args[0]) {
+    match remove_issues(write_beads_dir, args) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -879,13 +879,17 @@ fn handle_rm(
                 stdout,
                 BeadCliMutationSummaryWire {
                     operation: "rm".to_string(),
-                    issue_ids: vec![args[0].clone()],
+                    issue_ids: args.to_vec(),
                     status_transitions: Vec::new(),
                 },
             ))
         }
         Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: issue not found: {}\n", args[0])))
+            let issue_id = err
+                .message
+                .strip_prefix("Issue not found: ")
+                .unwrap_or(&err.message);
+            Ok(error(format!("Error: issue not found: {issue_id}\n")))
         }
         Err(err) => Err(err),
     }
@@ -2052,6 +2056,117 @@ mod tests {
         assert_eq!(removed.exit_code, 0);
         assert_eq!(removed.mutation_summary.unwrap().operation, "rm");
         assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_handles_multiple_ids_with_unique_output_and_requested_summary() {
+        let mut child = phase_issue(
+            "beads-1.1",
+            "Child",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        );
+        child.parent_id = Some("beads-1".to_string());
+        let store = seed_issues(vec![
+            plan_issue(
+                "beads-1",
+                "Plan",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:00:00Z",
+            ),
+            child,
+            plan_issue(
+                "beads-2",
+                "Independent",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:02:00Z",
+            ),
+        ]);
+        let args = vec![
+            "rm".to_string(),
+            "beads-1".to_string(),
+            "beads-1.1".to_string(),
+            "beads-2".to_string(),
+            "beads-2".to_string(),
+        ];
+
+        let outcome = execute_bead_cli(
+            &args,
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(
+            outcome.stdout,
+            concat!(
+                "✗ Removed: beads-1.1 — Child\n",
+                "✗ Removed: beads-1 — Plan\n",
+                "✗ Removed: beads-2 — Independent\n",
+            )
+        );
+        let summary = outcome.mutation_summary.unwrap();
+        assert_eq!(summary.operation, "rm");
+        assert_eq!(summary.issue_ids, args[1..]);
+        assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_missing_later_id_is_an_atomic_fast_path_error() {
+        let store = seed_issues(vec![
+            plan_issue(
+                "beads-1",
+                "First",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:00:00Z",
+            ),
+            plan_issue(
+                "beads-2",
+                "Second",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+        ]);
+        let projection_before =
+            fs::read(store.beads_dir.join("issues.jsonl")).unwrap();
+
+        let outcome = execute_bead_cli(
+            &[
+                "rm".to_string(),
+                "beads-1".to_string(),
+                "beads-missing".to_string(),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 1);
+        assert_eq!(outcome.stderr, "Error: issue not found: beads-missing\n");
+        assert!(outcome.stdout.is_empty());
+        assert!(outcome.mutation_summary.is_none());
+        assert_eq!(
+            fs::read(store.beads_dir.join("issues.jsonl")).unwrap(),
+            projection_before
+        );
+        assert_eq!(
+            read_store_issues(&store.beads_dir)
+                .unwrap()
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beads-1", "beads-2"]
+        );
     }
 
     #[test]

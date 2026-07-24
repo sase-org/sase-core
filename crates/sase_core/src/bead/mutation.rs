@@ -567,38 +567,63 @@ fn close_one_and_delegated_parent(
     Ok(true)
 }
 
-pub fn remove_issue(
+pub fn remove_issues(
     beads_dir: &Path,
-    issue_id: &str,
+    issue_ids: &[String],
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let issue = store.get_issue(issue_id)?.clone();
-    let actor = issue.created_by.clone();
-    let mut removed = Vec::new();
-    if issue.issue_type == IssueTypeWire::Plan {
-        removed.extend(
-            sorted_descendants(&store.issues, issue_id)
-                .into_iter()
-                .cloned(),
-        );
+    if issue_ids.is_empty() {
+        return Err(BeadError::validation(
+            "remove_issues() requires at least one issue ID",
+        ));
     }
-    removed.push(issue);
-    let removed_ids: BTreeSet<String> =
-        removed.iter().map(|issue| issue.id.clone()).collect();
-    let cascade_removed_issue_ids = removed
-        .iter()
-        .filter(|removed_issue| removed_issue.id != issue_id)
-        .map(|removed_issue| removed_issue.id.clone())
-        .collect();
-    store.append_issue_event(
-        issue_id,
-        BeadEventOperationWire::IssueRemoved,
-        BeadEventPayloadWire::IssueRemoved {
-            cascade_removed_issue_ids,
-        },
-        &now_utc(),
-        &actor,
-    )?;
+
+    let mut store = MutableStore::load(beads_dir)?;
+    let mut requested = Vec::new();
+    let mut requested_ids = BTreeSet::new();
+    for issue_id in issue_ids {
+        let issue = store.get_issue(issue_id)?.clone();
+        if requested_ids.insert(issue.id.clone()) {
+            requested.push(issue);
+        }
+    }
+
+    let mut removed = Vec::new();
+    let mut removed_ids = BTreeSet::new();
+    for issue in &requested {
+        if issue.issue_type == IssueTypeWire::Plan {
+            for descendant in sorted_descendants(&store.issues, &issue.id) {
+                if removed_ids.insert(descendant.id.clone()) {
+                    removed.push(descendant.clone());
+                }
+            }
+        }
+        if removed_ids.insert(issue.id.clone()) {
+            removed.push(issue.clone());
+        }
+    }
+
+    let removed_at = now_utc();
+    for issue in &requested {
+        let cascade_removed_issue_ids =
+            if issue.issue_type == IssueTypeWire::Plan {
+                sorted_descendants(&store.issues, &issue.id)
+                    .into_iter()
+                    .map(|descendant| descendant.id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        store.append_issue_event(
+            &issue.id,
+            BeadEventOperationWire::IssueRemoved,
+            BeadEventPayloadWire::IssueRemoved {
+                cascade_removed_issue_ids,
+            },
+            &removed_at,
+            &issue.created_by,
+        )?;
+    }
+
     store
         .issues
         .retain(|issue| !removed_ids.contains(&issue.id));
@@ -617,6 +642,13 @@ pub fn remove_issue(
     );
     result.issues = removed;
     Ok(result)
+}
+
+pub fn remove_issue(
+    beads_dir: &Path,
+    issue_id: &str,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    remove_issues(beads_dir, &[issue_id.to_string()])
 }
 
 pub fn add_dependency(
@@ -1944,6 +1976,183 @@ mod tests {
     }
 
     #[test]
+    fn remove_issues_removes_independent_roots_in_argument_order() {
+        let (_temp, beads_dir) = batch_remove_fixture();
+
+        let result = remove_issues(
+            &beads_dir,
+            &["sase-2".to_string(), "sase-1.1".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.issue_ids, vec!["sase-2", "sase-1.1"]);
+        assert_eq!(
+            result
+                .issues
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-2", "sase-1.1"]
+        );
+        let reloaded = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(
+            reloaded
+                .issues
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-1", "sase-1.2"]
+        );
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let reduced = reduce_event_streams(&streams).unwrap();
+        assert_eq!(reduced, reloaded.issues);
+        let removal_events: Vec<&BeadEventRecordWire> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::IssueRemoved
+            })
+            .collect();
+        assert_eq!(removal_events.len(), 2);
+        assert_eq!(removal_events[0].timestamp, removal_events[1].timestamp);
+    }
+
+    #[test]
+    fn remove_issues_deduplicates_overlapping_roots_in_both_orders() {
+        let (_temp, beads_dir) = batch_remove_fixture();
+        let plan_first = remove_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-1.2".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            plan_first.issue_ids,
+            vec!["sase-1.1", "sase-1.2", "sase-1"]
+        );
+
+        let (_temp, beads_dir) = batch_remove_fixture();
+        let descendant_first = remove_issues(
+            &beads_dir,
+            &["sase-1.2".to_string(), "sase-1".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            descendant_first.issue_ids,
+            vec!["sase-1.2", "sase-1.1", "sase-1"]
+        );
+    }
+
+    #[test]
+    fn remove_issues_deduplicates_duplicate_requests_and_events() {
+        let (_temp, beads_dir) = batch_remove_fixture();
+
+        let result = remove_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-1".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.issue_ids, vec!["sase-1.1", "sase-1.2", "sase-1"]);
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let removal_events = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::IssueRemoved
+            })
+            .count();
+        assert_eq!(removal_events, 1);
+    }
+
+    #[test]
+    fn remove_issues_missing_later_id_leaves_store_unchanged() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let first = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let second = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Second".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        add_dependency(
+            &beads_dir,
+            &second.id,
+            &first.id,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        let projection_before =
+            fs::read(beads_dir.join("issues.jsonl")).unwrap();
+        let config_before = fs::read(beads_dir.join("config.json")).unwrap();
+        let (_, streams_before) = read_event_store(&beads_dir).unwrap();
+
+        let error = remove_issues(
+            &beads_dir,
+            &[first.id.clone(), "sase-missing".to_string()],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "not_found");
+        assert_eq!(error.message, "Issue not found: sase-missing");
+        assert_eq!(
+            fs::read(beads_dir.join("issues.jsonl")).unwrap(),
+            projection_before
+        );
+        assert_eq!(
+            fs::read(beads_dir.join("config.json")).unwrap(),
+            config_before
+        );
+        let (_, streams_after) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(streams_after, streams_before);
+        let reloaded = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(
+            reloaded
+                .get_issue(&second.id)
+                .unwrap()
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.depends_on_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn remove_issues_rejects_an_empty_request() {
+        let (_temp, beads_dir) = batch_remove_fixture();
+
+        let error = remove_issues(&beads_dir, &[]).unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(
+            error.message,
+            "remove_issues() requires at least one issue ID"
+        );
+    }
+
+    #[test]
     fn removing_child_epic_does_not_close_parent_phase() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");
@@ -2721,5 +2930,53 @@ mod tests {
         format!(
             r#"{{"id":"{id}","title":"{title}","status":"{status}","issue_type":"{issue_type}","parent_id":{parent},"owner":"","assignee":"","created_at":"{timestamp}","created_by":"","updated_at":"{timestamp}","closed_at":null,"close_reason":null,"description":"","notes":"","design":"","is_ready_to_work":false,"changespec_name":"","changespec_bug_id":"","dependencies":[]}}"#
         )
+    }
+
+    fn batch_remove_fixture() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "Plan",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-1.1",
+                    "First child",
+                    "phase",
+                    Some("sase-1"),
+                    "open",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-1.2",
+                    "Second child",
+                    "phase",
+                    Some("sase-1"),
+                    "open",
+                    "2026-01-01T00:02:00Z",
+                ),
+                issue(
+                    "sase-2",
+                    "Independent",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:03:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        (temp, beads_dir)
     }
 }
