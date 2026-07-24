@@ -322,6 +322,7 @@ use sase_core::bead::{
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
     claim_for_agent_launch as core_bead_claim_for_agent_launch,
+    claim_for_agent_wait as core_bead_claim_for_agent_wait,
     close_issues as core_bead_close_issues,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
     execute_bead_cli as core_execute_bead_cli,
@@ -338,6 +339,7 @@ use sase_core::bead::{
     read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
+    release_agent_claim as core_bead_release_agent_claim,
     remove_issue as core_bead_remove_issue,
     remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
@@ -2746,6 +2748,42 @@ fn py_bead_claim_for_agent_launch<'py>(
             core_bead_claim_for_agent_launch(
                 &beads_dir, bead_id, agent_name, now,
             )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_claim_for_agent_wait", signature = (beads_dir, bead_id, agent_name, now=None))]
+fn py_bead_claim_for_agent_wait<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    bead_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_claim_for_agent_wait(&beads_dir, bead_id, agent_name, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_release_agent_claim", signature = (beads_dir, bead_id, agent_name, now=None))]
+fn py_bead_release_agent_claim<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    bead_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_release_agent_claim(&beads_dir, bead_id, agent_name, now)
         }),
     )
 }
@@ -5369,6 +5407,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_wait, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_release_agent_claim, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_preclaim_epic_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;

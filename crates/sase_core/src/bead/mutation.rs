@@ -301,6 +301,142 @@ pub fn claim_for_agent_launch(
     })
 }
 
+pub fn claim_for_agent_wait(
+    beads_dir: &Path,
+    issue_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if agent_name.trim().is_empty() {
+        return Err(BeadError::validation(
+            "agent name for bead wait claim cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)
+            .map_err(|error| durable_store_error("read", beads_dir, error))?;
+        let index = store.issue_index(issue_id)?;
+        let current = store.issues[index].clone();
+
+        if current.status == StatusWire::Claimed
+            && current.assignee == agent_name
+        {
+            let mut result = outcome(
+                "claim_for_agent_wait",
+                false,
+                vec![current.id.clone()],
+            );
+            result.issue = Some(current);
+            return Ok(result);
+        }
+
+        if current.status != StatusWire::Open {
+            let holder = if current.assignee.is_empty() {
+                "<unassigned>"
+            } else {
+                current.assignee.as_str()
+            };
+            let mut result = outcome(
+                "claim_for_agent_wait",
+                false,
+                vec![current.id.clone()],
+            );
+            result.message = format!(
+                "cannot claim bead {issue_id} for agent wait: current status is {} and holder is {holder}",
+                mutation_status_value(&current.status)
+            );
+            result.issue = Some(current);
+            return Ok(result);
+        }
+
+        let now = now.unwrap_or_else(now_utc);
+        store.issues[index].status = StatusWire::Claimed;
+        store.issues[index].assignee = agent_name.to_string();
+        store.issues[index].updated_at = now.clone();
+        let issue = store.issues[index].clone();
+        issue.validate()?;
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: BeadIssueUpdateEventFieldsWire {
+                    status: Some(StatusWire::Claimed),
+                    assignee: Some(agent_name.to_string()),
+                    ..Default::default()
+                },
+            },
+            &now,
+            &issue.created_by,
+        )?;
+        store
+            .save()
+            .map_err(|error| durable_store_error("write", beads_dir, error))?;
+
+        let mut result =
+            outcome("claim_for_agent_wait", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
+pub fn release_agent_claim(
+    beads_dir: &Path,
+    issue_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if agent_name.trim().is_empty() {
+        return Err(BeadError::validation(
+            "agent name for bead claim release cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)
+            .map_err(|error| durable_store_error("read", beads_dir, error))?;
+        let index = store.issue_index(issue_id)?;
+        let current = store.issues[index].clone();
+
+        if current.status != StatusWire::Claimed
+            || current.assignee != agent_name
+        {
+            let mut result =
+                outcome("release_agent_claim", false, vec![current.id.clone()]);
+            result.issue = Some(current);
+            return Ok(result);
+        }
+
+        let now = now.unwrap_or_else(now_utc);
+        store.issues[index].status = StatusWire::Open;
+        store.issues[index].assignee.clear();
+        store.issues[index].updated_at = now.clone();
+        let issue = store.issues[index].clone();
+        issue.validate()?;
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: BeadIssueUpdateEventFieldsWire {
+                    status: Some(StatusWire::Open),
+                    assignee: Some(String::new()),
+                    ..Default::default()
+                },
+            },
+            &now,
+            &issue.created_by,
+        )?;
+        store
+            .save()
+            .map_err(|error| durable_store_error("write", beads_dir, error))?;
+
+        let mut result =
+            outcome("release_agent_claim", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
 pub fn preclaim_epic_work_plan(
     beads_dir: &Path,
     epic_id: &str,
@@ -1143,6 +1279,15 @@ fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
         _ => Err(BeadError::validation(format!(
             "invalid bead status: {value}"
         ))),
+    }
+}
+
+fn mutation_status_value(status: &StatusWire) -> &'static str {
+    match status {
+        StatusWire::Open => "open",
+        StatusWire::Claimed => "claimed",
+        StatusWire::InProgress => "in_progress",
+        StatusWire::Closed => "closed",
     }
 }
 
@@ -2498,6 +2643,261 @@ mod tests {
     }
 
     #[test]
+    fn claim_for_agent_wait_claims_open_and_is_idempotent_for_same_agent() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+
+        let first = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        let issue = first.issue.unwrap();
+        assert_eq!(first.operation, "claim_for_agent_wait");
+        assert!(first.changed);
+        assert_eq!(first.issue_ids, vec![phase_id.clone()]);
+        assert_eq!(issue.status, StatusWire::Claimed);
+        assert_eq!(issue.assignee, "agent-1");
+        assert_eq!(issue.updated_at, "2026-01-01T00:02:00Z");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let claim_event = streams[0].events.last().unwrap();
+        assert_eq!(claim_event.operation, BeadEventOperationWire::IssueUpdated);
+        assert!(matches!(
+            &claim_event.payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.status == Some(StatusWire::Claimed)
+                    && fields.assignee.as_deref() == Some("agent-1")
+        ));
+
+        let before = persisted_claim_state(&beads_dir);
+        let repeated = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!repeated.changed);
+        assert!(repeated.message.is_empty());
+        assert_eq!(repeated.issue.unwrap().updated_at, "2026-01-01T00:02:00Z");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn claim_for_agent_wait_declines_other_claims_and_terminal_states_without_writes(
+    ) {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        let before_other_claim = persisted_claim_state(&beads_dir);
+        let other_claim = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-2",
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!other_claim.changed);
+        assert!(other_claim.message.contains("status is claimed"));
+        assert!(other_claim.message.contains("holder is agent-1"));
+        assert_eq!(persisted_claim_state(&beads_dir), before_other_claim);
+
+        claim_for_agent_launch(
+            &beads_dir,
+            &phase_id,
+            "agent-2",
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        let before_in_progress = persisted_claim_state(&beads_dir);
+        let in_progress = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-3",
+            Some("2026-01-01T00:05:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!in_progress.changed);
+        assert!(in_progress.message.contains("status is in_progress"));
+        assert!(in_progress.message.contains("holder is agent-2"));
+        assert_eq!(persisted_claim_state(&beads_dir), before_in_progress);
+
+        close_issues(
+            &beads_dir,
+            std::slice::from_ref(&phase_id),
+            None,
+            Some("2026-01-01T00:06:00Z".to_string()),
+        )
+        .unwrap();
+        let before_closed = persisted_claim_state(&beads_dir);
+        let closed = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-3",
+            Some("2026-01-01T00:07:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!closed.changed);
+        assert!(closed.message.contains("status is closed"));
+        assert!(closed.message.contains("holder is agent-2"));
+        assert_eq!(persisted_claim_state(&beads_dir), before_closed);
+    }
+
+    #[test]
+    fn release_agent_claim_is_owner_guarded_and_round_trips_to_open() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        let before_wrong_agent = persisted_claim_state(&beads_dir);
+        let wrong_agent = release_agent_claim(
+            &beads_dir,
+            &phase_id,
+            "agent-2",
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!wrong_agent.changed);
+        assert_eq!(persisted_claim_state(&beads_dir), before_wrong_agent);
+
+        let released = release_agent_claim(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        let released_issue = released.issue.unwrap();
+        assert_eq!(released.operation, "release_agent_claim");
+        assert!(released.changed);
+        assert_eq!(released_issue.status, StatusWire::Open);
+        assert!(released_issue.assignee.is_empty());
+        assert_eq!(released_issue.updated_at, "2026-01-01T00:04:00Z");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let release_event = streams[0].events.last().unwrap();
+        assert!(matches!(
+            &release_event.payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.status == Some(StatusWire::Open)
+                    && fields.assignee.as_deref() == Some("")
+        ));
+
+        let before_open_release = persisted_claim_state(&beads_dir);
+        assert!(
+            !release_agent_claim(
+                &beads_dir,
+                &phase_id,
+                "agent-1",
+                Some("2026-01-01T00:05:00Z".to_string()),
+            )
+            .unwrap()
+            .changed
+        );
+        assert_eq!(persisted_claim_state(&beads_dir), before_open_release);
+
+        let reclaimed = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-2",
+            Some("2026-01-01T00:06:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(reclaimed.status, StatusWire::Claimed);
+        assert_eq!(reclaimed.assignee, "agent-2");
+    }
+
+    #[test]
+    fn release_agent_claim_declines_in_progress_and_closed_without_writes() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        claim_for_agent_launch(
+            &beads_dir,
+            &phase_id,
+            "agent-1",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        let before_in_progress = persisted_claim_state(&beads_dir);
+        assert!(
+            !release_agent_claim(
+                &beads_dir,
+                &phase_id,
+                "agent-1",
+                Some("2026-01-01T00:03:00Z".to_string()),
+            )
+            .unwrap()
+            .changed
+        );
+        assert_eq!(persisted_claim_state(&beads_dir), before_in_progress);
+
+        close_issues(
+            &beads_dir,
+            std::slice::from_ref(&phase_id),
+            None,
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        let before_closed = persisted_claim_state(&beads_dir);
+        assert!(
+            !release_agent_claim(
+                &beads_dir,
+                &phase_id,
+                "agent-1",
+                Some("2026-01-01T00:05:00Z".to_string()),
+            )
+            .unwrap()
+            .changed
+        );
+        assert_eq!(persisted_claim_state(&beads_dir), before_closed);
+    }
+
+    #[test]
+    fn agent_claim_mutations_reject_missing_and_blank_requests() {
+        let (_temp, beads_dir, _phase_id) = claim_mutation_fixture();
+
+        for mutation in [
+            claim_for_agent_wait
+                as fn(
+                    &Path,
+                    &str,
+                    &str,
+                    Option<String>,
+                )
+                    -> Result<BeadMutationOutcomeWire, BeadError>,
+            release_agent_claim,
+        ] {
+            let missing = mutation(&beads_dir, "sase-missing", "agent", None)
+                .unwrap_err();
+            assert_eq!(missing.kind, "not_found");
+            assert!(missing.message.contains("sase-missing"));
+
+            for agent_name in ["", "  \t"] {
+                let invalid =
+                    mutation(&beads_dir, "sase-missing", agent_name, None)
+                        .unwrap_err();
+                assert_eq!(invalid.kind, "validation");
+                assert!(invalid.message.contains("cannot be empty or blank"));
+            }
+        }
+    }
+
+    #[test]
     fn concurrent_launch_claims_preserve_sibling_events_and_projection() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");
@@ -2931,6 +3331,62 @@ mod tests {
         format!(
             r#"{{"id":"{id}","title":"{title}","status":"{status}","issue_type":"{issue_type}","parent_id":{parent},"owner":"","assignee":"","created_at":"{timestamp}","created_by":"","updated_at":"{timestamp}","closed_at":null,"close_reason":null,"description":"","notes":"","design":"","is_ready_to_work":false,"changespec_name":"","changespec_bug_id":"","dependencies":[]}}"#
         )
+    }
+
+    fn claim_mutation_fixture() -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        (temp, beads_dir, phase.id)
+    }
+
+    fn persisted_claim_state(
+        beads_dir: &Path,
+    ) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
+        let issues = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+        let streams_dir = beads_dir.join("events/streams");
+        let mut streams: Vec<_> = fs::read_dir(streams_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        streams.sort_by(|left, right| left.0.cmp(&right.0));
+        (issues, streams)
     }
 
     fn batch_remove_fixture() -> (tempfile::TempDir, PathBuf) {
