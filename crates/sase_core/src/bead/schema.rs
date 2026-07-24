@@ -6,7 +6,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'open'
-                  CHECK(status IN ('open', 'in_progress', 'closed')),
+                  CHECK(status IN ('open', 'claimed', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
                   CHECK(issue_type IN ('plan', 'phase')),
     tier        TEXT
@@ -75,7 +75,7 @@ pub fn issue_type_migration_sql() -> &'static str {
 CREATE TABLE _issues_new (
   id TEXT PRIMARY KEY, title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open'
-    CHECK(status IN ('open','in_progress','closed')),
+    CHECK(status IN ('open','claimed','in_progress','closed')),
   issue_type TEXT NOT NULL DEFAULT 'phase'
     CHECK(issue_type IN ('plan','phase')),
   tier TEXT CHECK(tier IN ('plan','epic')),
@@ -164,7 +164,7 @@ CREATE TABLE _issues_new (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'open'
-                  CHECK(status IN ('open', 'in_progress', 'closed')),
+                  CHECK(status IN ('open', 'claimed', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
                   CHECK(issue_type IN ('plan', 'phase')),
     tier        TEXT
@@ -311,6 +311,97 @@ mod tests {
     }
 
     #[test]
+    fn fresh_schema_accepts_claimed_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(BEAD_SQLITE_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, tier, created_at, updated_at
+             ) VALUES (
+                'plan-claimed', 'Claimed plan', 'claimed', 'plan', 'epic',
+                'now', 'now'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM issues WHERE id='plan-claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "claimed");
+    }
+
+    #[test]
+    fn issue_type_migration_preserves_and_accepts_claimed_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open'
+                    CHECK(status IN ('open','claimed','in_progress','closed')),
+                issue_type TEXT NOT NULL DEFAULT 'child'
+                    CHECK(issue_type IN ('epic','child')),
+                parent_id TEXT,
+                owner TEXT,
+                assignee TEXT,
+                created_at TEXT NOT NULL,
+                created_by TEXT,
+                updated_at TEXT NOT NULL,
+                closed_at TEXT,
+                close_reason TEXT,
+                description TEXT,
+                notes TEXT,
+                design TEXT
+            );
+            INSERT INTO issues (
+                id, title, status, issue_type, assignee,
+                created_at, updated_at
+            ) VALUES (
+                'epic-claimed', 'Claimed epic', 'claimed', 'epic',
+                'agent-one', 'now', 'now'
+            );"#,
+        )
+        .unwrap();
+
+        conn.execute_batch(issue_type_migration_sql()).unwrap();
+
+        let migrated: (String, String, String) = conn
+            .query_row(
+                "SELECT status, issue_type, tier
+                 FROM issues WHERE id='epic-claimed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            migrated,
+            (
+                "claimed".to_string(),
+                "plan".to_string(),
+                "epic".to_string()
+            )
+        );
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, parent_id,
+                created_at, updated_at
+             ) VALUES (
+                'phase-claimed', 'Claimed phase', 'claimed', 'phase',
+                'epic-claimed', 'now', 'now'
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn migration_detection_matches_python_helpers() {
         assert!(!needs_issue_type_migration(None));
         assert!(needs_issue_type_migration(Some(
@@ -391,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn relax_migration_preserves_rows_dependencies_and_foreign_keys() {
+    fn relax_migration_preserves_claimed_rows_and_related_data() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         let legacy_schema = BEAD_SQLITE_SCHEMA.replace(
@@ -400,6 +491,11 @@ mod tests {
         );
         conn.execute_batch(&legacy_schema).unwrap();
         insert_plan_and_phase(&conn, "phase-medium", "medium").unwrap();
+        conn.execute(
+            "UPDATE issues SET status='claimed' WHERE id='phase-medium'",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO dependencies (
                 issue_id, depends_on_id, created_at, created_by
@@ -423,6 +519,11 @@ mod tests {
 
         insert_plan_and_phase(&conn, "phase-xsmall", "xsmall").unwrap();
         insert_plan_and_phase(&conn, "phase-xlarge", "xlarge").unwrap();
+        conn.execute(
+            "UPDATE issues SET status='claimed' WHERE id='phase-xlarge'",
+            [],
+        )
+        .unwrap();
         let phase_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM issues WHERE issue_type='phase'",
@@ -431,6 +532,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(phase_count, 3);
+        let claimed_ids = conn
+            .prepare(
+                "SELECT id FROM issues
+                 WHERE status='claimed' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(claimed_ids, ["phase-medium", "phase-xlarge"]);
         let dependency_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dependencies", [], |row| {
                 row.get(0)
