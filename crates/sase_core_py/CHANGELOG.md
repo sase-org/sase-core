@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/sase-org/sase-core/compare/v0.9.0...v0.9.1) - 2026-07-24
+
+### Added
+
+- *(identity)* add owner-aware relationship domain (sase-8v.1)
+
+### Fixed
+
+- *(bead)* expose legacy size constraint migration (sase-8w.7.1)
+
 ## [0.9.0](https://github.com/sase-org/sase-core/compare/v0.8.0...v0.9.0) - 2026-07-23
 
 ### Added
