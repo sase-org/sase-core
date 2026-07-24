@@ -114,6 +114,10 @@ mod tests {
     fn splits_trailing_known_effort() {
         assert_eq!(split_model_effort("opus@xhigh"), ("opus", Some("xhigh")));
         assert_eq!(
+            split_model_effort("@default@medium"),
+            ("@default", Some("medium"))
+        );
+        assert_eq!(
             split_model_effort("codex/gpt-5.6-sol@low"),
             ("codex/gpt-5.6-sol", Some("low"))
         );
@@ -123,6 +127,10 @@ mod tests {
     fn leaves_unknown_or_internal_at_intact() {
         // Unknown trailing token is not an effort level.
         assert_eq!(split_model_effort("opus@v2"), ("opus@v2", None));
+        assert_eq!(
+            split_model_effort("@default@turbo"),
+            ("@default@turbo", None)
+        );
         // A leading `@` (position 0) is never split.
         assert_eq!(split_model_effort("@max"), ("@max", None));
         // No `@` at all.
