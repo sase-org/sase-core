@@ -5702,7 +5702,6 @@ mod tests {
     use pyo3::Python;
     use serde_json::json;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn append_json<'py>(
         py: Python<'py>,
@@ -6854,55 +6853,39 @@ mod tests {
         module
     }
 
-    fn temp_notification_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "sase-core-py-notification-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+    fn temp_notification_path(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::Builder::new()
+            .prefix("sase-core-py-notification-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join(name);
+        (temp, path)
     }
 
-    fn temp_beads_dir() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir()
-            .join(format!("sase-core-py-bead-{}-{nanos}", std::process::id()));
-        let beads_dir = dir.join("sdd/beads");
+    fn temp_beads_dir() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::Builder::new()
+            .prefix("sase-core-py-bead-")
+            .tempdir()
+            .unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
         fs::create_dir_all(&beads_dir).unwrap();
-        beads_dir
+        (temp, beads_dir)
     }
 
-    fn temp_telemetry_path() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "sase-core-py-telemetry-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("metrics.sqlite")
+    fn temp_telemetry_path() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::Builder::new()
+            .prefix("sase-core-py-telemetry-")
+            .tempdir()
+            .unwrap();
+        let path = temp.path().join("metrics.sqlite");
+        (temp, path)
     }
 
-    fn temp_agent_stats_root() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+    fn temp_agent_stats_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("sase-core-py-agent-stats-")
+            .tempdir()
             .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "sase-core-py-agent-stats-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -7012,7 +6995,7 @@ mod tests {
     fn bead_search_binding_round_trips_json_shape() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let beads_dir = temp_beads_dir();
+            let (_temp, beads_dir) = temp_beads_dir();
             fs::write(
                 beads_dir.join("issues.jsonl"),
                 serde_json::to_string(&json!({
@@ -7043,10 +7026,6 @@ mod tests {
 
             assert_eq!(value[0]["issue"]["id"], json!("beads-1.1"));
             assert_eq!(value[0]["matched_fields"], json!(["title"]));
-
-            let root =
-                beads_dir.parent().unwrap().parent().unwrap().to_path_buf();
-            let _ = fs::remove_dir_all(root);
         });
     }
 
@@ -7059,7 +7038,7 @@ mod tests {
             assert!(module.getattr("bead_remove").is_ok());
             assert!(module.getattr("bead_remove_many").is_ok());
 
-            let beads_dir = temp_beads_dir();
+            let (_temp, beads_dir) = temp_beads_dir();
             fs::write(
                 beads_dir.join("issues.jsonl"),
                 [
@@ -7136,7 +7115,7 @@ mod tests {
     fn bead_manifest_repair_binding_round_trips_structured_outcome() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let beads_dir = temp_beads_dir();
+            let (_temp, beads_dir) = temp_beads_dir();
 
             let result = py_bead_repair_event_store_manifest(
                 py,
@@ -7340,7 +7319,7 @@ mod tests {
     fn notification_store_binding_round_trips_json_shape() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let path = temp_notification_path("notifications.jsonl");
+            let (_temp, path) = temp_notification_path("notifications.jsonl");
             let notification_obj = json_value_to_py(
                 py,
                 &json!({
@@ -7402,12 +7381,6 @@ mod tests {
             let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
             assert_eq!(outcome_value["matched_count"], json!(1));
             assert_eq!(outcome_value["changed_count"], json!(1));
-
-            let _ = fs::remove_file(&path);
-            let _ = fs::remove_file(
-                path.with_file_name("notifications.jsonl.lock"),
-            );
-            let _ = fs::remove_dir(path.parent().unwrap());
         });
     }
 
@@ -7438,7 +7411,7 @@ mod tests {
     fn notification_store_counts_binding_omits_rows_and_persists() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let path = temp_notification_path("notifications.jsonl");
+            let (_temp, path) = temp_notification_path("notifications.jsonl");
             let notification_obj = json_value_to_py(
                 py,
                 &json!({
@@ -7488,12 +7461,6 @@ mod tests {
             .unwrap();
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["notifications"][0]["read"], json!(true));
-
-            let _ = fs::remove_file(&path);
-            let _ = fs::remove_file(
-                path.with_file_name("notifications.jsonl.lock"),
-            );
-            let _ = fs::remove_dir(path.parent().unwrap());
         });
     }
 
@@ -7501,7 +7468,7 @@ mod tests {
     fn notification_store_append_and_rewrite_counts_bindings_omit_rows() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let path = temp_notification_path("notifications.jsonl");
+            let (_temp, path) = temp_notification_path("notifications.jsonl");
             let notification_obj = json_value_to_py(
                 py,
                 &json!({
@@ -7609,7 +7576,7 @@ mod tests {
     fn telemetry_bindings_round_trip_python_dicts() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let path = temp_telemetry_path();
+            let (_temp, path) = temp_telemetry_path();
             let batch_obj = json_value_to_py(
                 py,
                 &json!({
@@ -7734,9 +7701,6 @@ mod tests {
             assert_eq!(stats["raw_sample_count"], json!(0));
             assert_eq!(stats["rollup_5m_count"], json!(1));
             assert_eq!(stats["last_write_by_subsystem"]["agent"], json!(100));
-
-            let parent = path.parent().unwrap().to_path_buf();
-            let _ = fs::remove_dir_all(parent);
         });
     }
 
@@ -7744,7 +7708,8 @@ mod tests {
     fn agent_stats_binding_round_trips_python_dict() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let root = temp_agent_stats_root();
+            let temp = temp_agent_stats_root();
+            let root = temp.path();
             let projects = root.join("projects");
             let artifact =
                 projects.join("proj/artifacts/ace-run/20260710010000");
@@ -7834,8 +7799,6 @@ mod tests {
                 json!(60.0)
             );
             assert_eq!(result["runners"]["trend"].as_array().unwrap().len(), 1);
-
-            let _ = fs::remove_dir_all(root);
         });
     }
 
@@ -7843,7 +7806,8 @@ mod tests {
     fn agent_activity_stats_binding_round_trips_python_dict() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let root = temp_agent_stats_root();
+            let temp = temp_agent_stats_root();
+            let root = temp.path();
             let projects = root.join("projects");
             let project = projects.join("proj");
             fs::create_dir_all(&project).unwrap();
