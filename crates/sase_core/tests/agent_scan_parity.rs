@@ -1497,6 +1497,7 @@ fn waiting_marker_carries_runner_slot_fields() {
             "wait_until": "2026-07-12T19:30:00Z",
             "wait_runners": 3,
             "wait_priority": 5,
+            "wait_priority_explicit": true,
             "wait_runners_explicit": true,
             "slot_requested_at": "2026-07-12T19:20:00Z",
         }),
@@ -1518,6 +1519,7 @@ fn waiting_marker_carries_runner_slot_fields() {
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
     assert_eq!(waiting.wait_runners, Some(3));
     assert_eq!(waiting.wait_priority, Some(5));
+    assert!(waiting.wait_priority_explicit);
     assert!(waiting.wait_runners_explicit);
     assert_eq!(
         waiting.slot_requested_at.as_deref(),
