@@ -43,6 +43,7 @@ pub mod runner_limit_override;
 pub mod sections;
 pub mod status;
 pub mod suffix;
+pub mod tasks;
 pub mod telemetry;
 pub mod vcs_log;
 pub mod wire;
@@ -477,6 +478,12 @@ pub use status::{
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
+pub use tasks::{
+    append_task, prune_tasks, read_tasks_snapshot, update_task,
+    BackgroundTaskWire, TaskAppendOutcomeWire, TaskPruneOutcomeWire,
+    TaskStoreError, TaskStoreSnapshotWire, TaskStoreStatsWire,
+    TaskUpdateOutcomeWire, TaskUpdateWire, TASK_WIRE_SCHEMA_VERSION,
+};
 pub use telemetry::{
     cleanup_matching_labels as telemetry_cleanup_matching_labels,
     prune as telemetry_prune, query_instant as telemetry_query_instant,

@@ -69,6 +69,10 @@
 //! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
 //! - `set_prompt_stash_pinned(path: str, ids: list[str], pinned: bool) -> dict`
 //! - `rewrite_prompt_stash(path: str, entries: list[dict]) -> dict`
+//! - `read_tasks_snapshot(path: str) -> dict`
+//! - `append_task(path: str, task: dict, history_limit: int) -> dict`
+//! - `update_task(path: str, update: dict) -> dict`
+//! - `prune_tasks(path: str, history_limit: int) -> dict`
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
 //! - `render_agent_name_template(template: str, token: str) -> str`
@@ -452,6 +456,12 @@ use sase_core::status::{
     read_status_from_lines as core_read_status_from_lines,
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
+};
+use sase_core::tasks::{
+    append_task as core_append_task, prune_tasks as core_prune_tasks,
+    read_tasks_snapshot as core_read_tasks_snapshot,
+    update_task as core_update_task, BackgroundTaskWire, TaskStoreError,
+    TaskUpdateWire,
 };
 use sase_core::telemetry::{
     cleanup_matching_labels as core_telemetry_cleanup_matching_labels,
@@ -3578,6 +3588,101 @@ fn prompt_stash_entries_from_py_list(
     Ok(values)
 }
 
+// --- Background-task store bindings -------------------------------------
+
+fn task_store_error_to_pyerr(error: TaskStoreError) -> PyErr {
+    match error {
+        error @ TaskStoreError::LockTimeout { .. } => {
+            PyTimeoutError::new_err(error.to_string())
+        }
+        error => PyValueError::new_err(error.to_string()),
+    }
+}
+
+/// Read the background-task JSONL store and return a snapshot dict.
+#[pyfunction]
+#[pyo3(name = "read_tasks_snapshot")]
+fn py_read_tasks_snapshot(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| core_read_tasks_snapshot(&path));
+    task_store_result_to_py(py, &snapshot.map_err(task_store_error_to_pyerr)?)
+}
+
+/// Append one task dict, enforce retention, and return the outcome dict.
+#[pyfunction]
+#[pyo3(name = "append_task")]
+fn py_append_task<'py>(
+    py: Python<'py>,
+    path: &str,
+    task: &Bound<'py, PyDict>,
+    history_limit: i64,
+) -> PyResult<PyObject> {
+    let task = background_task_from_pydict(task)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_append_task(&path, &task, history_limit));
+    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+}
+
+/// Apply a partial task update and return its matched/task outcome dict.
+#[pyfunction]
+#[pyo3(name = "update_task")]
+fn py_update_task<'py>(
+    py: Python<'py>,
+    path: &str,
+    update: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let update = task_update_from_pydict(update)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_update_task(&path, &update));
+    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+}
+
+/// Enforce terminal-task retention and return the fresh snapshot + pruned ids.
+#[pyfunction]
+#[pyo3(name = "prune_tasks")]
+fn py_prune_tasks(
+    py: Python<'_>,
+    path: &str,
+    history_limit: i64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_prune_tasks(&path, history_limit));
+    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+}
+
+fn background_task_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<BackgroundTaskWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "task is not a valid BackgroundTaskWire dict: {error}"
+        ))
+    })
+}
+
+fn task_update_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<TaskUpdateWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "update is not a valid TaskUpdateWire dict: {error}"
+        ))
+    })
+}
+
+fn task_store_result_to_py<T>(py: Python<'_>, result: &T) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
 ///
 /// Translates the dict to `serde_json::Value` first so missing fields use
@@ -5494,6 +5599,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_set_prompt_stash_pinned, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prune_tasks, m)?)?;
     m.add_function(wrap_pyfunction!(py_frontmatter_field_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
@@ -5593,6 +5702,89 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn background_task_store_bindings_round_trip_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tasks.jsonl");
+        let path = path.to_str().unwrap();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "read_tasks_snapshot",
+                "append_task",
+                "update_task",
+                "prune_tasks",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let task = json_value_to_py(
+                py,
+                &json!({
+                    "task_id": "task-one",
+                    "label": "Binding task",
+                    "kind": "command",
+                    "status": "pending",
+                    "command": ["true"],
+                    "cwd": "/tmp",
+                    "project": "sase",
+                    "workspace_num": 16,
+                    "session_id": "session",
+                    "session_label": "ace",
+                    "origin": "test",
+                    "cl_name": null,
+                    "tags": ["binding", "binding"],
+                    "pid": null,
+                    "pgid": null,
+                    "exit_code": null,
+                    "phase": "queued",
+                    "message": null,
+                    "created_at": "2026-07-25T12:00:00Z",
+                    "started_at": null,
+                    "finished_at": null,
+                    "log_path": "/tmp/task-one.log"
+                }),
+            )
+            .unwrap();
+            let task = task.bind(py).downcast::<PyDict>().unwrap();
+            let appended = py_append_task(py, path, task, 10).unwrap();
+            let appended = py_to_json_value(appended.bind(py)).unwrap();
+            assert_eq!(appended["snapshot"]["tasks"][0]["task_id"], "task-one");
+            assert_eq!(
+                appended["snapshot"]["tasks"][0]["tags"],
+                json!(["binding"])
+            );
+
+            let update = json_value_to_py(
+                py,
+                &json!({
+                    "task_id": "task-one",
+                    "status": "running",
+                    "session_id": null,
+                    "phase": null,
+                    "pid": 42
+                }),
+            )
+            .unwrap();
+            let update = update.bind(py).downcast::<PyDict>().unwrap();
+            let updated = py_update_task(py, path, update).unwrap();
+            let updated = py_to_json_value(updated.bind(py)).unwrap();
+            assert_eq!(updated["task"]["status"], "running");
+            assert_eq!(updated["task"]["session_id"], JsonValue::Null);
+            assert_eq!(updated["task"]["phase"], JsonValue::Null);
+            assert_eq!(updated["task"]["pid"], 42);
+
+            let snapshot = py_read_tasks_snapshot(py, path).unwrap();
+            let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot["tasks"][0]["task_id"], "task-one");
+            let pruned = py_prune_tasks(py, path, 0).unwrap();
+            let pruned = py_to_json_value(pruned.bind(py)).unwrap();
+            assert!(pruned["pruned_task_ids"].as_array().unwrap().is_empty());
+        });
     }
 
     #[test]
