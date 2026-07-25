@@ -412,16 +412,12 @@ fn validate_clan_member_identity(
         "clan member id",
     )?;
 
+    // The clan template and the member template each carry at most one `@`
+    // marker (enforced per component above). A composed identity may therefore
+    // hold two markers: the clan token is allocated for the whole proposal
+    // group first, then each templated member is allocated inside the concrete
+    // clan.
     let composed = format!("{clan}.{member}");
-    if composed.matches('@').count() > 1 {
-        return Err(ChopEngineError::new(
-            "ambiguous_agent_name_template",
-            format!("{base}.agent_name"),
-            format!(
-                "composed clan member name `{composed}` contains multiple `@` template markers"
-            ),
-        ));
-    }
     if composed.contains("--") {
         return Err(ChopEngineError::new(
             "invalid_clan_member_name",

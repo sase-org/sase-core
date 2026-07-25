@@ -231,6 +231,10 @@ fn clan_scoped_proposals_validate_member_and_directive_shapes() {
         ("research", "worker"),
         ("research.@", "worker.deep"),
         ("research", "@"),
+        // One marker in the clan plus one in the member is legal: each is
+        // allocated in its own stage by the planner.
+        ("research.@", "@"),
+        ("toobig-@", "split_file.src.pkg.large.@"),
     ];
     for (clan, member) in valid_shapes {
         parse_chop_result(
@@ -253,14 +257,14 @@ fn clan_scoped_proposals_validate_member_and_directive_shapes() {
         (None, "research", None, "clan_member_required"),
         (Some(""), "research", None, "blank_value"),
         (
-            Some("@"),
-            "research.@",
-            None,
-            "ambiguous_agent_name_template",
-        ),
-        (
             Some("worker"),
             "research@@",
+            None,
+            "invalid_agent_name_template",
+        ),
+        (
+            Some("split_file.src.pkg.large.@"),
+            "toobig-@@",
             None,
             "invalid_agent_name_template",
         ),
