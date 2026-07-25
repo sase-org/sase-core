@@ -149,7 +149,8 @@
 //! - `sdd_artifact_link_parse(document: str) -> dict`
 //! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
 //! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
-//! - `placeholder_completion(text: str, line: int, character: int) -> dict | None`
+//! - `placeholder_completion(text: str, line: int, character: int, common:
+//!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
@@ -4089,18 +4090,25 @@ fn py_validate_frontmatter_field(
 
 /// Return placeholder completion context and candidates, or `None` when the
 /// cursor is outside a placeholder or no reusable candidates exist.
+///
+/// `common` carries caller-ranked placeholders from a durable store. They are
+/// emitted after the document's own candidates and tagged `"common"`.
 #[pyfunction]
 #[pyo3(name = "placeholder_completion")]
+#[pyo3(signature = (text, line, character, common = None))]
 fn py_placeholder_completion(
     py: Python<'_>,
     text: &str,
     line: u32,
     character: u32,
+    common: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
+    let common = common.unwrap_or_default();
     let document = sase_core::DocumentSnapshot::new(text);
     let completion = sase_core::editor_build_placeholder_completion_candidates(
         &document,
         sase_core::EditorPosition { line, character },
+        &common,
     )
     .filter(|completion| !completion.candidates.is_empty());
     let value = serde_json::to_value(&completion).map_err(|e| {
@@ -6756,17 +6764,50 @@ mod tests {
         Python::with_gil(|py| {
             let text = "<Alpha> use <a>";
             let completion =
-                py_placeholder_completion(py, text, 0, 14).unwrap();
+                py_placeholder_completion(py, text, 0, 14, None).unwrap();
             let value = py_to_json_value(completion.bind(py)).unwrap();
             assert_eq!(value["prefix"], json!("a"));
-            assert_eq!(value["candidates"], json!(["Alpha"]));
+            assert_eq!(
+                value["candidates"],
+                json!([{"text": "Alpha", "source": "prompt"}])
+            );
             assert_eq!(value["append_closing_bracket"], json!(false));
             assert_eq!(
                 value["replacement_range"]["start"]["character"],
                 json!(13)
             );
 
-            let empty = py_placeholder_completion(py, "<only>", 0, 5).unwrap();
+            let with_common = py_placeholder_completion(
+                py,
+                text,
+                0,
+                14,
+                Some(vec!["Alpha".to_string(), "anchor".to_string()]),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(with_common.bind(py)).unwrap()["candidates"],
+                json!([
+                    {"text": "Alpha", "source": "prompt"},
+                    {"text": "anchor", "source": "common"},
+                ])
+            );
+
+            let common_only = py_placeholder_completion(
+                py,
+                "<only>",
+                0,
+                5,
+                Some(vec!["only tag".to_string()]),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(common_only.bind(py)).unwrap()["candidates"],
+                json!([{"text": "only tag", "source": "common"}])
+            );
+
+            let empty =
+                py_placeholder_completion(py, "<only>", 0, 5, None).unwrap();
             assert_eq!(
                 py_to_json_value(empty.bind(py)).unwrap(),
                 JsonValue::Null

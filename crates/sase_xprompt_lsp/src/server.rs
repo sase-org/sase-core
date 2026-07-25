@@ -717,6 +717,8 @@ impl XpromptLspServer {
                 editor_build_placeholder_completion_candidates(
                     document,
                     to_editor_position(position),
+                    // The LSP has no common-placeholder source of its own.
+                    &[],
                 )
                 .map(|completion| completion.into_completion_list())
                 .unwrap_or_else(empty_completion_list)
