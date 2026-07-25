@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/sase-org/sase-core/compare/v0.9.1...v0.9.2) - 2026-07-25
+
+### Added
+
+- *(tasks)* add durable background task store (sase-95.1)
+
+### Fixed
+
+- *(agent-scan)* carry wait priority explicitness (sase-9k.2)
+
 ## [0.9.1](https://github.com/sase-org/sase-core/compare/v0.9.0...v0.9.1) - 2026-07-25
 
 ### Added
