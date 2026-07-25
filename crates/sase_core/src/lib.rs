@@ -23,6 +23,7 @@ pub mod axe_chop;
 pub mod axe_status;
 pub mod bead;
 pub mod commit_footer;
+pub mod commit_sha;
 pub mod config;
 pub mod content_layout;
 pub mod editor;
@@ -107,7 +108,8 @@ pub use agent_group_archive::{
 };
 pub use agent_identity::{
     agent_link_target, agent_local_hood, agent_name_ancestors,
-    agent_name_in_hood, classify_agent_ownership, globalize_agent_name,
+    agent_name_in_hood, classify_agent_ownership,
+    classify_legacy_v1_group_ownership, globalize_agent_name,
     globalize_legacy_agent_name, localize_agent_name,
     normalize_agent_archive_name, parse_agent_family_name,
     rewrite_agent_relationship_batch, strip_global_agent_name,
@@ -117,7 +119,8 @@ pub use agent_identity::{
     AgentOwnershipClassification, AgentRelationshipBatchWire,
     AgentRelationshipError, AgentRelationshipKind, AgentRelationshipTargetWire,
     AgentRelationshipWire, AgentRunContainerWire, AgentRunWire,
-    AgentSourceOwnerIdentity, RewrittenAgentRelationshipBatchWire,
+    AgentSourceOwnerIdentity, LegacyV1GroupOwnershipClassification,
+    LegacyV1GroupOwnershipEvidence, RewrittenAgentRelationshipBatchWire,
     RewrittenAgentRelationshipTargetWire, RewrittenAgentRelationshipWire,
     RewrittenAgentRunContainerWire, RewrittenAgentRunWire,
     ValidatedAgentRelationshipSummaryWire, AGENT_RELATIONSHIP_SCHEMA_VERSION,
@@ -259,6 +262,7 @@ pub use commit_footer::{
     CommitFooterTagWire, CommitFooterUpdateWire, CommitFooterWire,
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
+pub use commit_sha::commit_shas_equivalent;
 pub use config::{
     compose_axe_config, config_field_model, config_inventory, config_plan_edit,
     config_validate, plan_axe_entry_mutation, AxeConfigComposeRequestWire,

@@ -94,6 +94,33 @@ impl AgentOwnershipClassification {
     }
 }
 
+/// First-party evidence available when classifying one legacy-v1 group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyV1GroupOwnershipEvidence {
+    pub v2_hood_published: bool,
+    pub proven_entry_count: usize,
+    pub total_entry_count: usize,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyV1GroupOwnershipClassification {
+    OwnerObserved,
+    Foreign,
+}
+
+impl LegacyV1GroupOwnershipClassification {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerObserved => "owner_observed",
+            Self::Foreign => "foreign",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentFamilyNameWire {
@@ -155,6 +182,14 @@ pub enum AgentIdentityError {
         "legacy agent name '{name}' must be qualified as '<machine_name>.<local-name>'"
     )]
     MalformedLegacyName { name: String },
+
+    #[error(
+        "invalid legacy-v1 group ownership evidence: proven entry count {proven_entry_count} exceeds total entry count {total_entry_count}"
+    )]
+    InvalidLegacyV1GroupOwnershipEvidence {
+        proven_entry_count: usize,
+        total_entry_count: usize,
+    },
 
     #[error(
         "invalid family name '{name}': expected a solo name or one terminal '--<role>' suffix"
@@ -220,6 +255,41 @@ pub fn classify_agent_ownership(
         AgentSourceOwnerIdentity::V2 { .. } => {
             AgentOwnershipClassification::OtherUser
         }
+    })
+}
+
+/// Classify one legacy-v1 group using explicit first-party evidence.
+///
+/// A matching machine token is necessary but never sufficient. The group is
+/// owner-observed only when the target owner has already published its hood in
+/// v2 or at least one entry is proven against a local, non-imported artifact.
+pub fn classify_legacy_v1_group_ownership(
+    group_machine_name: &str,
+    target: &AgentOwnerIdentity,
+    evidence: &LegacyV1GroupOwnershipEvidence,
+) -> Result<LegacyV1GroupOwnershipClassification, AgentIdentityError> {
+    validate_machine_name(group_machine_name).map_err(|source| {
+        AgentIdentityError::InvalidMachineName {
+            machine_name: group_machine_name.to_string(),
+            reason: source.to_string(),
+        }
+    })?;
+    target.validate()?;
+    if evidence.proven_entry_count > evidence.total_entry_count {
+        return Err(
+            AgentIdentityError::InvalidLegacyV1GroupOwnershipEvidence {
+                proven_entry_count: evidence.proven_entry_count,
+                total_entry_count: evidence.total_entry_count,
+            },
+        );
+    }
+
+    let owner_observed = group_machine_name == target.machine_name
+        && (evidence.v2_hood_published || evidence.proven_entry_count > 0);
+    Ok(if owner_observed {
+        LegacyV1GroupOwnershipClassification::OwnerObserved
+    } else {
+        LegacyV1GroupOwnershipClassification::Foreign
     })
 }
 
@@ -704,6 +774,59 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn legacy_v1_group_ownership_evidence_matrix() {
+        let target = owner("alice", "athena");
+        for (group_machine_name, machine_matches) in
+            [("athena", true), ("zeus", false)]
+        {
+            for v2_hood_published in [false, true] {
+                for proven_entry_count in [0, 1, 3] {
+                    let evidence = LegacyV1GroupOwnershipEvidence {
+                        v2_hood_published,
+                        proven_entry_count,
+                        total_entry_count: 3,
+                    };
+                    let expected = if machine_matches
+                        && (v2_hood_published || proven_entry_count > 0)
+                    {
+                        LegacyV1GroupOwnershipClassification::OwnerObserved
+                    } else {
+                        LegacyV1GroupOwnershipClassification::Foreign
+                    };
+                    assert_eq!(
+                        classify_legacy_v1_group_ownership(
+                            group_machine_name,
+                            &target,
+                            &evidence,
+                        )
+                        .unwrap(),
+                        expected,
+                        "machine={group_machine_name}, v2={v2_hood_published}, proven={proven_entry_count}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_v1_group_ownership_rejects_impossible_evidence() {
+        let error = classify_legacy_v1_group_ownership(
+            "athena",
+            &owner("alice", "athena"),
+            &LegacyV1GroupOwnershipEvidence {
+                v2_hood_published: false,
+                proven_entry_count: 2,
+                total_entry_count: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentIdentityError::InvalidLegacyV1GroupOwnershipEvidence { .. }
+        ));
     }
 
     #[test]

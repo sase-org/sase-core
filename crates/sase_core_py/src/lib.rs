@@ -84,6 +84,8 @@
 //! - `validate_agent_username(username: str) -> None`
 //! - `validate_agent_owner(username: str, machine_name: str) -> None`
 //! - `classify_agent_ownership(source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
+//! - `classify_legacy_v1_group_ownership(group_machine_name: str, target_username: str, target_machine_name: str, v2_hood_published: bool, proven_entry_count: int, total_entry_count: int) -> str`
+//! - `commit_shas_equivalent(left: str, right: str) -> bool`
 //! - `normalize_agent_archive_name(name: str) -> str`
 //! - `globalize_agent_name(local_name: str, username: str, machine_name: str) -> str`
 //! - `globalize_legacy_agent_name(legacy_name: str, username: str, machine_name: str) -> str`
@@ -233,6 +235,7 @@ use sase_core::agent_identity::{
     agent_name_ancestors as core_agent_name_ancestors,
     agent_name_in_hood as core_agent_name_in_hood,
     classify_agent_ownership as core_classify_agent_ownership,
+    classify_legacy_v1_group_ownership as core_classify_legacy_v1_group_ownership,
     globalize_agent_name as core_globalize_agent_name,
     globalize_legacy_agent_name as core_globalize_legacy_agent_name,
     localize_agent_name as core_localize_agent_name,
@@ -244,7 +247,7 @@ use sase_core::agent_identity::{
     validate_agent_relationship_batch as core_validate_agent_relationship_batch,
     validate_agent_username as core_validate_agent_username,
     AgentOwnerIdentity, AgentRelationshipBatchWire, AgentSourceOwnerIdentity,
-    AGENT_RELATIONSHIP_SCHEMA_VERSION,
+    LegacyV1GroupOwnershipEvidence, AGENT_RELATIONSHIP_SCHEMA_VERSION,
 };
 use sase_core::agent_launch::{
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
@@ -359,6 +362,7 @@ use sase_core::commit_footer::{
     update_commit_footer as core_update_commit_footer, CommitFooterUpdateWire,
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
+use sase_core::commit_sha::commit_shas_equivalent as core_commit_shas_equivalent;
 use sase_core::compose_snippet_catalog as core_compose_snippet_catalog;
 use sase_core::config::{
     compose_axe_config as core_compose_axe_config,
@@ -677,6 +681,37 @@ fn py_classify_agent_ownership(
     core_classify_agent_ownership(&source, &target)
         .map(|classification| classification.as_str().to_string())
         .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_legacy_v1_group_ownership")]
+fn py_classify_legacy_v1_group_ownership(
+    group_machine_name: &str,
+    target_username: &str,
+    target_machine_name: &str,
+    v2_hood_published: bool,
+    proven_entry_count: usize,
+    total_entry_count: usize,
+) -> PyResult<String> {
+    let target = explicit_owner(target_username, target_machine_name)?;
+    let evidence = LegacyV1GroupOwnershipEvidence {
+        v2_hood_published,
+        proven_entry_count,
+        total_entry_count,
+    };
+    core_classify_legacy_v1_group_ownership(
+        group_machine_name,
+        &target,
+        &evidence,
+    )
+    .map(|classification| classification.as_str().to_string())
+    .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "commit_shas_equivalent")]
+fn py_commit_shas_equivalent(left: &str, right: &str) -> bool {
+    core_commit_shas_equivalent(left, right)
 }
 
 #[pyfunction]
@@ -5274,6 +5309,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_agent_username, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_agent_ownership, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_classify_legacy_v1_group_ownership,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_commit_shas_equivalent, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_legacy_agent_name, m)?)?;
@@ -5634,6 +5674,8 @@ mod tests {
                 "validate_agent_username",
                 "validate_agent_owner",
                 "classify_agent_ownership",
+                "classify_legacy_v1_group_ownership",
+                "commit_shas_equivalent",
                 "normalize_agent_archive_name",
                 "globalize_agent_name",
                 "globalize_legacy_agent_name",
@@ -5667,6 +5709,28 @@ mod tests {
                 .unwrap(),
                 "same_user_other_machine"
             );
+            assert_eq!(
+                py_classify_legacy_v1_group_ownership(
+                    "athena", "alice", "athena", false, 1, 2,
+                )
+                .unwrap(),
+                "owner_observed"
+            );
+            assert_eq!(
+                py_classify_legacy_v1_group_ownership(
+                    "zeus", "alice", "athena", true, 2, 2,
+                )
+                .unwrap(),
+                "foreign"
+            );
+            assert!(py_classify_legacy_v1_group_ownership(
+                "athena", "alice", "athena", false, 2, 1,
+            )
+            .is_err());
+            assert!(py_commit_shas_equivalent(
+                "d7e06b77b",
+                "d7e06b77b42d89ecf4bb1538c6f89c6fe700124e",
+            ));
             assert_eq!(
                 py_globalize_agent_name(
                     "260722.foo.bar--code",
