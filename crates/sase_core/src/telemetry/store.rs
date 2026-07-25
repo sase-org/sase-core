@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{
-    params, params_from_iter, Connection, OpenFlags, OptionalExtension,
-    Transaction,
+    params, params_from_iter, Connection, ErrorCode, OpenFlags,
+    OptionalExtension, Transaction, TransactionBehavior,
 };
 
 use super::wire::{
@@ -35,7 +36,9 @@ pub fn record_batch(
     validate_batch(&batch)?;
     let now_ts = batch.now_ts.unwrap_or_else(unix_now);
     with_store(store_path, busy_timeout, |conn| {
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         for sample in &batch.samples {
             insert_sample(&tx, sample)?;
         }
@@ -92,7 +95,9 @@ pub fn prune(
 ) -> Result<TelemetryPruneReportWire, String> {
     let now_ts = request.now_ts.unwrap_or_else(unix_now);
     with_store(store_path, busy_timeout, |conn| {
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
         let report = maintain(&tx, now_ts, &request.retention)?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(report)
@@ -176,7 +181,9 @@ pub fn cleanup_matching_labels(
         ));
     }
 
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     for (table, expected) in ["samples", "rollup_5m", "rollup_1h"]
         .into_iter()
         .zip(counts)
@@ -416,9 +423,9 @@ fn open_store(
     }
     let conn = Connection::open(store_path).map_err(|e| e.to_string())?;
     conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
+    enable_wal_mode(&conn, busy_timeout)?;
     conn.execute_batch(
         r#"
-        PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS meta (
@@ -516,6 +523,47 @@ fn open_store(
     )
     .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+fn enable_wal_mode(
+    conn: &Connection,
+    busy_timeout: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let result = loop {
+        let remaining = busy_timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break Err(
+                "timed out waiting to enable WAL journal mode".to_string()
+            );
+        }
+        conn.busy_timeout(remaining).map_err(|e| e.to_string())?;
+        match conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => break Ok(()),
+            Ok(mode) => {
+                break Err(format!(
+                    "failed to enable WAL journal mode: SQLite returned {mode:?}"
+                ));
+            }
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                ) =>
+            {
+                let remaining = busy_timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    break Err(error.to_string());
+                }
+                thread::sleep(Duration::from_millis(5).min(remaining));
+            }
+            Err(error) => break Err(error.to_string()),
+        }
+    };
+    conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
+    result
 }
 
 fn validate_batch(batch: &TelemetryRecordBatchWire) -> Result<(), String> {
@@ -2368,42 +2416,62 @@ mod tests {
 
     #[test]
     fn concurrent_writers_preserve_every_delta() {
+        for round in 0..10 {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("metrics.sqlite");
+            let barrier = Arc::new(Barrier::new(4));
+            let mut handles = Vec::new();
+            for worker in 0..4 {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                handles.push(thread::spawn(move || {
+                    barrier.wait();
+                    let samples = (0..25)
+                        .map(|offset| {
+                            sample(
+                                1_000 + offset,
+                                "sase_agent_runs_total",
+                                TelemetryMetricKindWire::Counter,
+                                &format!("runner-{worker}"),
+                                1.0,
+                            )
+                        })
+                        .collect();
+                    record_batch(
+                        &path,
+                        batch(samples, 1_100),
+                        Duration::from_secs(5),
+                    )
+                    .unwrap();
+                }));
+            }
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            let mut request = instant_request("sase_agent_runs_total", 1_100);
+            request.group_by = Some(Vec::new());
+            let result =
+                query_instant(&path, request, Duration::from_secs(1)).unwrap();
+            assert_eq!(
+                result.values[0].value, 100.0,
+                "lost a concurrent delta in round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_initialization_lock_wait_is_bounded() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("metrics.sqlite");
-        let barrier = Arc::new(Barrier::new(4));
-        let mut handles = Vec::new();
-        for worker in 0..4 {
-            let path = path.clone();
-            let barrier = barrier.clone();
-            handles.push(thread::spawn(move || {
-                barrier.wait();
-                let samples = (0..25)
-                    .map(|offset| {
-                        sample(
-                            1_000 + offset,
-                            "sase_agent_runs_total",
-                            TelemetryMetricKindWire::Counter,
-                            &format!("runner-{worker}"),
-                            1.0,
-                        )
-                    })
-                    .collect();
-                record_batch(
-                    &path,
-                    batch(samples, 1_100),
-                    Duration::from_secs(5),
-                )
-                .unwrap();
-            }));
-        }
-        for handle in handles {
-            handle.join().unwrap();
-        }
-        let mut request = instant_request("sase_agent_runs_total", 1_100);
-        request.group_by = Some(Vec::new());
-        let result =
-            query_instant(&path, request, Duration::from_secs(1)).unwrap();
-        assert_eq!(result.values[0].value, 100.0);
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let started = Instant::now();
+        let result = open_store(&path, Duration::from_millis(25));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        holder.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
