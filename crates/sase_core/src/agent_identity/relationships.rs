@@ -1177,6 +1177,35 @@ mod tests {
     }
 
     #[test]
+    fn historical_family_names_validate_in_relationship_batches() {
+        let batch = AgentRelationshipBatchWire {
+            schema_version: AGENT_RELATIONSHIP_SCHEMA_VERSION,
+            owner: owner("alice", "athena"),
+            runs: vec![
+                run("run-1", "fi--code.f0--plan"),
+                run("run-2", "fi--code.f0--code"),
+            ],
+            containers: vec![AgentRunContainerWire {
+                kind: AgentContainerKind::Family,
+                global_name: "alice.athena.fi--code.f0".to_string(),
+                owner: owner("alice", "athena"),
+                member_source_run_ids: vec![
+                    "run-1".to_string(),
+                    "run-2".to_string(),
+                ],
+            }],
+            relationships: vec![],
+        };
+
+        let summary = validate_agent_relationship_batch(&batch).unwrap();
+        assert_eq!(summary.run_count, 2);
+        assert_eq!(
+            summary.container_order,
+            ["family:alice.athena.fi--code.f0"]
+        );
+    }
+
+    #[test]
     fn serde_contract_rejects_machine_local_and_unknown_state() {
         let value = json!({
             "schema_version": 2,

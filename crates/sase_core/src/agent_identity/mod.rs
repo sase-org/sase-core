@@ -13,9 +13,9 @@ pub use identity::{
     agent_name_in_hood, classify_agent_ownership, globalize_agent_name,
     globalize_legacy_agent_name, localize_agent_name,
     normalize_agent_archive_name, parse_agent_family_name,
-    strip_global_agent_name, validate_agent_username, AgentFamilyNameWire,
-    AgentIdentityError, AgentLinkTargetWire, AgentOwnerIdentity,
-    AgentOwnershipClassification, AgentSourceOwnerIdentity,
+    strip_global_agent_name, validate_agent_name, validate_agent_username,
+    AgentFamilyNameWire, AgentIdentityError, AgentLinkTargetWire,
+    AgentOwnerIdentity, AgentOwnershipClassification, AgentSourceOwnerIdentity,
 };
 pub use relationships::{
     rewrite_agent_relationship_batch, validate_agent_relationship_batch,

@@ -80,6 +80,7 @@
 //! - `qualify_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `strip_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `machine_hood_of(name: str, known_machines: list[str]) -> str | None`
+//! - `validate_agent_name(name: str) -> None`
 //! - `validate_agent_username(username: str) -> None`
 //! - `validate_agent_owner(username: str, machine_name: str) -> None`
 //! - `classify_agent_ownership(source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
@@ -239,6 +240,7 @@ use sase_core::agent_identity::{
     parse_agent_family_name as core_parse_agent_family_name,
     rewrite_agent_relationship_batch as core_rewrite_agent_relationship_batch,
     strip_global_agent_name as core_strip_global_agent_name,
+    validate_agent_name as core_validate_agent_name,
     validate_agent_relationship_batch as core_validate_agent_relationship_batch,
     validate_agent_username as core_validate_agent_username,
     AgentOwnerIdentity, AgentRelationshipBatchWire, AgentSourceOwnerIdentity,
@@ -638,6 +640,13 @@ fn identity_wire_to_py<'py, T: serde::Serialize>(
 #[pyo3(name = "validate_agent_username")]
 fn py_validate_agent_username(username: &str) -> PyResult<()> {
     core_validate_agent_username(username)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_agent_name")]
+fn py_validate_agent_name(name: &str) -> PyResult<()> {
+    core_validate_agent_name(name)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -5261,6 +5270,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_qualify_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_strip_machine_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_machine_hood_of, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_username, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_agent_ownership, m)?)?;
@@ -5620,6 +5630,7 @@ mod tests {
             let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
             sase_core_rs(py, &module).unwrap();
             for name in [
+                "validate_agent_name",
                 "validate_agent_username",
                 "validate_agent_owner",
                 "classify_agent_ownership",
@@ -5642,6 +5653,8 @@ mod tests {
 
             py_validate_agent_username("alice").unwrap();
             assert!(py_validate_agent_username("Alice").is_err());
+            py_validate_agent_name("foo.bar--code").unwrap();
+            assert!(py_validate_agent_name("foo--code.bar").is_err());
             py_validate_agent_owner("alice", "athena").unwrap();
             assert!(py_validate_agent_owner("alice", "athena1").is_err());
             assert_eq!(
@@ -5684,6 +5697,22 @@ mod tests {
                     "family_name": "foo.bar",
                     "member_role": "code"
                 })
+            );
+            let historical =
+                py_parse_agent_family_name(py, "fi--code.f0--plan").unwrap();
+            assert_eq!(
+                py_to_json_value(historical.bind(py)).unwrap(),
+                json!({
+                    "kind": "member",
+                    "family_name": "fi--code.f0",
+                    "member_role": "plan"
+                })
+            );
+            assert_eq!(py_agent_local_hood("4x--epic.f-0").unwrap(), "4x");
+            assert!(py_agent_name_in_hood("fi--code.f0--code", "fi").unwrap());
+            assert_eq!(
+                py_agent_name_ancestors("fi--code.f0--code").unwrap(),
+                ["fi", "fi--code.f0"]
             );
             let link =
                 py_agent_link_target(py, "foo.bar--code", "alice", "athena")

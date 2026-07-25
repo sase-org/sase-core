@@ -190,6 +190,15 @@ pub fn validate_agent_username(
     }
 }
 
+/// Strictly validate a newly-created agent name.
+///
+/// Historical classification helpers intentionally accept legacy family
+/// markers in non-terminal segments. Name creation must continue to use this
+/// stricter entry point, which permits at most one terminal `--<role>` suffix.
+pub fn validate_agent_name(name: &str) -> Result<(), AgentIdentityError> {
+    validate_semantic_name(name)
+}
+
 pub fn classify_agent_ownership(
     source: &AgentSourceOwnerIdentity,
     target: &AgentOwnerIdentity,
@@ -214,8 +223,8 @@ pub fn classify_agent_ownership(
     })
 }
 
-/// Strip at most one canonical `YYMMDD.` archive prefix and validate the
-/// remaining name.
+/// Strip at most one canonical `YYMMDD.` archive prefix and validate that the
+/// remaining historical name is non-empty and path-safe.
 pub fn normalize_agent_archive_name(
     name: &str,
 ) -> Result<String, AgentIdentityError> {
@@ -231,7 +240,7 @@ pub fn normalize_agent_archive_name(
         }
         _ => name,
     };
-    validate_semantic_name(normalized)?;
+    validate_historical_semantic_name(normalized)?;
     Ok(normalized.to_string())
 }
 
@@ -245,10 +254,10 @@ pub fn globalize_agent_name(
     let normalized = normalize_agent_archive_name(local_name)?;
     let prefix = owner_prefix(owner);
     if let Some(remainder) = normalized.strip_prefix(&prefix) {
-        validate_semantic_name(remainder)?;
+        validate_historical_semantic_name(remainder)?;
         return Ok(normalized);
     }
-    validate_semantic_name(&normalized)?;
+    validate_historical_semantic_name(&normalized)?;
     Ok(format!("{prefix}{normalized}"))
 }
 
@@ -290,7 +299,7 @@ pub fn strip_global_agent_name(
     let Some(local_name) = normalized.strip_prefix(&prefix) else {
         return Err(owner_mismatch(&normalized, source_owner));
     };
-    validate_semantic_name(local_name)?;
+    validate_historical_semantic_name(local_name)?;
     Ok(local_name.to_string())
 }
 
@@ -331,28 +340,32 @@ pub fn parse_agent_family_name(
 
 pub fn agent_local_hood(name: &str) -> Result<String, AgentIdentityError> {
     let parsed = parse_agent_family_name(name)?;
-    Ok(parsed
-        .family_name
-        .split('.')
-        .next()
-        .expect("validated name has a first segment")
-        .to_string())
+    Ok(historical_hood_segment(
+        parsed
+            .family_name
+            .split('.')
+            .next()
+            .expect("validated name has a first segment"),
+    )
+    .to_string())
 }
 
 pub fn agent_name_in_hood(
     name: &str,
     hood: &str,
 ) -> Result<bool, AgentIdentityError> {
-    let parsed = parse_agent_family_name(name)?;
     let normalized_hood = normalize_agent_archive_name(hood)?;
     if normalized_hood.contains("--") {
         return Err(AgentIdentityError::InvalidFamilyName {
             name: hood.to_string(),
         });
     }
-    Ok(parsed.family_name == normalized_hood
-        || parsed
-            .family_name
+    let Ok(parsed) = parse_agent_family_name(name) else {
+        return Ok(false);
+    };
+    let family_scope = historical_family_scope(&parsed.family_name);
+    Ok(family_scope == normalized_hood
+        || family_scope
             .strip_prefix(&normalized_hood)
             .is_some_and(|suffix| suffix.starts_with('.')))
 }
@@ -361,18 +374,20 @@ pub fn agent_name_ancestors(
     name: &str,
 ) -> Result<Vec<String>, AgentIdentityError> {
     let parsed = parse_agent_family_name(name)?;
-    let mut current = String::new();
-    Ok(parsed
-        .family_name
-        .split('.')
-        .map(|segment| {
-            if !current.is_empty() {
-                current.push('.');
-            }
-            current.push_str(segment);
-            current.clone()
-        })
-        .collect())
+    let mut segments = parsed.family_name.split('.');
+    let first = segments.next().expect("validated name has a first segment");
+    let hood = historical_hood_segment(first);
+    let mut ancestors = vec![hood.to_string()];
+    let mut current = first.to_string();
+    for segment in segments {
+        current.push('.');
+        current.push_str(segment);
+        ancestors.push(current.clone());
+    }
+    if ancestors.len() == 1 && hood != first {
+        ancestors.push(first.to_string());
+    }
+    Ok(ancestors)
 }
 
 pub fn agent_link_target(
@@ -442,7 +457,7 @@ fn strip_source_global_name(
                     expected_machine: machine_name.clone(),
                 });
             };
-            validate_semantic_name(local_name)?;
+            validate_historical_semantic_name(local_name)?;
             Ok(local_name.to_string())
         }
     }
@@ -466,35 +481,30 @@ fn owner_mismatch(
 fn parse_normalized_family_name(
     normalized: &str,
 ) -> Result<AgentFamilyNameWire, AgentIdentityError> {
-    let delimiter_count = normalized.match_indices("--").count();
-    match delimiter_count {
-        0 => Ok(AgentFamilyNameWire {
+    let (family_name, member_role) =
+        parse_normalized_family_name_unchecked(normalized);
+    Ok(match member_role {
+        None => AgentFamilyNameWire {
             kind: "solo".to_string(),
-            family_name: normalized.to_string(),
+            family_name: family_name.to_string(),
             member_role: None,
-        }),
-        1 => {
-            let (base, role) = normalized.rsplit_once("--").expect("one match");
-            if base.is_empty() || role.is_empty() || role.contains('.') {
-                return Err(AgentIdentityError::InvalidFamilyName {
-                    name: normalized.to_string(),
-                });
-            }
-            validate_dotted_base(base)?;
-            validate_simple_segment(role, normalized)?;
-            Ok(AgentFamilyNameWire {
-                kind: "member".to_string(),
-                family_name: base.to_string(),
-                member_role: Some(role.to_string()),
-            })
-        }
-        _ => Err(AgentIdentityError::InvalidFamilyName {
-            name: normalized.to_string(),
-        }),
-    }
+        },
+        Some(role) => AgentFamilyNameWire {
+            kind: "member".to_string(),
+            family_name: family_name.to_string(),
+            member_role: Some(role.to_string()),
+        },
+    })
 }
 
 fn validate_semantic_name(name: &str) -> Result<(), AgentIdentityError> {
+    validate_historical_semantic_name(name)?;
+    validate_new_family_name(name)
+}
+
+fn validate_historical_semantic_name(
+    name: &str,
+) -> Result<(), AgentIdentityError> {
     if name.is_empty() {
         return Err(AgentIdentityError::EmptyAgentName);
     }
@@ -518,34 +528,68 @@ fn validate_semantic_name(name: &str) -> Result<(), AgentIdentityError> {
             reason: "control characters are forbidden".to_string(),
         });
     }
-    let parsed = parse_normalized_family_name_unchecked(name)?;
-    validate_dotted_base(parsed.0)?;
-    if let Some(role) = parsed.1 {
-        validate_simple_segment(role, name)?;
-    }
-    Ok(())
+    validate_dotted_base(name)
 }
 
-fn parse_normalized_family_name_unchecked(
-    name: &str,
-) -> Result<(&str, Option<&str>), AgentIdentityError> {
-    let mut matches = name.match_indices("--");
+fn parse_normalized_family_name_unchecked(name: &str) -> (&str, Option<&str>) {
+    let terminal_start = name
+        .rfind('.')
+        .map_or(0, |separator| separator.saturating_add(1));
+    let terminal = &name[terminal_start..];
+    let mut matches = terminal.match_indices("--");
     match (matches.next(), matches.next()) {
-        (None, _) => Ok((name, None)),
-        (Some((index, _)), None) => {
+        (Some((relative_index, _)), None) => {
+            let index = terminal_start + relative_index;
             let base = &name[..index];
             let role = &name[index + 2..];
-            if base.is_empty() || role.is_empty() || role.contains('.') {
-                Err(AgentIdentityError::InvalidFamilyName {
-                    name: name.to_string(),
-                })
+            if base.is_empty() || role.is_empty() {
+                (name, None)
             } else {
-                Ok((base, Some(role)))
+                (base, Some(role))
             }
+        }
+        _ => (name, None),
+    }
+}
+
+fn validate_new_family_name(name: &str) -> Result<(), AgentIdentityError> {
+    let delimiter_count = name.match_indices("--").count();
+    match delimiter_count {
+        0 => Ok(()),
+        1 => {
+            let (base, role) = name.rsplit_once("--").expect("one match");
+            if base.is_empty() || role.is_empty() || role.contains('.') {
+                return Err(AgentIdentityError::InvalidFamilyName {
+                    name: name.to_string(),
+                });
+            }
+            validate_dotted_base(base)?;
+            validate_simple_segment(role, name)
         }
         _ => Err(AgentIdentityError::InvalidFamilyName {
             name: name.to_string(),
         }),
+    }
+}
+
+fn historical_hood_segment(segment: &str) -> &str {
+    segment.split_once("--").map_or(segment, |(hood, _)| {
+        if hood.is_empty() {
+            segment
+        } else {
+            hood
+        }
+    })
+}
+
+fn historical_family_scope(family_name: &str) -> String {
+    let (first, suffix) =
+        family_name.split_once('.').unwrap_or((family_name, ""));
+    let hood = historical_hood_segment(first);
+    if suffix.is_empty() {
+        hood.to_string()
+    } else {
+        format!("{hood}.{suffix}")
     }
 }
 
@@ -757,21 +801,20 @@ mod tests {
     fn unsafe_names_and_empty_remainders_fail() {
         let alice = owner("alice", "athena");
         for value in [
-            "",
-            ".",
-            "..",
-            "foo..bar",
-            "foo/bar",
-            "foo\\bar",
-            "foo\nbar",
-            "foo--",
-            "--code",
-            "foo--code--test",
+            "", ".", "..", "foo..bar", "foo/bar", "foo\\bar", "foo\nbar",
             "260722.",
         ] {
             assert!(globalize_agent_name(value, &alice).is_err(), "{value}");
         }
         assert!(strip_global_agent_name("alice.athena.", &alice).is_err());
+
+        for value in ["foo--", "--code", "foo--code.bar", "foo--code--test"] {
+            assert!(matches!(
+                validate_agent_name(value),
+                Err(AgentIdentityError::InvalidFamilyName { .. })
+            ));
+        }
+        validate_agent_name("foo.bar--code").unwrap();
     }
 
     #[test]
@@ -795,10 +838,103 @@ mod tests {
         );
         assert!(agent_name_in_hood("foo.bar--code", "foo").unwrap());
         assert!(!agent_name_in_hood("foobar.baz", "foo").unwrap());
+    }
 
-        for invalid in ["foo--code.bar", "foo--code--test", "--code", "foo--"] {
-            assert!(parse_agent_family_name(invalid).is_err(), "{invalid}");
+    #[test]
+    fn historical_family_classification_is_total_and_canonical() {
+        let alice = owner("alice", "athena");
+        let cases = [
+            (
+                "4x--epic.f-0",
+                "solo",
+                "4x--epic.f-0",
+                None,
+                "4x",
+                vec!["4x", "4x--epic.f-0"],
+            ),
+            (
+                "fi--code.f0",
+                "solo",
+                "fi--code.f0",
+                None,
+                "fi",
+                vec!["fi", "fi--code.f0"],
+            ),
+            (
+                "fi--code.f0--plan",
+                "member",
+                "fi--code.f0",
+                Some("plan"),
+                "fi",
+                vec!["fi", "fi--code.f0"],
+            ),
+            (
+                "fi--code.f0--code",
+                "member",
+                "fi--code.f0",
+                Some("code"),
+                "fi",
+                vec!["fi", "fi--code.f0"],
+            ),
+        ];
+        for (name, kind, family_name, member_role, hood, ancestors) in cases {
+            let parsed = parse_agent_family_name(name).unwrap();
+            assert_eq!(parsed.kind, kind, "{name}");
+            assert_eq!(parsed.family_name, family_name, "{name}");
+            assert_eq!(parsed.member_role.as_deref(), member_role, "{name}");
+            assert_eq!(agent_local_hood(name).unwrap(), hood, "{name}");
+            assert_eq!(
+                agent_name_ancestors(name).unwrap(),
+                ancestors,
+                "{name}"
+            );
+            assert!(agent_name_in_hood(name, hood).unwrap(), "{name}");
+            assert!(!agent_name_in_hood(name, "other").unwrap(), "{name}");
+            assert!(agent_link_target(name, &alice).is_ok(), "{name}");
+
+            let global = globalize_agent_name(name, &alice).unwrap();
+            assert_eq!(
+                globalize_agent_name(&global, &alice).unwrap(),
+                global,
+                "{name}"
+            );
+            assert_eq!(
+                strip_global_agent_name(&global, &alice).unwrap(),
+                name,
+                "{name}"
+            );
+            assert_eq!(
+                parse_agent_family_name(&parsed.family_name)
+                    .unwrap()
+                    .family_name,
+                parsed.family_name,
+                "{name}"
+            );
         }
+    }
+
+    #[test]
+    fn hood_membership_never_raises_for_historical_candidates() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "foo",
+            "foo.bar",
+            "foobar",
+            "4x--epic.f-0",
+            "fi--code.f0",
+            "fi--code.f0--plan",
+            "fi--code.f0--code",
+            "foo--code--test",
+            "foo/bar",
+            "foo\\bar",
+            "foo\nbar",
+        ] {
+            assert!(agent_name_in_hood(name, "foo").is_ok(), "{name:?}");
+        }
+        assert!(agent_name_in_hood("foo", "foo--code").is_err());
+        assert!(!agent_name_in_hood("foobar", "foo").unwrap());
     }
 
     #[test]
