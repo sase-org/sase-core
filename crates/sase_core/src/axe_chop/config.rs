@@ -21,7 +21,8 @@ const AXE_KEYS: &[&str] = &[
     "chop_script_dirs",
     "lumberjacks",
 ];
-const LUMBERJACK_KEYS: &[&str] = &["interval", "chop_timeout", "chops", "env"];
+const LUMBERJACK_KEYS: &[&str] =
+    &["description", "interval", "chop_timeout", "chops", "env"];
 const CHOP_KEYS: &[&str] = &[
     "name",
     "script",
@@ -242,6 +243,25 @@ fn validate_lumberjacks(
             &lumberjack_path,
             diagnostics,
         );
+        match config.get("description") {
+            Some(description) => validate_description(
+                request,
+                description,
+                &child_path(&lumberjack_path, "description"),
+                diagnostics,
+            ),
+            None if request.require_descriptions => {
+                diagnostics.push(diagnostic(
+                    request,
+                    "required_missing",
+                    &child_path(&lumberjack_path, "description"),
+                    &format!(
+                        "lumberjack `{name}` requires a non-empty `description`"
+                    ),
+                ));
+            }
+            None => {}
+        }
         if let Some(interval) = config.get("interval") {
             validate_positive_integer(
                 request,
@@ -297,6 +317,19 @@ fn validate_chops(
                             &mut identities,
                             diagnostics,
                         );
+                        if request.require_descriptions {
+                            diagnostics.push(diagnostic(
+                                request,
+                                "required_missing",
+                                &child_path(
+                                    &child_path(path, name),
+                                    "description",
+                                ),
+                                &format!(
+                                    "chop `{name}` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form"
+                                ),
+                            ));
+                        }
                     }
                     Value::Object(config) => {
                         let identity =
@@ -444,15 +477,27 @@ fn validate_chop_config(
             );
         }
     }
-    if let Some(value) = config.get("description") {
-        validate_optional_type(
+    match config.get("description") {
+        Some(description) => validate_description(
             request,
-            Some(value),
+            description,
             &child_path(path, "description"),
-            "string",
-            Value::is_string,
             diagnostics,
-        );
+        ),
+        None if request.require_descriptions => {
+            let name = map_name
+                .or_else(|| config.get("name").and_then(Value::as_str))
+                .unwrap_or("<unknown>");
+            diagnostics.push(diagnostic(
+                request,
+                "required_missing",
+                &child_path(path, "description"),
+                &format!(
+                    "chop `{name}` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form"
+                ),
+            ));
+        }
+        None => {}
     }
     if let Some(value) = config.get("enabled") {
         validate_optional_type(
@@ -1026,6 +1071,31 @@ fn validate_nonblank_string(
             path,
             "value must be a non-blank string",
         ));
+    }
+}
+
+fn validate_description(
+    request: &AxeConfigValidationRequestWire,
+    value: &Value,
+    path: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    match value.as_str() {
+        Some(description) if description.trim().is_empty() => {
+            diagnostics.push(diagnostic(
+                request,
+                "blank_value",
+                path,
+                "description must not be blank",
+            ));
+        }
+        Some(_) => {}
+        None => diagnostics.push(diagnostic(
+            request,
+            "type_mismatch",
+            path,
+            "value must be a string",
+        )),
     }
 }
 

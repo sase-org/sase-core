@@ -549,6 +549,8 @@ pub struct ChopTargetExpansionWire {
 pub struct AxeConfigValidationRequestWire {
     pub schema_version: u32,
     pub config: Value,
+    #[serde(default)]
+    pub require_descriptions: bool,
     /// Dotted config path to source/provenance label.
     #[serde(default)]
     pub provenance: BTreeMap<String, String>,

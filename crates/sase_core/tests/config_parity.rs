@@ -653,10 +653,20 @@ fn axe_layers() -> Vec<ConfigLayerInputWire> {
             "name": "default", "kind": "builtin", "writable": false,
             "list_strategy": "concatenate",
             "value": {"axe": {"lumberjacks": {"checks.main": {
+                "description": "Run release and workspace checks",
                 "interval": 10,
                 "chops": [
-                    {"name": "release.check", "script": "run-release", "enabled": true},
-                    {"name": "space name", "script": "run-space"}
+                    {
+                        "name": "release.check",
+                        "description": "Check release readiness",
+                        "script": "run-release",
+                        "enabled": true
+                    },
+                    {
+                        "name": "space name",
+                        "description": "Check names with spaces",
+                        "script": "run-space"
+                    }
                 ]
             }}}}
         },
@@ -676,6 +686,7 @@ fn axe_layers() -> Vec<ConfigLayerInputWire> {
 fn axe_composition_retains_legacy_defaults_and_exact_key_provenance() {
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: axe_layers(),
+        require_descriptions: false,
     })
     .unwrap();
     let chops =
@@ -791,6 +802,7 @@ fn axe_inventory_marks_generated_instances_as_base_owned() {
     .unwrap();
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: layers.clone(),
+        require_descriptions: false,
     })
     .unwrap();
     let generated = result
@@ -843,8 +855,11 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
         }
     ]))
     .unwrap();
-    let result =
-        compose_axe_config(&AxeConfigComposeRequestWire { layers }).unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+    })
+    .unwrap();
     for code in [
         "duplicate_chop_identity",
         "type_mismatch",
@@ -856,4 +871,77 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
                     == Some("overlay:test.yml:/tmp/test.yml")
         }));
     }
+}
+
+#[test]
+fn axe_required_descriptions_validate_only_the_merged_config() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks on a short cadence",
+                "interval": 10,
+                "chops": {"hooks": {
+                    "description": "Advance hook state",
+                    "script": "run-hooks"
+                }}
+            }}}}
+        },
+        {
+            "name": "overlay",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "interval": 5
+            }}}}
+        }
+    ]))
+    .unwrap();
+
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: true,
+    })
+    .unwrap();
+
+    assert_eq!(
+        result.effective_config["axe"]["lumberjacks"]["checks"]["interval"],
+        json!(5)
+    );
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|item| item.code == "required_missing"));
+}
+
+#[test]
+fn axe_entry_mutation_propagates_required_descriptions_to_preview() {
+    let mut layers = axe_layers();
+    layers[0].value["axe"]["lumberjacks"]["checks.main"]["chops"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("description");
+    let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": layers,
+        "require_descriptions": true,
+        "target_layer": "overlay:sase_work.yml",
+        "selector": {
+            "kind": "chop",
+            "lumberjack": "checks.main",
+            "chop": "release.check"
+        },
+        "operations": [
+            {"kind": "unset", "key_path": ["description"]}
+        ]
+    }))
+    .unwrap();
+
+    let plan = plan_axe_entry_mutation(&request).unwrap();
+
+    assert!(plan.axe_diagnostics.iter().any(|item| {
+        item.code == "required_missing"
+            && item.path.as_deref()
+                == Some(
+                    "axe.lumberjacks.checks.main.chops.release.check.description",
+                )
+    }));
 }

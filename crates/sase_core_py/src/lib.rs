@@ -6573,6 +6573,39 @@ mod tests {
         });
     }
 
+    #[test]
+    fn required_axe_descriptions_round_trip_through_python_binding() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let config_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "require_descriptions": true,
+                    "config": {"axe": {"lumberjacks": {"checks": {
+                        "chops": {"hooks": {}}
+                    }}}}
+                }),
+            )
+            .unwrap();
+            let config = config_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let diagnostics = py_validate_axe_config(py, config).unwrap();
+            let diagnostics = py_to_json_value(diagnostics.bind(py)).unwrap();
+
+            assert_eq!(diagnostics.as_array().unwrap().len(), 2);
+            assert!(diagnostics.as_array().unwrap().iter().any(|item| {
+                item["code"] == "required_missing"
+                    && item["path"] == "axe.lumberjacks.checks.description"
+            }));
+            assert!(diagnostics.as_array().unwrap().iter().any(|item| {
+                item["code"] == "required_missing"
+                    && item["path"]
+                        == "axe.lumberjacks.checks.chops.hooks.description"
+            }));
+        });
+    }
+
     fn spec_json(name: &str, status: &str, parent: Option<&str>) -> JsonValue {
         json!({
             "schema_version": 3,

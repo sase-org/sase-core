@@ -119,6 +119,8 @@ pub struct AxeInventoryEntryWire {
 pub struct AxeConfigComposeRequestWire {
     #[serde(default)]
     pub layers: Vec<ConfigLayerInputWire>,
+    #[serde(default)]
+    pub require_descriptions: bool,
 }
 
 /// Effective AXE config, exact provenance, entity inventory, and diagnostics.
@@ -146,6 +148,8 @@ pub struct AxeEntryMutationRequestWire {
     pub schema: Value,
     #[serde(default)]
     pub layers: Vec<ConfigLayerInputWire>,
+    #[serde(default)]
+    pub require_descriptions: bool,
     pub target_layer: String,
     pub selector: AxeEntrySelectorWire,
     pub operations: Vec<AxeFieldOperationWire>,
@@ -184,7 +188,7 @@ pub fn compose_axe_config(
     request: &AxeConfigComposeRequestWire,
 ) -> Result<AxeConfigCompositionWire, ConfigError> {
     let (effective_config, exact_provenance, diagnostics) =
-        compose_values(&request.layers)?;
+        compose_values(&request.layers, request.require_descriptions)?;
     let provenance = provenance_wire(&exact_provenance);
     let entries =
         build_inventory(&effective_config, &request.layers, &exact_provenance);
@@ -247,6 +251,7 @@ pub fn plan_axe_entry_mutation(
 
     let original = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: request.layers.clone(),
+        require_descriptions: request.require_descriptions,
     })?;
     if let Some(entry) = original
         .entries
@@ -284,6 +289,7 @@ pub fn plan_axe_entry_mutation(
 
     let candidate = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: candidate_layers,
+        require_descriptions: request.require_descriptions,
     })?;
     let after =
         selected_value(&candidate.effective_config, &request.selector).cloned();
@@ -461,6 +467,7 @@ fn ensure_object<'a>(
 
 fn compose_values(
     layers: &[ConfigLayerInputWire],
+    require_descriptions: bool,
 ) -> Result<(Value, ExactProvenance, Vec<ConfigDiagnosticWire>), ConfigError> {
     let mut merged = Value::Object(Map::new());
     let mut provenance = ExactProvenance::new();
@@ -474,6 +481,7 @@ fn compose_values(
         let raw_request = AxeConfigValidationRequestWire {
             schema_version: CHOP_ENGINE_SCHEMA_VERSION,
             config: serde_json::json!({"axe": raw_axe}),
+            require_descriptions: false,
             provenance: BTreeMap::from([(AXE.to_string(), label.clone())]),
         };
         diagnostics.extend(validate_axe_config(&raw_request).map_err(
@@ -514,6 +522,7 @@ fn compose_values(
     let final_request = AxeConfigValidationRequestWire {
         schema_version: CHOP_ENGINE_SCHEMA_VERSION,
         config: merged.clone(),
+        require_descriptions,
         provenance: dotted_provenance,
     };
     diagnostics.extend(validate_axe_config(&final_request).map_err(

@@ -692,10 +692,12 @@ fn strict_axe_validation_accepts_new_shape() {
                 "lumberjack_log_temp_max_age_seconds": 300,
                 "lumberjack_restart_backoff_max_seconds": 60,
                 "lumberjacks": {"docs": {
+                    "description": "Refresh documentation on a daily cadence",
                     "interval": 5,
                     "chop_timeout": "1m30s",
                     "env": {"TOKEN": {"env": "DOCS_TOKEN"}},
                     "chops": {"refresh_docs": {
+                        "description": "Refresh generated documentation",
                         "script": "sase_chop_refresh_docs",
                         "run_every": "1d",
                         "trigger": {"git.commits_since": {
@@ -712,6 +714,99 @@ fn strict_axe_validation_accepts_new_shape() {
         }))
         .unwrap();
     assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_accepts_missing_descriptions_by_default() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {"checks": {
+                "chops": {"hook_checks": {"script": "run-hooks"}}
+            }}}}
+        }))
+        .unwrap();
+
+    assert!(!request.require_descriptions);
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_blank_descriptions() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {"checks": {
+                "description": " ",
+                "chops": {"hook_checks": {"description": "\t"}}
+            }}}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().all(|item| item.code == "blank_value"));
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter_map(|item| item.path.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            "axe.lumberjacks.checks.chops.hook_checks.description",
+            "axe.lumberjacks.checks.description",
+        ]
+    );
+}
+
+#[test]
+fn strict_axe_validation_requires_lumberjack_and_chop_descriptions_when_enabled(
+) {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "require_descriptions": true,
+            "config": {"axe": {"lumberjacks": {
+                "list_lane": {
+                    "description": "Run list-form checks",
+                    "chops": ["bare_check"]
+                },
+                "map_lane": {
+                    "description": "Run map-form checks",
+                    "chops": {"map_check": {}}
+                },
+                "missing_lane": {}
+            }}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+    assert_eq!(diagnostics.len(), 3);
+    assert!(diagnostics
+        .iter()
+        .all(|item| item.code == "required_missing"));
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| (
+                item.path.as_deref().unwrap(),
+                item.message.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "axe.lumberjacks.list_lane.chops.bare_check.description",
+                "chop `bare_check` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
+            ),
+            (
+                "axe.lumberjacks.map_lane.chops.map_check.description",
+                "chop `map_check` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
+            ),
+            (
+                "axe.lumberjacks.missing_lane.description",
+                "lumberjack `missing_lane` requires a non-empty `description`",
+            ),
+        ]
+    );
 }
 
 #[test]
