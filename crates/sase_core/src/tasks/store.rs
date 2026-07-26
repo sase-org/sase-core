@@ -15,6 +15,9 @@ use super::wire::{
     TaskUpdateWire, TASK_WIRE_SCHEMA_VERSION,
 };
 
+/// Every task kind the store accepts on write.
+const TASK_KINDS: [&str; 3] = ["command", "tui", "detached"];
+
 const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCK_RETRY_MIN_MS: u64 = 10;
 const LOCK_RETRY_JITTER_MS: u64 = 20;
@@ -402,12 +405,7 @@ fn normalize_and_validate_task(
             ));
         }
     }
-    if !matches!(task.kind.as_str(), "command" | "tui") {
-        return Err(invalid_task(
-            task,
-            format!("unknown kind {:?}", task.kind),
-        ));
-    }
+    validate_kind(&task.kind).map_err(|reason| invalid_task(task, reason))?;
     validate_status(&task.status)
         .map_err(|reason| invalid_task(task, reason))?;
     validate_timestamp_field("created_at", Some(&task.created_at))
@@ -417,6 +415,14 @@ fn normalize_and_validate_task(
     validate_timestamp_field("finished_at", task.finished_at.as_ref())
         .map_err(|reason| invalid_task(task, reason))?;
     Ok(())
+}
+
+fn validate_kind(kind: &str) -> Result<(), String> {
+    if TASK_KINDS.contains(&kind) {
+        Ok(())
+    } else {
+        Err(format!("unknown kind {kind:?}"))
+    }
 }
 
 fn validate_status(status: &str) -> Result<(), String> {
@@ -658,6 +664,68 @@ mod tests {
         );
         assert_eq!(outcome.snapshot.tasks[0].tags, vec!["alpha", "zeta"]);
         assert_eq!(read_tasks_snapshot(&path).unwrap(), outcome.snapshot);
+    }
+
+    #[test]
+    fn detached_kind_round_trips_and_unknown_kinds_are_rejected() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tasks.jsonl");
+        let mut detached = task("detached", "running", "2026-07-25T12:00:00Z");
+        detached.kind = "detached".to_string();
+        let outcome = append_task(&path, &detached, 10).unwrap();
+        assert_eq!(outcome.snapshot.tasks[0].kind, "detached");
+        assert_eq!(
+            read_tasks_snapshot(&path).unwrap().tasks[0].kind,
+            "detached"
+        );
+
+        let mut unknown = task("unknown", "running", "2026-07-25T12:00:01Z");
+        unknown.kind = "daemon".to_string();
+        let error = append_task(&path, &unknown, 10).unwrap_err();
+        assert!(matches!(
+            &error,
+            TaskStoreError::InvalidTask { task_id, reason }
+                if task_id == "unknown"
+                    && reason == "unknown kind \"daemon\""
+        ));
+    }
+
+    #[test]
+    fn updating_an_existing_row_to_the_detached_kind_validates() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tasks.jsonl");
+        append_task(
+            &path,
+            &task("promoted", "running", "2026-07-25T12:00:00Z"),
+            10,
+        )
+        .unwrap();
+
+        let updated = update_task(
+            &path,
+            &TaskUpdateWire {
+                task_id: "promoted".to_string(),
+                kind: Some("detached".to_string()),
+                ..TaskUpdateWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.task.unwrap().kind, "detached");
+
+        let error = update_task(
+            &path,
+            &TaskUpdateWire {
+                task_id: "promoted".to_string(),
+                kind: Some("daemon".to_string()),
+                ..TaskUpdateWire::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, TaskStoreError::InvalidTask { .. }));
+        assert_eq!(
+            read_tasks_snapshot(&path).unwrap().tasks[0].kind,
+            "detached"
+        );
     }
 
     #[test]
