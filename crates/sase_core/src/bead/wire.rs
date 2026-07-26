@@ -294,16 +294,6 @@ impl IssueWire {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OperationOutcomeWire {
-    pub operation: String,
-    pub changed: bool,
-    #[serde(default)]
-    pub issue_ids: Vec<String>,
-    #[serde(default)]
-    pub message: String,
-}
-
 pub(crate) fn deserialize_valid_issue(
     value: serde_json::Value,
 ) -> Result<IssueWire, BeadError> {

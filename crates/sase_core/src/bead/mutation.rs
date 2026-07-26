@@ -31,6 +31,8 @@ use super::wire::{
 
 // Reuse the ignored compatibility database as the advisory lock file so a
 // successful claim cannot introduce durable bead-store content of its own.
+// Deleting and recreating beads.db while this lock is held would split
+// contenders across different inodes, so store maintenance must preserve it.
 const BEAD_MUTATION_LOCK_FILENAME: &str = "beads.db";
 const BEAD_MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const BEAD_MUTATION_LOCK_RETRY_MIN_MS: u64 = 10;
@@ -153,64 +155,66 @@ pub fn create_issue(
     beads_dir: &Path,
     request: BeadCreateRequestWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let tier = default_create_tier(&request);
-    let now = request.now.unwrap_or_else(now_utc);
-    let owner = store.config.owner.clone();
-    let issue_id = match request.parent_id.as_deref() {
-        Some(parent_id) => next_child_id(parent_id, &store.issues),
-        None => {
-            let counter = next_top_level_counter(
-                &store.config.issue_prefix,
-                store.config.next_counter,
-                &store.issues,
-            );
-            store.config.next_counter = counter + 1;
-            format!("{}-{}", store.config.issue_prefix, to_base36(counter))
-        }
-    };
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let tier = default_create_tier(&request);
+        let now = request.now.unwrap_or_else(now_utc);
+        let owner = store.config.owner.clone();
+        let issue_id = match request.parent_id.as_deref() {
+            Some(parent_id) => next_child_id(parent_id, &store.issues),
+            None => {
+                let counter = next_top_level_counter(
+                    &store.config.issue_prefix,
+                    store.config.next_counter,
+                    &store.issues,
+                );
+                store.config.next_counter = counter + 1;
+                format!("{}-{}", store.config.issue_prefix, to_base36(counter))
+            }
+        };
 
-    let issue = IssueWire {
-        id: issue_id,
-        title: request.title,
-        status: StatusWire::Open,
-        issue_type: request.issue_type.clone(),
-        tier,
-        parent_id: request.parent_id,
-        owner: owner.clone(),
-        assignee: request.assignee,
-        created_at: now.clone(),
-        created_by: owner,
-        updated_at: now,
-        closed_at: None,
-        close_reason: None,
-        description: request.description,
-        notes: request.notes,
-        design: request.design,
-        model: normalize_model(request.model)?,
-        size: request.size,
-        is_ready_to_work: false,
-        changespec_name: request.changespec_name,
-        changespec_bug_id: request.changespec_bug_id,
-        dependencies: Vec::new(),
-    };
-    issue.validate()?;
-    store.issues.push(issue.clone());
-    let mut event_issue = issue.clone();
-    event_issue.dependencies.clear();
-    store.append_issue_event(
-        &issue.id,
-        BeadEventOperationWire::IssueCreated,
-        BeadEventPayloadWire::IssueCreated { issue: event_issue },
-        &issue.updated_at,
-        &issue.created_by,
-    )?;
-    store.save()?;
+        let issue = IssueWire {
+            id: issue_id,
+            title: request.title,
+            status: StatusWire::Open,
+            issue_type: request.issue_type.clone(),
+            tier,
+            parent_id: request.parent_id,
+            owner: owner.clone(),
+            assignee: request.assignee,
+            created_at: now.clone(),
+            created_by: owner,
+            updated_at: now,
+            closed_at: None,
+            close_reason: None,
+            description: request.description,
+            notes: request.notes,
+            design: request.design,
+            model: normalize_model(request.model)?,
+            size: request.size,
+            is_ready_to_work: false,
+            changespec_name: request.changespec_name,
+            changespec_bug_id: request.changespec_bug_id,
+            dependencies: Vec::new(),
+        };
+        issue.validate()?;
+        store.issues.push(issue.clone());
+        let mut event_issue = issue.clone();
+        event_issue.dependencies.clear();
+        store.append_issue_event(
+            &issue.id,
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated { issue: event_issue },
+            &issue.updated_at,
+            &issue.created_by,
+        )?;
+        store.save()?;
 
-    let mut result = outcome("create", true, vec![issue.id.clone()]);
-    result.issue = Some(issue);
-    result.next_counter = Some(store.config.next_counter);
-    Ok(result)
+        let mut result = outcome("create", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        result.next_counter = Some(store.config.next_counter);
+        Ok(result)
+    })
 }
 
 pub fn update_issue(
@@ -223,27 +227,29 @@ pub fn update_issue(
             "is_ready_to_work cannot be set via update(); use mark_ready_to_work() instead.",
         ));
     }
-    let mut store = MutableStore::load(beads_dir)?;
-    let index = store.issue_index(issue_id)?;
-    let mut issue = store.issues[index].clone();
-    let event_fields = event_fields_from_update_fields(&fields)?;
-    apply_update_fields(&mut issue, fields)?;
-    issue.validate()?;
-    store.issues[index] = issue.clone();
-    store.append_issue_event(
-        issue_id,
-        BeadEventOperationWire::IssueUpdated,
-        BeadEventPayloadWire::IssueUpdated {
-            fields: event_fields,
-        },
-        &issue.updated_at,
-        &issue.created_by,
-    )?;
-    store.save()?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let mut issue = store.issues[index].clone();
+        let event_fields = event_fields_from_update_fields(&fields)?;
+        apply_update_fields(&mut issue, fields)?;
+        issue.validate()?;
+        store.issues[index] = issue.clone();
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: event_fields,
+            },
+            &issue.updated_at,
+            &issue.created_by,
+        )?;
+        store.save()?;
 
-    let mut result = outcome("update", true, vec![issue.id.clone()]);
-    result.issue = Some(issue);
-    Ok(result)
+        let mut result = outcome("update", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
 }
 
 pub fn claim_for_agent_launch(
@@ -443,95 +449,97 @@ pub fn preclaim_epic_work_plan(
     assignments: &[BeadPreclaimAssignmentWire],
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let epic = store.get_issue(epic_id)?;
-    if epic.issue_type != IssueTypeWire::Plan {
-        return Err(BeadError {
-            kind: "not_a_plan".to_string(),
-            message: format!(
-                "sase bead work preclaim only applies to epic plan beads (got phase for {epic_id})"
-            ),
-        });
-    }
-    if !matches!(epic.tier.as_ref(), Some(BeadTierWire::Epic)) {
-        return Err(BeadError {
-            kind: "not_workable_plan".to_string(),
-            message: format!(
-                "sase bead work preclaim only applies to epic plan beads (got {} for {epic_id})",
-                tier_label(epic.tier.as_ref())
-            ),
-        });
-    }
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let epic = store.get_issue(epic_id)?;
+        if epic.issue_type != IssueTypeWire::Plan {
+            return Err(BeadError {
+                kind: "not_a_plan".to_string(),
+                message: format!(
+                    "sase bead work preclaim only applies to epic plan beads (got phase for {epic_id})"
+                ),
+            });
+        }
+        if !matches!(epic.tier.as_ref(), Some(BeadTierWire::Epic)) {
+            return Err(BeadError {
+                kind: "not_workable_plan".to_string(),
+                message: format!(
+                    "sase bead work preclaim only applies to epic plan beads (got {} for {epic_id})",
+                    tier_label(epic.tier.as_ref())
+                ),
+            });
+        }
 
-    let mut seen = HashSet::new();
-    let mut indexes = Vec::with_capacity(assignments.len());
-    let mut rollback = Vec::with_capacity(assignments.len());
-    for assignment in assignments {
-        if !seen.insert(assignment.bead_id.as_str()) {
-            return Err(BeadError::validation(format!(
-                "duplicate preclaim target: {}",
-                assignment.bead_id
-            )));
+        let mut seen = HashSet::new();
+        let mut indexes = Vec::with_capacity(assignments.len());
+        let mut rollback = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            if !seen.insert(assignment.bead_id.as_str()) {
+                return Err(BeadError::validation(format!(
+                    "duplicate preclaim target: {}",
+                    assignment.bead_id
+                )));
+            }
+            let index = store.issue_index(&assignment.bead_id)?;
+            let issue = &store.issues[index];
+            if issue.issue_type != IssueTypeWire::Phase {
+                return Err(BeadError::validation(format!(
+                    "preclaim target is not a phase bead: {}",
+                    assignment.bead_id
+                )));
+            }
+            if issue.parent_id.as_deref() != Some(epic_id) {
+                return Err(BeadError::validation(format!(
+                    "preclaim target {} is not a child of epic {}",
+                    assignment.bead_id, epic_id
+                )));
+            }
+            if issue.status == StatusWire::Closed {
+                return Err(BeadError::validation(format!(
+                    "preclaim target is closed: {}",
+                    assignment.bead_id
+                )));
+            }
+            indexes.push(index);
+            rollback.push(BeadPreclaimRollbackWire {
+                bead_id: issue.id.clone(),
+                status: issue.status.clone(),
+                assignee: issue.assignee.clone(),
+            });
         }
-        let index = store.issue_index(&assignment.bead_id)?;
-        let issue = &store.issues[index];
-        if issue.issue_type != IssueTypeWire::Phase {
-            return Err(BeadError::validation(format!(
-                "preclaim target is not a phase bead: {}",
-                assignment.bead_id
-            )));
-        }
-        if issue.parent_id.as_deref() != Some(epic_id) {
-            return Err(BeadError::validation(format!(
-                "preclaim target {} is not a child of epic {}",
-                assignment.bead_id, epic_id
-            )));
-        }
-        if issue.status == StatusWire::Closed {
-            return Err(BeadError::validation(format!(
-                "preclaim target is closed: {}",
-                assignment.bead_id
-            )));
-        }
-        indexes.push(index);
-        rollback.push(BeadPreclaimRollbackWire {
-            bead_id: issue.id.clone(),
-            status: issue.status.clone(),
-            assignee: issue.assignee.clone(),
-        });
-    }
 
-    let now = now.unwrap_or_else(now_utc);
-    let mut updated = Vec::with_capacity(assignments.len());
-    for (assignment, index) in assignments.iter().zip(indexes) {
-        let issue = &mut store.issues[index];
-        issue.status = StatusWire::InProgress;
-        issue.assignee = assignment.agent_name.clone();
-        issue.updated_at = now.clone();
-        issue.validate()?;
-        updated.push(issue.clone());
-    }
-    for (assignment, issue) in assignments.iter().zip(&updated) {
-        store.append_issue_event(
-            &assignment.bead_id,
-            BeadEventOperationWire::EpicWorkPreclaimed,
-            BeadEventPayloadWire::EpicWorkPreclaimed {
-                agent_name: assignment.agent_name.clone(),
-            },
-            &now,
-            &issue.created_by,
-        )?;
-    }
+        let now = now.unwrap_or_else(now_utc);
+        let mut updated = Vec::with_capacity(assignments.len());
+        for (assignment, index) in assignments.iter().zip(indexes) {
+            let issue = &mut store.issues[index];
+            issue.status = StatusWire::InProgress;
+            issue.assignee = assignment.agent_name.clone();
+            issue.updated_at = now.clone();
+            issue.validate()?;
+            updated.push(issue.clone());
+        }
+        for (assignment, issue) in assignments.iter().zip(&updated) {
+            store.append_issue_event(
+                &assignment.bead_id,
+                BeadEventOperationWire::EpicWorkPreclaimed,
+                BeadEventPayloadWire::EpicWorkPreclaimed {
+                    agent_name: assignment.agent_name.clone(),
+                },
+                &now,
+                &issue.created_by,
+            )?;
+        }
 
-    store.save()?;
-    let mut result = outcome(
-        "preclaim_epic_work",
-        !assignments.is_empty(),
-        updated.iter().map(|issue| issue.id.clone()).collect(),
-    );
-    result.issues = updated;
-    result.rollback_preclaims = rollback;
-    Ok(result)
+        store.save()?;
+        let mut result = outcome(
+            "preclaim_epic_work",
+            !assignments.is_empty(),
+            updated.iter().map(|issue| issue.id.clone()).collect(),
+        );
+        result.issues = updated;
+        result.rollback_preclaims = rollback;
+        Ok(result)
+    })
 }
 
 pub fn open_issue(
@@ -539,25 +547,27 @@ pub fn open_issue(
     issue_id: &str,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let index = store.issue_index(issue_id)?;
-    let now = now.unwrap_or_else(now_utc);
-    store.issues[index].status = StatusWire::Open;
-    store.issues[index].updated_at = now.clone();
-    let issue = store.issues[index].clone();
-    issue.validate()?;
-    store.append_issue_event(
-        issue_id,
-        BeadEventOperationWire::IssueOpened,
-        BeadEventPayloadWire::IssueOpened,
-        &now,
-        &issue.created_by,
-    )?;
-    store.save()?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let now = now.unwrap_or_else(now_utc);
+        store.issues[index].status = StatusWire::Open;
+        store.issues[index].updated_at = now.clone();
+        let issue = store.issues[index].clone();
+        issue.validate()?;
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueOpened,
+            BeadEventPayloadWire::IssueOpened,
+            &now,
+            &issue.created_by,
+        )?;
+        store.save()?;
 
-    let mut result = outcome("open", true, vec![issue.id.clone()]);
-    result.issue = Some(issue);
-    Ok(result)
+        let mut result = outcome("open", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
 }
 
 pub fn close_issues(
@@ -566,77 +576,80 @@ pub fn close_issues(
     reason: Option<String>,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let now = now.unwrap_or_else(now_utc);
-    let mut standard_close_ids = BTreeSet::new();
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let now = now.unwrap_or_else(now_utc);
+        let mut standard_close_ids = BTreeSet::new();
 
-    for issue_id in issue_ids {
-        let issue = store.get_issue(issue_id)?;
-        standard_close_ids.insert(issue.id.clone());
-        if issue.issue_type == IssueTypeWire::Plan {
-            standard_close_ids.extend(
-                sorted_descendants(&store.issues, issue_id)
-                    .into_iter()
-                    .map(|descendant| descendant.id.clone()),
-            );
-        }
-    }
-    let mut batch = CloseBatch {
-        standard_close_ids,
-        ..Default::default()
-    };
-
-    for issue_id in issue_ids {
-        let issue = store.get_issue(issue_id)?.clone();
-        if issue.issue_type == IssueTypeWire::Plan {
-            let descendant_ids: Vec<String> =
-                sorted_descendants(&store.issues, issue_id)
-                    .into_iter()
-                    .filter(|descendant| {
-                        descendant.status != StatusWire::Closed
-                    })
-                    .map(|descendant| descendant.id.clone())
-                    .collect();
-            for child_id in descendant_ids {
-                close_one_and_delegated_parent(
-                    &mut store,
-                    &child_id,
-                    &now,
-                    reason.clone(),
-                    &mut batch,
-                )?;
+        for issue_id in issue_ids {
+            let issue = store.get_issue(issue_id)?;
+            standard_close_ids.insert(issue.id.clone());
+            if issue.issue_type == IssueTypeWire::Plan {
+                standard_close_ids.extend(
+                    sorted_descendants(&store.issues, issue_id)
+                        .into_iter()
+                        .map(|descendant| descendant.id.clone()),
+                );
             }
         }
-        if !close_one_and_delegated_parent(
-            &mut store,
-            issue_id,
-            &now,
-            reason.clone(),
-            &mut batch,
-        )? {
-            batch.returned.push(store.get_issue(issue_id)?.clone());
-        }
-    }
-    for issue in &batch.event_closed {
-        store.append_issue_event(
-            &issue.id,
-            BeadEventOperationWire::IssueClosed,
-            BeadEventPayloadWire::IssueClosed {
-                close_reason: issue.close_reason.clone(),
-            },
-            &now,
-            &issue.created_by,
-        )?;
-    }
+        let mut batch = CloseBatch {
+            standard_close_ids,
+            ..Default::default()
+        };
 
-    store.save()?;
-    let changed = !batch.closed_ids.is_empty();
-    let mut result = outcome("close", changed, batch.closed_ids);
-    if !changed {
-        result.message = "all requested issues were already closed".to_string();
-    }
-    result.issues = batch.returned;
-    Ok(result)
+        for issue_id in issue_ids {
+            let issue = store.get_issue(issue_id)?.clone();
+            if issue.issue_type == IssueTypeWire::Plan {
+                let descendant_ids: Vec<String> =
+                    sorted_descendants(&store.issues, issue_id)
+                        .into_iter()
+                        .filter(|descendant| {
+                            descendant.status != StatusWire::Closed
+                        })
+                        .map(|descendant| descendant.id.clone())
+                        .collect();
+                for child_id in descendant_ids {
+                    close_one_and_delegated_parent(
+                        &mut store,
+                        &child_id,
+                        &now,
+                        reason.clone(),
+                        &mut batch,
+                    )?;
+                }
+            }
+            if !close_one_and_delegated_parent(
+                &mut store,
+                issue_id,
+                &now,
+                reason.clone(),
+                &mut batch,
+            )? {
+                batch.returned.push(store.get_issue(issue_id)?.clone());
+            }
+        }
+        for issue in &batch.event_closed {
+            store.append_issue_event(
+                &issue.id,
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: issue.close_reason.clone(),
+                },
+                &now,
+                &issue.created_by,
+            )?;
+        }
+
+        store.save()?;
+        let changed = !batch.closed_ids.is_empty();
+        let mut result = outcome("close", changed, batch.closed_ids);
+        if !changed {
+            result.message =
+                "all requested issues were already closed".to_string();
+        }
+        result.issues = batch.returned;
+        Ok(result)
+    })
 }
 
 #[derive(Default)]
@@ -713,71 +726,73 @@ pub fn remove_issues(
         ));
     }
 
-    let mut store = MutableStore::load(beads_dir)?;
-    let mut requested = Vec::new();
-    let mut requested_ids = BTreeSet::new();
-    for issue_id in issue_ids {
-        let issue = store.get_issue(issue_id)?.clone();
-        if requested_ids.insert(issue.id.clone()) {
-            requested.push(issue);
-        }
-    }
-
-    let mut removed = Vec::new();
-    let mut removed_ids = BTreeSet::new();
-    for issue in &requested {
-        if issue.issue_type == IssueTypeWire::Plan {
-            for descendant in sorted_descendants(&store.issues, &issue.id) {
-                if removed_ids.insert(descendant.id.clone()) {
-                    removed.push(descendant.clone());
-                }
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let mut requested = Vec::new();
+        let mut requested_ids = BTreeSet::new();
+        for issue_id in issue_ids {
+            let issue = store.get_issue(issue_id)?.clone();
+            if requested_ids.insert(issue.id.clone()) {
+                requested.push(issue);
             }
         }
-        if removed_ids.insert(issue.id.clone()) {
-            removed.push(issue.clone());
-        }
-    }
 
-    let removed_at = now_utc();
-    for issue in &requested {
-        let cascade_removed_issue_ids =
+        let mut removed = Vec::new();
+        let mut removed_ids = BTreeSet::new();
+        for issue in &requested {
             if issue.issue_type == IssueTypeWire::Plan {
-                sorted_descendants(&store.issues, &issue.id)
-                    .into_iter()
-                    .map(|descendant| descendant.id.clone())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-        store.append_issue_event(
-            &issue.id,
-            BeadEventOperationWire::IssueRemoved,
-            BeadEventPayloadWire::IssueRemoved {
-                cascade_removed_issue_ids,
-            },
-            &removed_at,
-            &issue.created_by,
-        )?;
-    }
+                for descendant in sorted_descendants(&store.issues, &issue.id) {
+                    if removed_ids.insert(descendant.id.clone()) {
+                        removed.push(descendant.clone());
+                    }
+                }
+            }
+            if removed_ids.insert(issue.id.clone()) {
+                removed.push(issue.clone());
+            }
+        }
 
-    store
-        .issues
-        .retain(|issue| !removed_ids.contains(&issue.id));
-    for issue in &mut store.issues {
-        issue.dependencies.retain(|dep| {
-            !removed_ids.contains(&dep.issue_id)
-                && !removed_ids.contains(&dep.depends_on_id)
-        });
-    }
-    store.save()?;
+        let removed_at = now_utc();
+        for issue in &requested {
+            let cascade_removed_issue_ids =
+                if issue.issue_type == IssueTypeWire::Plan {
+                    sorted_descendants(&store.issues, &issue.id)
+                        .into_iter()
+                        .map(|descendant| descendant.id.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            store.append_issue_event(
+                &issue.id,
+                BeadEventOperationWire::IssueRemoved,
+                BeadEventPayloadWire::IssueRemoved {
+                    cascade_removed_issue_ids,
+                },
+                &removed_at,
+                &issue.created_by,
+            )?;
+        }
 
-    let mut result = outcome(
-        "rm",
-        true,
-        removed.iter().map(|issue| issue.id.clone()).collect(),
-    );
-    result.issues = removed;
-    Ok(result)
+        store
+            .issues
+            .retain(|issue| !removed_ids.contains(&issue.id));
+        for issue in &mut store.issues {
+            issue.dependencies.retain(|dep| {
+                !removed_ids.contains(&dep.issue_id)
+                    && !removed_ids.contains(&dep.depends_on_id)
+            });
+        }
+        store.save()?;
+
+        let mut result = outcome(
+            "rm",
+            true,
+            removed.iter().map(|issue| issue.id.clone()).collect(),
+        );
+        result.issues = removed;
+        Ok(result)
+    })
 }
 
 pub fn remove_issue(
@@ -793,40 +808,42 @@ pub fn add_dependency(
     depends_on_id: &str,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    store.get_issue(depends_on_id)?;
-    let owner = store.config.owner.clone();
-    let index = store.issue_index(issue_id)?;
-    if store.issues[index]
-        .dependencies
-        .iter()
-        .any(|dep| dep.depends_on_id == depends_on_id)
-    {
-        return Err(BeadError::validation(format!(
-            "Dependency already exists: {issue_id} depends on {depends_on_id}"
-        )));
-    }
-    let dep = DependencyWire {
-        issue_id: issue_id.to_string(),
-        depends_on_id: depends_on_id.to_string(),
-        created_at: now.unwrap_or_else(now_utc),
-        created_by: owner,
-    };
-    store.issues[index].dependencies.push(dep.clone());
-    store.append_issue_event(
-        issue_id,
-        BeadEventOperationWire::DependencyAdded,
-        BeadEventPayloadWire::DependencyAdded {
-            dependency: dep.clone(),
-        },
-        &dep.created_at,
-        &dep.created_by,
-    )?;
-    store.save()?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        store.get_issue(depends_on_id)?;
+        let owner = store.config.owner.clone();
+        let index = store.issue_index(issue_id)?;
+        if store.issues[index]
+            .dependencies
+            .iter()
+            .any(|dep| dep.depends_on_id == depends_on_id)
+        {
+            return Err(BeadError::validation(format!(
+                "Dependency already exists: {issue_id} depends on {depends_on_id}"
+            )));
+        }
+        let dep = DependencyWire {
+            issue_id: issue_id.to_string(),
+            depends_on_id: depends_on_id.to_string(),
+            created_at: now.unwrap_or_else(now_utc),
+            created_by: owner,
+        };
+        store.issues[index].dependencies.push(dep.clone());
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::DependencyAdded,
+            BeadEventPayloadWire::DependencyAdded {
+                dependency: dep.clone(),
+            },
+            &dep.created_at,
+            &dep.created_by,
+        )?;
+        store.save()?;
 
-    let mut result = outcome("dep_add", true, vec![issue_id.to_string()]);
-    result.dependency = Some(dep);
-    Ok(result)
+        let mut result = outcome("dep_add", true, vec![issue_id.to_string()]);
+        result.dependency = Some(dep);
+        Ok(result)
+    })
 }
 
 pub fn mark_ready_to_work(
@@ -890,57 +907,59 @@ fn set_ready_to_work(
     reject_already_ready: bool,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    let mut store = MutableStore::load(beads_dir)?;
-    let index = store.issue_index(epic_id)?;
-    if store.issues[index].issue_type != IssueTypeWire::Plan {
-        return Err(BeadError {
-            kind: "not_a_plan".to_string(),
-            message: format!(
-                "is_ready_to_work only applies to plan beads (got phase for {epic_id})"
-            ),
-        });
-    }
-    let tier = store.issues[index].tier.as_ref();
-    if !matches!(tier, Some(BeadTierWire::Epic)) {
-        return Err(BeadError {
-            kind: "not_workable_plan".to_string(),
-            message: format!(
-                "sase bead work only applies to epic plan beads (got {} for {epic_id})",
-                tier_label(tier)
-            ),
-        });
-    }
-    if reject_already_ready && store.issues[index].is_ready_to_work {
-        return Err(BeadError {
-            kind: "already_ready".to_string(),
-            message: format!(
-                "{epic_id} is already marked is_ready_to_work=True"
-            ),
-        });
-    }
-    store.issues[index].is_ready_to_work = ready;
-    store.issues[index].updated_at = now.unwrap_or_else(now_utc);
-    let issue = store.issues[index].clone();
-    store.append_issue_event(
-        epic_id,
-        if ready {
-            BeadEventOperationWire::ReadyMarked
-        } else {
-            BeadEventOperationWire::ReadyUnmarked
-        },
-        if ready {
-            BeadEventPayloadWire::ReadyMarked
-        } else {
-            BeadEventPayloadWire::ReadyUnmarked
-        },
-        &issue.updated_at,
-        &issue.created_by,
-    )?;
-    store.save()?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(epic_id)?;
+        if store.issues[index].issue_type != IssueTypeWire::Plan {
+            return Err(BeadError {
+                kind: "not_a_plan".to_string(),
+                message: format!(
+                    "is_ready_to_work only applies to plan beads (got phase for {epic_id})"
+                ),
+            });
+        }
+        let tier = store.issues[index].tier.as_ref();
+        if !matches!(tier, Some(BeadTierWire::Epic)) {
+            return Err(BeadError {
+                kind: "not_workable_plan".to_string(),
+                message: format!(
+                    "sase bead work only applies to epic plan beads (got {} for {epic_id})",
+                    tier_label(tier)
+                ),
+            });
+        }
+        if reject_already_ready && store.issues[index].is_ready_to_work {
+            return Err(BeadError {
+                kind: "already_ready".to_string(),
+                message: format!(
+                    "{epic_id} is already marked is_ready_to_work=True"
+                ),
+            });
+        }
+        store.issues[index].is_ready_to_work = ready;
+        store.issues[index].updated_at = now.unwrap_or_else(now_utc);
+        let issue = store.issues[index].clone();
+        store.append_issue_event(
+            epic_id,
+            if ready {
+                BeadEventOperationWire::ReadyMarked
+            } else {
+                BeadEventOperationWire::ReadyUnmarked
+            },
+            if ready {
+                BeadEventPayloadWire::ReadyMarked
+            } else {
+                BeadEventPayloadWire::ReadyUnmarked
+            },
+            &issue.updated_at,
+            &issue.created_by,
+        )?;
+        store.save()?;
 
-    let mut result = outcome("ready_to_work", true, vec![issue.id.clone()]);
-    result.issue = Some(issue);
-    Ok(result)
+        let mut result = outcome("ready_to_work", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
 }
 
 fn apply_update_fields(
@@ -1496,7 +1515,7 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{mpsc, Arc, Barrier};
     use tempfile::tempdir;
 
     #[test]
@@ -2895,6 +2914,89 @@ mod tests {
                 assert!(invalid.message.contains("cannot be empty or blank"));
             }
         }
+    }
+
+    #[test]
+    fn concurrent_update_and_claim_preserve_both_events_and_projection() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        let lock_path = bead_mutation_lock_path(&beads_dir);
+        let holder = open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
+        FileExt::lock_exclusive(&holder).unwrap();
+
+        let update_beads_dir = beads_dir.clone();
+        let update_phase_id = phase_id.clone();
+        let (update_tx, update_rx) = mpsc::channel();
+        let update_handle = thread::spawn(move || {
+            let result = update_issue(
+                &update_beads_dir,
+                &update_phase_id,
+                BeadUpdateFieldsWire {
+                    title: Some("Updated concurrently".to_string()),
+                    now: Some("2026-01-01T00:02:00Z".to_string()),
+                    ..Default::default()
+                },
+            );
+            update_tx.send(()).unwrap();
+            result
+        });
+        assert!(matches!(
+            update_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        let claim_beads_dir = beads_dir.clone();
+        let claim_phase_id = phase_id.clone();
+        let (claim_tx, claim_rx) = mpsc::channel();
+        let claim_handle = thread::spawn(move || {
+            let result = claim_for_agent_launch(
+                &claim_beads_dir,
+                &claim_phase_id,
+                "agent-1",
+                Some("2026-01-01T00:03:00Z".to_string()),
+            );
+            claim_tx.send(()).unwrap();
+            result
+        });
+        assert!(matches!(
+            claim_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        FileExt::unlock(&holder).unwrap();
+        update_handle.join().unwrap().unwrap();
+        claim_handle.join().unwrap().unwrap();
+
+        let projected =
+            import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
+                .unwrap()
+                .issues;
+        let phase =
+            projected.iter().find(|issue| issue.id == phase_id).unwrap();
+        assert_eq!(phase.title, "Updated concurrently");
+        assert_eq!(phase.status, StatusWire::InProgress);
+        assert_eq!(phase.assignee, "agent-1");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let update_events: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.issue_id == phase_id
+                    && event.operation == BeadEventOperationWire::IssueUpdated
+            })
+            .collect();
+        assert_eq!(update_events.len(), 2);
+        assert!(update_events.iter().any(|event| matches!(
+            &event.payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.title.as_deref() == Some("Updated concurrently")
+        )));
+        assert!(update_events.iter().any(|event| matches!(
+            &event.payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.status == Some(StatusWire::InProgress)
+                    && fields.assignee.as_deref() == Some("agent-1")
+        )));
     }
 
     #[test]

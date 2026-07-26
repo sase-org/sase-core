@@ -264,9 +264,8 @@ pub use bead::{
     BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
     BeadPreclaimRollbackWire, BeadSearchMatchWire, BeadTierWire,
     BeadUpdateFieldsWire, DependencyWire, IssueTypeWire, IssueWire,
-    JsonlLoadOutcome, OperationOutcomeWire, PhaseSizeWire, StatusWire,
-    BEAD_EVENT_SCHEMA_VERSION, BEAD_READ_WIRE_SCHEMA_VERSION,
-    BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
+    JsonlLoadOutcome, PhaseSizeWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
+    BEAD_READ_WIRE_SCHEMA_VERSION, BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
 };
 pub use commit_footer::{
     parse_commit_footer, update_commit_footer, CommitFooterReferenceWire,

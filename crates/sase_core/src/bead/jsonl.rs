@@ -1,8 +1,11 @@
 //! JSONL import/export for git-portable bead storage.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +19,8 @@ use super::wire::{
     deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
     IssueTypeWire, IssueWire,
 };
+
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct JsonlLoadOutcome {
@@ -364,7 +369,7 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
         ))
     })?;
     fs::create_dir_all(parent)?;
-    let tmp_path = path.with_extension("tmp");
+    let tmp_path = atomic_temp_path(path)?;
     {
         let mut file = fs::File::create(&tmp_path)?;
         file.write_all(bytes)?;
@@ -375,6 +380,20 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+fn atomic_temp_path(path: &Path) -> Result<PathBuf, BeadError> {
+    let file_name = path.file_name().ok_or_else(|| {
+        BeadError::io(format!(
+            "cannot determine file name for {}",
+            path.display()
+        ))
+    })?;
+    let counter = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(file_name);
+    tmp_name.push(format!(".tmp.{}.{counter}", process::id()));
+    Ok(path.with_file_name(tmp_name))
 }
 
 pub(crate) fn apply_missing_tiers(issues: &mut [IssueWire]) {
@@ -424,6 +443,29 @@ mod tests {
             changespec_bug_id: String::new(),
             dependencies: vec![],
         }
+    }
+
+    #[test]
+    fn atomic_temp_paths_are_unique_per_process() {
+        let target = Path::new("/tmp/issues.jsonl");
+
+        let first = atomic_temp_path(target).unwrap();
+        let second = atomic_temp_path(target).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), target.parent());
+        assert_eq!(second.parent(), target.parent());
+        let expected_prefix = format!(".issues.jsonl.tmp.{}.", process::id());
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&expected_prefix));
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&expected_prefix));
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub struct EpicWorkPlanWire {
     pub total_phase_count: usize,
     #[serde(default)]
     pub phase_bead_ids: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub waves: Vec<Vec<PhaseAssignmentWire>>,
     pub land_agent_name: String,
     pub land_model: String,
@@ -114,6 +116,7 @@ pub fn build_epic_work_plan_from_issues(
 
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     let mut blocker_bead_ids: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let mut warnings = BTreeSet::new();
     for phase in &schedulable_phases {
         let mut scheduled_blockers: BTreeSet<&str> = BTreeSet::new();
         let mut in_epic_blockers: BTreeSet<&str> = BTreeSet::new();
@@ -126,12 +129,14 @@ pub fn build_epic_work_plan_from_issues(
                 }
                 continue;
             }
-            let blocker = issue_by_id.get(blocker_id);
-            let blocker_is_active = match blocker {
-                Some(issue) => issue.status != StatusWire::Closed,
-                None => true,
+            let Some(blocker) = issue_by_id.get(blocker_id) else {
+                warnings.insert(format!(
+                    "Phase '{}' depends on missing blocker '{}'; treating the dangling dependency as satisfied",
+                    phase.id, blocker_id
+                ));
+                continue;
             };
-            if blocker_is_active {
+            if blocker.status != StatusWire::Closed {
                 return Err(BeadError {
                     kind: "cross_epic_blocker".to_string(),
                     message: format!(
@@ -236,6 +241,7 @@ pub fn build_epic_work_plan_from_issues(
         launch_tag_id: epic_id.to_string(),
         total_phase_count,
         phase_bead_ids,
+        warnings: warnings.into_iter().collect(),
         waves: assigned_waves,
         land_agent_name: land_agent_name(epic_id),
         land_model: epic.model.clone(),
@@ -562,6 +568,24 @@ mod tests {
 
         assert_eq!(err.kind, "cross_epic_blocker");
         assert!(err.message.contains("'ext'"));
+    }
+
+    #[test]
+    fn missing_out_of_epic_blocker_is_satisfied_with_warning() {
+        let mut p1 = phase("p1", "e1");
+        depends(&mut p1, "missing");
+
+        let plan = build_epic_work_plan_from_issues(vec![epic("e1"), p1], "e1")
+            .unwrap();
+
+        assert_eq!(plan.waves.len(), 1);
+        assert_eq!(plan.waves[0][0].bead_id, "p1");
+        assert_eq!(
+            plan.warnings,
+            vec![
+                "Phase 'p1' depends on missing blocker 'missing'; treating the dangling dependency as satisfied"
+            ]
+        );
     }
 
     #[test]
