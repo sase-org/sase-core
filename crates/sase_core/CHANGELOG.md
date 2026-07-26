@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/sase-org/sase-core/compare/v0.9.2...v0.10.0) - 2026-07-26
+
+### Added
+
+- *(axe)* support required config descriptions (sase-9t.1)
+- *(tasks)* accept the detached task kind in the background task store (sase-9s.2)
+- *(editor)* add raw placeholder transforms (sase-9q.1)
+- *(editor)* [**breaking**] tag placeholder candidates with a source and accept common tags (sase-9m.1)
+- *(axe_chop)* allow one template marker in each of a chop clan and member (sase-9n.1)
+
+### Other
+
+- *(core-py)* reap binding test temp dirs (sase-96.8.6)
+
 ## [0.9.2](https://github.com/sase-org/sase-core/compare/v0.9.1...v0.9.2) - 2026-07-25
 
 ### Added
