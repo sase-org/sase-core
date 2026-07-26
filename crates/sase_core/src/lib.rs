@@ -202,8 +202,8 @@ pub use agent_stats::{
 pub use axe_chop::{
     apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,
     evaluate_chop_decision, expand_chop_targets, parse_chop_duration,
-    parse_chop_result, release_chop_once_per, validate_axe_config,
-    validate_chop_proposal, validate_chop_result,
+    parse_chop_result, release_chop_once_per, split_axe_description,
+    validate_axe_config, validate_chop_proposal, validate_chop_result,
     AxeConfigValidationRequestWire, ChopAgentSnapshotWire,
     ChopChangespecSnapshotWire, ChopCheckpointDocumentWire,
     ChopCheckpointEntryWire, ChopCheckpointEventWire, ChopCheckpointPolicyWire,

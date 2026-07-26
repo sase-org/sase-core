@@ -37,6 +37,38 @@ const CHOP_KEYS: &[&str] = &[
     "for_each",
     "vars",
 ];
+const AXE_DESCRIPTION_SUMMARY_MAX: usize = 100;
+const AXE_DESCRIPTION_MAX_CHARS: usize = 2000;
+
+fn normalize_axe_description(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Normalize and split one AXE description into its summary and body.
+pub fn split_axe_description(text: &str) -> (String, String) {
+    let normalized = normalize_axe_description(text);
+    let lines = normalized
+        .split('\n')
+        .map(|line| line.trim_end().to_string())
+        .collect::<Vec<_>>();
+    let summary = lines.first().map_or("", String::as_str).trim().to_string();
+    if lines.len() <= 2 {
+        return (summary, String::new());
+    }
+
+    let body_lines = &lines[2..];
+    let Some(start) =
+        body_lines.iter().position(|line| !line.trim().is_empty())
+    else {
+        return (summary, String::new());
+    };
+    let end = body_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .expect("a non-blank body line exists")
+        + 1;
+    (summary, body_lines[start..end].join("\n"))
+}
 
 /// Parse a positive duration with `d`, `h`, `m`, and `s` compound units.
 pub fn parse_chop_duration(value: &str) -> Result<u64, ChopEngineError> {
@@ -1088,6 +1120,50 @@ fn validate_description(
                 path,
                 "description must not be blank",
             ));
+        }
+        Some(description) if request.require_description_shape => {
+            let normalized = normalize_axe_description(description);
+            let lines = normalized.split('\n').collect::<Vec<_>>();
+            let summary = lines.first().copied().unwrap_or("").trim();
+            let (code, message) = if summary.is_empty() {
+                (
+                    "description_summary_blank",
+                    "description must start with a non-blank summary line"
+                        .to_string(),
+                )
+            } else {
+                let summary_chars = summary.chars().count();
+                if summary_chars > AXE_DESCRIPTION_SUMMARY_MAX {
+                    (
+                        "description_summary_too_long",
+                        format!(
+                            "description summary line must be at most {AXE_DESCRIPTION_SUMMARY_MAX} characters (found {summary_chars})"
+                        ),
+                    )
+                } else if lines
+                    .get(1)
+                    .is_some_and(|line| !line.trim().is_empty())
+                {
+                    (
+                        "description_body_separator_required",
+                        "description must leave line 2 blank to separate the summary from the body"
+                            .to_string(),
+                    )
+                } else {
+                    let description_chars = description.chars().count();
+                    if description_chars > AXE_DESCRIPTION_MAX_CHARS {
+                        (
+                            "description_too_long",
+                            format!(
+                                "description must be at most {AXE_DESCRIPTION_MAX_CHARS} characters (found {description_chars})"
+                            ),
+                        )
+                    } else {
+                        return;
+                    }
+                }
+            };
+            diagnostics.push(diagnostic(request, code, path, &message));
         }
         Some(_) => {}
         None => diagnostics.push(diagnostic(

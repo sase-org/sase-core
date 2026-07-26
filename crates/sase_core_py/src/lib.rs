@@ -139,6 +139,7 @@
 //! - `release_chop_once_per(request: dict) -> dict`
 //! - `expand_chop_targets(request: dict) -> dict`
 //! - `parse_chop_duration(value: str) -> int`
+//! - `split_axe_description(text: str) -> tuple[str, str]`
 //! - `validate_axe_config(request: dict) -> list[dict]`
 //! - `axe_status_wire_schema_version() -> int`
 //! - `classify_axe_status(request: dict) -> dict`
@@ -315,6 +316,7 @@ use sase_core::axe_chop::{
     parse_chop_duration as core_parse_chop_duration,
     parse_chop_result as core_parse_chop_result,
     release_chop_once_per as core_release_chop_once_per,
+    split_axe_description as core_split_axe_description,
     validate_axe_config as core_validate_axe_config,
     validate_chop_proposal as core_validate_chop_proposal,
     validate_chop_result as core_validate_chop_result,
@@ -4391,6 +4393,13 @@ fn py_parse_chop_duration(value: &str) -> PyResult<u64> {
     core_parse_chop_duration(value).map_err(chop_error_to_pyerr)
 }
 
+/// Normalize and split one AXE description into its summary and body.
+#[pyfunction]
+#[pyo3(name = "split_axe_description")]
+fn py_split_axe_description(text: &str) -> (String, String) {
+    core_split_axe_description(text)
+}
+
 /// Return provenance-aware diagnostics for the new axe config shape.
 #[pyfunction]
 #[pyo3(name = "validate_axe_config")]
@@ -5670,6 +5679,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_release_chop_once_per, m)?)?;
     m.add_function(wrap_pyfunction!(py_expand_chop_targets, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_chop_duration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_split_axe_description, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_axe_config, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
@@ -6603,6 +6613,28 @@ mod tests {
                     && item["path"]
                         == "axe.lumberjacks.checks.chops.hooks.description"
             }));
+        });
+    }
+
+    #[test]
+    fn axe_description_split_round_trips_through_python_binding() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+
+            let result = module
+                .getattr("split_axe_description")
+                .unwrap()
+                .call1(("  Run checks  \r\n\r\nBody line  \r\n",))
+                .unwrap()
+                .extract::<(String, String)>()
+                .unwrap();
+
+            assert_eq!(
+                result,
+                ("Run checks".to_string(), "Body line".to_string())
+            );
         });
     }
 

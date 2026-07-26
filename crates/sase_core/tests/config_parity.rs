@@ -687,6 +687,7 @@ fn axe_composition_retains_legacy_defaults_and_exact_key_provenance() {
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: axe_layers(),
         require_descriptions: false,
+        require_description_shape: false,
     })
     .unwrap();
     let chops =
@@ -803,6 +804,7 @@ fn axe_inventory_marks_generated_instances_as_base_owned() {
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers: layers.clone(),
         require_descriptions: false,
+        require_description_shape: false,
     })
     .unwrap();
     let generated = result
@@ -858,6 +860,7 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers,
         require_descriptions: false,
+        require_description_shape: false,
     })
     .unwrap();
     for code in [
@@ -874,7 +877,7 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
 }
 
 #[test]
-fn axe_required_descriptions_validate_only_the_merged_config() {
+fn axe_description_requirements_validate_only_the_merged_config() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
             "name": "default",
@@ -899,6 +902,7 @@ fn axe_required_descriptions_validate_only_the_merged_config() {
     let result = compose_axe_config(&AxeConfigComposeRequestWire {
         layers,
         require_descriptions: true,
+        require_description_shape: true,
     })
     .unwrap();
 
@@ -910,6 +914,10 @@ fn axe_required_descriptions_validate_only_the_merged_config() {
         .diagnostics
         .iter()
         .any(|item| item.code == "required_missing"));
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|item| item.code.starts_with("description_")));
 }
 
 #[test]
@@ -939,6 +947,37 @@ fn axe_entry_mutation_propagates_required_descriptions_to_preview() {
 
     assert!(plan.axe_diagnostics.iter().any(|item| {
         item.code == "required_missing"
+            && item.path.as_deref()
+                == Some(
+                    "axe.lumberjacks.checks.main.chops.release.check.description",
+                )
+    }));
+}
+
+#[test]
+fn axe_entry_mutation_propagates_description_shape_to_diagnostics() {
+    let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": axe_layers(),
+        "require_description_shape": true,
+        "target_layer": "overlay:sase_work.yml",
+        "selector": {
+            "kind": "chop",
+            "lumberjack": "checks.main",
+            "chop": "release.check"
+        },
+        "operations": [{
+            "kind": "set",
+            "key_path": ["description"],
+            "value": "Check release readiness\nwithout a blank separator"
+        }]
+    }))
+    .unwrap();
+
+    let plan = plan_axe_entry_mutation(&request).unwrap();
+
+    assert!(plan.axe_diagnostics.iter().any(|item| {
+        item.code == "description_body_separator_required"
             && item.path.as_deref()
                 == Some(
                     "axe.lumberjacks.checks.main.chops.release.check.description",

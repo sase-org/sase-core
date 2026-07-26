@@ -683,6 +683,139 @@ fn compound_durations_are_strict_and_positive() {
 }
 
 #[test]
+fn axe_descriptions_split_into_normalized_summary_and_body() {
+    for (description, expected) in [
+        ("Run checks", ("Run checks", "")),
+        (
+            "Run checks\n\nExplain when the checks run.",
+            ("Run checks", "Explain when the checks run."),
+        ),
+        (
+            "Run checks\n\n- First check\n- Second check",
+            ("Run checks", "- First check\n- Second check"),
+        ),
+        (
+            "Run checks\r\n\r\nFirst line\r\nSecond line",
+            ("Run checks", "First line\nSecond line"),
+        ),
+        (
+            "  Run checks  \n \nBody line   \n  indented body  ",
+            ("Run checks", "Body line\n  indented body"),
+        ),
+        (
+            "Run checks\n\n \nFirst body line\n\nSecond body line\n \n",
+            ("Run checks", "First body line\n\nSecond body line"),
+        ),
+    ] {
+        assert_eq!(
+            split_axe_description(description),
+            (expected.0.to_string(), expected.1.to_string())
+        );
+    }
+}
+
+fn validate_one_axe_description(
+    description: &str,
+    require_description_shape: bool,
+) -> Vec<crate::config::ConfigDiagnosticWire> {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "require_description_shape": require_description_shape,
+            "config": {"axe": {"lumberjacks": {"checks": {
+                "description": description
+            }}}}
+        }))
+        .unwrap();
+    validate_axe_config(&request).unwrap()
+}
+
+#[test]
+fn strict_axe_validation_reports_each_description_shape_error_precisely() {
+    let too_long_summary = "x".repeat(101);
+    let too_long_description = format!("Summary\n\n{}", "x".repeat(1992));
+    for (description, code, message) in [
+        (
+            "\n\nBody",
+            "description_summary_blank",
+            "description must start with a non-blank summary line".to_string(),
+        ),
+        (
+            too_long_summary.as_str(),
+            "description_summary_too_long",
+            "description summary line must be at most 100 characters (found 101)"
+                .to_string(),
+        ),
+        (
+            "Summary\nBody",
+            "description_body_separator_required",
+            "description must leave line 2 blank to separate the summary from the body"
+                .to_string(),
+        ),
+        (
+            too_long_description.as_str(),
+            "description_too_long",
+            "description must be at most 2000 characters (found 2001)"
+                .to_string(),
+        ),
+    ] {
+        let diagnostics = validate_one_axe_description(description, true);
+        assert_eq!(diagnostics.len(), 1, "{description:?}");
+        assert_eq!(diagnostics[0].severity, "error");
+        assert_eq!(diagnostics[0].code, code);
+        assert_eq!(diagnostics[0].message, message);
+        assert_eq!(
+            diagnostics[0].path.as_deref(),
+            Some("axe.lumberjacks.checks.description")
+        );
+    }
+}
+
+#[test]
+fn strict_axe_validation_gates_description_shape_and_accepts_single_lines() {
+    let too_long_summary = "x".repeat(101);
+    let too_long_description = format!("Summary\n\n{}", "x".repeat(1992));
+    for description in [
+        "\n\nBody",
+        too_long_summary.as_str(),
+        "Summary\nBody",
+        too_long_description.as_str(),
+    ] {
+        assert_eq!(validate_one_axe_description(description, false), vec![]);
+    }
+    assert_eq!(validate_one_axe_description("Run checks", true), vec![]);
+    let blank = validate_one_axe_description(" \t", true);
+    assert_eq!(blank.len(), 1);
+    assert_eq!(blank[0].code, "blank_value");
+}
+
+#[test]
+fn strict_axe_validation_counts_description_limits_in_characters() {
+    assert_eq!(validate_one_axe_description(&"é".repeat(100), true), vec![]);
+    let summary_diagnostics =
+        validate_one_axe_description(&"é".repeat(101), true);
+    assert_eq!(summary_diagnostics.len(), 1);
+    assert_eq!(
+        summary_diagnostics[0].message,
+        "description summary line must be at most 100 characters (found 101)"
+    );
+
+    let description = format!("Summary\n\n{}", "界".repeat(1991));
+    assert_eq!(description.chars().count(), 2000);
+    assert_eq!(validate_one_axe_description(&description, true), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_emits_only_the_first_description_shape_error() {
+    let diagnostics = validate_one_axe_description(
+        &format!("{}\nBody", "x".repeat(2001)),
+        true,
+    );
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "description_summary_too_long");
+}
+
+#[test]
 fn strict_axe_validation_accepts_new_shape() {
     let request: AxeConfigValidationRequestWire =
         serde_json::from_value(json!({

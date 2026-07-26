@@ -16,7 +16,9 @@ mod wire;
 pub use bookkeeping::{
     apply_checkpoint_update, check_and_record_once_per, release_chop_once_per,
 };
-pub use config::{parse_chop_duration, validate_axe_config};
+pub use config::{
+    parse_chop_duration, split_axe_description, validate_axe_config,
+};
 pub use decision::evaluate_chop_decision;
 pub use targets::expand_chop_targets;
 pub use validation::{

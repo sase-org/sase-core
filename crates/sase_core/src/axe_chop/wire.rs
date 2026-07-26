@@ -551,6 +551,8 @@ pub struct AxeConfigValidationRequestWire {
     pub config: Value,
     #[serde(default)]
     pub require_descriptions: bool,
+    #[serde(default)]
+    pub require_description_shape: bool,
     /// Dotted config path to source/provenance label.
     #[serde(default)]
     pub provenance: BTreeMap<String, String>,
