@@ -49,6 +49,16 @@ pub mod vcs_log;
 pub mod wire;
 pub mod xprompt_catalog;
 
+/// Return launch-inert literal zones as UTF-8 byte ranges.
+///
+/// The ranges cover fenced code blocks, disabled regions, and inline code
+/// using the same composition as agent launch parsing. They may overlap or be
+/// unsorted; consumers that require normalized ranges should normalize them
+/// locally.
+pub fn prompt_literal_zone_ranges(text: &str) -> Vec<(usize, usize)> {
+    agent_launch::launch_literal_zone_ranges(text)
+}
+
 pub use agent_archive::{
     agent_archive_facet_counts, mark_agent_archive_bundles_revived,
     query_agent_archive, verify_agent_archive_index,
@@ -326,6 +336,9 @@ pub use editor::{
     is_vcs_project_trigger_token as editor_is_vcs_project_trigger_token,
     is_xprompt_like_token as editor_is_xprompt_like_token,
     named_args_skeleton as editor_named_args_skeleton,
+    placeholder_input_names as editor_placeholder_input_names,
+    raw_placeholder_fields as editor_raw_placeholder_fields,
+    substitute_raw_placeholders as editor_substitute_raw_placeholders,
     validate_frontmatter as editor_validate_frontmatter,
     validate_frontmatter_field as editor_validate_frontmatter_field,
     vcs_project_trigger_token as editor_vcs_project_trigger_token,
@@ -336,12 +349,12 @@ pub use editor::{
     EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
     FrontmatterInputType, HoverPayload, PlaceholderCandidate,
     PlaceholderCandidateSource, PlaceholderCompletion, PlaceholderContext,
-    PlaceholderSpan, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRefTrigger, VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
-    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
-    AGENT_CATALOG_SCHEMA_VERSION, DIRECTIVES as EDITOR_DIRECTIVES,
-    EDITOR_WIRE_SCHEMA_VERSION, PLACEHOLDER_MAX_INNER_CHARS,
-    VCS_REPO_CATALOG_SCHEMA_VERSION,
+    PlaceholderSpan, RawPlaceholderField, TokenInfo, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
+    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION,
+    DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
+    PLACEHOLDER_MAX_INNER_CHARS, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{
     is_valid_effort, resolve_effective_effort, split_model_effort,

@@ -860,7 +860,7 @@ async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
                     "uri": uri,
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "`<the plan>` then <>"
+                    "text": "<the plan> then <>"
                 }
             }
         }),
@@ -874,7 +874,7 @@ async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
             "method": "textDocument/completion",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 0, "character": 19}
+                "position": {"line": 0, "character": 17}
             }
         }),
     )
@@ -894,8 +894,8 @@ async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
     let item = completion_item.expect("expected placeholder completion item");
     assert_eq!(item["label"], "the plan");
     assert_eq!(item["kind"], 6);
-    assert_eq!(item["textEdit"]["range"]["start"]["character"], 19);
-    assert_eq!(item["textEdit"]["range"]["end"]["character"], 20);
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 17);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 18);
     assert_eq!(item["textEdit"]["newText"], "the plan>");
 
     write_message(

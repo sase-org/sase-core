@@ -43,8 +43,10 @@ pub use hover::hover_at_position;
 pub use placeholder::{
     build_placeholder_completion_candidates,
     detect_placeholder_context_at_position, extract_placeholder_spans,
-    PlaceholderCandidate, PlaceholderCandidateSource, PlaceholderCompletion,
-    PlaceholderContext, PlaceholderSpan, PLACEHOLDER_MAX_INNER_CHARS,
+    placeholder_input_names, raw_placeholder_fields,
+    substitute_raw_placeholders, PlaceholderCandidate,
+    PlaceholderCandidateSource, PlaceholderCompletion, PlaceholderContext,
+    PlaceholderSpan, RawPlaceholderField, PLACEHOLDER_MAX_INNER_CHARS,
 };
 pub use token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,

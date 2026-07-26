@@ -152,6 +152,9 @@
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
+//! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
+//! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
+//! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -4129,6 +4132,38 @@ fn py_placeholder_spans(py: Python<'_>, text: &str) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+/// Return ordered summaries for the prompt's unique raw placeholders.
+#[pyfunction]
+#[pyo3(name = "raw_placeholder_fields")]
+fn py_raw_placeholder_fields(
+    py: Python<'_>,
+    text: &str,
+    context_width: usize,
+) -> PyResult<PyObject> {
+    let fields = sase_core::editor_raw_placeholder_fields(text, context_width);
+    let value = serde_json::to_value(&fields).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Replace mapped raw placeholders without touching literal spans.
+#[pyfunction]
+#[pyo3(name = "substitute_raw_placeholders")]
+fn py_substitute_raw_placeholders(
+    text: &str,
+    values: BTreeMap<String, String>,
+) -> String {
+    sase_core::editor_substitute_raw_placeholders(text, &values)
+}
+
+/// Convert placeholder labels into stable xprompt input names.
+#[pyfunction]
+#[pyo3(name = "placeholder_input_names")]
+fn py_placeholder_input_names(texts: Vec<String>) -> Vec<String> {
+    sase_core::editor_placeholder_input_names(texts)
+}
+
 // --- Portable AXE runtime status -----------------------------------------
 
 fn axe_status_error_to_pyerr(error: AxeStatusError) -> PyErr {
@@ -5617,6 +5652,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(py_substitute_raw_placeholders, m)?)?;
+    m.add_function(wrap_pyfunction!(py_placeholder_input_names, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_axe_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
@@ -6812,12 +6850,39 @@ mod tests {
                 JsonValue::Null
             );
 
-            let spans =
-                py_placeholder_spans(py, "`<inline>` < trailing>").unwrap();
+            let spans = py_placeholder_spans(py, "`<inline>` <live>").unwrap();
             let spans = py_to_json_value(spans.bind(py)).unwrap();
-            assert_eq!(spans.as_array().unwrap().len(), 1);
+            assert_eq!(spans.as_array().unwrap().len(), 2);
             assert_eq!(spans[0]["text"], json!("inline"));
+            assert_eq!(spans[0]["raw"], json!(false));
             assert_eq!(spans[0]["range"]["start"]["character"], json!(1));
+            assert_eq!(spans[1]["text"], json!("live"));
+            assert_eq!(spans[1]["raw"], json!(true));
+
+            let fields =
+                py_raw_placeholder_fields(py, "<live> and <live>", 60).unwrap();
+            assert_eq!(
+                py_to_json_value(fields.bind(py)).unwrap(),
+                json!([{
+                    "text": "live",
+                    "occurrences": 2,
+                    "context": "<live> and <live>",
+                }])
+            );
+            assert_eq!(
+                py_substitute_raw_placeholders(
+                    "<live> and `<live>`",
+                    BTreeMap::from([("live".to_string(), "ready".to_string())]),
+                ),
+                "ready and `<live>`"
+            );
+            assert_eq!(
+                py_placeholder_input_names(vec![
+                    "the plan".to_string(),
+                    "the-plan".to_string(),
+                ]),
+                vec!["the_plan", "the_plan_2"]
+            );
         });
     }
 

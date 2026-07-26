@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,10 +16,23 @@ pub const PLACEHOLDER_MAX_INNER_CHARS: usize = 100;
 pub struct PlaceholderSpan {
     /// The placeholder's inner text, without angle brackets.
     pub text: String,
+    /// Whether the span is active prompt text rather than a literal example.
+    pub raw: bool,
     /// The full range, including `<` and `>`.
     pub range: EditorRange,
     /// The inner range, excluding `<` and `>`.
     pub inner_range: EditorRange,
+}
+
+/// One unique raw placeholder prepared for an input collection surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawPlaceholderField {
+    /// The placeholder's inner text, without angle brackets.
+    pub text: String,
+    /// Number of raw occurrences with this exact inner text.
+    pub occurrences: usize,
+    /// A one-line snippet around the first raw occurrence.
+    pub context: String,
 }
 
 /// Cursor context inside an opening `<` on one line.
@@ -68,6 +81,7 @@ pub struct PlaceholderCompletion {
 struct ExtractedPlaceholder {
     span: PlaceholderSpan,
     opening_byte: usize,
+    closing_byte_exclusive: usize,
 }
 
 /// Extract every complete, valid placeholder from the document.
@@ -78,6 +92,113 @@ pub fn extract_placeholder_spans(
         .into_iter()
         .map(|placeholder| placeholder.span)
         .collect()
+}
+
+/// Summarize unique raw placeholders in first-occurrence order.
+pub fn raw_placeholder_fields(
+    text: &str,
+    context_width: usize,
+) -> Vec<RawPlaceholderField> {
+    let document = DocumentSnapshot::new(text);
+    let mut fields = Vec::<RawPlaceholderField>::new();
+    let mut field_indexes = HashMap::<String, usize>::new();
+
+    for placeholder in scan_placeholder_spans(&document)
+        .into_iter()
+        .filter(|item| item.span.raw)
+    {
+        if let Some(index) = field_indexes.get(&placeholder.span.text) {
+            fields[*index].occurrences += 1;
+            continue;
+        }
+
+        let index = fields.len();
+        field_indexes.insert(placeholder.span.text.clone(), index);
+        fields.push(RawPlaceholderField {
+            text: placeholder.span.text,
+            occurrences: 1,
+            context: placeholder_context(
+                text,
+                placeholder.opening_byte,
+                placeholder.closing_byte_exclusive,
+                context_width,
+            ),
+        });
+    }
+
+    fields
+}
+
+/// Replace mapped raw placeholders in one left-to-right pass.
+pub fn substitute_raw_placeholders(
+    text: &str,
+    values: &BTreeMap<String, String>,
+) -> String {
+    if values.is_empty() {
+        return text.to_string();
+    }
+
+    let document = DocumentSnapshot::new(text);
+    let placeholders = scan_placeholder_spans(&document);
+    let mut output = String::with_capacity(text.len());
+    let mut copied_through = 0;
+
+    for placeholder in placeholders {
+        if !placeholder.span.raw {
+            continue;
+        }
+        let Some(value) = values.get(&placeholder.span.text) else {
+            continue;
+        };
+        output.push_str(&text[copied_through..placeholder.opening_byte]);
+        output.push_str(value);
+        copied_through = placeholder.closing_byte_exclusive;
+    }
+    output.push_str(&text[copied_through..]);
+    output
+}
+
+/// Convert placeholder labels into deterministic input argument names.
+pub fn placeholder_input_names(texts: Vec<String>) -> Vec<String> {
+    let mut used = HashSet::<String>::new();
+    let mut names = Vec::with_capacity(texts.len());
+
+    for text in texts {
+        let mut slug = String::new();
+        let mut separating = false;
+        for ch in text.chars().flat_map(char::to_lowercase) {
+            if ch.is_alphanumeric() {
+                if separating && !slug.is_empty() {
+                    slug.push('_');
+                }
+                slug.push(ch);
+                separating = false;
+            } else {
+                separating = true;
+            }
+        }
+
+        slug = slug.chars().take(40).collect();
+        while slug.ends_with('_') {
+            slug.pop();
+        }
+        if slug.is_empty() {
+            slug.push_str("arg");
+        } else if slug.chars().next().is_some_and(char::is_numeric) {
+            slug = format!("arg_{slug}");
+        }
+
+        let base = slug.clone();
+        let mut suffix = 2;
+        while used.contains(&slug) {
+            slug = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        used.insert(slug.clone());
+        names.push(slug);
+    }
+
+    names
 }
 
 /// Detect whether `position` is inside an unmatched `<` on the same line.
@@ -143,6 +264,9 @@ pub fn build_placeholder_completion_candidates(
 
     for placeholder in scan_placeholder_spans(document) {
         if placeholder.opening_byte == context.opening_byte {
+            continue;
+        }
+        if !placeholder.span.raw {
             continue;
         }
         let text = placeholder.span.text;
@@ -225,6 +349,7 @@ fn scan_placeholder_spans(
     document: &DocumentSnapshot,
 ) -> Vec<ExtractedPlaceholder> {
     let mut placeholders = Vec::new();
+    let literal_ranges = normalized_literal_ranges(document.text());
 
     for line_number in 0..document.line_count() {
         let Ok(line_number) = u32::try_from(line_number) else {
@@ -260,9 +385,11 @@ fn scan_placeholder_spans(
                     let opening_byte = line_start + opening_in_line;
                     let inner_byte_start = line_start + inner_start;
                     let closing_byte = line_start + index;
-                    let Some(range) = document
-                        .byte_range_to_range(opening_byte, closing_byte + 1)
-                    else {
+                    let closing_byte_exclusive = closing_byte + 1;
+                    let Some(range) = document.byte_range_to_range(
+                        opening_byte,
+                        closing_byte_exclusive,
+                    ) else {
                         continue;
                     };
                     let Some(inner_range) = document
@@ -273,10 +400,18 @@ fn scan_placeholder_spans(
                     placeholders.push(ExtractedPlaceholder {
                         span: PlaceholderSpan {
                             text: inner.to_string(),
+                            raw: !literal_ranges.iter().any(
+                                |(literal_start, literal_end)| {
+                                    opening_byte < *literal_end
+                                        && *literal_start
+                                            < closing_byte_exclusive
+                                },
+                            ),
                             range,
                             inner_range,
                         },
                         opening_byte,
+                        closing_byte_exclusive,
                     });
                 }
                 _ => {}
@@ -285,6 +420,103 @@ fn scan_placeholder_spans(
     }
 
     placeholders
+}
+
+fn normalized_literal_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> =
+        crate::prompt_literal_zone_ranges(text)
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let end = end.min(text.len());
+                (start < end).then_some((start, end))
+            })
+            .collect();
+    ranges.sort_unstable();
+
+    let mut normalized = Vec::<(usize, usize)>::new();
+    for (start, end) in ranges {
+        if let Some((_, prior_end)) = normalized.last_mut() {
+            if start <= *prior_end {
+                *prior_end = (*prior_end).max(end);
+                continue;
+            }
+        }
+        normalized.push((start, end));
+    }
+    normalized
+}
+
+fn placeholder_context(
+    text: &str,
+    opening_byte: usize,
+    closing_byte_exclusive: usize,
+    context_width: usize,
+) -> String {
+    let line_start = text[..opening_byte].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[closing_byte_exclusive..]
+        .find('\n')
+        .map_or(text.len(), |i| closing_byte_exclusive + i);
+    let line = &text[line_start..line_end];
+    let leading_bytes = line.len() - line.trim_start().len();
+    let trimmed = line.trim();
+    let placeholder_start =
+        opening_byte.saturating_sub(line_start + leading_bytes);
+    let placeholder_end =
+        closing_byte_exclusive.saturating_sub(line_start + leading_bytes);
+
+    let before: Vec<char> = trimmed[..placeholder_start].chars().collect();
+    let placeholder: Vec<char> = trimmed[placeholder_start..placeholder_end]
+        .chars()
+        .collect();
+    let after: Vec<char> = trimmed[placeholder_end..].chars().collect();
+    let total = before.len() + placeholder.len() + after.len();
+    if total <= context_width {
+        return trimmed.to_string();
+    }
+    if context_width <= placeholder.len() {
+        return placeholder.into_iter().collect();
+    }
+
+    let mut left_ellipsized = false;
+    let mut right_ellipsized = false;
+    let mut left_take = 0;
+    let mut right_take = 0;
+    for _ in 0..3 {
+        let marker_width =
+            usize::from(left_ellipsized) + usize::from(right_ellipsized);
+        let available =
+            context_width.saturating_sub(placeholder.len() + marker_width);
+        left_take = before.len().min(available / 2);
+        right_take = after.len().min(available - left_take);
+
+        let remaining = available - left_take - right_take;
+        let extra_left = (before.len() - left_take).min(remaining);
+        left_take += extra_left;
+        let remaining = remaining - extra_left;
+        right_take += (after.len() - right_take).min(remaining);
+
+        let next_left_ellipsized = left_take < before.len();
+        let next_right_ellipsized = right_take < after.len();
+        if next_left_ellipsized == left_ellipsized
+            && next_right_ellipsized == right_ellipsized
+        {
+            break;
+        }
+        left_ellipsized = next_left_ellipsized;
+        right_ellipsized = next_right_ellipsized;
+    }
+
+    let mut context = String::new();
+    if left_ellipsized {
+        context.push('…');
+    }
+    context.extend(before[before.len() - left_take..].iter());
+    context.extend(placeholder);
+    context.extend(after[..right_take].iter());
+    if right_ellipsized {
+        context.push('…');
+    }
+    context
 }
 
 fn valid_placeholder_inner(inner: &str) -> bool {
@@ -345,6 +577,10 @@ mod tests {
 
         assert_eq!(values, vec!["inline", "code value", "alpha"]);
         assert_eq!(
+            spans.iter().map(|span| span.raw).collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        assert_eq!(
             spans[0].range.start,
             EditorPosition {
                 line: 2,
@@ -352,6 +588,77 @@ mod tests {
             }
         );
         assert_eq!(spans[0].inner_range.start.character, 2);
+    }
+
+    #[test]
+    fn summarizes_exact_raw_fields_with_bounded_context() {
+        let text = concat!(
+            "  a long prefix before <Foo> and a long suffix after it  \n",
+            "`<Foo>` then <foo> and <Foo>"
+        );
+        let fields = raw_placeholder_fields(text, 40);
+
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Foo", "foo"]
+        );
+        assert_eq!(fields[0].occurrences, 2);
+        assert_eq!(fields[1].occurrences, 1);
+        assert!(fields[0].context.contains("<Foo>"));
+        assert!(fields[0].context.starts_with('…'));
+        assert!(fields[0].context.ends_with('…'));
+        assert!(fields[0].context.chars().count() <= 40);
+        assert_eq!(fields[1].context, "`<Foo>` then <foo> and <Foo>");
+    }
+
+    #[test]
+    fn substitutes_only_mapped_raw_spans_without_rescanning_values() {
+        let text = "🙂 raw <x> and `<x>`\n```\n<x>\n```\n<other> then <x>";
+        let values = BTreeMap::from([
+            ("x".to_string(), "<y>".to_string()),
+            ("y".to_string(), "rescanned".to_string()),
+        ]);
+
+        assert_eq!(
+            substitute_raw_placeholders(text, &values),
+            "🙂 raw <y> and `<x>`\n```\n<x>\n```\n<other> then <y>"
+        );
+        assert_eq!(substitute_raw_placeholders(text, &BTreeMap::new()), text);
+    }
+
+    #[test]
+    fn slugs_unicode_names_and_resolves_collisions_in_input_order() {
+        let names = placeholder_input_names(
+            [
+                "the plan", "the-plan", "PR #", "2fa code", "???", "código",
+                "foo_2", "foo", "foo",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+
+        assert_eq!(
+            names,
+            vec![
+                "the_plan",
+                "the_plan_2",
+                "pr",
+                "arg_2fa_code",
+                "arg",
+                "código",
+                "foo_2",
+                "foo",
+                "foo_3",
+            ]
+        );
+        assert_eq!(
+            placeholder_input_names(vec!["word ".repeat(20)]),
+            vec!["word_word_word_word_word_word_word_word"]
+        );
     }
 
     #[test]
@@ -402,6 +709,18 @@ mod tests {
                 PlaceholderCandidateSource::Prompt
             ]
         );
+    }
+
+    #[test]
+    fn completion_candidates_exclude_literal_spans() {
+        let (document, cursor) = marked_document(
+            "`<alpha>`\n```\n<alpine>\n```\n<apricot> use <a<CURSOR>>",
+        );
+        let completion =
+            build_placeholder_completion_candidates(&document, cursor, &[])
+                .unwrap();
+
+        assert_eq!(texts(&completion), vec!["apricot"]);
     }
 
     #[test]

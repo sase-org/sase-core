@@ -1162,7 +1162,7 @@ fn xprompt_occurrences(prompt: &str) -> Vec<XPromptOccurrence> {
         .collect()
 }
 
-fn launch_literal_zone_ranges(prompt: &str) -> Vec<(usize, usize)> {
+pub(crate) fn launch_literal_zone_ranges(prompt: &str) -> Vec<(usize, usize)> {
     let mut ranges = fenced_block_ranges(prompt);
     ranges.extend(disabled_region_ranges(prompt));
     if prompt.contains('`') {
