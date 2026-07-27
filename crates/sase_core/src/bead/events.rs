@@ -139,6 +139,8 @@ pub enum BeadEventPayloadWire {
         close_reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolution: Option<BeadResolutionWire>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        forced_descendant_ids: Vec<String>,
     },
     IssueRemoved {
         #[serde(default)]
@@ -654,6 +656,7 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::IssueClosed {
             close_reason,
             resolution,
+            ..
         } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Closed;

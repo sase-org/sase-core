@@ -190,6 +190,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: String::new(),
             notes: String::new(),
             design: String::new(),
@@ -381,6 +382,8 @@ mod tests {
                     BeadEventOperationWire::IssueClosed,
                     BeadEventPayloadWire::IssueClosed {
                         close_reason: Some("done".to_string()),
+                        resolution: None,
+                        forced_descendant_ids: Vec::new(),
                     },
                 ),
                 event(
@@ -395,7 +398,11 @@ mod tests {
                     "2026-01-04T00:00:00Z",
                     "beads-1",
                     BeadEventOperationWire::IssueClosed,
-                    BeadEventPayloadWire::IssueClosed { close_reason: None },
+                    BeadEventPayloadWire::IssueClosed {
+                        close_reason: None,
+                        resolution: None,
+                        forced_descendant_ids: Vec::new(),
+                    },
                 ),
             ],
         )];

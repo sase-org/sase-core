@@ -2995,13 +2995,14 @@ fn py_bead_open<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_close")]
-#[pyo3(signature = (beads_dir, issue_ids, reason=None, resolution=None, now=None))]
+#[pyo3(signature = (beads_dir, issue_ids, reason=None, resolution=None, force=false, now=None))]
 fn py_bead_close<'py>(
     py: Python<'py>,
     beads_dir: &str,
     issue_ids: Vec<String>,
     reason: Option<String>,
     resolution: Option<String>,
+    force: bool,
     now: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
@@ -3013,7 +3014,7 @@ fn py_bead_close<'py>(
         py,
         py.allow_threads(|| {
             core_bead_close_issues(
-                &beads_dir, &issue_ids, reason, resolution, now,
+                &beads_dir, &issue_ids, reason, resolution, force, now,
             )
         }),
     )

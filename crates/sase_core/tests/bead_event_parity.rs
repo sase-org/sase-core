@@ -237,6 +237,7 @@ fn reducer_handles_current_mutation_operation_variants() {
                 BeadEventPayloadWire::IssueClosed {
                     close_reason: Some("done".to_string()),
                     resolution: None,
+                    forced_descendant_ids: Vec::new(),
                 },
             ),
             event(
@@ -484,6 +485,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
         BeadEventPayloadWire::IssueClosed {
             close_reason: Some("local done".to_string()),
             resolution: None,
+            forced_descendant_ids: Vec::new(),
         },
     ));
     let mut theirs = base.clone();
@@ -495,6 +497,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
         BeadEventPayloadWire::IssueClosed {
             close_reason: Some("upstream done".to_string()),
             resolution: None,
+            forced_descendant_ids: Vec::new(),
         },
     ));
 
@@ -615,6 +618,7 @@ fn merge_event_stream_orders_non_base_union_deterministically() {
             BeadEventPayloadWire::IssueClosed {
                 close_reason: None,
                 resolution: None,
+                forced_descendant_ids: Vec::new(),
             },
         ),
         numbered_event(
@@ -745,6 +749,7 @@ fn merge_event_stream_accepts_interleaved_additions_and_preserves_ids() {
         BeadEventPayloadWire::IssueClosed {
             close_reason: None,
             resolution: None,
+            forced_descendant_ids: Vec::new(),
         },
     );
     let ours = BeadEventStreamWire {
@@ -881,6 +886,7 @@ fn merge_event_stream_supports_sequential_rebase_replay() {
             BeadEventPayloadWire::IssueClosed {
                 close_reason: None,
                 resolution: None,
+                forced_descendant_ids: Vec::new(),
             },
         ),
         event(
@@ -967,6 +973,7 @@ fn reduce_applies_merged_stream_events_in_recorded_order() {
                     BeadEventPayloadWire::IssueClosed {
                         close_reason: None,
                         resolution: None,
+                        forced_descendant_ids: Vec::new(),
                     },
                 ),
             ],
@@ -1050,6 +1057,7 @@ fn reduce_survives_many_merged_streams_with_non_monotonic_timestamps() {
                         BeadEventPayloadWire::IssueClosed {
                             close_reason: None,
                             resolution: None,
+                            forced_descendant_ids: Vec::new(),
                         },
                     ),
                 ],

@@ -836,8 +836,18 @@ fn handle_open(
     match open_issue(write_beads_dir, &args[0], None) {
         Ok(outcome) => {
             let issue = outcome.issue.as_ref().expect("open outcome has issue");
+            let mut stdout =
+                format!("○ Opened: {} — {}\n", issue.id, issue.title);
+            for ancestor in &outcome.issues {
+                writeln!(
+                    stdout,
+                    "○ Reopened ancestor: {} — {}",
+                    ancestor.id, ancestor.title
+                )
+                .expect("writing to String cannot fail");
+            }
             Ok(success_with_mutation(
-                format!("○ Opened: {} — {}\n", issue.id, issue.title),
+                stdout,
                 mutation_summary("open", &outcome, old.as_ref()),
             ))
         }
@@ -886,14 +896,14 @@ fn handle_close(
     args: &[String],
     write_beads_dir: &Path,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    let Some((ids, reason, resolution)) = parse_close_args(args) else {
+    let Some((ids, force, reason, resolution)) = parse_close_args(args) else {
         return Ok(defer());
     };
     if ids.is_empty() {
         return Ok(defer());
     }
     let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    match close_issues(write_beads_dir, &ids, reason, resolution, None) {
+    match close_issues(write_beads_dir, &ids, reason, resolution, force, None) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -1303,16 +1313,24 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
     Some(fields)
 }
 
-fn parse_close_args(
-    args: &[String],
-) -> Option<(Vec<String>, Option<String>, Option<BeadResolutionWire>)> {
+type ParsedCloseArgs = (
+    Vec<String>,
+    bool,
+    Option<String>,
+    Option<BeadResolutionWire>,
+);
+
+fn parse_close_args(args: &[String]) -> Option<ParsedCloseArgs> {
     let mut ids = Vec::new();
+    let mut force = false;
     let mut reason = None;
     let mut resolution = None;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
-        if arg == "-r" || arg == "--reason" {
+        if arg == "-f" || arg == "--force" {
+            force = true;
+        } else if arg == "-r" || arg == "--reason" {
             idx += 1;
             reason = Some(args.get(idx)?.clone());
         } else if let Some(value) = arg.strip_prefix("--reason=") {
@@ -1329,7 +1347,7 @@ fn parse_close_args(
         }
         idx += 1;
     }
-    Some((ids, reason, resolution))
+    Some((ids, force, reason, resolution))
 }
 
 fn parse_resolution(value: &str) -> Option<BeadResolutionWire> {
@@ -2523,6 +2541,23 @@ mod tests {
         assert_eq!(summary.status_transitions.len(), 1);
         assert_eq!(summary.status_transitions[0].from_status, "in_progress");
         assert_eq!(summary.status_transitions[0].to_status, "closed");
+    }
+
+    #[test]
+    fn close_parser_accepts_force_with_reason_and_resolution() {
+        let (ids, force, reason, resolution) = parse_close_args(&[
+            "beads-1".to_string(),
+            "--force".to_string(),
+            "--reason".to_string(),
+            "Requirements changed".to_string(),
+            "--resolution=canceled".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(ids, vec!["beads-1"]);
+        assert!(force);
+        assert_eq!(reason.as_deref(), Some("Requirements changed"));
+        assert_eq!(resolution, Some(BeadResolutionWire::Canceled));
     }
 
     #[test]
