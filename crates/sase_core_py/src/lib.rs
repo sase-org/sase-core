@@ -3172,6 +3172,14 @@ fn py_bead_build_epic_work_plan_from_issues<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_cli_execute")]
+#[pyo3(signature = (
+    argv,
+    read_beads_dirs,
+    write_beads_dir,
+    cwd,
+    relativize_design_paths,
+    plan_roots = Vec::new(),
+))]
 fn py_bead_cli_execute<'py>(
     py: Python<'py>,
     argv: Vec<String>,
@@ -3179,10 +3187,12 @@ fn py_bead_cli_execute<'py>(
     write_beads_dir: &str,
     cwd: &str,
     relativize_design_paths: bool,
+    plan_roots: Vec<String>,
 ) -> PyResult<PyObject> {
     let read_beads_dirs = strings_to_paths(read_beads_dirs);
     let write_beads_dir = PathBuf::from(write_beads_dir);
     let cwd = PathBuf::from(cwd);
+    let plan_roots = strings_to_paths(plan_roots);
     bead_result_to_py(
         py,
         py.allow_threads(|| {
@@ -3192,6 +3202,7 @@ fn py_bead_cli_execute<'py>(
                 &write_beads_dir,
                 &cwd,
                 relativize_design_paths,
+                &plan_roots,
             )
         }),
     )

@@ -26,6 +26,18 @@ use super::wire::{
     BeadError, BeadSearchMatchWire, BeadTierWire, DependencyWire,
     IssueTypeWire, IssueWire, StatusWire,
 };
+use crate::plan::refs::{parse_plan_reference, resolve_plan_reference};
+
+/// Rendered when a stored plan reference matches no plan file.
+const PLAN_REFERENCE_MISSING_LABEL: &str = "(unresolved: no plan file found)";
+/// Rendered when a stored plan reference matches more than one plan file.
+const PLAN_REFERENCE_AMBIGUOUS_LABEL: &str =
+    "(ambiguous: multiple plans match this reference)";
+/// Rendered when a stored `plans:` value violates the reference grammar.
+const PLAN_REFERENCE_INVALID_LABEL: &str =
+    "(unresolved: malformed plan reference)";
+/// Marks a reference that only resolved after ignoring its month directory.
+const PLAN_REFERENCE_DRIFT_SUFFIX: &str = " (month drift)";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadCliOutcomeWire {
@@ -58,6 +70,7 @@ pub fn execute_bead_cli(
     write_beads_dir: &Path,
     cwd: &Path,
     relativize_design_paths: bool,
+    plan_roots: &[PathBuf],
 ) -> Result<BeadCliOutcomeWire, BeadError> {
     if argv.is_empty() || argv.iter().any(|arg| arg == "-h" || arg == "--help")
     {
@@ -72,6 +85,7 @@ pub fn execute_bead_cli(
             write_beads_dir,
             cwd,
             relativize_design_paths,
+            plan_roots,
         ),
         "search" => handle_search(
             &argv[1..],
@@ -79,6 +93,7 @@ pub fn execute_bead_cli(
             write_beads_dir,
             cwd,
             relativize_design_paths,
+            plan_roots,
         ),
         "ready" => handle_ready(&argv[1..], read_beads_dirs, write_beads_dir),
         "blocked" => {
@@ -150,6 +165,7 @@ fn handle_show(
     write_beads_dir: &Path,
     cwd: &Path,
     relativize_design_paths: bool,
+    plan_roots: &[PathBuf],
 ) -> Result<BeadCliOutcomeWire, BeadError> {
     if args.len() != 1 {
         return Ok(defer());
@@ -286,9 +302,13 @@ fn handle_show(
         }
     }
     if !issue.design.is_empty() {
-        let display =
-            display_design_path(&issue.design, cwd, relativize_design_paths);
-        write!(stdout, "\nPLAN\n  {display}\n")
+        let display = display_design_path(
+            &issue.design,
+            cwd,
+            relativize_design_paths,
+            plan_roots,
+        );
+        write!(stdout, "\nPLAN\n  {}\n", display.join("\n  "))
             .expect("writing to String cannot fail");
     }
 
@@ -301,6 +321,7 @@ fn handle_search(
     write_beads_dir: &Path,
     cwd: &Path,
     relativize_design_paths: bool,
+    plan_roots: &[PathBuf],
 ) -> Result<BeadCliOutcomeWire, BeadError> {
     let search_args = match parse_search_args(args) {
         SearchParseOutcome::Parsed(args) => args,
@@ -338,6 +359,7 @@ fn handle_search(
             write_beads_dir,
             cwd,
             relativize_design_paths,
+            plan_roots,
         )?,
     };
 
@@ -1379,6 +1401,7 @@ fn render_search_full(
     write_beads_dir: &Path,
     cwd: &Path,
     relativize_design_paths: bool,
+    plan_roots: &[PathBuf],
 ) -> Result<String, BeadError> {
     if matches.is_empty() {
         return Ok(format!("No beads match \"{query}\".\n"));
@@ -1396,6 +1419,7 @@ fn render_search_full(
             write_beads_dir,
             cwd,
             relativize_design_paths,
+            plan_roots,
         )?;
         stdout.push_str(&show_outcome.stdout);
     }
@@ -1796,18 +1820,104 @@ fn tier_value(tier: &BeadTierWire) -> &'static str {
     }
 }
 
+/// Render a stored plan reference and where it currently resolves.
+///
+/// The first line is always the stable reference as stored. A second line
+/// reports the resolved path, or says plainly that the reference resolves
+/// nowhere; it is omitted when the resolved path is the reference itself.
 fn display_design_path(
     design: &str,
     cwd: &Path,
     relativize_design_paths: bool,
-) -> String {
-    if !relativize_design_paths {
-        return design.to_string();
+    plan_roots: &[PathBuf],
+) -> Vec<String> {
+    let reference = design.to_string();
+    let resolved = resolve_design_reference(design, cwd, plan_roots);
+    let detail = match resolved {
+        DesignResolution::Resolved { path, drifted } => {
+            let display =
+                display_plan_path(&path, cwd, relativize_design_paths);
+            if display == reference {
+                return vec![reference];
+            }
+            format!(
+                "{display}{}",
+                if drifted {
+                    PLAN_REFERENCE_DRIFT_SUFFIX
+                } else {
+                    ""
+                }
+            )
+        }
+        DesignResolution::Ambiguous => {
+            PLAN_REFERENCE_AMBIGUOUS_LABEL.to_string()
+        }
+        DesignResolution::Invalid => PLAN_REFERENCE_INVALID_LABEL.to_string(),
+        DesignResolution::Missing => PLAN_REFERENCE_MISSING_LABEL.to_string(),
+    };
+    vec![reference, format!("→ {detail}")]
+}
+
+/// Where one stored `design` value points once the shared resolver has run.
+enum DesignResolution {
+    Resolved { path: PathBuf, drifted: bool },
+    Ambiguous,
+    Invalid,
+    Missing,
+}
+
+fn resolve_design_reference(
+    design: &str,
+    cwd: &Path,
+    plan_roots: &[PathBuf],
+) -> DesignResolution {
+    let Ok(resolution) = resolve_plan_reference(design, plan_roots) else {
+        return DesignResolution::Invalid;
+    };
+    if let Some(path) = resolution.resolved_path.as_ref() {
+        return DesignResolution::Resolved {
+            path: PathBuf::from(path),
+            drifted: resolution.status == "drifted",
+        };
+    }
+    // A legacy relative path still names a file below the working directory,
+    // which is how in-tree stores linked plans before `plans:` references.
+    if let Some(path) = legacy_path_below_cwd(design, cwd) {
+        return DesignResolution::Resolved {
+            path,
+            drifted: false,
+        };
+    }
+    if resolution.status == "ambiguous" {
+        return DesignResolution::Ambiguous;
+    }
+    DesignResolution::Missing
+}
+
+fn legacy_path_below_cwd(design: &str, cwd: &Path) -> Option<PathBuf> {
+    let parsed = parse_plan_reference(design).ok()?;
+    if !parsed.legacy {
+        return None;
     }
     let path = Path::new(design);
+    if path.is_absolute() {
+        return None;
+    }
+    let candidate = cwd.join(path);
+    candidate.is_file().then_some(candidate)
+}
+
+fn display_plan_path(
+    path: &Path,
+    cwd: &Path,
+    relativize_design_paths: bool,
+) -> String {
+    if !relativize_design_paths {
+        return path.display().to_string();
+    }
     path.strip_prefix(cwd)
         .map(|relative| relative.display().to_string())
-        .unwrap_or_else(|_| design.to_string())
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 fn success(stdout: String) -> BeadCliOutcomeWire {
@@ -2215,6 +2325,7 @@ mod tests {
             &store.beads_dir,
             store.beads_dir.parent().unwrap(),
             false,
+            &[],
         )
         .unwrap();
 
@@ -2237,6 +2348,7 @@ mod tests {
             &store.beads_dir,
             store.beads_dir.parent().unwrap(),
             false,
+            &[],
         )
         .unwrap();
         assert_eq!(removed.exit_code, 0);
@@ -2285,6 +2397,7 @@ mod tests {
             &store.beads_dir,
             Path::new("/repo"),
             false,
+            &[],
         )
         .unwrap();
 
@@ -2334,6 +2447,7 @@ mod tests {
             &store.beads_dir,
             Path::new("/repo"),
             false,
+            &[],
         )
         .unwrap();
 
@@ -2370,6 +2484,7 @@ mod tests {
             &store.beads_dir,
             Path::new("/repo"),
             false,
+            &[],
         )
         .unwrap();
         let summary = outcome.mutation_summary.unwrap();
@@ -2400,6 +2515,7 @@ mod tests {
             &store.beads_dir,
             &nested,
             true,
+            &[],
         )
         .unwrap();
         assert_eq!(outcome.exit_code, 0);
@@ -2427,6 +2543,7 @@ mod tests {
             &store.beads_dir,
             workspace,
             true,
+            &[],
         )
         .unwrap();
 
@@ -2457,6 +2574,7 @@ mod tests {
             &store.beads_dir,
             &workspace,
             false,
+            &[],
         )
         .unwrap();
 
@@ -2473,6 +2591,7 @@ mod tests {
             beads_dir,
             Path::new("/repo"),
             false,
+            &[],
         )
         .unwrap()
     }
@@ -2507,6 +2626,174 @@ mod tests {
             _temp: temp,
             beads_dir,
         }
+    }
+
+    fn show_plan_section(
+        design: &str,
+        plan_roots: &[PathBuf],
+        cwd: &Path,
+        relativize_design_paths: bool,
+    ) -> String {
+        let mut issue = plan_issue(
+            "beads-1",
+            "Plan",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:00:00Z",
+        );
+        issue.design = design.to_string();
+        let store = seed_issues(vec![issue]);
+        let outcome = execute_bead_cli(
+            &["show".to_string(), "beads-1".to_string()],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            cwd,
+            relativize_design_paths,
+            plan_roots,
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        let (_, plan) = outcome.stdout.split_once("\nPLAN\n").unwrap();
+        plan.to_string()
+    }
+
+    fn seed_plan_root(temp: &TempDir, month: &str, name: &str) -> PathBuf {
+        let month_dir = temp.path().join(month);
+        fs::create_dir_all(&month_dir).unwrap();
+        fs::write(month_dir.join(name), "# Plan\n").unwrap();
+        temp.path().to_path_buf()
+    }
+
+    #[test]
+    fn show_renders_reference_above_its_resolved_path() {
+        let plans = tempdir().unwrap();
+        let root = seed_plan_root(&plans, "202607", "durable.md");
+
+        let plan = show_plan_section(
+            "plans:202607/durable.md",
+            std::slice::from_ref(&root),
+            Path::new("/repo"),
+            false,
+        );
+
+        assert_eq!(
+            plan,
+            format!(
+                "  plans:202607/durable.md\n  → {}\n",
+                root.join("202607/durable.md").display()
+            )
+        );
+    }
+
+    #[test]
+    fn show_marks_a_reference_resolved_through_month_drift() {
+        let plans = tempdir().unwrap();
+        let root = seed_plan_root(&plans, "202607", "drifted.md");
+
+        let plan = show_plan_section(
+            "plans:202606/drifted.md",
+            std::slice::from_ref(&root),
+            Path::new("/repo"),
+            false,
+        );
+
+        assert_eq!(
+            plan,
+            format!(
+                "  plans:202606/drifted.md\n  → {} (month drift)\n",
+                root.join("202607/drifted.md").display()
+            )
+        );
+    }
+
+    #[test]
+    fn show_says_plainly_when_a_reference_resolves_nowhere() {
+        let plans = tempdir().unwrap();
+        let root = plans.path().to_path_buf();
+
+        let plan = show_plan_section(
+            "plans:202607/gone.md",
+            std::slice::from_ref(&root),
+            Path::new("/repo"),
+            false,
+        );
+
+        assert_eq!(
+            plan,
+            concat!(
+                "  plans:202607/gone.md\n",
+                "  → (unresolved: no plan file found)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn show_reports_an_ambiguous_reference_instead_of_guessing() {
+        let plans = tempdir().unwrap();
+        seed_plan_root(&plans, "202606", "twin.md");
+        let root = seed_plan_root(&plans, "202607", "twin.md");
+
+        let plan = show_plan_section(
+            "plans:202605/twin.md",
+            std::slice::from_ref(&root),
+            Path::new("/repo"),
+            false,
+        );
+
+        assert_eq!(
+            plan,
+            concat!(
+                "  plans:202605/twin.md\n",
+                "  → (ambiguous: multiple plans match this reference)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn show_reports_a_malformed_reference() {
+        let plan = show_plan_section(
+            "plans:../escape.md",
+            &[],
+            Path::new("/repo"),
+            false,
+        );
+
+        assert_eq!(
+            plan,
+            concat!(
+                "  plans:../escape.md\n",
+                "  → (unresolved: malformed plan reference)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn show_keeps_one_line_when_a_legacy_path_resolves_to_itself() {
+        let workspace = tempdir().unwrap();
+        let plan_path = workspace.path().join("plans/legacy.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Plan\n").unwrap();
+
+        let plan =
+            show_plan_section("plans/legacy.md", &[], workspace.path(), true);
+
+        assert_eq!(plan, "  plans/legacy.md\n");
+    }
+
+    #[test]
+    fn show_resolves_a_legacy_path_against_the_working_directory() {
+        let workspace = tempdir().unwrap();
+        let plan_path = workspace.path().join("plans/legacy.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Plan\n").unwrap();
+
+        let plan =
+            show_plan_section("plans/legacy.md", &[], workspace.path(), false);
+
+        assert_eq!(
+            plan,
+            format!("  plans/legacy.md\n  → {}\n", plan_path.display())
+        );
     }
 
     fn phase_issue(
