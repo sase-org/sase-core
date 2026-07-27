@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::plan::canonicalize_plan_reference;
+
 use super::mutation::{
     add_dependency, close_issues, create_issue, open_issue, remove_issues,
     update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
@@ -562,10 +564,62 @@ fn storage_design_path(
     }
     let normalized = fs::canonicalize(&resolved).unwrap_or(resolved);
     let storage_root = design_storage_root(cwd, write_beads_dir);
+    let plan_roots = design_plan_roots(storage_root, write_beads_dir)
+        .into_iter()
+        .map(|root| fs::canonicalize(&root).unwrap_or(root))
+        .collect::<Vec<_>>();
+    if let Some(reference) =
+        canonicalize_plan_reference(&normalized, &plan_roots)
+            .map_err(|err| err.message)?
+    {
+        return Ok(reference);
+    }
     Ok(normalized
         .strip_prefix(storage_root)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| normalized.display().to_string()))
+}
+
+fn design_plan_roots(storage_root: &Path, beads_dir: &Path) -> Vec<PathBuf> {
+    let components = beads_dir
+        .components()
+        .rev()
+        .take(4)
+        .map(|component| component.as_os_str())
+        .collect::<Vec<_>>();
+    if components
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "plans", "repos", "sase"])
+    {
+        return vec![beads_dir
+            .parent()
+            .expect("matched sidecar beads directory has a parent")
+            .to_path_buf()];
+    }
+    if components
+        .iter()
+        .take(3)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "sdd", ".sase"])
+    {
+        return vec![beads_dir
+            .parent()
+            .expect("matched local beads directory has a parent")
+            .join("plans")];
+    }
+    if components
+        .iter()
+        .take(2)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "sdd"])
+    {
+        return vec![beads_dir
+            .parent()
+            .expect("matched in-tree beads directory has a parent")
+            .join("plans")];
+    }
+    vec![storage_root.join("plans")]
 }
 
 fn design_storage_root<'a>(cwd: &'a Path, beads_dir: &'a Path) -> &'a Path {
@@ -2080,6 +2134,36 @@ mod tests {
     }
 
     #[test]
+    fn search_design_matches_canonical_plan_reference() {
+        let mut epic = plan_issue(
+            "beads-1",
+            "Linked epic",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        );
+        epic.design = "plans:202607/roadmap.md".to_string();
+        let store = seed_issues(vec![epic]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["search", "202607", "--color", "never"],
+        );
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(
+            outcome.stdout,
+            "○ beads-1 · Linked epic\n  design: \"plans:202607/roadmap.md\"\n"
+        );
+
+        let old_prefix = execute_search(
+            &store.beads_dir,
+            &["search", "sdd/plans", "--color", "never"],
+        );
+        assert_eq!(old_prefix.stdout, "No beads match \"sdd/plans\".\n");
+    }
+
+    #[test]
     fn search_no_match_is_successful() {
         let store = seed_issues(vec![phase_issue(
             "beads-1.1",
@@ -2323,6 +2407,64 @@ mod tests {
         assert_eq!(issue.design, "plans/plan.md");
     }
 
+    #[test]
+    fn create_plan_under_in_tree_plans_root_stores_canonical_reference() {
+        let store = seed_issues(Vec::new());
+        let workspace = store.beads_dir.ancestors().nth(2).unwrap();
+        let plan_path = workspace.join("sdd/plans/202607/roadmap.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Roadmap\n").unwrap();
+
+        let outcome = execute_bead_cli(
+            &[
+                "create".to_string(),
+                "--title".to_string(),
+                "Canonical plan".to_string(),
+                "--type".to_string(),
+                format!("plan({})", plan_path.display()),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            workspace,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 0);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.design, "plans:202607/roadmap.md");
+    }
+
+    #[test]
+    fn create_plan_under_sidecar_plans_root_stores_canonical_reference() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let beads_dir = workspace.join("sase/repos/plans/beads");
+        let store = seed_issues_at(temp, beads_dir, Vec::new());
+        let plan_path = workspace.join("sase/repos/plans/202607/roadmap.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Roadmap\n").unwrap();
+
+        let outcome = execute_bead_cli(
+            &[
+                "create".to_string(),
+                "--title".to_string(),
+                "Sidecar plan".to_string(),
+                "--type".to_string(),
+                format!("plan({})", plan_path.display()),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            &workspace,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 0);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.design, "plans:202607/roadmap.md");
+    }
+
     fn execute_search(beads_dir: &Path, args: &[&str]) -> BeadCliOutcomeWire {
         let argv = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
         execute_bead_cli(
@@ -2338,6 +2480,14 @@ mod tests {
     fn seed_issues(issues: Vec<IssueWire>) -> SeededStore {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");
+        seed_issues_at(temp, beads_dir, issues)
+    }
+
+    fn seed_issues_at(
+        temp: TempDir,
+        beads_dir: PathBuf,
+        issues: Vec<IssueWire>,
+    ) -> SeededStore {
         fs::create_dir_all(&beads_dir).unwrap();
         let jsonl = issues
             .iter()
