@@ -61,12 +61,59 @@ fn serialized_event_store_fixture_matches_import_and_reduces() {
         &parse_issues_jsonl(EVENT_ROUNDTRIP_SCHEMA).issues,
     )
     .unwrap();
-    assert_eq!(streams, imported);
+    let mut imported_with_legacy_ids = imported.clone();
+    for (imported_stream, legacy_stream) in
+        imported_with_legacy_ids.iter_mut().zip(&streams)
+    {
+        for (imported_event, legacy_event) in
+            imported_stream.events.iter_mut().zip(&legacy_stream.events)
+        {
+            imported_event.event_id.clone_from(&legacy_event.event_id);
+        }
+    }
+    assert_eq!(streams, imported_with_legacy_ids);
+    assert!(streams[0].events.iter().all(|event| event
+        .event_id
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .len()
+        != 64));
+    assert!(imported[0]
+        .events
+        .iter()
+        .all(|event| is_content_hashed_event_id(&event.event_id)));
 
     let exported =
         export_issues_to_jsonl(&reduce_event_streams(&streams).unwrap())
             .unwrap();
     assert_eq!(exported, EVENT_ROUNDTRIP_SCHEMA);
+    assert_eq!(
+        export_issues_to_jsonl(&reduce_event_streams(&imported).unwrap())
+            .unwrap(),
+        EVENT_ROUNDTRIP_SCHEMA
+    );
+}
+
+#[test]
+fn event_import_mints_reproducible_content_hashed_ids() {
+    let issues = parse_issues_jsonl(EVENT_ROUNDTRIP_SCHEMA).issues;
+    let first = import_issues_to_event_streams(&issues).unwrap();
+    let repeated = import_issues_to_event_streams(&issues).unwrap();
+    assert_eq!(first, repeated);
+
+    let mut changed_issues = issues;
+    changed_issues[0].title = "Changed content".to_string();
+    let changed = import_issues_to_event_streams(&changed_issues).unwrap();
+
+    assert_ne!(first[0].events[0].event_id, changed[0].events[0].event_id);
+    assert!(first[0].events[0]
+        .event_id
+        .starts_with("gold-1:000001:issue_created:gold-1:"));
+    assert!(first[0]
+        .events
+        .iter()
+        .all(|event| is_content_hashed_event_id(&event.event_id)));
 }
 
 #[test]
@@ -463,8 +510,9 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
     );
     assert_eq!(
         merged.events[4].event_id,
-        "gold-1:000005:issue_closed:gold-1.2"
+        "gold-1:000004:issue_closed:gold-1.2"
     );
+    assert_eq!(&merged.events[..base.events.len()], &base.events);
     let reduced = reduce_event_streams(&[merged]).unwrap();
     assert_eq!(
         reduced
@@ -518,7 +566,7 @@ fn merge_event_stream_keeps_exact_duplicate_append_once() {
 }
 
 #[test]
-fn merge_event_stream_preserves_each_branch_causal_order() {
+fn merge_event_stream_orders_non_base_union_deterministically() {
     let root = issue(
         "gold-1",
         "Root",
@@ -580,30 +628,135 @@ fn merge_event_stream_preserves_each_branch_causal_order() {
         .map(|event| event.operation)
         .collect::<Vec<_>>();
 
-    let ready_marked = operations
-        .iter()
-        .position(|operation| *operation == BeadEventOperationWire::ReadyMarked)
-        .unwrap();
-    let ready_unmarked = operations
-        .iter()
-        .position(|operation| {
-            *operation == BeadEventOperationWire::ReadyUnmarked
-        })
-        .unwrap();
-    let closed = operations
-        .iter()
-        .position(|operation| *operation == BeadEventOperationWire::IssueClosed)
-        .unwrap();
-    let opened = operations
-        .iter()
-        .position(|operation| *operation == BeadEventOperationWire::IssueOpened)
-        .unwrap();
-    assert!(ready_marked < ready_unmarked);
-    assert!(closed < opened);
+    assert_eq!(
+        operations,
+        vec![
+            BeadEventOperationWire::ReadyUnmarked,
+            BeadEventOperationWire::IssueClosed,
+            BeadEventOperationWire::IssueOpened,
+            BeadEventOperationWire::ReadyMarked,
+        ]
+    );
 }
 
 #[test]
 fn merge_event_stream_rejects_deleted_or_rewritten_base_events() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            numbered_event(
+                "gold-1",
+                1,
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: root },
+            ),
+            numbered_event(
+                "gold-1",
+                2,
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::ReadyMarked,
+                BeadEventPayloadWire::ReadyMarked,
+            ),
+        ],
+    };
+    let mut deleted = base.clone();
+    deleted.events.remove(1);
+    deleted.events.insert(
+        0,
+        event(
+            "gold-1",
+            "2025-12-31T23:59:00Z",
+            BeadEventOperationWire::ReadyUnmarked,
+            BeadEventPayloadWire::ReadyUnmarked,
+        ),
+    );
+    let mut rewritten = base.clone();
+    rewritten.events[1].actor = "rewriter@example.com".to_string();
+
+    let deletion_error =
+        merge_bead_event_streams(&base, &deleted, &base).unwrap_err();
+    let rewrite_error =
+        merge_bead_event_streams(&base, &base, &rewritten).unwrap_err();
+
+    assert!(deletion_error.message.contains("missing base event 2"));
+    assert!(rewrite_error.message.contains("rewrote base event 2"));
+}
+
+#[test]
+fn merge_event_stream_accepts_interleaved_additions_and_preserves_ids() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            numbered_event(
+                "gold-1",
+                1,
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: root },
+            ),
+            numbered_event(
+                "gold-1",
+                2,
+                "2026-01-01T00:04:00Z",
+                BeadEventOperationWire::ReadyMarked,
+                BeadEventPayloadWire::ReadyMarked,
+            ),
+        ],
+    };
+    let before = event(
+        "gold-1",
+        "2025-12-31T23:59:00Z",
+        BeadEventOperationWire::IssueOpened,
+        BeadEventPayloadWire::IssueOpened,
+    );
+    let between = event(
+        "gold-1",
+        "2026-01-01T00:02:00Z",
+        BeadEventOperationWire::ReadyUnmarked,
+        BeadEventPayloadWire::ReadyUnmarked,
+    );
+    let after = event(
+        "gold-1",
+        "2026-01-01T00:05:00Z",
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed { close_reason: None },
+    );
+    let ours = BeadEventStreamWire {
+        events: vec![
+            before.clone(),
+            base.events[0].clone(),
+            between.clone(),
+            base.events[1].clone(),
+            after.clone(),
+        ],
+        ..base.clone()
+    };
+
+    let merged = merge_bead_event_streams(&base, &ours, &base).unwrap();
+
+    assert_eq!(&merged.events[..2], &base.events);
+    assert_eq!(&merged.events[2..], &[before, between, after]);
+}
+
+#[test]
+fn merge_event_stream_union_is_associative_and_idempotent() {
     let root = issue(
         "gold-1",
         "Root",
@@ -622,20 +775,148 @@ fn merge_event_stream_rejects_deleted_or_rewritten_base_events() {
             BeadEventPayloadWire::IssueCreated { issue: root },
         )],
     };
-    let deleted = BeadEventStreamWire {
-        events: vec![],
+    let additions = [
+        event(
+            "gold-1",
+            "2026-01-01T00:03:00Z",
+            BeadEventOperationWire::ReadyMarked,
+            BeadEventPayloadWire::ReadyMarked,
+        ),
+        event(
+            "gold-1",
+            "2026-01-01T00:01:00Z",
+            BeadEventOperationWire::ReadyUnmarked,
+            BeadEventPayloadWire::ReadyUnmarked,
+        ),
+        event(
+            "gold-1",
+            "2026-01-01T00:02:00Z",
+            BeadEventOperationWire::IssueOpened,
+            BeadEventPayloadWire::IssueOpened,
+        ),
+    ];
+    let branches = additions.map(|addition| BeadEventStreamWire {
+        events: vec![base.events[0].clone(), addition],
         ..base.clone()
+    });
+
+    let ab =
+        merge_bead_event_streams(&base, &branches[0], &branches[1]).unwrap();
+    let bc =
+        merge_bead_event_streams(&base, &branches[1], &branches[2]).unwrap();
+    let left = merge_bead_event_streams(&base, &ab, &branches[2]).unwrap();
+    let right = merge_bead_event_streams(&base, &branches[0], &bc).unwrap();
+    let repeated = merge_bead_event_streams(&base, &left, &left).unwrap();
+
+    assert_eq!(left, right);
+    assert_eq!(left, repeated);
+    assert_eq!(
+        left.events
+            .iter()
+            .skip(1)
+            .map(|event| event.timestamp.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "2026-01-01T00:01:00Z",
+            "2026-01-01T00:02:00Z",
+            "2026-01-01T00:03:00Z",
+        ]
+    );
+}
+
+#[test]
+fn merge_event_stream_supports_sequential_rebase_replay() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![numbered_event(
+            "gold-1",
+            1,
+            "2026-01-01T00:00:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated { issue: root },
+        )],
     };
-    let mut rewritten = base.clone();
-    rewritten.events[0].actor = "rewriter@example.com".to_string();
+    let local_events = vec![
+        event(
+            "gold-1",
+            "2026-01-01T00:04:00Z",
+            BeadEventOperationWire::ReadyMarked,
+            BeadEventPayloadWire::ReadyMarked,
+        ),
+        event(
+            "gold-1",
+            "2026-01-01T00:02:00Z",
+            BeadEventOperationWire::ReadyUnmarked,
+            BeadEventPayloadWire::ReadyUnmarked,
+        ),
+        event(
+            "gold-1",
+            "2026-01-01T00:06:00Z",
+            BeadEventOperationWire::IssueOpened,
+            BeadEventPayloadWire::IssueOpened,
+        ),
+    ];
+    let upstream_events = vec![
+        event(
+            "gold-1",
+            "2026-01-01T00:01:00Z",
+            BeadEventOperationWire::IssueClosed,
+            BeadEventPayloadWire::IssueClosed { close_reason: None },
+        ),
+        event(
+            "gold-1",
+            "2026-01-01T00:03:00Z",
+            BeadEventOperationWire::IssueOpened,
+            BeadEventPayloadWire::IssueOpened,
+        ),
+    ];
+    let mut upstream = base.clone();
+    upstream.events.extend(upstream_events.clone());
+    let local_states = (1..=local_events.len())
+        .map(|count| {
+            let mut stream = base.clone();
+            stream.events.extend(local_events[..count].iter().cloned());
+            stream
+        })
+        .collect::<Vec<_>>();
 
-    let deletion_error =
-        merge_bead_event_streams(&base, &deleted, &base).unwrap_err();
-    let rewrite_error =
-        merge_bead_event_streams(&base, &base, &rewritten).unwrap_err();
+    let mut rebased = upstream;
+    let mut previous_local = base.clone();
+    for local_state in local_states {
+        rebased =
+            merge_bead_event_streams(&previous_local, &rebased, &local_state)
+                .unwrap();
+        rebased.validate().unwrap();
+        previous_local = local_state;
+    }
 
-    assert!(deletion_error.message.contains("deleted base events"));
-    assert!(rewrite_error.message.contains("rewrote base event 1"));
+    let expected_events = base
+        .events
+        .iter()
+        .chain(&local_events)
+        .chain(&upstream_events)
+        .collect::<Vec<_>>();
+    assert_eq!(rebased.events.len(), expected_events.len());
+    for expected in expected_events {
+        assert_eq!(
+            rebased
+                .events
+                .iter()
+                .filter(|event| *event == expected)
+                .count(),
+            1,
+            "event {} must appear exactly once",
+            expected.event_id
+        );
+    }
 }
 
 #[test]
@@ -819,6 +1100,13 @@ fn event_stream_fixture(
             .map(|line| serde_json::from_str(line).unwrap())
             .collect(),
     }
+}
+
+fn is_content_hashed_event_id(event_id: &str) -> bool {
+    event_id.rsplit(':').next().is_some_and(|digest| {
+        digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn issue(

@@ -7160,6 +7160,77 @@ mod tests {
     }
 
     #[test]
+    fn bead_merge_event_streams_binding_preserves_replay_stable_union() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_merge_event_streams").is_ok());
+
+            let event = |event_id: &str, timestamp: &str, operation: &str| {
+                json!({
+                    "schema_version": 1,
+                    "event_id": event_id,
+                    "timestamp": timestamp,
+                    "actor": "owner@example.com",
+                    "operation": operation,
+                    "issue_id": "gold-1",
+                    "payload": {"kind": operation},
+                })
+            };
+            let first =
+                event("legacy-first", "2026-01-01T00:01:00Z", "ready_marked");
+            let second = event(
+                "legacy-second",
+                "2026-01-01T00:02:00Z",
+                "ready_unmarked",
+            );
+            let before =
+                event("added-before", "2026-01-01T00:00:00Z", "ready_marked");
+            let between = event(
+                "added-between",
+                "2026-01-01T00:01:30Z",
+                "ready_unmarked",
+            );
+            let stream = |events: Vec<JsonValue>| {
+                json!({
+                    "stream_id": "gold-1",
+                    "root_issue_id": "gold-1",
+                    "events": events,
+                })
+            };
+            let base_value = stream(vec![first.clone(), second.clone()]);
+            let ours_value =
+                stream(vec![before, first.clone(), second.clone()]);
+            let theirs_value = stream(vec![first, between, second]);
+            let base_obj = json_value_to_py(py, &base_value).unwrap();
+            let ours_obj = json_value_to_py(py, &ours_value).unwrap();
+            let theirs_obj = json_value_to_py(py, &theirs_value).unwrap();
+            let base = base_obj.bind(py).downcast::<PyDict>().unwrap();
+            let ours = ours_obj.bind(py).downcast::<PyDict>().unwrap();
+            let theirs = theirs_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result =
+                py_bead_merge_event_streams(py, base, ours, theirs).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(
+                result["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|event| event["event_id"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "legacy-first",
+                    "legacy-second",
+                    "added-before",
+                    "added-between",
+                ]
+            );
+        });
+    }
+
+    #[test]
     fn bead_remove_many_binding_is_exported_and_removes_multiple_roots() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

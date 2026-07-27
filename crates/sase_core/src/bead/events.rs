@@ -8,6 +8,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::wire::{
     BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
@@ -407,90 +408,33 @@ pub fn merge_bead_event_streams(
         )));
     }
 
-    validate_append_only_branch(base, ours, "ours")?;
-    validate_append_only_branch(base, theirs, "theirs")?;
-
+    let ours_base_indexes = validate_append_only_branch(base, ours, "ours")?;
+    let theirs_base_indexes =
+        validate_append_only_branch(base, theirs, "theirs")?;
     let base_events = event_keys(&base.events)?;
-    let mut nodes: BTreeMap<String, BeadEventRecordWire> = BTreeMap::new();
-    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for branch in [ours, theirs] {
-        let mut previous: Option<String> = None;
-        for event in branch.events.iter().skip(base.events.len()) {
+    let mut additions: BTreeMap<String, BeadEventRecordWire> = BTreeMap::new();
+    for (branch, base_indexes) in
+        [(ours, &ours_base_indexes), (theirs, &theirs_base_indexes)]
+    {
+        for (index, event) in branch.events.iter().enumerate() {
+            if base_indexes.contains(&index) {
+                continue;
+            }
             let key = serde_json::to_string(event)?;
             if base_events.contains(&key) {
                 continue;
             }
-            nodes.entry(key.clone()).or_insert_with(|| event.clone());
-            if let Some(previous_key) = previous.as_ref() {
-                if previous_key != &key {
-                    edges
-                        .entry(previous_key.clone())
-                        .or_default()
-                        .insert(key.clone());
-                }
-            }
-            previous = Some(key);
+            additions.entry(key).or_insert_with(|| event.clone());
         }
     }
 
-    let mut indegrees: BTreeMap<String, usize> =
-        nodes.keys().map(|key| (key.clone(), 0)).collect();
-    for targets in edges.values() {
-        for target in targets {
-            *indegrees.get_mut(target).ok_or_else(|| {
-                BeadError::validation(
-                    "bead event merge contains an unknown causal successor",
-                )
-            })? += 1;
-        }
-    }
-
-    let mut ready = BTreeSet::new();
-    for (key, event) in &nodes {
-        if indegrees[key] == 0 {
-            ready.insert(event_union_key(event, key));
-        }
-    }
-
-    let mut ordered_keys = Vec::with_capacity(nodes.len());
-    while let Some((_, _, _, key)) = ready.pop_first() {
-        ordered_keys.push(key.clone());
-        if let Some(targets) = edges.get(&key) {
-            for target in targets {
-                let indegree = indegrees.get_mut(target).ok_or_else(|| {
-                    BeadError::validation(
-                        "bead event merge contains an unknown causal successor",
-                    )
-                })?;
-                *indegree -= 1;
-                if *indegree == 0 {
-                    let event = nodes.get(target).ok_or_else(|| {
-                        BeadError::validation(
-                            "bead event merge contains an unknown event",
-                        )
-                    })?;
-                    ready.insert(event_union_key(event, target));
-                }
-            }
-        }
-    }
-    if ordered_keys.len() != nodes.len() {
-        return Err(BeadError::validation(format!(
-            "cannot merge bead event stream {} with conflicting causal order",
-            base.stream_id
-        )));
-    }
-
+    let mut additions = additions.into_iter().collect::<Vec<_>>();
+    additions
+        .sort_by_key(|(serialized, event)| event_union_key(event, serialized));
     let mut merged = base.clone();
-    for key in ordered_keys {
-        let event = nodes.get(&key).ok_or_else(|| {
-            BeadError::validation("bead event merge contains an unknown event")
-        })?;
-        let ordinal = merged.events.len() + 1;
-        merged
-            .events
-            .push(renumber_event(event, &merged.stream_id, ordinal)?);
-    }
+    merged
+        .events
+        .extend(additions.into_iter().map(|(_, event)| event));
     merged.validate()?;
     Ok(merged)
 }
@@ -499,25 +443,35 @@ fn validate_append_only_branch(
     base: &BeadEventStreamWire,
     branch: &BeadEventStreamWire,
     branch_name: &str,
-) -> Result<(), BeadError> {
-    if branch.events.len() < base.events.len() {
-        return Err(BeadError::validation(format!(
-            "cannot merge non-append-only bead event stream {}: {branch_name} deleted base events",
-            base.stream_id
-        )));
-    }
-    for (index, (base_event, branch_event)) in
-        base.events.iter().zip(&branch.events).enumerate()
-    {
-        if base_event != branch_event {
+) -> Result<BTreeSet<usize>, BeadError> {
+    let mut matched_indexes = BTreeSet::new();
+    let mut branch_start = 0;
+    for (base_index, base_event) in base.events.iter().enumerate() {
+        if branch.events.iter().any(|branch_event| {
+            branch_event.event_id == base_event.event_id
+                && branch_event != base_event
+        }) {
             return Err(BeadError::validation(format!(
                 "cannot merge non-append-only bead event stream {}: {branch_name} rewrote base event {}",
                 base.stream_id,
-                index + 1
+                base_index + 1
             )));
         }
+        let Some(offset) = branch.events[branch_start..]
+            .iter()
+            .position(|branch_event| branch_event == base_event)
+        else {
+            return Err(BeadError::validation(format!(
+                "cannot merge non-append-only bead event stream {}: {branch_name} missing base event {}",
+                base.stream_id,
+                base_index + 1
+            )));
+        };
+        let branch_index = branch_start + offset;
+        matched_indexes.insert(branch_index);
+        branch_start = branch_index + 1;
     }
-    Ok(())
+    Ok(matched_indexes)
 }
 
 fn event_union_key(
@@ -542,21 +496,30 @@ fn event_keys(
         .map_err(BeadError::from)
 }
 
-fn renumber_event(
-    event: &BeadEventRecordWire,
+pub(super) fn mint_bead_event_id(
     stream_id: &str,
     ordinal: usize,
-) -> Result<BeadEventRecordWire, BeadError> {
-    let operation_label = serde_json::to_string(&event.operation)?
+    timestamp: &str,
+    actor: &str,
+    operation: BeadEventOperationWire,
+    issue_id: &str,
+    payload: &BeadEventPayloadWire,
+) -> Result<String, BeadError> {
+    let operation_label = serde_json::to_string(&operation)?
         .trim_matches('"')
         .to_string();
-    let mut event = event.clone();
-    event.event_id = format!(
-        "{stream_id}:{ordinal:06}:{operation_label}:{}",
-        event.issue_id
-    );
-    event.validate()?;
-    Ok(event)
+    let content = serde_json::to_vec(&(
+        BEAD_EVENT_SCHEMA_VERSION,
+        timestamp,
+        actor,
+        operation,
+        issue_id,
+        payload,
+    ))?;
+    let digest = hex::encode(Sha256::digest(content));
+    Ok(format!(
+        "{stream_id}:{ordinal:06}:{operation_label}:{issue_id}:{digest}"
+    ))
 }
 
 /// Interleave events from every stream into one deterministic apply order.
@@ -863,15 +826,18 @@ impl PendingEvent {
         stream_id: &str,
         ordinal: usize,
     ) -> Result<BeadEventRecordWire, BeadError> {
-        let operation = serde_json::to_string(&self.operation)?
-            .trim_matches('"')
-            .to_string();
+        let event_id = mint_bead_event_id(
+            stream_id,
+            ordinal,
+            &self.timestamp,
+            &self.actor,
+            self.operation,
+            &self.issue_id,
+            &self.payload,
+        )?;
         Ok(BeadEventRecordWire {
             schema_version: BEAD_EVENT_SCHEMA_VERSION,
-            event_id: format!(
-                "{stream_id}:{ordinal:06}:{operation}:{}",
-                self.issue_id
-            ),
+            event_id,
             timestamp: self.timestamp,
             actor: self.actor,
             operation: self.operation,

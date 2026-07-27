@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
-    import_issues_to_event_streams, reduce_event_streams,
+    import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
     BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
     BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
     BEAD_EVENT_SCHEMA_VERSION,
@@ -1132,14 +1132,13 @@ impl MutableStore {
         let stream_id = self.stream_id_for_issue(issue_id)?;
         let stream = self.stream_for_mut(&stream_id)?;
         let ordinal = stream.events.len() + 1;
-        let operation_label = serde_json::to_string(&operation)?
-            .trim_matches('"')
-            .to_string();
+        let event_id = mint_bead_event_id(
+            &stream_id, ordinal, timestamp, actor, operation, issue_id,
+            &payload,
+        )?;
         let event = BeadEventRecordWire {
             schema_version: BEAD_EVENT_SCHEMA_VERSION,
-            event_id: format!(
-                "{stream_id}:{ordinal:06}:{operation_label}:{issue_id}"
-            ),
+            event_id,
             timestamp: timestamp.to_string(),
             actor: actor.to_string(),
             operation,
@@ -3359,6 +3358,75 @@ mod tests {
         assert!(regenerated.contains(r#""id":"sase-1""#));
         assert!(regenerated.contains(r#""id":"sase-1.1""#));
         assert!(regenerated.contains(r#""assignee":"agent""#));
+    }
+
+    #[test]
+    fn mutable_appends_mint_stable_content_hashed_event_ids() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let alpha_payload = BeadEventPayloadWire::IssueUpdated {
+            fields: BeadIssueUpdateEventFieldsWire {
+                title: Some("Alpha".to_string()),
+                ..Default::default()
+            },
+        };
+        let beta_payload = BeadEventPayloadWire::IssueUpdated {
+            fields: BeadIssueUpdateEventFieldsWire {
+                title: Some("Beta".to_string()),
+                ..Default::default()
+            },
+        };
+        let mut alpha = MutableStore::load(&beads_dir).unwrap();
+        let mut duplicate = MutableStore::load(&beads_dir).unwrap();
+        let mut beta = MutableStore::load(&beads_dir).unwrap();
+        for (store, payload) in [
+            (&mut alpha, alpha_payload.clone()),
+            (&mut duplicate, alpha_payload),
+            (&mut beta, beta_payload),
+        ] {
+            store
+                .append_issue_event(
+                    &epic.id,
+                    BeadEventOperationWire::IssueUpdated,
+                    payload,
+                    "2026-01-01T00:01:00Z",
+                    "owner@example.com",
+                )
+                .unwrap();
+        }
+
+        let alpha_id = &alpha.streams[0].events.last().unwrap().event_id;
+        let duplicate_id =
+            &duplicate.streams[0].events.last().unwrap().event_id;
+        let beta_id = &beta.streams[0].events.last().unwrap().event_id;
+
+        assert_eq!(alpha_id, duplicate_id);
+        assert_ne!(alpha_id, beta_id);
+        assert_eq!(
+            alpha_id.rsplit_once(':').unwrap().0,
+            beta_id.rsplit_once(':').unwrap().0
+        );
+        assert!(alpha_id.rsplit(':').next().is_some_and(|digest| {
+            digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }));
     }
 
     #[test]
