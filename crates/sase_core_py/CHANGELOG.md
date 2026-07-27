@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3](https://github.com/sase-org/sase-core/compare/v0.11.2...v0.11.3) - 2026-07-27
+
+### Added
+
+- *(bead)* show plan references alongside where they resolve (sase-9z.4)
+- *(beads)* validate doctor plan references (sase-9z.5)
+- *(plan)* add durable plan reference contract (sase-9z.1)
+
 ## [0.11.2](https://github.com/sase-org/sase-core/compare/v0.11.1...v0.11.2) - 2026-07-27
 
 ### Fixed
