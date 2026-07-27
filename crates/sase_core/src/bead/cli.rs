@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::plan::canonicalize_plan_reference;
 
 use super::mutation::{
-    add_dependency, close_issues, create_issue, open_issue, remove_issues,
-    update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
-    BeadUpdateFieldsWire,
+    add_dependency, close_issues, create_issue, open_issue,
+    remove_dependencies, remove_issues, update_issue, BeadCreateRequestWire,
+    BeadMutationOutcomeWire, BeadUpdateFieldsWire,
 };
 use super::read::read_store_issues;
 use super::search::search_issues_in_issues;
@@ -943,13 +943,15 @@ fn handle_dep(
     args: &[String],
     write_beads_dir: &Path,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    if args.len() != 3 || args[0] != "add" {
+    if args.iter().any(|arg| arg.starts_with('-')) {
         return Ok(defer());
     }
-    let issue_id = &args[1];
-    let depends_on_id = &args[2];
-    match add_dependency(write_beads_dir, issue_id, depends_on_id, None) {
-        Ok(outcome) => {
+    match args.first().map(String::as_str) {
+        Some("add") if args.len() == 3 => {
+            let issue_id = &args[1];
+            let depends_on_id = &args[2];
+            let outcome =
+                add_dependency(write_beads_dir, issue_id, depends_on_id, None)?;
             let dep = outcome
                 .dependency
                 .as_ref()
@@ -966,8 +968,93 @@ fn handle_dep(
                 },
             ))
         }
-        Err(err) => Err(err),
+        Some("rm") if args.len() >= 3 => {
+            let issue_id = &args[1];
+            let outcome = remove_dependencies(
+                write_beads_dir,
+                issue_id,
+                &args[2..],
+                None,
+            )?;
+            let mut stdout = String::new();
+            for dependency in &outcome.dependencies {
+                writeln!(
+                    stdout,
+                    "✗ Removed dependency: {} no longer depends on {}",
+                    dependency.issue_id, dependency.depends_on_id
+                )
+                .expect("writing to String cannot fail");
+            }
+            let issues = read_store_issues(write_beads_dir)?;
+            let active_blockers =
+                active_blocker_ids(&issues, issue_id.as_str());
+            let source_is_ready = issues
+                .iter()
+                .find(|issue| issue.id == *issue_id)
+                .is_some_and(|issue| {
+                    issue.status == StatusWire::Open
+                        && (issue.issue_type == IssueTypeWire::Phase
+                            || issue.tier == Some(BeadTierWire::Epic))
+                        && active_blockers.is_empty()
+                });
+            if source_is_ready {
+                writeln!(
+                    stdout,
+                    "○ {issue_id} is now ready (no active blockers)."
+                )
+                .expect("writing to String cannot fail");
+            } else {
+                if active_blockers.is_empty() {
+                    writeln!(stdout, "○ {issue_id} has no active blockers.")
+                        .expect("writing to String cannot fail");
+                } else {
+                    writeln!(
+                        stdout,
+                        "○ {issue_id} still has {} active blocker{}: {}.",
+                        active_blockers.len(),
+                        if active_blockers.len() == 1 { "" } else { "s" },
+                        active_blockers.join(", ")
+                    )
+                    .expect("writing to String cannot fail");
+                }
+            }
+            Ok(success_with_mutation(
+                stdout,
+                BeadCliMutationSummaryWire {
+                    operation: "dep_rm".to_string(),
+                    issue_ids: outcome.issue_ids,
+                    status_transitions: Vec::new(),
+                },
+            ))
+        }
+        _ => Ok(defer()),
     }
+}
+
+fn active_blocker_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
+    let status_by_id: BTreeMap<&str, &StatusWire> = issues
+        .iter()
+        .map(|issue| (issue.id.as_str(), &issue.status))
+        .collect();
+    issues
+        .iter()
+        .find(|issue| issue.id == issue_id)
+        .into_iter()
+        .flat_map(|issue| &issue.dependencies)
+        .filter(|dependency| {
+            status_by_id
+                .get(dependency.depends_on_id.as_str())
+                .is_some_and(|status| {
+                    matches!(
+                        status,
+                        StatusWire::Open
+                            | StatusWire::Claimed
+                            | StatusWire::InProgress
+                    )
+                })
+        })
+        .map(|dependency| dependency.depends_on_id.clone())
+        .collect()
 }
 
 fn handle_rm(
@@ -2403,6 +2490,72 @@ mod tests {
         assert_eq!(removed.exit_code, 0);
         assert_eq!(removed.mutation_summary.unwrap().operation, "rm");
         assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dependency_remove_is_handled_with_a_batch_mutation_summary() {
+        let mut source = plan_issue(
+            "beads-1",
+            "Source",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:00:00Z",
+        );
+        source.dependencies = vec![
+            DependencyWire {
+                issue_id: "beads-1".to_string(),
+                depends_on_id: "beads-2".to_string(),
+                created_at: "2026-01-01T00:02:00Z".to_string(),
+                created_by: "owner@example.com".to_string(),
+            },
+            DependencyWire {
+                issue_id: "beads-1".to_string(),
+                depends_on_id: "beads-3".to_string(),
+                created_at: "2026-01-01T00:03:00Z".to_string(),
+                created_by: "owner@example.com".to_string(),
+            },
+        ];
+        let store = seed_issues(vec![
+            source,
+            plan_issue(
+                "beads-2",
+                "First target",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+            plan_issue(
+                "beads-3",
+                "Second target",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:02:00Z",
+            ),
+        ]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["dep", "rm", "beads-1", "beads-2", "beads-3"],
+        );
+
+        assert_eq!(
+            outcome.stdout,
+            concat!(
+                "✗ Removed dependency: beads-1 no longer depends on beads-2\n",
+                "✗ Removed dependency: beads-1 no longer depends on beads-3\n",
+                "○ beads-1 is now ready (no active blockers).\n",
+            )
+        );
+        let summary = outcome.mutation_summary.unwrap();
+        assert_eq!(summary.operation, "dep_rm");
+        assert_eq!(summary.issue_ids, vec!["beads-1", "beads-2", "beads-3"]);
+        assert!(read_store_issues(&store.beads_dir)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == "beads-1")
+            .unwrap()
+            .dependencies
+            .is_empty());
     }
 
     #[test]

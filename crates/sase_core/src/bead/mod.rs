@@ -43,8 +43,8 @@ pub use mutation::{
     add_dependency, append_issue_note, claim_for_agent_launch,
     claim_for_agent_wait, close_issues, create_issue, export_jsonl, init_store,
     mark_ready_to_work, open_issue, preclaim_epic_work_plan,
-    release_agent_claim, remove_issue, remove_issues, sync_is_clean,
-    unmark_ready_to_work, update_issue, BeadCreateRequestWire,
+    release_agent_claim, remove_dependencies, remove_issue, remove_issues,
+    sync_is_clean, unmark_ready_to_work, update_issue, BeadCreateRequestWire,
     BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
     BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };

@@ -360,6 +360,7 @@ use sase_core::bead::{
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
     release_agent_claim as core_bead_release_agent_claim,
+    remove_dependencies as core_bead_remove_dependencies,
     remove_issue as core_bead_remove_issue,
     remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
@@ -3159,6 +3160,30 @@ fn py_bead_dep_add<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_dep_remove")]
+#[pyo3(signature = (beads_dir, issue_id, depends_on_ids, now=None))]
+fn py_bead_dep_remove<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    depends_on_ids: Vec<String>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_remove_dependencies(
+                &beads_dir,
+                issue_id,
+                &depends_on_ids,
+                now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_mark_ready_to_work")]
 #[pyo3(signature = (beads_dir, epic_id, now=None))]
 fn py_bead_mark_ready_to_work<'py>(
@@ -5797,6 +5822,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_dep_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_unmark_ready_to_work, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_export_jsonl, m)?)?;

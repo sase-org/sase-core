@@ -130,6 +130,8 @@ pub struct BeadMutationOutcomeWire {
     #[serde(default)]
     pub dependency: Option<DependencyWire>,
     #[serde(default)]
+    pub dependencies: Vec<DependencyWire>,
+    #[serde(default)]
     pub next_counter: Option<u64>,
     #[serde(default)]
     pub rollback_preclaims: Vec<BeadPreclaimRollbackWire>,
@@ -1071,6 +1073,80 @@ pub fn add_dependency(
     })
 }
 
+pub fn remove_dependencies(
+    beads_dir: &Path,
+    issue_id: &str,
+    depends_on_ids: &[String],
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if depends_on_ids.is_empty() {
+        return Err(BeadError::validation(
+            "remove_dependencies() requires at least one dependency ID",
+        ));
+    }
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let mut seen = BTreeSet::new();
+        let requested: Vec<String> = depends_on_ids
+            .iter()
+            .filter(|depends_on_id| seen.insert((*depends_on_id).clone()))
+            .cloned()
+            .collect();
+        let removed = requested
+            .iter()
+            .map(|depends_on_id| {
+                store.issues[index]
+                    .dependencies
+                    .iter()
+                    .find(|dependency| {
+                        dependency.depends_on_id == *depends_on_id
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        BeadError::validation(format!(
+                            "Dependency does not exist: {issue_id} does not depend on {depends_on_id}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let removed_ids: BTreeSet<&str> = removed
+            .iter()
+            .map(|dependency| dependency.depends_on_id.as_str())
+            .collect();
+        store.issues[index].dependencies.retain(|dependency| {
+            !removed_ids.contains(dependency.depends_on_id.as_str())
+        });
+        let updated_issue = store.issues[index].clone();
+        let removed_at = now.unwrap_or_else(now_utc);
+        let actor = store.config.owner.clone();
+        for dependency in &removed {
+            store.append_issue_event(
+                issue_id,
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved {
+                    dependency: dependency.clone(),
+                },
+                &removed_at,
+                &actor,
+            )?;
+        }
+        store.save()?;
+
+        let mut issue_ids = Vec::with_capacity(removed.len() + 1);
+        issue_ids.push(issue_id.to_string());
+        issue_ids.extend(
+            removed
+                .iter()
+                .map(|dependency| dependency.depends_on_id.clone()),
+        );
+        let mut result = outcome("dep_rm", true, issue_ids);
+        result.issue = Some(updated_issue);
+        result.dependencies = removed;
+        Ok(result)
+    })
+}
+
 pub fn mark_ready_to_work(
     beads_dir: &Path,
     epic_id: &str,
@@ -1759,6 +1835,7 @@ fn outcome(
         issue: None,
         issues: Vec::new(),
         dependency: None,
+        dependencies: Vec::new(),
         next_counter: None,
         rollback_preclaims: Vec::new(),
         reopened_ancestor_ids: Vec::new(),
@@ -4311,6 +4388,208 @@ mod tests {
             store.get_issue(&second.id).unwrap().title,
             "Replacement child"
         );
+    }
+
+    #[test]
+    fn remove_dependencies_records_the_full_removed_edge() {
+        let (_temp, beads_dir, source_id, target_ids) =
+            dependency_mutation_fixture();
+
+        let result = remove_dependencies(
+            &beads_dir,
+            &source_id,
+            &[target_ids[0].clone()],
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(result.operation, "dep_rm");
+        assert_eq!(
+            result.issue_ids,
+            vec![source_id.clone(), target_ids[0].clone()]
+        );
+        assert_eq!(result.dependencies.len(), 1);
+        assert_eq!(result.dependencies[0].issue_id, source_id);
+        assert_eq!(result.dependencies[0].depends_on_id, target_ids[0]);
+        assert_eq!(result.dependencies[0].created_at, "2026-01-01T00:03:00Z");
+        assert_eq!(result.dependencies[0].created_by, "owner@example.com");
+        assert_eq!(
+            result
+                .issue
+                .unwrap()
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.depends_on_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![target_ids[1].as_str()]
+        );
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let event = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .find(|event| {
+                event.operation == BeadEventOperationWire::DependencyRemoved
+            })
+            .unwrap();
+        assert_eq!(event.timestamp, "2026-01-01T00:10:00Z");
+        assert_eq!(event.actor, "owner@example.com");
+        assert!(matches!(
+            &event.payload,
+            BeadEventPayloadWire::DependencyRemoved { dependency }
+                if dependency.depends_on_id == target_ids[0]
+                    && dependency.created_at == "2026-01-01T00:03:00Z"
+        ));
+    }
+
+    #[test]
+    fn remove_dependencies_batches_and_deduplicates_targets() {
+        let (_temp, beads_dir, source_id, target_ids) =
+            dependency_mutation_fixture();
+
+        let result = remove_dependencies(
+            &beads_dir,
+            &source_id,
+            &[
+                target_ids[0].clone(),
+                target_ids[1].clone(),
+                target_ids[0].clone(),
+            ],
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.issue_ids,
+            vec![
+                source_id.clone(),
+                target_ids[0].clone(),
+                target_ids[1].clone()
+            ]
+        );
+        assert_eq!(result.dependencies.len(), 2);
+        assert!(MutableStore::load(&beads_dir)
+            .unwrap()
+            .get_issue(&source_id)
+            .unwrap()
+            .dependencies
+            .is_empty());
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(
+            streams
+                .iter()
+                .flat_map(|stream| &stream.events)
+                .filter(|event| {
+                    event.operation == BeadEventOperationWire::DependencyRemoved
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn remove_dependencies_validates_the_whole_batch_before_writing() {
+        let (_temp, beads_dir, source_id, target_ids) =
+            dependency_mutation_fixture();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = remove_dependencies(
+            &beads_dir,
+            &source_id,
+            &[target_ids[0].clone(), "sase-missing-edge".to_string()],
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(
+            error.message,
+            format!(
+                "Dependency does not exist: {source_id} does not depend on sase-missing-edge"
+            )
+        );
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn remove_dependencies_rejects_an_unknown_source_without_writing() {
+        let (_temp, beads_dir, _source_id, target_ids) =
+            dependency_mutation_fixture();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = remove_dependencies(
+            &beads_dir,
+            "sase-missing",
+            &[target_ids[0].clone()],
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "not_found");
+        assert_eq!(error.message, "Issue not found: sase-missing");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    fn dependency_mutation_fixture(
+    ) -> (tempfile::TempDir, PathBuf, String, Vec<String>) {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let source = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Source".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let first = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First target".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let second = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Second target".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        add_dependency(
+            &beads_dir,
+            &source.id,
+            &first.id,
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        add_dependency(
+            &beads_dir,
+            &source.id,
+            &second.id,
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+
+        (temp, beads_dir, source.id, vec![first.id, second.id])
     }
 
     fn issue(

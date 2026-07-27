@@ -120,6 +120,7 @@ pub enum BeadEventOperationWire {
     IssueClosed,
     IssueRemoved,
     DependencyAdded,
+    DependencyRemoved,
     ReadyMarked,
     ReadyUnmarked,
     EpicWorkPreclaimed,
@@ -147,6 +148,9 @@ pub enum BeadEventPayloadWire {
         cascade_removed_issue_ids: Vec<String>,
     },
     DependencyAdded {
+        dependency: DependencyWire,
+    },
+    DependencyRemoved {
         dependency: DependencyWire,
     },
     ReadyMarked,
@@ -206,6 +210,18 @@ impl BeadEventPayloadWire {
                 if dependency.issue_id != issue_id {
                     return Err(BeadError::validation(format!(
                         "dependency_added payload issue_id mismatch: {} != {}",
+                        dependency.issue_id, issue_id
+                    )));
+                }
+                Ok(())
+            }
+            (
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved { dependency },
+            ) => {
+                if dependency.issue_id != issue_id {
+                    return Err(BeadError::validation(format!(
+                        "dependency_removed payload issue_id mismatch: {} != {}",
                         dependency.issue_id, issue_id
                     )));
                 }
@@ -619,6 +635,7 @@ fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
     match operation {
         BeadEventOperationWire::IssueCreated => 0,
         BeadEventOperationWire::DependencyAdded => 2,
+        BeadEventOperationWire::DependencyRemoved => 3,
         _ => 1,
     }
 }
@@ -698,6 +715,14 @@ pub(super) fn apply_event(
                 issue.dependencies.push(dependency.clone());
             }
             issue.validate()?;
+        }
+        BeadEventPayloadWire::DependencyRemoved { dependency } => {
+            if let Some(issue) = issues.get_mut(&event.issue_id) {
+                issue.dependencies.retain(|existing| {
+                    existing.depends_on_id != dependency.depends_on_id
+                });
+                issue.validate()?;
+            }
         }
         BeadEventPayloadWire::ReadyMarked => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;

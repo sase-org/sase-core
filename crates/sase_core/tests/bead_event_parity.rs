@@ -1073,6 +1073,336 @@ fn reduce_survives_many_merged_streams_with_non_monotonic_timestamps() {
         .all(|issue| issue.status == StatusWire::Closed));
 }
 
+#[test]
+fn dependency_remove_replay_is_tolerant_and_projection_round_trips() {
+    let dependency = DependencyWire {
+        issue_id: "source".to_string(),
+        depends_on_id: "target".to_string(),
+        created_at: "2026-01-01T00:02:00Z".to_string(),
+        created_by: "creator@example.com".to_string(),
+    };
+    let stream = BeadEventStreamWire {
+        stream_id: "source".to_string(),
+        root_issue_id: "source".to_string(),
+        events: vec![
+            event(
+                "source",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "source",
+                        "Source",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:00:00Z",
+                    ),
+                },
+            ),
+            event(
+                "target",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "target",
+                        "Target",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:01:00Z",
+                    ),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::DependencyAdded,
+                BeadEventPayloadWire::DependencyAdded {
+                    dependency: dependency.clone(),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:03:00Z",
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved {
+                    dependency: dependency.clone(),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:04:00Z",
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved { dependency },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+    assert!(reduced
+        .iter()
+        .find(|issue| issue.id == "source")
+        .unwrap()
+        .dependencies
+        .is_empty());
+    let reimported = import_issues_to_event_streams(&reduced).unwrap();
+    assert!(reimported
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .all(|event| {
+            event.operation != BeadEventOperationWire::DependencyRemoved
+        }));
+    assert_eq!(reduce_event_streams(&reimported).unwrap(), reduced);
+}
+
+#[test]
+fn dependency_remove_replay_tolerates_a_target_removed_first() {
+    let dependency = DependencyWire {
+        issue_id: "source".to_string(),
+        depends_on_id: "target".to_string(),
+        created_at: "2026-01-01T00:02:00Z".to_string(),
+        created_by: "creator@example.com".to_string(),
+    };
+    let stream = BeadEventStreamWire {
+        stream_id: "source".to_string(),
+        root_issue_id: "source".to_string(),
+        events: vec![
+            event(
+                "source",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "source",
+                        "Source",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:00:00Z",
+                    ),
+                },
+            ),
+            event(
+                "target",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "target",
+                        "Target",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:01:00Z",
+                    ),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::DependencyAdded,
+                BeadEventPayloadWire::DependencyAdded {
+                    dependency: dependency.clone(),
+                },
+            ),
+            event(
+                "target",
+                "2026-01-01T00:03:00Z",
+                BeadEventOperationWire::IssueRemoved,
+                BeadEventPayloadWire::IssueRemoved {
+                    cascade_removed_issue_ids: Vec::new(),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:04:00Z",
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved { dependency },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+
+    assert_eq!(reduced.len(), 1);
+    assert_eq!(reduced[0].id, "source");
+    assert!(reduced[0].dependencies.is_empty());
+}
+
+#[test]
+fn dependency_add_remove_add_replays_to_present() {
+    let dependency = DependencyWire {
+        issue_id: "source".to_string(),
+        depends_on_id: "target".to_string(),
+        created_at: "2026-01-01T00:02:00Z".to_string(),
+        created_by: "creator@example.com".to_string(),
+    };
+    let stream = BeadEventStreamWire {
+        stream_id: "source".to_string(),
+        root_issue_id: "source".to_string(),
+        events: vec![
+            event(
+                "source",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "source",
+                        "Source",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:00:00Z",
+                    ),
+                },
+            ),
+            event(
+                "target",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "target",
+                        "Target",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:01:00Z",
+                    ),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::DependencyAdded,
+                BeadEventPayloadWire::DependencyAdded {
+                    dependency: dependency.clone(),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:03:00Z",
+                BeadEventOperationWire::DependencyRemoved,
+                BeadEventPayloadWire::DependencyRemoved {
+                    dependency: dependency.clone(),
+                },
+            ),
+            event(
+                "source",
+                "2026-01-01T00:04:00Z",
+                BeadEventOperationWire::DependencyAdded,
+                BeadEventPayloadWire::DependencyAdded { dependency },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+
+    assert_eq!(
+        reduced
+            .iter()
+            .find(|issue| issue.id == "source")
+            .unwrap()
+            .dependencies
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn same_timestamp_dependency_add_replays_before_remove_across_streams() {
+    let dependency = DependencyWire {
+        issue_id: "source".to_string(),
+        depends_on_id: "target".to_string(),
+        created_at: "2026-01-01T00:02:00Z".to_string(),
+        created_by: "creator@example.com".to_string(),
+    };
+    let streams = [
+        BeadEventStreamWire {
+            stream_id: "source".to_string(),
+            root_issue_id: "source".to_string(),
+            events: vec![
+                event(
+                    "source",
+                    "2026-01-01T00:00:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated {
+                        issue: issue(
+                            "source",
+                            "Source",
+                            IssueTypeWire::Plan,
+                            None,
+                            "2026-01-01T00:00:00Z",
+                        ),
+                    },
+                ),
+                event(
+                    "source",
+                    "2026-01-01T00:02:00Z",
+                    BeadEventOperationWire::DependencyAdded,
+                    BeadEventPayloadWire::DependencyAdded {
+                        dependency: dependency.clone(),
+                    },
+                ),
+            ],
+        },
+        BeadEventStreamWire {
+            stream_id: "target".to_string(),
+            root_issue_id: "target".to_string(),
+            events: vec![
+                event(
+                    "target",
+                    "2026-01-01T00:01:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated {
+                        issue: issue(
+                            "target",
+                            "Target",
+                            IssueTypeWire::Plan,
+                            None,
+                            "2026-01-01T00:01:00Z",
+                        ),
+                    },
+                ),
+                event(
+                    "source",
+                    "2026-01-01T00:02:00Z",
+                    BeadEventOperationWire::DependencyRemoved,
+                    BeadEventPayloadWire::DependencyRemoved { dependency },
+                ),
+            ],
+        },
+    ];
+
+    let reduced = reduce_event_streams(&streams).unwrap();
+
+    assert!(reduced
+        .iter()
+        .find(|issue| issue.id == "source")
+        .unwrap()
+        .dependencies
+        .is_empty());
+}
+
+#[test]
+fn dependency_remove_payload_rejects_a_source_mismatch() {
+    let record = event(
+        "source",
+        "2026-01-01T00:00:00Z",
+        BeadEventOperationWire::DependencyRemoved,
+        BeadEventPayloadWire::DependencyRemoved {
+            dependency: DependencyWire {
+                issue_id: "different".to_string(),
+                depends_on_id: "target".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                created_by: String::new(),
+            },
+        },
+    );
+
+    let error = record.validate().unwrap_err();
+
+    assert!(error
+        .message
+        .contains("dependency_removed payload issue_id mismatch"));
+}
+
 fn event(
     issue_id: &str,
     timestamp: &str,
