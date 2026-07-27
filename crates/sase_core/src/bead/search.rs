@@ -518,6 +518,7 @@ mod tests {
             updated_at: "2026-01-01T00:01:00Z".to_string(),
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: String::new(),
             notes: String::new(),
             design: String::new(),

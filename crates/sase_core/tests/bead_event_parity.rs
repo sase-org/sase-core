@@ -236,6 +236,7 @@ fn reducer_handles_current_mutation_operation_variants() {
                 BeadEventOperationWire::IssueClosed,
                 BeadEventPayloadWire::IssueClosed {
                     close_reason: Some("done".to_string()),
+                    resolution: None,
                 },
             ),
             event(
@@ -482,6 +483,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
         BeadEventOperationWire::IssueClosed,
         BeadEventPayloadWire::IssueClosed {
             close_reason: Some("local done".to_string()),
+            resolution: None,
         },
     ));
     let mut theirs = base.clone();
@@ -492,6 +494,7 @@ fn merge_event_stream_unions_concurrent_appends_deterministically() {
         BeadEventOperationWire::IssueClosed,
         BeadEventPayloadWire::IssueClosed {
             close_reason: Some("upstream done".to_string()),
+            resolution: None,
         },
     ));
 
@@ -609,7 +612,10 @@ fn merge_event_stream_orders_non_base_union_deterministically() {
             2,
             "2026-01-01T00:02:00Z",
             BeadEventOperationWire::IssueClosed,
-            BeadEventPayloadWire::IssueClosed { close_reason: None },
+            BeadEventPayloadWire::IssueClosed {
+                close_reason: None,
+                resolution: None,
+            },
         ),
         numbered_event(
             "gold-1",
@@ -736,7 +742,10 @@ fn merge_event_stream_accepts_interleaved_additions_and_preserves_ids() {
         "gold-1",
         "2026-01-01T00:05:00Z",
         BeadEventOperationWire::IssueClosed,
-        BeadEventPayloadWire::IssueClosed { close_reason: None },
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: None,
+            resolution: None,
+        },
     );
     let ours = BeadEventStreamWire {
         events: vec![
@@ -869,7 +878,10 @@ fn merge_event_stream_supports_sequential_rebase_replay() {
             "gold-1",
             "2026-01-01T00:01:00Z",
             BeadEventOperationWire::IssueClosed,
-            BeadEventPayloadWire::IssueClosed { close_reason: None },
+            BeadEventPayloadWire::IssueClosed {
+                close_reason: None,
+                resolution: None,
+            },
         ),
         event(
             "gold-1",
@@ -952,7 +964,10 @@ fn reduce_applies_merged_stream_events_in_recorded_order() {
                     "gold-1",
                     "2026-01-01T00:01:00Z",
                     BeadEventOperationWire::IssueClosed,
-                    BeadEventPayloadWire::IssueClosed { close_reason: None },
+                    BeadEventPayloadWire::IssueClosed {
+                        close_reason: None,
+                        resolution: None,
+                    },
                 ),
             ],
         },
@@ -1034,6 +1049,7 @@ fn reduce_survives_many_merged_streams_with_non_monotonic_timestamps() {
                         BeadEventOperationWire::IssueClosed,
                         BeadEventPayloadWire::IssueClosed {
                             close_reason: None,
+                            resolution: None,
                         },
                     ),
                 ],
@@ -1133,6 +1149,7 @@ fn issue(
         updated_at: timestamp.to_string(),
         closed_at: None,
         close_reason: None,
+        resolution: None,
         description: String::new(),
         notes: String::new(),
         design: String::new(),

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::wire::{
-    BeadError, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire,
+    BeadError, BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire,
+    IssueWire, PhaseSizeWire, StatusWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -137,6 +137,8 @@ pub enum BeadEventPayloadWire {
     IssueOpened,
     IssueClosed {
         close_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<BeadResolutionWire>,
     },
     IssueRemoved {
         #[serde(default)]
@@ -247,6 +249,8 @@ pub struct BeadIssueUpdateEventFieldsWire {
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
     pub close_reason: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Option<BeadResolutionWire>>,
     #[serde(default)]
     pub changespec_name: Option<String>,
     #[serde(default)]
@@ -269,6 +273,7 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.size.is_none()
             && self.closed_at.is_none()
             && self.close_reason.is_none()
+            && self.resolution.is_none()
             && self.changespec_name.is_none()
             && self.changespec_bug_id.is_none()
             && self.tier.is_none()
@@ -636,14 +641,19 @@ fn apply_event(
         BeadEventPayloadWire::IssueOpened => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Open;
+            issue.resolution = None;
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
-        BeadEventPayloadWire::IssueClosed { close_reason } => {
+        BeadEventPayloadWire::IssueClosed {
+            close_reason,
+            resolution,
+        } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Closed;
             issue.closed_at = Some(event.timestamp.clone());
             issue.close_reason = close_reason.clone();
+            issue.resolution = resolution.clone();
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -712,6 +722,9 @@ fn apply_update_event_fields(
     }
     if let Some(value) = &fields.status {
         issue.status = value.clone();
+        if issue.status != StatusWire::Closed {
+            issue.resolution = None;
+        }
     }
     if let Some(value) = &fields.assignee {
         issue.assignee = value.clone();
@@ -736,6 +749,9 @@ fn apply_update_event_fields(
     }
     if let Some(value) = &fields.close_reason {
         issue.close_reason = value.clone();
+    }
+    if let Some(value) = &fields.resolution {
+        issue.resolution = value.clone();
     }
     if let Some(value) = &fields.changespec_name {
         issue.changespec_name = value.clone();

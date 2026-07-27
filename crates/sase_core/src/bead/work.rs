@@ -304,6 +304,7 @@ mod tests {
             updated_at: String::new(),
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: String::new(),
             notes: String::new(),
             design: String::new(),

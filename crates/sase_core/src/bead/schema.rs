@@ -20,6 +20,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     updated_at  TEXT NOT NULL,
     closed_at   TEXT,
     close_reason TEXT,
+    resolution  TEXT
+                  CHECK(resolution IN ('done', 'canceled', 'superseded')),
     description TEXT,
     notes       TEXT,
     design      TEXT,
@@ -178,6 +180,8 @@ CREATE TABLE _issues_new (
     updated_at  TEXT NOT NULL,
     closed_at   TEXT,
     close_reason TEXT,
+    resolution  TEXT
+                  CHECK(resolution IN ('done', 'canceled', 'superseded')),
     description TEXT,
     notes       TEXT,
     design      TEXT,
@@ -205,13 +209,13 @@ CREATE TABLE _issues_new (
 );
 INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
-    created_at, created_by, updated_at, closed_at, close_reason,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
-    created_at, created_by, updated_at, closed_at, close_reason,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 FROM issues;
@@ -270,6 +274,17 @@ pub fn tier_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN tier TEXT CHECK(tier IN ('plan','epic'))"
 }
 
+pub fn needs_resolution_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("resolution"),
+    }
+}
+
+pub fn resolution_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN resolution TEXT CHECK(resolution IN ('done','canceled','superseded'))"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +322,7 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("issue_type = 'phase'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("resolution  TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
     }
 
@@ -444,6 +460,52 @@ mod tests {
         assert!(!needs_tier_migration(None));
         assert!(needs_tier_migration(Some("CREATE TABLE issues(id TEXT)")));
         assert!(!needs_tier_migration(Some("tier TEXT")));
+
+        assert!(!needs_resolution_migration(None));
+        assert!(needs_resolution_migration(Some(
+            "CREATE TABLE issues(id TEXT)"
+        )));
+        assert!(!needs_resolution_migration(Some("resolution TEXT")));
+        assert_eq!(
+            resolution_migration_sql(),
+            "ALTER TABLE issues ADD COLUMN resolution TEXT CHECK(resolution IN ('done','canceled','superseded'))"
+        );
+    }
+
+    #[test]
+    fn resolution_migration_preserves_legacy_rows_without_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                issue_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO issues VALUES (
+                'legacy-1', 'Legacy closed', 'closed', 'plan', 'now', 'now'
+             );",
+        )
+        .unwrap();
+
+        conn.execute_batch(resolution_migration_sql()).unwrap();
+
+        let resolution: Option<String> = conn
+            .query_row(
+                "SELECT resolution FROM issues WHERE id='legacy-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolution, None);
+        assert!(conn
+            .execute(
+                "UPDATE issues SET resolution='abandoned' WHERE id='legacy-1'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]

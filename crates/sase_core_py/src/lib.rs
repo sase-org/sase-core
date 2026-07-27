@@ -347,6 +347,7 @@ use sase_core::bead::{
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
+    needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
     open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
@@ -359,6 +360,7 @@ use sase_core::bead::{
     remove_issue as core_bead_remove_issue,
     remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
+    resolution_migration_sql as core_bead_resolution_migration_sql,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
@@ -366,7 +368,8 @@ use sase_core::bead::{
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueWire,
+    BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
+    IssueWire,
 };
 use sase_core::commit_footer::{
     parse_commit_footer as core_parse_commit_footer,
@@ -2472,6 +2475,21 @@ fn py_bead_size_check_relax_migration_sql() -> &'static str {
 }
 
 #[pyfunction]
+#[pyo3(
+    name = "bead_needs_resolution_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_resolution_migration(create_table_sql: Option<&str>) -> bool {
+    core_bead_needs_resolution_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_resolution_migration_sql")]
+fn py_bead_resolution_migration_sql() -> &'static str {
+    core_bead_resolution_migration_sql()
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_read_store")]
 fn py_bead_read_store<'py>(
     py: Python<'py>,
@@ -2962,21 +2980,39 @@ fn py_bead_open<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_close")]
-#[pyo3(signature = (beads_dir, issue_ids, reason=None, now=None))]
+#[pyo3(signature = (beads_dir, issue_ids, reason=None, resolution=None, now=None))]
 fn py_bead_close<'py>(
     py: Python<'py>,
     beads_dir: &str,
     issue_ids: Vec<String>,
     reason: Option<String>,
+    resolution: Option<String>,
     now: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
+    let resolution = resolution
+        .as_deref()
+        .map(parse_bead_resolution)
+        .transpose()?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
-            core_bead_close_issues(&beads_dir, &issue_ids, reason, now)
+            core_bead_close_issues(
+                &beads_dir, &issue_ids, reason, resolution, now,
+            )
         }),
     )
+}
+
+fn parse_bead_resolution(value: &str) -> PyResult<BeadResolutionWire> {
+    match value {
+        "done" => Ok(BeadResolutionWire::Done),
+        "canceled" => Ok(BeadResolutionWire::Canceled),
+        "superseded" => Ok(BeadResolutionWire::Superseded),
+        _ => Err(PyValueError::new_err(format!(
+            "invalid bead resolution: {value}"
+        ))),
+    }
 }
 
 #[pyfunction]
@@ -5676,6 +5712,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_bead_size_check_relax_migration_sql,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_resolution_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
@@ -7475,6 +7513,8 @@ mod tests {
             let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
             sase_core_rs(py, &module).unwrap();
             for name in [
+                "bead_needs_resolution_migration",
+                "bead_resolution_migration_sql",
                 "bead_needs_size_check_relax_migration",
                 "bead_size_check_relax_migration_sql",
             ] {
@@ -7492,6 +7532,13 @@ mod tests {
             assert_eq!(
                 py_bead_size_check_relax_migration_sql(),
                 core_bead_size_check_relax_migration_sql()
+            );
+            assert!(py_bead_needs_resolution_migration(Some(
+                "CREATE TABLE issues(id TEXT)"
+            )));
+            assert_eq!(
+                py_bead_resolution_migration_sql(),
+                core_bead_resolution_migration_sql()
             );
         });
     }

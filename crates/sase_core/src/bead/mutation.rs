@@ -25,8 +25,8 @@ use super::jsonl::{
 };
 use super::wire::{
     deserialize_option_phase_size, validate_model_value, BeadError,
-    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
-    StatusWire,
+    BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -88,6 +88,8 @@ pub struct BeadUpdateFieldsWire {
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
     pub close_reason: Option<Option<String>>,
+    #[serde(default)]
+    pub resolution: Option<Option<BeadResolutionWire>>,
     #[serde(default)]
     pub changespec_name: Option<String>,
     #[serde(default)]
@@ -187,6 +189,7 @@ pub fn create_issue(
             updated_at: now,
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: request.description,
             notes: request.notes,
             design: request.design,
@@ -552,6 +555,7 @@ pub fn open_issue(
         let index = store.issue_index(issue_id)?;
         let now = now.unwrap_or_else(now_utc);
         store.issues[index].status = StatusWire::Open;
+        store.issues[index].resolution = None;
         store.issues[index].updated_at = now.clone();
         let issue = store.issues[index].clone();
         issue.validate()?;
@@ -574,11 +578,13 @@ pub fn close_issues(
     beads_dir: &Path,
     issue_ids: &[String],
     reason: Option<String>,
+    resolution: Option<BeadResolutionWire>,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
         let now = now.unwrap_or_else(now_utc);
+        let resolution = resolution.unwrap_or(BeadResolutionWire::Done);
         let mut standard_close_ids = BTreeSet::new();
 
         for issue_id in issue_ids {
@@ -614,6 +620,7 @@ pub fn close_issues(
                         &child_id,
                         &now,
                         reason.clone(),
+                        resolution.clone(),
                         &mut batch,
                     )?;
                 }
@@ -623,6 +630,7 @@ pub fn close_issues(
                 issue_id,
                 &now,
                 reason.clone(),
+                resolution.clone(),
                 &mut batch,
             )? {
                 batch.returned.push(store.get_issue(issue_id)?.clone());
@@ -634,6 +642,7 @@ pub fn close_issues(
                 BeadEventOperationWire::IssueClosed,
                 BeadEventPayloadWire::IssueClosed {
                     close_reason: issue.close_reason.clone(),
+                    resolution: issue.resolution.clone(),
                 },
                 &now,
                 &issue.created_by,
@@ -665,9 +674,12 @@ fn close_one_and_delegated_parent(
     issue_id: &str,
     closed_at: &str,
     reason: Option<String>,
+    resolution: BeadResolutionWire,
     batch: &mut CloseBatch,
 ) -> Result<bool, BeadError> {
-    let Some(issue) = store.close_one(issue_id, closed_at, reason)? else {
+    let Some(issue) =
+        store.close_one(issue_id, closed_at, reason, resolution)?
+    else {
         return Ok(false);
     };
     batch.closed_ids.push(issue.id.clone());
@@ -708,6 +720,7 @@ fn close_one_and_delegated_parent(
             parent_id,
             closed_at,
             Some("delegated work landed".to_string()),
+            BeadResolutionWire::Done,
         )?
         .expect("non-closed delegated parent phase closes");
     batch.closed_ids.push(parent.id.clone());
@@ -971,6 +984,9 @@ fn apply_update_fields(
     }
     if let Some(value) = fields.status {
         issue.status = parse_status(&value)?;
+        if issue.status != StatusWire::Closed {
+            issue.resolution = None;
+        }
     }
     if let Some(value) = fields.assignee {
         issue.assignee = value;
@@ -996,6 +1012,9 @@ fn apply_update_fields(
     if let Some(value) = fields.close_reason {
         issue.close_reason = value;
     }
+    if let Some(value) = fields.resolution {
+        issue.resolution = value;
+    }
     if let Some(value) = fields.changespec_name {
         issue.changespec_name = value;
     }
@@ -1012,9 +1031,14 @@ fn apply_update_fields(
 fn event_fields_from_update_fields(
     fields: &BeadUpdateFieldsWire,
 ) -> Result<BeadIssueUpdateEventFieldsWire, BeadError> {
+    let status = fields.status.as_deref().map(parse_status).transpose()?;
+    let resolution = match (&status, &fields.resolution) {
+        (Some(status), None) if *status != StatusWire::Closed => Some(None),
+        _ => fields.resolution.clone(),
+    };
     let event_fields = BeadIssueUpdateEventFieldsWire {
         title: fields.title.clone(),
-        status: fields.status.as_deref().map(parse_status).transpose()?,
+        status,
         assignee: fields.assignee.clone(),
         description: fields.description.clone(),
         notes: fields.notes.clone(),
@@ -1023,6 +1047,7 @@ fn event_fields_from_update_fields(
         size: fields.size.clone(),
         closed_at: fields.closed_at.clone(),
         close_reason: fields.close_reason.clone(),
+        resolution,
         changespec_name: fields.changespec_name.clone(),
         changespec_bug_id: fields.changespec_bug_id.clone(),
         tier: fields.tier.clone(),
@@ -1195,6 +1220,7 @@ impl MutableStore {
         issue_id: &str,
         closed_at: &str,
         reason: Option<String>,
+        resolution: BeadResolutionWire,
     ) -> Result<Option<IssueWire>, BeadError> {
         let index = self.issue_index(issue_id)?;
         if self.issues[index].status == StatusWire::Closed {
@@ -1203,6 +1229,7 @@ impl MutableStore {
         self.issues[index].status = StatusWire::Closed;
         self.issues[index].closed_at = Some(closed_at.to_string());
         self.issues[index].close_reason = reason;
+        self.issues[index].resolution = Some(resolution);
         self.issues[index].updated_at = closed_at.to_string();
         Ok(Some(self.issues[index].clone()))
     }
@@ -1681,6 +1708,7 @@ mod tests {
             &beads_dir,
             &["sase-1".to_string()],
             Some("done".to_string()),
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -1691,6 +1719,56 @@ mod tests {
         assert!(exported
             .contains(r#""id":"sase-1.1","title":"A","status":"closed""#));
         assert!(exported.contains(r#""close_reason":"done""#));
+        assert!(exported.contains(r#""resolution":"done""#));
+    }
+
+    #[test]
+    fn close_records_explicit_resolution_and_reopen_update_clears_it() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            issue(
+                "sase-1",
+                "Superseded plan",
+                "plan",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ) + "\n",
+        )
+        .unwrap();
+
+        let closed = close_issues(
+            &beads_dir,
+            &["sase-1".to_string()],
+            Some("A replacement shipped".to_string()),
+            Some(BeadResolutionWire::Superseded),
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            closed.issues[0].resolution,
+            Some(BeadResolutionWire::Superseded)
+        );
+
+        let reopened = update_issue(
+            &beads_dir,
+            "sase-1",
+            BeadUpdateFieldsWire {
+                status: Some("open".to_string()),
+                now: Some("2026-01-03T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.issue.unwrap().resolution, None);
+        assert_eq!(
+            MutableStore::load(&beads_dir).unwrap().issues[0].resolution,
+            None
+        );
     }
 
     #[test]
@@ -1744,6 +1822,7 @@ mod tests {
             &beads_dir,
             &["sase-1".to_string()],
             Some("done".to_string()),
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -1814,6 +1893,7 @@ mod tests {
             &beads_dir,
             &["sase-1.1.1".to_string()],
             Some("landed".to_string()),
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -1841,7 +1921,7 @@ mod tests {
         assert_eq!(parent_close_events.len(), 1);
         assert!(matches!(
             &parent_close_events[0].payload,
-            BeadEventPayloadWire::IssueClosed { close_reason }
+            BeadEventPayloadWire::IssueClosed { close_reason, .. }
                 if close_reason.as_deref() == Some("delegated work landed")
         ));
         let projected = reduce_event_streams(&streams).unwrap();
@@ -1906,6 +1986,7 @@ mod tests {
         let result = close_issues(
             &beads_dir,
             &["sase-1.1.1".to_string()],
+            None,
             None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
@@ -1978,6 +2059,7 @@ mod tests {
             &beads_dir,
             &["sase-1.1.1".to_string()],
             Some("child landed".to_string()),
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -2045,6 +2127,7 @@ mod tests {
             &beads_dir,
             &["sase-1.1.1".to_string(), "sase-1.1".to_string()],
             Some("explicit".to_string()),
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -2062,7 +2145,7 @@ mod tests {
         assert_eq!(parent_close_events.len(), 1);
         assert!(matches!(
             &parent_close_events[0].payload,
-            BeadEventPayloadWire::IssueClosed { close_reason }
+            BeadEventPayloadWire::IssueClosed { close_reason, .. }
                 if close_reason.as_deref() == Some("explicit")
         ));
     }
@@ -2387,6 +2470,7 @@ mod tests {
             &beads_dir,
             &["sase-1".to_string()],
             None,
+            None,
             Some("2026-01-02T00:00:00Z".to_string()),
         )
         .unwrap();
@@ -2399,6 +2483,7 @@ mod tests {
         let result = close_issues(
             &beads_dir,
             &["sase-1".to_string()],
+            None,
             None,
             Some("2026-01-03T00:00:00Z".to_string()),
         )
@@ -2752,6 +2837,7 @@ mod tests {
             &beads_dir,
             std::slice::from_ref(&phase_id),
             None,
+            None,
             Some("2026-01-01T00:06:00Z".to_string()),
         )
         .unwrap();
@@ -2867,6 +2953,7 @@ mod tests {
         close_issues(
             &beads_dir,
             std::slice::from_ref(&phase_id),
+            None,
             None,
             Some("2026-01-01T00:04:00Z".to_string()),
         )
@@ -3261,6 +3348,7 @@ mod tests {
             &beads_dir,
             std::slice::from_ref(&p2.id),
             Some("done".to_string()),
+            None,
             Some("2026-01-01T00:03:00Z".to_string()),
         )
         .unwrap();

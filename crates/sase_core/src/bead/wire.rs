@@ -31,6 +31,24 @@ pub enum BeadTierWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum BeadResolutionWire {
+    Done,
+    Canceled,
+    Superseded,
+}
+
+impl BeadResolutionWire {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Canceled => "canceled",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PhaseSizeWire {
     Xsmall,
     Small,
@@ -205,6 +223,8 @@ pub struct IssueWire {
     pub closed_at: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
     pub close_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<BeadResolutionWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -289,6 +309,11 @@ impl IssueWire {
                 "changespec_bug_id requires changespec_name",
             ));
         }
+        if self.status != StatusWire::Closed && self.resolution.is_some() {
+            return Err(BeadError::validation(
+                "Only closed issues can carry resolution metadata",
+            ));
+        }
         validate_model_value(&self.model)?;
         Ok(())
     }
@@ -328,6 +353,7 @@ mod tests {
             updated_at: String::new(),
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: String::new(),
             notes: String::new(),
             design: String::new(),
@@ -482,5 +508,34 @@ mod tests {
         assert_eq!(issue.parent_id, None);
         assert_eq!(issue.closed_at, None);
         assert_eq!(issue.close_reason, None);
+        assert_eq!(issue.resolution, None);
+    }
+
+    #[test]
+    fn resolution_round_trips_and_requires_closed_status() {
+        for (resolution, expected) in [
+            (BeadResolutionWire::Done, "done"),
+            (BeadResolutionWire::Canceled, "canceled"),
+            (BeadResolutionWire::Superseded, "superseded"),
+        ] {
+            let mut issue = phase(Some("test-0"));
+            issue.status = StatusWire::Closed;
+            issue.resolution = Some(resolution.clone());
+            issue.validate().unwrap();
+
+            let value = serde_json::to_value(&issue).unwrap();
+            assert_eq!(value["resolution"], expected);
+            let round_tripped: IssueWire =
+                serde_json::from_value(value).unwrap();
+            assert_eq!(round_tripped.resolution, Some(resolution));
+        }
+
+        let mut issue = phase(Some("test-0"));
+        issue.resolution = Some(BeadResolutionWire::Done);
+        let error = issue.validate().unwrap_err();
+        assert_eq!(
+            error.message,
+            "Only closed issues can carry resolution metadata"
+        );
     }
 }

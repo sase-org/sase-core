@@ -23,8 +23,8 @@ use super::mutation::{
 use super::read::read_store_issues;
 use super::search::search_issues_in_issues;
 use super::wire::{
-    BeadError, BeadSearchMatchWire, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, StatusWire,
+    BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::plan::refs::{parse_plan_reference, resolve_plan_reference};
 
@@ -212,6 +212,20 @@ fn handle_show(
     if !issue.model.is_empty() {
         writeln!(stdout, "Model: {}", issue.model)
             .expect("writing to String cannot fail");
+    }
+    if issue.status == StatusWire::Closed {
+        write!(
+            stdout,
+            "\nRESOLUTION\n  Resolution: {}\n  Close reason: {}\n  Closed at: {}\n",
+            issue
+                .resolution
+                .as_ref()
+                .map(BeadResolutionWire::as_str)
+                .unwrap_or("(unrecorded)"),
+            issue.close_reason.as_deref().unwrap_or("(none)"),
+            issue.closed_at.as_deref().unwrap_or("(unknown)")
+        )
+        .expect("writing to String cannot fail");
     }
     if let Some(parent_id) = &issue.parent_id {
         if let Some(parent) = find_issue(&issues, parent_id) {
@@ -872,14 +886,14 @@ fn handle_close(
     args: &[String],
     write_beads_dir: &Path,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    let Some((ids, reason)) = parse_close_args(args) else {
+    let Some((ids, reason, resolution)) = parse_close_args(args) else {
         return Ok(defer());
     };
     if ids.is_empty() {
         return Ok(defer());
     }
     let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    match close_issues(write_beads_dir, &ids, reason, None) {
+    match close_issues(write_beads_dir, &ids, reason, resolution, None) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -1289,9 +1303,12 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
     Some(fields)
 }
 
-fn parse_close_args(args: &[String]) -> Option<(Vec<String>, Option<String>)> {
+fn parse_close_args(
+    args: &[String],
+) -> Option<(Vec<String>, Option<String>, Option<BeadResolutionWire>)> {
     let mut ids = Vec::new();
     let mut reason = None;
+    let mut resolution = None;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
@@ -1300,6 +1317,11 @@ fn parse_close_args(args: &[String]) -> Option<(Vec<String>, Option<String>)> {
             reason = Some(args.get(idx)?.clone());
         } else if let Some(value) = arg.strip_prefix("--reason=") {
             reason = Some(value.to_string());
+        } else if arg == "-R" || arg == "--resolution" {
+            idx += 1;
+            resolution = Some(parse_resolution(args.get(idx)?)?);
+        } else if let Some(value) = arg.strip_prefix("--resolution=") {
+            resolution = Some(parse_resolution(value)?);
         } else if arg.starts_with('-') {
             return None;
         } else {
@@ -1307,7 +1329,16 @@ fn parse_close_args(args: &[String]) -> Option<(Vec<String>, Option<String>)> {
         }
         idx += 1;
     }
-    Some((ids, reason))
+    Some((ids, reason, resolution))
+}
+
+fn parse_resolution(value: &str) -> Option<BeadResolutionWire> {
+    match value {
+        "done" => Some(BeadResolutionWire::Done),
+        "canceled" => Some(BeadResolutionWire::Canceled),
+        "superseded" => Some(BeadResolutionWire::Superseded),
+        _ => None,
+    }
 }
 
 fn read_issues(
@@ -2817,6 +2848,7 @@ mod tests {
             updated_at: created_at.to_string(),
             closed_at: None,
             close_reason: None,
+            resolution: None,
             description: description.to_string(),
             notes: String::new(),
             design: String::new(),
