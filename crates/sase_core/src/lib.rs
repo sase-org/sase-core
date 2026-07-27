@@ -433,14 +433,17 @@ pub use notifications::{
 };
 pub use parser::parse_project_bytes;
 pub use plan::{
-    parse_sdd_artifact_link, plan_frontmatter_schema, plan_validate,
-    plan_validate_with_mode, read_plans, render_sdd_artifact_link,
-    search_plans, upsert_sdd_artifact_link, PlanDiagnosticWire, PlanError,
-    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanSearchMatchWire,
-    PlanValidationMode, PlanValidationResultWire, PlanWire,
-    SddArtifactDocumentWire, SddArtifactLinkKindWire, SddArtifactLinkTypeWire,
-    SddLegacyArtifactLinkWire, ValidatedPlanWire,
-    PLAN_READ_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
+    canonicalize_plan_reference, parse_plan_reference, parse_sdd_artifact_link,
+    plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
+    read_plans, render_plan_reference, render_sdd_artifact_link,
+    resolve_plan_reference, search_plans, upsert_sdd_artifact_link,
+    ParsedPlanReference, PlanDiagnosticWire, PlanError,
+    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanReferenceResolutionWire,
+    PlanSearchMatchWire, PlanValidationMode, PlanValidationResultWire,
+    PlanWire, SddArtifactDocumentWire, SddArtifactLinkKindWire,
+    SddArtifactLinkTypeWire, SddLegacyArtifactLinkWire, ValidatedPlanWire,
+    PLAN_READ_WIRE_SCHEMA_VERSION,
+    PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };
 pub use project_spec::{

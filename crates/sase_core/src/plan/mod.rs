@@ -8,6 +8,7 @@
 
 pub mod artifact_link;
 pub mod read;
+pub mod refs;
 pub mod search;
 pub mod validate;
 pub mod wire;
@@ -18,6 +19,10 @@ pub use artifact_link::{
     SddArtifactLinkTypeWire, SddLegacyArtifactLinkWire,
 };
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
+pub use refs::{
+    canonicalize_plan_reference, parse_plan_reference, render_plan_reference,
+    resolve_plan_reference, ParsedPlanReference,
+};
 pub use search::{
     search_plans, PLAN_SEARCH_FIELD_NAMES, PLAN_SEARCH_WIRE_SCHEMA_VERSION,
 };
@@ -27,5 +32,6 @@ pub use validate::{
     PlanValidationMode, PlanValidationResultWire, ValidatedPlanWire,
 };
 pub use wire::{
-    PlanError, PlanSearchMatchWire, PlanWire, PLAN_WIRE_SCHEMA_VERSION,
+    PlanError, PlanReferenceResolutionWire, PlanSearchMatchWire, PlanWire,
+    PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };

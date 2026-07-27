@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const PLAN_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -79,4 +80,13 @@ pub struct PlanSearchMatchWire {
     pub plan: PlanWire,
     pub matched_fields: Vec<String>,
     pub score: f64,
+}
+
+/// The result of resolving one logical or legacy plan reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanReferenceResolutionWire {
+    pub schema_version: u64,
+    pub status: String,
+    pub resolved_path: Option<String>,
+    pub candidates: Vec<String>,
 }

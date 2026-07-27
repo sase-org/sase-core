@@ -422,12 +422,17 @@ use sase_core::notifications::{
     NotificationStateUpdateWire, NotificationWire,
 };
 use sase_core::plan::{
+    canonicalize_plan_reference as core_canonicalize_plan_reference,
+    parse_plan_reference as core_parse_plan_reference,
     parse_sdd_artifact_link as core_parse_sdd_artifact_link,
     plan_frontmatter_schema as core_plan_frontmatter_schema,
     plan_validate_with_mode as core_plan_validate_with_mode,
+    render_plan_reference as core_render_plan_reference,
     render_sdd_artifact_link as core_render_sdd_artifact_link,
+    resolve_plan_reference as core_resolve_plan_reference,
     search_plans as core_plan_search,
     upsert_sdd_artifact_link as core_upsert_sdd_artifact_link, PlanError,
+    PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
@@ -2644,6 +2649,57 @@ fn py_plan_frontmatter_schema<'py>(
         py,
         py.allow_threads(|| core_plan_frontmatter_schema(tier)),
     )
+}
+
+/// Parse a canonical plan reference or preserve a legacy path.
+#[pyfunction]
+#[pyo3(name = "plan_reference_parse")]
+fn py_plan_reference_parse<'py>(
+    py: Python<'py>,
+    value: &str,
+) -> PyResult<PyObject> {
+    plan_result_to_py(py, core_parse_plan_reference(value))
+}
+
+/// Render one validated canonical plan reference.
+#[pyfunction]
+#[pyo3(name = "plan_reference_render")]
+fn py_plan_reference_render(kind: &str, path: &str) -> PyResult<String> {
+    core_render_plan_reference(kind, path).map_err(plan_error_to_pyerr)
+}
+
+/// Canonicalize a plan path against ordered plan roots.
+#[pyfunction]
+#[pyo3(name = "plan_reference_canonicalize")]
+fn py_plan_reference_canonicalize(
+    path: &str,
+    roots: Vec<String>,
+) -> PyResult<Option<String>> {
+    let path = PathBuf::from(path);
+    let roots = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    core_canonicalize_plan_reference(&path, &roots).map_err(plan_error_to_pyerr)
+}
+
+/// Resolve a canonical or legacy plan reference against ordered roots.
+#[pyfunction]
+#[pyo3(name = "plan_reference_resolve")]
+fn py_plan_reference_resolve<'py>(
+    py: Python<'py>,
+    value: &str,
+    roots: Vec<String>,
+) -> PyResult<PyObject> {
+    let roots = roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    plan_result_to_py(
+        py,
+        py.allow_threads(|| core_resolve_plan_reference(value, &roots)),
+    )
+}
+
+/// Return the plan-reference resolution wire schema version.
+#[pyfunction]
+#[pyo3(name = "plan_reference_resolution_wire_schema_version")]
+fn py_plan_reference_resolution_wire_schema_version() -> u64 {
+    PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION
 }
 
 /// Parse canonical and historical artifact links from one SDD document.
@@ -5602,6 +5658,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_frontmatter_schema, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_reference_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_reference_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_reference_canonicalize, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_reference_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_plan_reference_resolution_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
@@ -6798,6 +6862,65 @@ mod tests {
             let error = py_plan_validate(py, content, "story", "authoring")
                 .unwrap_err();
             assert!(error.to_string().contains("unsupported plan tier"));
+        });
+    }
+
+    #[test]
+    fn plan_reference_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plans");
+        let target = root.join("202608/plan.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# Plan\n").unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "plan_reference_parse",
+                "plan_reference_render",
+                "plan_reference_canonicalize",
+                "plan_reference_resolve",
+                "plan_reference_resolution_wire_schema_version",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let parsed =
+                py_plan_reference_parse(py, "plans:202607/plan.md").unwrap();
+            let parsed = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(parsed["kind"], json!("plans"));
+            assert_eq!(parsed["legacy"], json!(false));
+
+            assert_eq!(
+                py_plan_reference_render("plans", "202607/plan.md").unwrap(),
+                "plans:202607/plan.md"
+            );
+            assert_eq!(
+                py_plan_reference_canonicalize(
+                    target.to_str().unwrap(),
+                    vec![root.to_string_lossy().into_owned()],
+                )
+                .unwrap()
+                .as_deref(),
+                Some("plans:202608/plan.md")
+            );
+
+            let resolved = py_plan_reference_resolve(
+                py,
+                "plans:202607/plan.md",
+                vec![root.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(resolved["schema_version"], json!(1));
+            assert_eq!(resolved["status"], json!("drifted"));
+            assert_eq!(
+                resolved["resolved_path"],
+                json!(target.to_string_lossy())
+            );
+            assert_eq!(py_plan_reference_resolution_wire_schema_version(), 1);
         });
     }
 
