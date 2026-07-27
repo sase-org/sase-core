@@ -156,6 +156,7 @@
 //! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
+//! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -333,6 +334,7 @@ use sase_core::axe_status::{
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
+    append_issue_note as core_bead_append_issue_note,
     bead_history as core_bead_history,
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
@@ -2893,6 +2895,28 @@ fn py_bead_update<'py>(
         py,
         py.allow_threads(|| {
             core_bead_update_issue(&beads_dir, issue_id, fields)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_append_note")]
+#[pyo3(signature = (beads_dir, issue_id, entry, author=None, now=None))]
+fn py_bead_append_note<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    entry: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_append_issue_note(
+                &beads_dir, issue_id, entry, author, now,
+            )
         }),
     )
 }
@@ -5759,6 +5783,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_append_note, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_wait, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_release_agent_claim, m)?)?;

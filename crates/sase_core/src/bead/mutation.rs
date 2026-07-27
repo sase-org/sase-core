@@ -272,6 +272,57 @@ pub fn update_issue(
     })
 }
 
+pub fn append_issue_note(
+    beads_dir: &Path,
+    issue_id: &str,
+    entry: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return Err(BeadError::validation(
+            "note entry cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let now = now.unwrap_or_else(now_utc);
+        let author = author
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| store.config.owner.clone());
+        let new_notes = appended_note_text(
+            &store.issues[index].notes,
+            &now,
+            &author,
+            entry,
+        );
+        store.issues[index].notes = new_notes.clone();
+        store.issues[index].updated_at = now.clone();
+        let issue = store.issues[index].clone();
+        issue.validate()?;
+        store.append_issue_event(
+            issue_id,
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: BeadIssueUpdateEventFieldsWire {
+                    notes: Some(new_notes),
+                    ..Default::default()
+                },
+            },
+            &now,
+            &author,
+        )?;
+        store.save()?;
+
+        let mut result = outcome("note", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
 pub fn claim_for_agent_launch(
     beads_dir: &Path,
     issue_id: &str,
@@ -1237,6 +1288,20 @@ fn normalize_model(value: String) -> Result<String, BeadError> {
     let model = value.trim().to_string();
     validate_model_value(&model)?;
     Ok(model)
+}
+
+fn appended_note_text(
+    existing: &str,
+    timestamp: &str,
+    author: &str,
+    entry: &str,
+) -> String {
+    let appended = format!("[{timestamp} · {author}] {}", entry.trim());
+    if existing.trim().is_empty() {
+        appended
+    } else {
+        format!("{}\n\n{appended}", existing.trim_end())
+    }
 }
 
 fn tier_label(tier: Option<&BeadTierWire>) -> &'static str {
@@ -3135,6 +3200,149 @@ mod tests {
         .unwrap_err();
 
         assert!(err.message.contains("model cannot contain"));
+    }
+
+    #[test]
+    fn append_issue_note_appends_attributed_entries_and_event() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let first = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            " first note ",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+        let second = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "second note",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(first.operation, "note");
+        assert_eq!(first.issue_ids, vec![issue.id.clone()]);
+        assert_eq!(
+            second.notes,
+            "[2026-01-01T00:01:00Z · agent-1] first note\n\n[2026-01-01T00:02:00Z · agent-1] second note"
+        );
+        assert_eq!(second.updated_at, "2026-01-01T00:02:00Z");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let note_events: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.issue_id == issue.id
+                    && event.operation == BeadEventOperationWire::IssueUpdated
+            })
+            .collect();
+        assert_eq!(note_events.len(), 2);
+        assert_eq!(note_events[0].actor, "agent-1");
+        assert!(matches!(
+            &note_events[1].payload,
+            BeadEventPayloadWire::IssueUpdated { fields }
+                if fields.notes.as_deref() == Some(second.notes.as_str())
+        ));
+
+        let reduced = reduce_event_streams(&streams).unwrap();
+        let reduced_issue =
+            reduced.iter().find(|issue| issue.id == second.id).unwrap();
+        assert_eq!(reduced_issue.notes, second.notes);
+    }
+
+    #[test]
+    fn append_issue_note_defaults_blank_author_to_store_owner() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let noted = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "owner note",
+            Some("  ".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(
+            noted.notes,
+            "[2026-01-01T00:01:00Z · owner@example.com] owner note"
+        );
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let note_event = streams[0].events.last().unwrap();
+        assert_eq!(note_event.actor, "owner@example.com");
+    }
+
+    #[test]
+    fn append_issue_note_rejects_blank_entry_without_writing() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error =
+            append_issue_note(&beads_dir, &issue.id, " \t ", None, None)
+                .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(error.message, "note entry cannot be empty or blank");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
     }
 
     #[test]
