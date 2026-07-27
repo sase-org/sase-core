@@ -31,7 +31,8 @@ pub use events::{
     BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 pub use history::{
-    bead_history, BeadHistoryChangeWire, BeadHistoryEntryWire, BeadHistoryWire,
+    bead_history, bead_lost_notes, BeadHistoryChangeWire, BeadHistoryEntryWire,
+    BeadHistoryWire, BeadLostNoteRevisionWire, BeadLostNotesWire,
     BEAD_HISTORY_WIRE_SCHEMA_VERSION,
 };
 pub use jsonl::{

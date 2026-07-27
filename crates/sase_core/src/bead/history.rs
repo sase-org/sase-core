@@ -38,12 +38,34 @@ pub struct BeadHistoryWire {
     pub entries: Vec<BeadHistoryEntryWire>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadLostNoteRevisionWire {
+    pub timestamp: String,
+    pub actor: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadLostNotesWire {
+    pub issue_id: String,
+    pub current_notes: String,
+    pub dropped_revisions: Vec<BeadLostNoteRevisionWire>,
+}
+
 pub fn bead_history(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<BeadHistoryWire, BeadError> {
     let (_manifest, streams) = read_event_store(beads_dir)?;
     history_from_streams(&streams, issue_id)
+}
+
+pub fn bead_lost_notes(
+    beads_dir: &Path,
+    issue_id: Option<&str>,
+) -> Result<Vec<BeadLostNotesWire>, BeadError> {
+    let (_manifest, streams) = read_event_store(beads_dir)?;
+    lost_notes_from_streams(&streams, issue_id)
 }
 
 fn history_from_streams(
@@ -88,6 +110,80 @@ fn history_from_streams(
         schema_version: BEAD_HISTORY_WIRE_SCHEMA_VERSION,
         entries,
     })
+}
+
+fn lost_notes_from_streams(
+    streams: &[BeadEventStreamWire],
+    issue_id: Option<&str>,
+) -> Result<Vec<BeadLostNotesWire>, BeadError> {
+    let streams = validated_event_streams(streams)?;
+    let mut issues = BTreeMap::new();
+    let mut revisions: BTreeMap<String, Vec<BeadLostNoteRevisionWire>> =
+        BTreeMap::new();
+
+    for event in merge_stream_events(&streams) {
+        let before_notes = issues
+            .get(&event.issue_id)
+            .map(|issue: &IssueWire| issue.notes.clone());
+        apply_event(&mut issues, event)?;
+        let after_notes =
+            issues.get(&event.issue_id).map(|issue| issue.notes.clone());
+
+        match after_notes {
+            Some(notes) if before_notes.as_ref() != Some(&notes) => {
+                revisions.entry(event.issue_id.clone()).or_default().push(
+                    BeadLostNoteRevisionWire {
+                        timestamp: event.timestamp.clone(),
+                        actor: event.actor.clone(),
+                        text: notes,
+                    },
+                );
+            }
+            None => {
+                revisions.remove(&event.issue_id);
+            }
+            Some(_) => {}
+        }
+    }
+
+    if let Some(issue_id) = issue_id {
+        if !issues.contains_key(issue_id) {
+            return Err(BeadError::validation(format!(
+                "Issue not found: {issue_id}"
+            )));
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (candidate_id, issue) in &issues {
+        if issue_id.is_some_and(|selected| selected != candidate_id) {
+            continue;
+        }
+        let dropped_revisions = revisions
+            .get(candidate_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|revision| {
+                let text = revision.text.trim();
+                (!text.is_empty() && !issue.notes.contains(text)).then(|| {
+                    BeadLostNoteRevisionWire {
+                        timestamp: revision.timestamp.clone(),
+                        actor: revision.actor.clone(),
+                        text: text.to_string(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if dropped_revisions.is_empty() {
+            continue;
+        }
+        findings.push(BeadLostNotesWire {
+            issue_id: candidate_id.clone(),
+            current_notes: issue.notes.clone(),
+            dropped_revisions,
+        });
+    }
+    Ok(findings)
 }
 
 fn issue_changes(
@@ -363,6 +459,135 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn lost_notes_reports_overwritten_nonempty_revisions() {
+        let mut issue = issue("beads-1", IssueTypeWire::Plan, None);
+        issue.notes = "first".to_string();
+        let streams = vec![stream(
+            "beads-1",
+            vec![
+                created("create", "2026-01-01T00:00:00Z", issue),
+                update(
+                    "notes-2",
+                    "2026-01-02T00:00:00Z",
+                    "beads-1",
+                    BeadIssueUpdateEventFieldsWire {
+                        notes: Some("second".to_string()),
+                        ..Default::default()
+                    },
+                ),
+                update(
+                    "notes-3",
+                    "2026-01-03T00:00:00Z",
+                    "beads-1",
+                    BeadIssueUpdateEventFieldsWire {
+                        notes: Some("third".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )];
+
+        let findings = lost_notes_from_streams(&streams, None).unwrap();
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].issue_id, "beads-1");
+        assert_eq!(findings[0].current_notes, "third");
+        assert_eq!(
+            findings[0]
+                .dropped_revisions
+                .iter()
+                .map(|revision| revision.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            findings[0].dropped_revisions[0].timestamp,
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(findings[0].dropped_revisions[0].actor, "agent");
+    }
+
+    #[test]
+    fn lost_notes_ignores_append_only_revision_chains() {
+        let mut issue = issue("beads-1", IssueTypeWire::Plan, None);
+        issue.notes = "first".to_string();
+        let streams = vec![stream(
+            "beads-1",
+            vec![
+                created("create", "2026-01-01T00:00:00Z", issue),
+                update(
+                    "append",
+                    "2026-01-02T00:00:00Z",
+                    "beads-1",
+                    BeadIssueUpdateEventFieldsWire {
+                        notes: Some("first\n\nsecond".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )];
+
+        assert!(lost_notes_from_streams(&streams, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lost_notes_are_stable_by_issue_id_and_support_one_issue() {
+        let mut second = issue("beads-2", IssueTypeWire::Plan, None);
+        second.notes = "old two".to_string();
+        let mut first = issue("beads-1", IssueTypeWire::Plan, None);
+        first.notes = "old one".to_string();
+        let streams = vec![
+            stream(
+                "beads-2",
+                vec![
+                    created("create-2", "2026-01-01T00:00:00Z", second),
+                    update(
+                        "overwrite-2",
+                        "2026-01-02T00:00:00Z",
+                        "beads-2",
+                        BeadIssueUpdateEventFieldsWire {
+                            notes: Some("new two".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                ],
+            ),
+            stream(
+                "beads-1",
+                vec![
+                    created("create-1", "2026-01-01T00:00:00Z", first),
+                    update(
+                        "overwrite-1",
+                        "2026-01-02T00:00:00Z",
+                        "beads-1",
+                        BeadIssueUpdateEventFieldsWire {
+                            notes: Some("new one".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                ],
+            ),
+        ];
+
+        let all = lost_notes_from_streams(&streams, None).unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|finding| finding.issue_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beads-1", "beads-2"]
+        );
+        assert_eq!(
+            lost_notes_from_streams(&streams, Some("beads-2"))
+                .unwrap()
+                .as_slice(),
+            &all[1..]
+        );
+        let error =
+            lost_notes_from_streams(&streams, Some("missing")).unwrap_err();
+        assert_eq!(error.message, "Issue not found: missing");
     }
 
     #[test]
