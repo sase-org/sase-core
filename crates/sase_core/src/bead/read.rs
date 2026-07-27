@@ -1,7 +1,7 @@
 //! Read-only bead store queries.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::events::reduce_event_streams;
 use super::jsonl::{
@@ -11,6 +11,7 @@ use super::jsonl::{
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
+use crate::plan::resolve_plan_reference;
 
 pub const BEAD_READ_WIRE_SCHEMA_VERSION: u64 = 1;
 
@@ -83,6 +84,29 @@ pub fn get_epic_children(
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
+    doctor_impl(beads_dir, PlanRootMode::NotRequested)
+}
+
+pub fn doctor_with_plan_roots(
+    beads_dir: &Path,
+    plan_roots: Option<&[PathBuf]>,
+) -> Result<Vec<String>, BeadError> {
+    doctor_impl(
+        beads_dir,
+        plan_roots.map_or(PlanRootMode::Unavailable, PlanRootMode::Available),
+    )
+}
+
+enum PlanRootMode<'a> {
+    NotRequested,
+    Unavailable,
+    Available(&'a [PathBuf]),
+}
+
+fn doctor_impl(
+    beads_dir: &Path,
+    plan_root_mode: PlanRootMode<'_>,
+) -> Result<Vec<String>, BeadError> {
     if !beads_dir.is_dir() {
         return Err(BeadError::io(format!(
             "No beads directory found at {}",
@@ -139,6 +163,16 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
             orphan_plan_ids.join(", ")
         ));
     }
+    match plan_root_mode {
+        PlanRootMode::NotRequested => {}
+        PlanRootMode::Unavailable => messages.push(
+            "NOTE: bead design reference validation skipped: plan roots unavailable"
+                .to_string(),
+        ),
+        PlanRootMode::Available(plan_roots) => {
+            messages.extend(design_reference_diagnostics(&issues, plan_roots));
+        }
+    }
 
     if event_store_is_present && legacy_path.exists() {
         let legacy_issues = read_legacy_jsonl_issues(beads_dir)?;
@@ -170,6 +204,97 @@ pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
         messages.push("OK: no issues found".to_string());
     }
     Ok(messages)
+}
+
+fn design_reference_diagnostics(
+    issues: &[IssueWire],
+    plan_roots: &[PathBuf],
+) -> Vec<String> {
+    let mut missing_or_malformed = Vec::new();
+    let mut ambiguous = Vec::new();
+    let mut owner_mismatches = Vec::new();
+
+    for issue in issues
+        .iter()
+        .filter(|issue| !issue.design.trim().is_empty())
+    {
+        let resolution =
+            match resolve_plan_reference(issue.design.trim(), plan_roots) {
+                Ok(resolution) => resolution,
+                Err(_) => {
+                    missing_or_malformed
+                        .push(format!("{} [{}]", issue.id, issue.design));
+                    continue;
+                }
+            };
+        match resolution.status.as_str() {
+            "missing" => missing_or_malformed
+                .push(format!("{} [{}]", issue.id, issue.design)),
+            "ambiguous" => {
+                ambiguous.push(format!("{} [{}]", issue.id, issue.design));
+            }
+            "exact" | "drifted" => {
+                let Some(resolved_path) = resolution.resolved_path else {
+                    continue;
+                };
+                let Some(owner) = read_plan_owner(Path::new(&resolved_path))
+                else {
+                    continue;
+                };
+                if owner != issue.id {
+                    owner_mismatches.push(format!(
+                        "{} (plan names {}; {})",
+                        issue.id, owner, issue.design
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut messages = Vec::new();
+    if !missing_or_malformed.is_empty() {
+        messages.push(format!(
+            "WARNING: missing or malformed bead design references ({}): {}",
+            missing_or_malformed.len(),
+            missing_or_malformed.join(", ")
+        ));
+    }
+    if !ambiguous.is_empty() {
+        messages.push(format!(
+            "WARNING: ambiguous bead design references ({}): {}",
+            ambiguous.len(),
+            ambiguous.join(", ")
+        ));
+    }
+    if !owner_mismatches.is_empty() {
+        messages.push(format!(
+            "WARNING: bead design reference owner mismatches ({}): {}",
+            owner_mismatches.len(),
+            owner_mismatches.join(", ")
+        ));
+    }
+    messages
+}
+
+fn read_plan_owner(plan_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(plan_path).ok()?;
+    let frontmatter = content.strip_prefix("---\n")?;
+    let end = frontmatter.find("\n---")?;
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&frontmatter[..end]).ok()?;
+    let mapping = parsed.as_mapping()?;
+    for field in ["bead_id", "bead"] {
+        let value = mapping
+            .get(serde_yaml::Value::String(field.to_string()))
+            .and_then(serde_yaml::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(value) = value {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn orphan_phase_ids(issues: &[IssueWire]) -> Vec<&str> {

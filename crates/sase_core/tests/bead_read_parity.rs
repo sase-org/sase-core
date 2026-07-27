@@ -1,8 +1,9 @@
 use std::fs;
 
 use sase_core::{
-    bead_blocked_issues, bead_doctor, bead_get_epic_children, bead_list_issues,
-    bead_ready_issues, bead_show_issue, bead_stats, import_issues_from_jsonl,
+    bead_blocked_issues, bead_doctor, bead_doctor_with_plan_roots,
+    bead_get_epic_children, bead_list_issues, bead_ready_issues,
+    bead_show_issue, bead_stats, import_issues_from_jsonl,
     import_issues_to_event_streams, repair_event_store_manifest,
     BeadEventManifestRepairStatusWire, BeadEventStoreManifestWire,
     BeadEventStreamWire,
@@ -383,6 +384,109 @@ fn doctor_reports_invalid_event_store_without_legacy_fallback() {
     assert!(bead_show_issue(&beads_dir, "beads-1").is_err());
 }
 
+#[test]
+fn doctor_groups_plan_reference_diagnostics_without_changing_compatibility() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("beads");
+    let plans_root = temp.path().join("plans");
+    fs::create_dir_all(plans_root.join("202607")).unwrap();
+    fs::create_dir_all(plans_root.join("202608")).unwrap();
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+
+    let exact = plans_root.join("202607/exact.md");
+    let legacy = plans_root.join("202607/legacy.md");
+    let drifted = plans_root.join("202608/drifted.md");
+    let mismatch = plans_root.join("202607/mismatch.md");
+    fs::write(
+        &exact,
+        "---\nbead_id: beads-exact\nbead: wrong-owner\n---\n# Exact\n",
+    )
+    .unwrap();
+    fs::write(&legacy, "---\nbead_id: beads-legacy\n---\n# Legacy\n").unwrap();
+    fs::write(&drifted, "---\nbead: beads-drifted\n---\n# Drifted\n").unwrap();
+    fs::write(&mismatch, "---\nbead_id: another-bead\n---\n# Mismatch\n")
+        .unwrap();
+    fs::write(
+        plans_root.join("202607/duplicate.md"),
+        "---\nbead_id: one\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        plans_root.join("202608/duplicate.md"),
+        "---\nbead_id: two\n---\n",
+    )
+    .unwrap();
+
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        [
+            issue_with_design("beads-exact", "plans:202607/exact.md"),
+            issue_with_design("beads-legacy", legacy.to_str().unwrap()),
+            issue_with_design("beads-drifted", "plans:202606/drifted.md"),
+            issue_with_design("beads-missing", "plans:202607/missing.md"),
+            issue_with_design("beads-malformed", "plans:../malformed.md"),
+            issue_with_design("beads-ambiguous", "plans:202606/duplicate.md"),
+            issue_with_design("beads-mismatch", "plans:202607/mismatch.md"),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        bead_doctor(&beads_dir).unwrap(),
+        vec!["OK: no issues found"]
+    );
+
+    let messages = bead_doctor_with_plan_roots(
+        &beads_dir,
+        Some(std::slice::from_ref(&plans_root)),
+    )
+    .unwrap();
+    assert!(messages.iter().any(|message| {
+        message.contains("missing or malformed bead design references (2)")
+            && message.contains("beads-missing")
+            && message.contains("beads-malformed")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("ambiguous bead design references (1)")
+            && message.contains("beads-ambiguous")
+    }));
+    assert!(messages.iter().any(|message| {
+        message.contains("bead design reference owner mismatches (1)")
+            && message.contains("beads-mismatch")
+            && message.contains("another-bead")
+    }));
+    assert!(!messages.iter().any(|message| {
+        message.contains("beads-exact")
+            || message.contains("beads-legacy")
+            || message.contains("beads-drifted")
+    }));
+}
+
+#[test]
+fn doctor_notes_explicitly_unavailable_plan_roots() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        issue_with_design("beads-1", "plans:202607/plan.md") + "\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        bead_doctor_with_plan_roots(&beads_dir, None).unwrap(),
+        vec![
+            "NOTE: bead design reference validation skipped: plan roots unavailable"
+        ]
+    );
+}
+
 fn ids(issues: Vec<sase_core::IssueWire>) -> Vec<String> {
     issues.into_iter().map(|issue| issue.id).collect()
 }
@@ -450,4 +554,19 @@ fn issue(
     format!(
         r#"{{"id":"{id}","title":"{title}","status":"{status}","issue_type":"{issue_type}","parent_id":{parent},"owner":"","assignee":"","created_at":"{timestamp}","created_by":"","updated_at":"{timestamp}","closed_at":null,"close_reason":null,"description":"","notes":"","design":"","is_ready_to_work":false,"changespec_name":"","changespec_bug_id":""{dependencies}}}"#
     )
+}
+
+fn issue_with_design(id: &str, design: &str) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&issue(
+        id,
+        id,
+        "plan",
+        None,
+        "open",
+        "2026-01-01T00:00:00Z",
+        "",
+    ))
+    .unwrap();
+    value["design"] = serde_json::json!(design);
+    serde_json::to_string(&value).unwrap()
 }

@@ -340,6 +340,7 @@ use sase_core::bead::{
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
     close_issues as core_bead_close_issues,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
+    doctor_with_plan_roots as core_bead_doctor_with_plan_roots,
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     get_epic_children as core_bead_get_epic_children,
@@ -2777,10 +2778,25 @@ fn py_bead_stats<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (beads_dir, plan_roots=None))]
 #[pyo3(name = "bead_doctor")]
-fn py_bead_doctor(beads_dir: &str) -> PyResult<Vec<String>> {
+fn py_bead_doctor(
+    beads_dir: &str,
+    plan_roots: Option<Vec<String>>,
+) -> PyResult<Vec<String>> {
     let beads_dir = PathBuf::from(beads_dir);
-    core_bead_doctor(&beads_dir).map_err(bead_error_to_pyerr)
+    let result = match plan_roots {
+        None => core_bead_doctor(&beads_dir),
+        Some(roots) if roots.is_empty() => {
+            core_bead_doctor_with_plan_roots(&beads_dir, None)
+        }
+        Some(roots) => {
+            let roots =
+                roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+            core_bead_doctor_with_plan_roots(&beads_dir, Some(&roots))
+        }
+    };
+    result.map_err(bead_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -5821,6 +5837,40 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn bead_doctor_binding_keeps_roots_optional_and_marks_unavailable() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let beads_dir = temp.path().join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+        fs::write(beads_dir.join("beads.db"), "").unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let doctor = module.getattr("bead_doctor").unwrap();
+            let path = beads_dir.to_str().unwrap();
+
+            let compatibility: Vec<String> =
+                doctor.call1((path,)).unwrap().extract().unwrap();
+            assert_eq!(compatibility, vec!["OK: no issues found"]);
+
+            let unavailable: Vec<String> = doctor
+                .call1((path, Vec::<String>::new()))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(
+                unavailable,
+                vec![
+                    "NOTE: bead design reference validation skipped: plan roots unavailable"
+                ]
+            );
+        });
     }
 
     #[test]

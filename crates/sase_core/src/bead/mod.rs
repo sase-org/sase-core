@@ -43,9 +43,10 @@ pub use mutation::{
     BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
-    blocked_issues, doctor, get_epic_children, list_issues,
-    read_event_store_issues, read_legacy_jsonl_issues, read_store_issues,
-    ready_issues, show_issue, stats, BEAD_READ_WIRE_SCHEMA_VERSION,
+    blocked_issues, doctor, doctor_with_plan_roots, get_epic_children,
+    list_issues, read_event_store_issues, read_legacy_jsonl_issues,
+    read_store_issues, ready_issues, show_issue, stats,
+    BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
