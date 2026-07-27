@@ -1849,6 +1849,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn init_store_writes_a_root_level_store_for_a_dot_dirname() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("beads-sidecar");
+        fs::create_dir_all(&root).unwrap();
+
+        init_store(&root, ".", "sase", "").unwrap();
+
+        assert!(root.join("config.json").is_file());
+        assert!(root.join("issues.jsonl").is_file());
+        assert!(root.join("beads.db").is_file());
+    }
+
+    #[test]
     fn phase_size_round_trips_through_create_update_events_and_projection() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");

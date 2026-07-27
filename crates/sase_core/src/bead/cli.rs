@@ -625,6 +625,17 @@ fn design_plan_roots(storage_root: &Path, beads_dir: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     if components
         .iter()
+        .take(3)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "repos", "sase"])
+    {
+        return vec![beads_dir
+            .parent()
+            .expect("matched beads sidecar directory has a parent")
+            .join("plans")];
+    }
+    if components
+        .iter()
         .map(|value| value.to_string_lossy())
         .eq(["beads", "plans", "repos", "sase"])
     {
@@ -665,6 +676,17 @@ fn design_storage_root<'a>(cwd: &'a Path, beads_dir: &'a Path) -> &'a Path {
         .take(4)
         .map(|component| component.as_os_str())
         .collect::<Vec<_>>();
+    if components
+        .iter()
+        .take(3)
+        .map(|value| value.to_string_lossy())
+        .eq(["beads", "repos", "sase"])
+    {
+        return beads_dir
+            .ancestors()
+            .nth(3)
+            .expect("three matched path components have a parent");
+    }
     if components
         .iter()
         .map(|value| value.to_string_lossy())
@@ -2119,6 +2141,35 @@ mod tests {
     struct SeededStore {
         _temp: TempDir,
         beads_dir: PathBuf,
+    }
+
+    #[test]
+    fn design_plan_roots_resolves_the_beads_sidecar_to_its_plans_sibling() {
+        let workspace = Path::new("/ws/sase_1");
+        let beads_dir = workspace.join("sase/repos/beads");
+
+        assert_eq!(
+            design_plan_roots(workspace, &beads_dir),
+            vec![workspace.join("sase/repos/plans")]
+        );
+        // The bead-in-plans sidecar shape must keep resolving to itself.
+        let nested = workspace.join("sase/repos/plans/beads");
+        assert_eq!(
+            design_plan_roots(workspace, &nested),
+            vec![workspace.join("sase/repos/plans")]
+        );
+    }
+
+    #[test]
+    fn design_storage_root_resolves_the_beads_sidecar_to_the_workspace() {
+        let cwd = Path::new("/elsewhere");
+        let workspace = Path::new("/ws/sase_1");
+        let beads_dir = workspace.join("sase/repos/beads");
+
+        assert_eq!(design_storage_root(cwd, &beads_dir), workspace);
+        // The bead-in-plans sidecar shape must keep resolving to the workspace.
+        let nested = workspace.join("sase/repos/plans/beads");
+        assert_eq!(design_storage_root(cwd, &nested), workspace);
     }
 
     #[test]
