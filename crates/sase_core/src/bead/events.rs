@@ -361,20 +361,8 @@ pub fn import_issues_to_event_streams(
 pub fn reduce_event_streams(
     streams: &[BeadEventStreamWire],
 ) -> Result<Vec<IssueWire>, BeadError> {
-    let mut stream_ids = BTreeSet::new();
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
-
-    let mut streams = streams.to_vec();
-    streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
-    for stream in &streams {
-        stream.validate()?;
-        if !stream_ids.insert(stream.stream_id.clone()) {
-            return Err(BeadError::validation(format!(
-                "duplicate bead event stream: {}",
-                stream.stream_id
-            )));
-        }
-    }
+    let streams = validated_event_streams(streams)?;
 
     for event in merge_stream_events(&streams) {
         apply_event(&mut issues, event)?;
@@ -386,6 +374,24 @@ pub fn reduce_event_streams(
         issue.validate()?;
     }
     Ok(reduced)
+}
+
+pub(super) fn validated_event_streams(
+    streams: &[BeadEventStreamWire],
+) -> Result<Vec<BeadEventStreamWire>, BeadError> {
+    let mut stream_ids = BTreeSet::new();
+    let mut streams = streams.to_vec();
+    streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
+    for stream in &streams {
+        stream.validate()?;
+        if !stream_ids.insert(stream.stream_id.clone()) {
+            return Err(BeadError::validation(format!(
+                "duplicate bead event stream: {}",
+                stream.stream_id
+            )));
+        }
+    }
+    Ok(streams)
 }
 
 pub fn merge_bead_event_streams(
@@ -536,7 +542,7 @@ pub(super) fn mint_bead_event_id(
 /// index order with timestamp order is not a total order), so a k-way merge
 /// keeps one cursor per stream and always emits the smallest head event by
 /// (timestamp, operation priority, event_id, stream index).
-fn merge_stream_events(
+pub(super) fn merge_stream_events(
     streams: &[BeadEventStreamWire],
 ) -> Vec<&BeadEventRecordWire> {
     let mut heads: BinaryHeap<Reverse<StreamHead<'_>>> = streams
@@ -615,7 +621,7 @@ fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
     }
 }
 
-fn apply_event(
+pub(super) fn apply_event(
     issues: &mut BTreeMap<String, IssueWire>,
     event: &BeadEventRecordWire,
 ) -> Result<(), BeadError> {

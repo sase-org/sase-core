@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod config;
 pub mod events;
+pub mod history;
 pub mod jsonl;
 pub mod mutation;
 pub mod read;
@@ -28,6 +29,10 @@ pub use events::{
     reduce_event_streams, BeadEventOperationWire, BeadEventPayloadWire,
     BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
     BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
+};
+pub use history::{
+    bead_history, BeadHistoryChangeWire, BeadHistoryEntryWire, BeadHistoryWire,
+    BEAD_HISTORY_WIRE_SCHEMA_VERSION,
 };
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,

@@ -333,6 +333,7 @@ use sase_core::axe_status::{
 };
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
+    bead_history as core_bead_history,
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
@@ -2539,6 +2540,20 @@ fn py_bead_show<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| core_bead_show_issue(&beads_dir, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_history")]
+fn py_bead_history<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_history(&beads_dir, issue_id)),
     )
 }
 
@@ -5718,6 +5733,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_history, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;

@@ -231,7 +231,7 @@ pub use axe_status::{
     AxeStatusSnapshotWire, AxeStatusStateWire, AXE_STATUS_SCHEMA_VERSION,
 };
 pub use bead::{
-    add_dependency as bead_add_dependency,
+    add_dependency as bead_add_dependency, bead_history,
     blocked_issues as bead_blocked_issues, changespec_metadata_migration_sql,
     claim_for_agent_launch as bead_claim_for_agent_launch,
     close_issues as bead_close_issues, create_issue as bead_create_issue,
@@ -261,11 +261,12 @@ pub use bead::{
     BeadError, BeadEventManifestRepairOutcomeWire,
     BeadEventManifestRepairStatusWire, BeadEventOperationWire,
     BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
-    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
-    BeadPreclaimRollbackWire, BeadSearchMatchWire, BeadTierWire,
-    BeadUpdateFieldsWire, DependencyWire, IssueTypeWire, IssueWire,
-    JsonlLoadOutcome, PhaseSizeWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
+    BeadEventStreamWire, BeadHistoryChangeWire, BeadHistoryEntryWire,
+    BeadHistoryWire, BeadIssueUpdateEventFieldsWire, BeadMutationOutcomeWire,
+    BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadSearchMatchWire,
+    BeadTierWire, BeadUpdateFieldsWire, DependencyWire, IssueTypeWire,
+    IssueWire, JsonlLoadOutcome, PhaseSizeWire, StatusWire,
+    BEAD_EVENT_SCHEMA_VERSION, BEAD_HISTORY_WIRE_SCHEMA_VERSION,
     BEAD_READ_WIRE_SCHEMA_VERSION, BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
 };
 pub use commit_footer::{
