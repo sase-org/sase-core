@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/sase-org/sase-core/compare/v0.11.4...v0.12.0) - 2026-07-27
+
+### Added
+
+- *(bead)* [**breaking**] make descendant close sweeps explicit (sase-a1.4)
+- *(beads)* expose event history replay (sase-a1.1)
+
 ## [0.11.4](https://github.com/sase-org/sase-core/compare/v0.11.3...v0.11.4) - 2026-07-27
 
 ### Added
