@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4](https://github.com/sase-org/sase-core/compare/v0.12.3...v0.12.4) - 2026-07-28
+
+### Added
+
+- *(plan)* support canonical parent header migration (sase-ag.5)
+
+### Fixed
+
+- *(plan)* ignore fenced header examples (sase-ag.4)
+
 ## [0.12.3](https://github.com/sase-org/sase-core/compare/v0.12.2...v0.12.3) - 2026-07-28
 
 ### Added
