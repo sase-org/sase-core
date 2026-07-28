@@ -807,13 +807,7 @@ fn parse_block(
     has_frontmatter: bool,
 ) -> Result<Option<ParsedBlock>, String> {
     let lines = physical_lines(body);
-    let candidates = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| looks_like_known_header_bullet(line.text))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let Some(start_index) = candidates.first().copied() else {
+    let Some(start_index) = first_header_candidate(&lines) else {
         return Ok(None);
     };
 
@@ -924,11 +918,7 @@ fn parse_block(
     }
 
     let end = if index == 0 { 0 } else { lines[index - 1].end };
-    if lines
-        .iter()
-        .skip(index)
-        .any(|line| looks_like_known_header_bullet(line.text))
-    {
+    if first_header_candidate(&lines[index..]).is_some() {
         return Err(
             "discontiguous or nested plan header bullets found".to_string()
         );
@@ -1039,6 +1029,41 @@ fn physical_lines(body: &str) -> Vec<PhysicalLine<'_>> {
         });
     }
     lines
+}
+
+fn first_header_candidate(lines: &[PhysicalLine<'_>]) -> Option<usize> {
+    let mut fence: Option<(char, usize)> = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.text.trim_start();
+        if let Some((marker, width)) = fence {
+            if fence_marker(trimmed).is_some_and(|(candidate, count)| {
+                candidate == marker && count >= width
+            }) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = fence_marker(trimmed) {
+            fence = Some(marker);
+            continue;
+        }
+        if looks_like_known_header_bullet(line.text) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let marker = line.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let width = line
+        .chars()
+        .take_while(|character| *character == marker)
+        .count();
+    (width >= 3).then_some((marker, width))
 }
 
 fn looks_like_known_header_bullet(line: &str) -> bool {
@@ -1657,6 +1682,39 @@ mod tests {
             parse_sdd_plan_header_block(body_only).kind,
             SddArtifactLinkKindWire::Missing
         );
+    }
+
+    #[test]
+    fn fenced_header_example_is_not_a_live_document_header() {
+        let body_only = "# Plan\n\n```markdown\n- **PROMPT:** [example](example.md)\n- **AGENTS:**\n  - example.agent\n```\n";
+        let parsed = parse_sdd_plan_header_block(body_only);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Missing);
+        assert_eq!(parsed.body, body_only);
+
+        let document = "- **PROMPT:** [prompt](prompt.md)\n\n# Plan\n\n```markdown\n- **PROMPT:** [example](example.md)\n```\n";
+        let parsed = parse_sdd_plan_header_block(document);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert!(parsed.canonical_layout);
+        assert_eq!(
+            parsed.body,
+            "# Plan\n\n```markdown\n- **PROMPT:** [example](example.md)\n```\n"
+        );
+    }
+
+    #[test]
+    fn extra_leading_blank_line_is_recognized_as_noncanonical_layout() {
+        let document = "\n- **PROMPT:** [prompt](prompt.md)\n\n# Plan\n";
+        let parsed = parse_sdd_plan_header_block(document);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert!(!parsed.canonical_layout);
+    }
+
+    #[test]
+    fn misplaced_unfenced_header_is_recognized_for_layout_diagnostics() {
+        let document = "# Plan\n\n- **PROMPT:** [prompt](prompt.md)\n";
+        let parsed = parse_sdd_plan_header_block(document);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert!(!parsed.canonical_layout);
     }
 
     #[test]
