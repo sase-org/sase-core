@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2](https://github.com/sase-org/sase-core/compare/v0.12.1...v0.12.2) - 2026-07-28
+
+### Added
+
+- validate lumberjack wait runner limits (sase-af.1)
+- *(bead)* recognize the beads sidecar root in path heuristics (sase-a8.1)
+
+### Fixed
+
+- *(xprompt)* canonicalize project identities in catalog (sase-ac.5)
+
 ## [0.12.1](https://github.com/sase-org/sase-core/compare/v0.12.0...v0.12.1) - 2026-07-27
 
 ### Added
