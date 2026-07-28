@@ -53,6 +53,8 @@ pub struct BeadCliOutcomeWire {
 pub struct BeadCliMutationSummaryWire {
     pub operation: String,
     #[serde(default)]
+    pub changed: bool,
+    #[serde(default)]
     pub issue_ids: Vec<String>,
     #[serde(default)]
     pub status_transitions: Vec<BeadCliStatusTransitionWire>,
@@ -936,6 +938,7 @@ fn handle_close(
                 stdout,
                 BeadCliMutationSummaryWire {
                     operation: "close".to_string(),
+                    changed: outcome.changed,
                     issue_ids: ids,
                     status_transitions: outcome
                         .issues
@@ -985,6 +988,7 @@ fn handle_dep(
                 ),
                 BeadCliMutationSummaryWire {
                     operation: "dep_add".to_string(),
+                    changed: outcome.changed,
                     issue_ids: vec![issue_id.clone(), depends_on_id.clone()],
                     status_transitions: Vec::new(),
                 },
@@ -1044,6 +1048,7 @@ fn handle_dep(
                 stdout,
                 BeadCliMutationSummaryWire {
                     operation: "dep_rm".to_string(),
+                    changed: outcome.changed,
                     issue_ids: outcome.issue_ids,
                     status_transitions: Vec::new(),
                 },
@@ -1097,6 +1102,7 @@ fn handle_rm(
                 stdout,
                 BeadCliMutationSummaryWire {
                     operation: "rm".to_string(),
+                    changed: outcome.changed,
                     issue_ids: args.to_vec(),
                     status_transitions: Vec::new(),
                 },
@@ -1885,6 +1891,7 @@ fn mutation_summary(
     }
     BeadCliMutationSummaryWire {
         operation: operation.to_string(),
+        changed: outcome.changed,
         issue_ids: outcome.issue_ids.clone(),
         status_transitions,
     }
