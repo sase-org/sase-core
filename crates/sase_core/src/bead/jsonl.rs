@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::events::{
-    reduce_event_streams, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire,
+    compare_issues_canonically, reduce_event_streams, BeadEventRecordWire,
+    BeadEventStoreManifestWire, BeadEventStreamWire,
 };
 use super::wire::{
     deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
@@ -101,7 +101,7 @@ pub fn export_issues_to_jsonl(
     issues: &[IssueWire],
 ) -> Result<String, BeadError> {
     let mut sorted = issues.to_vec();
-    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    sorted.sort_by(compare_issues_canonically);
 
     let mut output = String::new();
     for issue in sorted {

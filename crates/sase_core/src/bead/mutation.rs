@@ -4410,6 +4410,92 @@ mod tests {
     }
 
     #[test]
+    fn projection_writers_are_byte_stable_for_the_same_store_state() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let first_epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Second epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(first_epic.id),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mutation_projection =
+            fs::read(beads_dir.join("issues.jsonl")).unwrap();
+        let manifest_before =
+            fs::read(beads_dir.join("events/manifest.json")).unwrap();
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let reduced = reduce_event_streams(&streams).unwrap();
+
+        // The conflict/rebuild binding returns reducer rows for its caller to
+        // serialize directly, so reducer order is itself a writer contract.
+        let reduced_projection = reduced
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        assert_eq!(reduced_projection.as_bytes(), mutation_projection);
+
+        let direct_export =
+            crate::bead::jsonl::export_issues_to_jsonl(&reduced).unwrap();
+        assert_eq!(direct_export.as_bytes(), mutation_projection);
+
+        fs::write(beads_dir.join("issues.jsonl"), "stale projection\n")
+            .unwrap();
+        export_jsonl(&beads_dir).unwrap();
+        assert_eq!(
+            fs::read(beads_dir.join("issues.jsonl")).unwrap(),
+            mutation_projection
+        );
+
+        let mut reversed_streams = streams;
+        reversed_streams.reverse();
+        write_event_store(&beads_dir, &reversed_streams).unwrap();
+        assert_eq!(
+            fs::read(beads_dir.join("events/manifest.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(beads_dir.join("issues.jsonl")).unwrap(),
+            mutation_projection
+        );
+    }
+
+    #[test]
     fn mutable_appends_mint_stable_content_hashed_event_ids() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");

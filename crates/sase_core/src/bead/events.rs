@@ -4,7 +4,7 @@
 //! `IssueWire` snapshots into deterministic streams, then reduce streams back
 //! into the current snapshot model. Later phases own filesystem integration.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
@@ -387,11 +387,24 @@ pub fn reduce_event_streams(
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
-    reduced.sort_by_key(event_issue_key);
+    reduced.sort_by(compare_issues_canonically);
     for issue in &reduced {
         issue.validate()?;
     }
     Ok(reduced)
+}
+
+/// Order regenerated issue projections identically across every writer.
+///
+/// Some binding consumers serialize the reducer result directly, while the
+/// JSONL writer receives an arbitrary issue slice. Keeping their comparator
+/// here prevents those paths from alternating between hierarchy-first and
+/// plain-ID ordering.
+pub(super) fn compare_issues_canonically(
+    left: &IssueWire,
+    right: &IssueWire,
+) -> Ordering {
+    left.id.cmp(&right.id)
 }
 
 pub(super) fn validated_event_streams(
