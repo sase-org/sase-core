@@ -745,6 +745,7 @@ pub fn close_issues(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn close_issues_with_note(
     beads_dir: &Path,
     issue_ids: &[String],
@@ -3664,7 +3665,7 @@ mod tests {
                     .iter()
                     .rev()
                     .take(2)
-                    .map(|event| event.operation.clone())
+                    .map(|event| event.operation)
                     .collect::<Vec<_>>(),
                 vec![
                     BeadEventOperationWire::IssueClosed,

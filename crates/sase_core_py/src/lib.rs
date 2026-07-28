@@ -3170,6 +3170,7 @@ fn py_bead_open<'py>(
     note=None,
     author=None,
 ))]
+#[allow(clippy::too_many_arguments)]
 fn py_bead_close<'py>(
     py: Python<'py>,
     beads_dir: &str,

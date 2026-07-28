@@ -2825,7 +2825,7 @@ mod tests {
             .iter()
             .rev()
             .take(2)
-            .map(|event| event.operation.clone())
+            .map(|event| event.operation)
             .collect::<Vec<_>>();
         assert_eq!(
             operations,
