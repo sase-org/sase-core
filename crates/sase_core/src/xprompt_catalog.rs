@@ -14,12 +14,12 @@ use crate::{
         CompatibleLayoutPathWire, XpromptSourceWire,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
-    DocumentSnapshot, EditorRange, EditorSnippetCatalogRequestWire,
-    EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
-    EditorSnippetEntryWire, EditorXpromptCatalogRequestWire,
-    EditorXpromptCatalogResponseWire, MobileHelperProjectContextWire,
-    MobileHelperProjectScopeWire, MobileHelperResultWire,
-    MobileHelperSkippedWire, MobileHelperStatusWire,
+    list_project_records, DocumentSnapshot, EditorRange,
+    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
+    EditorXpromptCatalogRequestWire, EditorXpromptCatalogResponseWire,
+    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
+    MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
     MobileXpromptCatalogEntryWire, MobileXpromptCatalogStatsWire,
     MobileXpromptInputWire,
 };
@@ -160,9 +160,12 @@ pub fn load_editor_xprompt_catalog(
 ) -> Result<EditorXpromptCatalogResponseWire, XpromptCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
     let loader = CatalogLoader::new(root_dir);
+    let canonical_project =
+        loader.canonical_project(request.project.as_deref());
     let entries = filter_structured_sources(
-        loader.gather_structured_sources(request.project.as_deref())?,
+        loader.gather_structured_sources(canonical_project.as_deref())?,
         request,
+        canonical_project.as_deref(),
     );
     let total_count = entries.len() as u64;
     let limited = request
@@ -291,13 +294,14 @@ pub fn load_editor_snippet_catalog(
 fn filter_structured_sources(
     entries: Vec<StructuredSource>,
     request: &EditorXpromptCatalogRequestWire,
+    canonical_project: Option<&str>,
 ) -> Vec<StructuredSource> {
     let normalized_query =
         request.query.as_ref().map(|query| query.to_lowercase());
     entries
         .into_iter()
         .filter(|entry| {
-            if let Some(project) = request.project.as_deref() {
+            if let Some(project) = canonical_project {
                 if matches!(entry.project.as_deref(), Some(p) if p != project) {
                     return false;
                 }
@@ -883,6 +887,7 @@ struct CatalogLoader {
     plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
     plugin_config_paths: BTreeMap<String, PathBuf>,
     known_workspaces: BTreeMap<String, PathBuf>,
+    canonical_project_refs: BTreeMap<String, String>,
 }
 
 impl CatalogLoader {
@@ -910,7 +915,7 @@ impl CatalogLoader {
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV);
         let plugin_config_paths =
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV);
-        let known_workspaces = known_project_workspaces(home_dir.as_deref());
+        let known_projects = known_projects(home_dir.as_deref());
         Self {
             root_dir,
             home_dir,
@@ -919,15 +924,39 @@ impl CatalogLoader {
             default_config_path,
             plugin_xprompt_dirs,
             plugin_config_paths,
-            known_workspaces,
+            known_workspaces: known_projects.workspaces,
+            canonical_project_refs: known_projects.canonical_refs,
         }
+    }
+
+    fn canonical_project(&self, project: Option<&str>) -> Option<String> {
+        let project = project?.trim();
+        if project.is_empty() {
+            return None;
+        }
+        Some(
+            self.canonical_project_refs
+                .get(project)
+                .cloned()
+                .unwrap_or_else(|| project.to_string()),
+        )
+    }
+
+    fn root_project(&self) -> Option<&str> {
+        let root = self.root_dir.as_deref()?;
+        self.known_workspaces
+            .iter()
+            .find_map(|(project, workspace)| {
+                path_is_under(root, workspace).then_some(project.as_str())
+            })
     }
 
     fn gather_structured_sources(
         &self,
         project: Option<&str>,
     ) -> Result<Vec<StructuredSource>, XpromptCatalogLoadError> {
-        let workflows = self.load_all_workflows(project)?;
+        let effective_project = project.or_else(|| self.root_project());
+        let workflows = self.load_all_workflows(effective_project)?;
         let workflow_names = workflows.keys().cloned().collect::<BTreeSet<_>>();
         let mut seen = BTreeSet::<(String, String)>::new();
         let mut sources = Vec::new();
@@ -951,7 +980,7 @@ impl CatalogLoader {
             }
         }
 
-        for (name, xprompt) in self.load_all_xprompts(project)? {
+        for (name, xprompt) in self.load_all_xprompts(effective_project)? {
             if workflow_names.contains(&name) {
                 continue;
             }
@@ -974,31 +1003,36 @@ impl CatalogLoader {
             });
         }
 
-        if project.is_none() {
-            for (project_name, workspace) in &self.known_workspaces {
-                let mut project_xprompts =
-                    self.load_project_local_xprompts(project_name, workspace)?;
-                project_xprompts.extend(
-                    self.load_project_file_xprompts(project_name, workspace)?,
-                );
-                for (name, xprompt) in project_xprompts {
-                    let source =
-                        xprompt.source_path.clone().unwrap_or_default();
-                    if !seen.insert((source, name.clone())) {
-                        continue;
-                    }
-                    let workflow = xprompt_to_workflow(&xprompt);
-                    sources.push(StructuredSource {
-                        name,
-                        workflow,
-                        bucket: "project".to_string(),
-                        project: Some(project_name.clone()),
-                        description: xprompt.description,
-                        is_skill: xprompt.is_skill,
-                        content: xprompt.content,
-                        definition_section: DefinitionSection::Xprompts,
-                    });
+        let project_workspaces = match project {
+            Some(project) => self
+                .known_workspaces
+                .get_key_value(project)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            None => self.known_workspaces.iter().collect::<Vec<_>>(),
+        };
+        for (project_name, workspace) in project_workspaces {
+            let mut project_xprompts =
+                self.load_project_local_xprompts(project_name, workspace)?;
+            project_xprompts.extend(
+                self.load_project_file_xprompts(project_name, workspace)?,
+            );
+            for (name, xprompt) in project_xprompts {
+                let source = xprompt.source_path.clone().unwrap_or_default();
+                if !seen.insert((source, name.clone())) {
+                    continue;
                 }
+                let workflow = xprompt_to_workflow(&xprompt);
+                sources.push(StructuredSource {
+                    name,
+                    workflow,
+                    bucket: "project".to_string(),
+                    project: Some(project_name.clone()),
+                    description: xprompt.description,
+                    is_skill: xprompt.is_skill,
+                    content: xprompt.content,
+                    definition_section: DefinitionSection::Xprompts,
+                });
             }
         }
 
@@ -1676,60 +1710,60 @@ fn plugin_path_map_from_env(name: &str) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
-fn known_project_workspaces(home: Option<&Path>) -> BTreeMap<String, PathBuf> {
+#[derive(Debug, Default)]
+struct KnownProjects {
+    workspaces: BTreeMap<String, PathBuf>,
+    canonical_refs: BTreeMap<String, String>,
+}
+
+fn known_projects(home: Option<&Path>) -> KnownProjects {
     let Some(home) = home else {
-        return BTreeMap::new();
+        return KnownProjects::default();
     };
     let projects_dir = home.join(".sase").join("projects");
-    let Ok(project_dirs) = fs::read_dir(projects_dir) else {
-        return BTreeMap::new();
+    let include_states = vec!["enabled".to_string()];
+    let Ok(records) =
+        list_project_records(&projects_dir, &include_states, false, true)
+    else {
+        return KnownProjects::default();
     };
-    let mut result = BTreeMap::new();
-    for project_dir in project_dirs.flatten() {
-        let Ok(files) = fs::read_dir(project_dir.path()) else {
+
+    let project_keys = records
+        .iter()
+        .map(|record| record.project_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut ref_targets = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut result = KnownProjects::default();
+    for record in records {
+        let canonical = record
+            .display_name
+            .unwrap_or_else(|| record.project_name.clone());
+        result
+            .canonical_refs
+            .insert(record.project_name.clone(), canonical.clone());
+        ref_targets
+            .entry(canonical.clone())
+            .or_default()
+            .insert(canonical.clone());
+        for alias in record.aliases {
+            ref_targets
+                .entry(alias)
+                .or_default()
+                .insert(canonical.clone());
+        }
+        if let Some(workspace) = record.workspace_dir.map(PathBuf::from) {
+            if workspace.is_dir() {
+                result.workspaces.insert(canonical, workspace);
+            }
+        }
+    }
+    for (project_ref, targets) in ref_targets {
+        if project_keys.contains(&project_ref) || targets.len() != 1 {
             continue;
-        };
-        let mut entries: Vec<(String, PathBuf)> = Vec::new();
-        for file in files.flatten() {
-            let path = file.path();
-            let extension = path.extension().and_then(|ext| ext.to_str());
-            if extension != Some("sase") && extension != Some("gp") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-            else {
-                continue;
-            };
-            if stem.ends_with("-archive") {
-                continue;
-            }
-            entries.push((stem.to_string(), path));
         }
-        entries.sort_by(|a, b| {
-            let prefer_a =
-                a.1.extension().and_then(|ext| ext.to_str()) == Some("sase");
-            let prefer_b =
-                b.1.extension().and_then(|ext| ext.to_str()) == Some("sase");
-            prefer_b.cmp(&prefer_a)
-        });
-        let mut seen = BTreeSet::<String>::new();
-        for (project_name, path) in entries {
-            if !seen.insert(project_name.clone()) {
-                continue;
-            }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("WORKSPACE_DIR:") {
-                    let workspace = PathBuf::from(rest.trim());
-                    if workspace.is_dir() {
-                        result.insert(project_name, workspace);
-                    }
-                    break;
-                }
-            }
-        }
+        result
+            .canonical_refs
+            .insert(project_ref, targets.into_iter().next().unwrap());
     }
     result
 }
@@ -3064,6 +3098,10 @@ mod tests {
                 "app".to_string(),
                 root.clone(),
             )]),
+            canonical_project_refs: BTreeMap::from([(
+                "app".to_string(),
+                "app".to_string(),
+            )]),
         };
 
         let entries = loader.gather_structured_sources(Some("app")).unwrap();
@@ -3118,6 +3156,7 @@ mod tests {
             plugin_xprompt_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::new(),
+            canonical_project_refs: BTreeMap::new(),
         };
 
         let error = loader.gather_structured_sources(None).unwrap_err();
@@ -3191,6 +3230,10 @@ mod tests {
             known_workspaces: BTreeMap::from([(
                 "app".to_string(),
                 root.clone(),
+            )]),
+            canonical_project_refs: BTreeMap::from([(
+                "app".to_string(),
+                "app".to_string(),
             )]),
         };
 
@@ -3351,6 +3394,7 @@ mod tests {
                 plugin_config.join("default_config.yml"),
             )]),
             known_workspaces: BTreeMap::new(),
+            canonical_project_refs: BTreeMap::new(),
         };
 
         let entries = loader.gather_structured_sources(None).unwrap();
@@ -3446,6 +3490,10 @@ mod tests {
                 "app".to_string(),
                 project_workspace.clone(),
             )]),
+            canonical_project_refs: BTreeMap::from([(
+                "app".to_string(),
+                "app".to_string(),
+            )]),
         };
 
         let entries = loader.gather_structured_sources(Some("app")).unwrap();
@@ -3507,6 +3555,10 @@ mod tests {
                 "app".to_string(),
                 workspace.clone(),
             )]),
+            canonical_project_refs: BTreeMap::from([(
+                "app".to_string(),
+                "app".to_string(),
+            )]),
         };
 
         let entries = loader.gather_structured_sources(None).unwrap();
@@ -3553,22 +3605,25 @@ mod tests {
     }
 
     #[test]
-    fn known_project_workspaces_prefers_sase_spec_with_gp_fallback() {
+    fn known_projects_use_display_names_aliases_and_gp_fallback() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let projects_dir = home.join(".sase").join("projects");
 
         let canonical_workspace = temp.path().join("canonical_ws");
-        let canonical_project_dir = projects_dir.join("canonical");
+        let canonical_project_dir = projects_dir.join("gh_org__proj");
         fs::create_dir_all(&canonical_workspace).unwrap();
         fs::create_dir_all(&canonical_project_dir).unwrap();
         fs::write(
-            canonical_project_dir.join("canonical.sase"),
-            format!("WORKSPACE_DIR: {}\n", canonical_workspace.display()),
+            canonical_project_dir.join("gh_org__proj.sase"),
+            format!(
+                "PROJECT_NAME: proj\nPROJECT_ALIASES: p, project\nWORKSPACE_DIR: {}\n",
+                canonical_workspace.display()
+            ),
         )
         .unwrap();
         fs::write(
-            canonical_project_dir.join("canonical.gp"),
+            canonical_project_dir.join("gh_org__proj.gp"),
             "WORKSPACE_DIR: /tmp/should-be-ignored\n",
         )
         .unwrap();
@@ -3591,17 +3646,102 @@ mod tests {
         )
         .unwrap();
 
-        let workspaces = known_project_workspaces(Some(home.as_path()));
+        let known = known_projects(Some(home.as_path()));
 
         assert_eq!(
-            workspaces.get("canonical").map(PathBuf::as_path),
+            known.workspaces.get("proj").map(PathBuf::as_path),
             Some(canonical_workspace.as_path()),
         );
         assert_eq!(
-            workspaces.get("legacy").map(PathBuf::as_path),
+            known.workspaces.get("legacy").map(PathBuf::as_path),
             Some(legacy_workspace.as_path()),
         );
-        assert!(!workspaces.contains_key("archived"));
+        assert!(!known.workspaces.contains_key("gh_org__proj"));
+        assert!(!known.workspaces.contains_key("archived"));
+        for project_ref in ["gh_org__proj", "proj", "p", "project"] {
+            assert_eq!(
+                known.canonical_refs.get(project_ref).map(String::as_str),
+                Some("proj"),
+            );
+        }
+        assert_eq!(
+            known.canonical_refs.get("legacy").map(String::as_str),
+            Some("legacy"),
+        );
+    }
+
+    #[test]
+    fn project_catalog_uses_canonical_namespace_and_filter_refs() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let projects_dir = home.join(".sase").join("projects");
+        let project_dir = projects_dir.join("gh_org__proj");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(workspace.join("sase/xprompts")).unwrap();
+        fs::write(
+            project_dir.join("gh_org__proj.sase"),
+            format!(
+                "PROJECT_NAME: proj\nPROJECT_ALIASES: shortcut\nWORKSPACE_DIR: {}\n",
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("sase/xprompts/thing.md"),
+            "Project prompt body",
+        )
+        .unwrap();
+
+        let known = known_projects(Some(home.as_path()));
+        let loader = CatalogLoader {
+            root_dir: Some(workspace.clone()),
+            home_dir: Some(home),
+            package_xprompts_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            known_workspaces: known.workspaces,
+            canonical_project_refs: known.canonical_refs,
+        };
+        let entries = loader.gather_structured_sources(None).unwrap();
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.name == "proj/thing")
+                .count(),
+            1,
+        );
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == "proj/thing")
+            .unwrap();
+        assert_eq!(entry.project.as_deref(), Some("proj"));
+        assert!(entries
+            .iter()
+            .all(|entry| entry.name != "gh_org__proj/thing"));
+
+        for project_ref in ["gh_org__proj", "proj", "shortcut"] {
+            let mut filtered_request = request();
+            filtered_request.project = Some(project_ref.to_string());
+            let canonical =
+                loader.canonical_project(filtered_request.project.as_deref());
+            let filtered = filter_structured_sources(
+                entries.clone(),
+                &filtered_request,
+                canonical.as_deref(),
+            );
+            assert_eq!(
+                filtered
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["proj/thing"],
+                "{project_ref}",
+            );
+        }
     }
 
     #[test]
@@ -3616,6 +3756,7 @@ mod tests {
             plugin_xprompt_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::new(),
+            canonical_project_refs: BTreeMap::new(),
         };
         let entry = StructuredSource {
             name: "plugin".to_string(),
