@@ -45,6 +45,13 @@ fn plan_validate_matches_python_facade_fixture() {
         "diagnostics": [
             {
                 "severity": "warning",
+                "code": "parent-frontmatter-deprecated",
+                "field_path": "parent",
+                "message": "`parent` frontmatter is deprecated; use the Markdown PARENT header bullet",
+                "line": 10
+            },
+            {
+                "severity": "warning",
                 "code": "phase-description-missing",
                 "field_path": "phases[0].description",
                 "message": "phase `core` has no `description`; add one naming its plan-body section and briefly summarizing that section",

@@ -59,7 +59,8 @@ impl SddPlanHeaderSectionKindWire {
         match self {
             Self::Plan => Some("plan"),
             Self::Prompt => Some("prompt"),
-            Self::Parent | Self::Agents | Self::Commits => None,
+            Self::Parent => Some("parent"),
+            Self::Agents | Self::Commits => None,
         }
     }
 
@@ -638,7 +639,7 @@ fn rewrite_block(
     let normalized = normalize_sections(sections)?;
     if normalized == parsed.sections
         && parsed.canonical_layout
-        && !legacy_removal_needed(parsed, remove_legacy)
+        && !legacy_removal_needed(document, parsed, remove_legacy)
     {
         return Ok(document.to_string());
     }
@@ -650,6 +651,7 @@ fn rewrite_block(
             LegacyRemoval::All => {
                 prefix = remove_top_level_yaml_key(&prefix, "plan");
                 prefix = remove_top_level_yaml_key(&prefix, "prompt");
+                prefix = remove_top_level_yaml_key(&prefix, "parent");
             }
             LegacyRemoval::One(kind) => {
                 if let Some(field) = kind.legacy_field() {
@@ -683,17 +685,24 @@ fn rewrite_block(
 }
 
 fn legacy_removal_needed(
+    document: &str,
     parsed: &SddPlanHeaderDocumentWire,
     remove_legacy: LegacyRemoval,
 ) -> bool {
-    let Some(legacy) = &parsed.legacy else {
-        return false;
-    };
     match remove_legacy {
         LegacyRemoval::None => false,
-        LegacyRemoval::All => true,
+        LegacyRemoval::All => {
+            parsed.legacy.is_some()
+                || ["plan", "prompt", "parent"]
+                    .iter()
+                    .any(|field| has_top_level_yaml_key(document, field))
+        }
         LegacyRemoval::One(kind) => {
-            kind == SddPlanHeaderSectionKindWire::from(legacy.link_type)
+            parsed.legacy.as_ref().is_some_and(|legacy| {
+                kind == SddPlanHeaderSectionKindWire::from(legacy.link_type)
+            }) || kind
+                .legacy_field()
+                .is_some_and(|field| has_top_level_yaml_key(document, field))
         }
     }
 }
@@ -1272,6 +1281,20 @@ fn remove_top_level_yaml_key(prefix: &str, key: &str) -> String {
         .collect()
 }
 
+fn has_top_level_yaml_key(document: &str, key: &str) -> bool {
+    let Ok(parts) = split_document(document) else {
+        return false;
+    };
+    parts.frontmatter.is_some_and(|frontmatter| {
+        frontmatter.lines().any(|line| {
+            !line.starts_with([' ', '\t'])
+                && line
+                    .split_once(':')
+                    .is_some_and(|(candidate, _)| candidate.trim_end() == key)
+        })
+    })
+}
+
 fn block_invalid(
     body: impl Into<String>,
     has_frontmatter: bool,
@@ -1739,6 +1762,34 @@ mod tests {
                 "PROMPT",
                 "202607/prompts/example.md",
                 "prompts/example.md",
+                true,
+                false,
+            )
+            .unwrap(),
+            updated
+        );
+    }
+
+    #[test]
+    fn parent_upsert_removes_only_legacy_top_level_parent() {
+        let document = "---\ntier: tale\nparent: old/epic.md\nmetadata:\n  parent: keep-nested\n---\n\n- **PARENT:** [202607/epic.md](epic.md)\n\n# Plan\n";
+        let section = link_section(
+            SddPlanHeaderSectionKindWire::Parent,
+            "202607/epic.md",
+            "epic.md",
+        );
+        let updated =
+            upsert_sdd_plan_header_section(document, section, true, false)
+                .unwrap();
+        assert_eq!(
+            updated,
+            "---\ntier: tale\nmetadata:\n  parent: keep-nested\n---\n\n- **PARENT:** [202607/epic.md](epic.md)\n\n# Plan\n"
+        );
+        let parsed = parse_sdd_plan_header_block(&updated);
+        assert_eq!(
+            upsert_sdd_plan_header_section(
+                &updated,
+                parsed.sections[0].clone(),
                 true,
                 false,
             )

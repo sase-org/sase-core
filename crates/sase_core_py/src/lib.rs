@@ -7074,7 +7074,10 @@ mod tests {
             let value = py_to_json_value(result.bind(py)).unwrap();
             assert_eq!(value["schema_version"], json!(2));
             assert_eq!(value["ok"], json!(true));
-            assert_eq!(value["diagnostics"], json!([]));
+            assert_eq!(
+                value["diagnostics"][0]["code"],
+                json!("parent-frontmatter-deprecated")
+            );
             assert_eq!(value["plan"]["title"], json!("Binding parity"));
             assert_eq!(value["plan"]["parent_bead"], json!("sase-7z.1"));
             assert_eq!(value["plan"]["bead"], json!("sase-88.1"));
@@ -7090,6 +7093,10 @@ mod tests {
                 py_plan_validate(py, tale, "tale", "authoring").unwrap();
             let tale_value = py_to_json_value(tale_result.bind(py)).unwrap();
             assert_eq!(tale_value["ok"], json!(true));
+            assert_eq!(
+                tale_value["diagnostics"][0]["code"],
+                json!("parent-frontmatter-deprecated")
+            );
             assert_eq!(
                 tale_value["plan"]["title"],
                 json!("Tale binding parity")
@@ -7170,10 +7177,13 @@ mod tests {
             let legacy_value =
                 py_to_json_value(legacy_result.bind(py)).unwrap();
             assert_eq!(legacy_value["ok"], json!(true));
-            assert_eq!(
-                legacy_value["diagnostics"][0]["code"],
-                json!("phase-size-missing")
-            );
+            assert!(legacy_value["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic["code"] == json!("phase-size-missing")
+                }));
             assert_eq!(
                 legacy_value["plan"]["phases"][0]["size"],
                 json!("small")

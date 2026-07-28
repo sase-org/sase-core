@@ -302,7 +302,7 @@ pub fn plan_frontmatter_schema(
             "parent",
             "non-empty string",
             false,
-            "parent epic plan file reference written by SASE",
+            "Deprecated parent epic plan reference. Use the Markdown PARENT header bullet; this field remains readable for committed history.",
             json!("sase/repos/plans/202607/example.md"),
         ),
         field_spec(
@@ -398,6 +398,15 @@ impl<'a> Validator<'a> {
         let model = self.optional_model(mapping, "model", &index);
         let bead = self.optional_non_empty_string(mapping, "bead", &index);
         let parent = self.optional_non_empty_string(mapping, "parent", &index);
+        if parent.is_some() {
+            self.push(
+                "warning",
+                "parent-frontmatter-deprecated",
+                "parent",
+                "`parent` frontmatter is deprecated; use the Markdown PARENT header bullet",
+                &index,
+            );
+        }
 
         let (phases, changespec, bug_id, parent_bead) = match self.tier {
             PlanTier::Tale => (Vec::new(), None, None, None),
@@ -1241,7 +1250,7 @@ mod tests {
         let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(codes(&result), ["parent-frontmatter-deprecated"]);
         assert_eq!(result.schema_version, PLAN_WIRE_SCHEMA_VERSION);
         assert_eq!(
             result.plan,
@@ -1373,7 +1382,7 @@ mod tests {
     fn valid_epic_returns_all_normalized_fields() {
         let result = plan_validate(valid_epic(), "epic").unwrap();
         assert!(result.ok, "{:?}", result.diagnostics);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(codes(&result), ["parent-frontmatter-deprecated"]);
         let plan = result.plan.unwrap();
         assert_eq!(plan.title.as_deref(), Some("Validation engine"));
         assert_eq!(plan.changespec.as_deref(), Some("plan_validate"));
@@ -1618,6 +1627,12 @@ mod tests {
                 plan.parent.as_deref(),
                 Some("sase/repos/plans/202607/parent.md")
             );
+            assert!(result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == "warning"
+                    && diagnostic.code == "parent-frontmatter-deprecated"
+                    && diagnostic.field_path == "parent"
+                    && diagnostic.line.is_some()
+            }));
 
             for (field, value, code) in [
                 ("bead", "'   '", "value-empty"),
@@ -1733,7 +1748,10 @@ mod tests {
                 "bead",
                 "bead id of the agent that proposed this plan, written by SASE",
             ),
-            ("parent", "parent epic plan file reference written by SASE"),
+            (
+                "parent",
+                "Deprecated parent epic plan reference. Use the Markdown PARENT header bullet; this field remains readable for committed history.",
+            ),
         ] {
             for schema in [&tale, &epic] {
                 let field =
