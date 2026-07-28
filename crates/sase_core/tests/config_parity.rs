@@ -722,6 +722,45 @@ fn axe_composition_retains_legacy_defaults_and_exact_key_provenance() {
 }
 
 #[test]
+fn axe_composition_overlays_wait_runners_with_exact_provenance() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default",
+            "kind": "builtin",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "wait_runners": 2
+            }}}}
+        },
+        {
+            "name": "overlay:sase_work.yml",
+            "kind": "overlay",
+            "path": "/tmp/sase_work.yml",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "wait_runners": 0
+            }}}}
+        }
+    ]))
+    .unwrap();
+
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+    })
+    .unwrap();
+
+    assert_eq!(
+        result.effective_config["axe"]["lumberjacks"]["checks"]["wait_runners"],
+        json!(0)
+    );
+    assert!(result.diagnostics.is_empty());
+    assert!(result.provenance.iter().any(|item| {
+        item.key_path == ["axe", "lumberjacks", "checks", "wait_runners"]
+            && item.layer == "overlay:sase_work.yml:/tmp/sase_work.yml"
+    }));
+}
+
+#[test]
 fn axe_sparse_mutation_keeps_inherited_fields_and_matches_candidate_composition(
 ) {
     let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({

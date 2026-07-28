@@ -21,8 +21,14 @@ const AXE_KEYS: &[&str] = &[
     "chop_script_dirs",
     "lumberjacks",
 ];
-const LUMBERJACK_KEYS: &[&str] =
-    &["description", "interval", "chop_timeout", "chops", "env"];
+const LUMBERJACK_KEYS: &[&str] = &[
+    "description",
+    "interval",
+    "chop_timeout",
+    "wait_runners",
+    "chops",
+    "env",
+];
 const CHOP_KEYS: &[&str] = &[
     "name",
     "script",
@@ -307,6 +313,14 @@ fn validate_lumberjacks(
                 request,
                 timeout,
                 &child_path(&lumberjack_path, "chop_timeout"),
+                diagnostics,
+            );
+        }
+        if let Some(wait_runners) = config.get("wait_runners") {
+            validate_nonnegative_integer(
+                request,
+                wait_runners,
+                &child_path(&lumberjack_path, "wait_runners"),
                 diagnostics,
             );
         }
@@ -1086,6 +1100,22 @@ fn validate_positive_integer(
             "non_positive_integer",
             path,
             "value must be a positive integer",
+        ));
+    }
+}
+
+fn validate_nonnegative_integer(
+    request: &AxeConfigValidationRequestWire,
+    value: &Value,
+    path: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    if value.as_u64().is_none() {
+        diagnostics.push(diagnostic(
+            request,
+            "negative_integer",
+            path,
+            "value must be a non-negative integer",
         ));
     }
 }

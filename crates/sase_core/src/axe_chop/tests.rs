@@ -865,6 +865,52 @@ fn strict_axe_validation_accepts_missing_descriptions_by_default() {
 }
 
 #[test]
+fn strict_axe_validation_accepts_nonnegative_or_missing_wait_runners() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {
+                "exclusive": {"wait_runners": 0},
+                "background": {"wait_runners": 3},
+                "default": {}
+            }}}
+        }))
+        .unwrap();
+
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_invalid_wait_runners() {
+    for value in [json!(-1), json!("1"), json!(1.5)] {
+        let request: AxeConfigValidationRequestWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "config": {"axe": {"lumberjacks": {"checks": {
+                    "wait_runners": value
+                }}}},
+                "provenance": {
+                    "axe.lumberjacks.checks.wait_runners": "overlay:test.yml"
+                }
+            }))
+            .unwrap();
+
+        let diagnostics = validate_axe_config(&request).unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "negative_integer");
+        assert_eq!(
+            diagnostics[0].message,
+            "value must be a non-negative integer"
+        );
+        assert_eq!(
+            diagnostics[0].path.as_deref(),
+            Some("axe.lumberjacks.checks.wait_runners")
+        );
+        assert_eq!(diagnostics[0].layer.as_deref(), Some("overlay:test.yml"));
+    }
+}
+
+#[test]
 fn strict_axe_validation_rejects_blank_descriptions() {
     let request: AxeConfigValidationRequestWire =
         serde_json::from_value(json!({
