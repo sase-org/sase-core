@@ -14,9 +14,15 @@ pub mod validate;
 pub mod wire;
 
 pub use artifact_link::{
-    parse_sdd_artifact_link, render_sdd_artifact_link,
-    upsert_sdd_artifact_link, SddArtifactDocumentWire, SddArtifactLinkKindWire,
-    SddArtifactLinkTypeWire, SddLegacyArtifactLinkWire,
+    parse_sdd_artifact_link, parse_sdd_plan_header_block,
+    remove_sdd_plan_header_section, render_sdd_artifact_link,
+    render_sdd_plan_header_block, replace_sdd_plan_header_block,
+    upsert_sdd_artifact_link, upsert_sdd_plan_header_section,
+    SddArtifactDocumentWire, SddArtifactLinkKindWire, SddArtifactLinkTypeWire,
+    SddLegacyArtifactLinkWire, SddPlanHeaderDocumentWire,
+    SddPlanHeaderEntryWire, SddPlanHeaderSectionKindWire,
+    SddPlanHeaderSectionWire, MAX_RENDERED_PLAN_HEADER_ENTRIES,
+    PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
 };
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use refs::{

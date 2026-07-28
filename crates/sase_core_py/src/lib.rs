@@ -150,6 +150,12 @@
 //! - `sdd_artifact_link_parse(document: str) -> dict`
 //! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
 //! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
+//! - `sdd_plan_header_block_wire_schema_version() -> int`
+//! - `sdd_plan_header_block_parse(document: str) -> dict`
+//! - `sdd_plan_header_block_render(sections: list[dict]) -> str`
+//! - `sdd_plan_header_block_upsert_section(document: str, section: dict, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
+//! - `sdd_plan_header_block_replace(document: str, sections: list[dict], remove_legacy: bool, allow_resolved_mixed: bool) -> str`
+//! - `sdd_plan_header_block_remove_section(document: str, kind: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
@@ -433,13 +439,19 @@ use sase_core::plan::{
     canonicalize_plan_reference as core_canonicalize_plan_reference,
     parse_plan_reference as core_parse_plan_reference,
     parse_sdd_artifact_link as core_parse_sdd_artifact_link,
+    parse_sdd_plan_header_block as core_parse_sdd_plan_header_block,
     plan_frontmatter_schema as core_plan_frontmatter_schema,
     plan_validate_with_mode as core_plan_validate_with_mode,
+    remove_sdd_plan_header_section as core_remove_sdd_plan_header_section,
     render_plan_reference as core_render_plan_reference,
     render_sdd_artifact_link as core_render_sdd_artifact_link,
+    render_sdd_plan_header_block as core_render_sdd_plan_header_block,
+    replace_sdd_plan_header_block as core_replace_sdd_plan_header_block,
     resolve_plan_reference as core_resolve_plan_reference,
     search_plans as core_plan_search,
-    upsert_sdd_artifact_link as core_upsert_sdd_artifact_link, PlanError,
+    upsert_sdd_artifact_link as core_upsert_sdd_artifact_link,
+    upsert_sdd_plan_header_section as core_upsert_sdd_plan_header_section,
+    PlanError, SddPlanHeaderSectionWire, PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::project_spec::{
@@ -2796,6 +2808,116 @@ fn py_sdd_artifact_link_upsert(
         allow_resolved_mixed,
     )
     .map_err(plan_error_to_pyerr)
+}
+
+/// Return the plan-header block wire schema version.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_wire_schema_version")]
+fn py_sdd_plan_header_block_wire_schema_version() -> u64 {
+    PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION
+}
+
+/// Parse a complete SDD document's provenance header block.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_parse")]
+fn py_sdd_plan_header_block_parse<'py>(
+    py: Python<'py>,
+    document: &str,
+) -> PyResult<PyObject> {
+    plan_result_to_py(py, Ok(core_parse_sdd_plan_header_block(document)))
+}
+
+/// Render a complete canonical provenance header block.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_render")]
+fn py_sdd_plan_header_block_render(
+    sections: &Bound<'_, PyList>,
+) -> PyResult<String> {
+    let sections = sdd_plan_header_sections_from_py_list(sections)?;
+    core_render_sdd_plan_header_block(&sections).map_err(plan_error_to_pyerr)
+}
+
+/// Install or replace one provenance header section.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_upsert_section")]
+fn py_sdd_plan_header_block_upsert_section(
+    document: &str,
+    section: &Bound<'_, PyDict>,
+    remove_legacy: bool,
+    allow_resolved_mixed: bool,
+) -> PyResult<String> {
+    let section = sdd_plan_header_section_from_pydict(section)?;
+    core_upsert_sdd_plan_header_section(
+        document,
+        section,
+        remove_legacy,
+        allow_resolved_mixed,
+    )
+    .map_err(plan_error_to_pyerr)
+}
+
+/// Replace the complete provenance header block.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_replace")]
+fn py_sdd_plan_header_block_replace(
+    document: &str,
+    sections: &Bound<'_, PyList>,
+    remove_legacy: bool,
+    allow_resolved_mixed: bool,
+) -> PyResult<String> {
+    let sections = sdd_plan_header_sections_from_py_list(sections)?;
+    core_replace_sdd_plan_header_block(
+        document,
+        &sections,
+        remove_legacy,
+        allow_resolved_mixed,
+    )
+    .map_err(plan_error_to_pyerr)
+}
+
+/// Remove one provenance header section.
+#[pyfunction]
+#[pyo3(name = "sdd_plan_header_block_remove_section")]
+fn py_sdd_plan_header_block_remove_section(
+    document: &str,
+    kind: &str,
+    remove_legacy: bool,
+    allow_resolved_mixed: bool,
+) -> PyResult<String> {
+    core_remove_sdd_plan_header_section(
+        document,
+        kind,
+        remove_legacy,
+        allow_resolved_mixed,
+    )
+    .map_err(plan_error_to_pyerr)
+}
+
+fn sdd_plan_header_section_from_pydict(
+    section: &Bound<'_, PyDict>,
+) -> PyResult<SddPlanHeaderSectionWire> {
+    let value = py_to_json_value(section.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "invalid plan header section payload: {error}"
+        ))
+    })
+}
+
+fn sdd_plan_header_sections_from_py_list(
+    sections: &Bound<'_, PyList>,
+) -> PyResult<Vec<SddPlanHeaderSectionWire>> {
+    sections
+        .iter()
+        .map(|section| {
+            let value = py_to_json_value(&section)?;
+            serde_json::from_value(value).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "invalid plan header section payload: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 #[pyfunction]
@@ -5816,6 +5938,21 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_sdd_plan_header_block_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_plan_header_block_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_plan_header_block_render, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_sdd_plan_header_block_upsert_section,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_sdd_plan_header_block_replace, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_sdd_plan_header_block_remove_section,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -7163,6 +7300,68 @@ mod tests {
                 "/absolute.md",
             )
             .is_err());
+        });
+    }
+
+    #[test]
+    fn sdd_plan_header_block_bindings_match_core_contract() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_sdd_plan_header_block_wire_schema_version(),
+                PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION
+            );
+            let sections_obj = json_value_to_py(
+                py,
+                &json!([
+                    {
+                        "kind": "PROMPT",
+                        "label": "202607/prompts/example.md",
+                        "target": "prompts/example.md"
+                    },
+                    {
+                        "kind": "COMMITS",
+                        "entries": [{
+                            "label": "699456a",
+                            "target": "https://github.com/sase-org/sase/commit/699456a",
+                            "trailing_text": "fix(parser): wrap safely"
+                        }]
+                    }
+                ]),
+            )
+            .unwrap();
+            let sections = sections_obj.bind(py).downcast::<PyList>().unwrap();
+            let rendered = py_sdd_plan_header_block_render(sections).unwrap();
+            assert!(rendered.contains("- **PROMPT:**"));
+            assert!(rendered.contains("- **COMMITS:**"));
+
+            let document = format!("{rendered}\n\n# Plan\n");
+            let parsed = py_sdd_plan_header_block_parse(py, &document).unwrap();
+            let parsed = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(parsed["schema_version"], json!(1));
+            assert_eq!(parsed["sections"][1]["kind"], json!("COMMITS"));
+
+            let section_obj = json_value_to_py(
+                py,
+                &json!({
+                    "kind": "PARENT",
+                    "label": "202607/epic.md",
+                    "target": "https://github.com/sase-org/sase--plans/blob/main/202607/epic.md"
+                }),
+            )
+            .unwrap();
+            let section = section_obj.bind(py).downcast::<PyDict>().unwrap();
+            let updated = py_sdd_plan_header_block_upsert_section(
+                &document, section, false, false,
+            )
+            .unwrap();
+            assert!(updated.contains("- **PARENT:**"));
+
+            let removed = py_sdd_plan_header_block_remove_section(
+                &updated, "PARENT", false, false,
+            )
+            .unwrap();
+            assert_eq!(removed, document);
         });
     }
 
