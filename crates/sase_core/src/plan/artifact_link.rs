@@ -13,7 +13,7 @@ use serde_yaml::Value;
 use super::wire::PlanError;
 
 /// Wire schema for the plan-header block contract.
-pub const PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION: u64 = 2;
 
 /// Maximum number of visible entries in one list-shaped section.
 pub const MAX_RENDERED_PLAN_HEADER_ENTRIES: usize = 50;
@@ -27,6 +27,7 @@ pub enum SddPlanHeaderSectionKindWire {
     Plan,
     Prompt,
     Parent,
+    Bead,
     Agents,
     Commits,
 }
@@ -37,10 +38,11 @@ impl SddPlanHeaderSectionKindWire {
             "PLAN" => Ok(Self::Plan),
             "PROMPT" => Ok(Self::Prompt),
             "PARENT" => Ok(Self::Parent),
+            "BEAD" => Ok(Self::Bead),
             "AGENTS" => Ok(Self::Agents),
             "COMMITS" => Ok(Self::Commits),
             _ => Err(PlanError::validation(format!(
-                "unsupported plan header section `{value}`; expected PLAN, PROMPT, PARENT, AGENTS, or COMMITS"
+                "unsupported plan header section `{value}`; expected PLAN, PROMPT, PARENT, BEAD, AGENTS, or COMMITS"
             ))),
         }
     }
@@ -50,6 +52,7 @@ impl SddPlanHeaderSectionKindWire {
             Self::Plan => "PLAN",
             Self::Prompt => "PROMPT",
             Self::Parent => "PARENT",
+            Self::Bead => "BEAD",
             Self::Agents => "AGENTS",
             Self::Commits => "COMMITS",
         }
@@ -60,12 +63,16 @@ impl SddPlanHeaderSectionKindWire {
             Self::Plan => Some("plan"),
             Self::Prompt => Some("prompt"),
             Self::Parent => Some("parent"),
-            Self::Agents | Self::Commits => None,
+            Self::Bead | Self::Agents | Self::Commits => None,
         }
     }
 
     fn is_link(self) -> bool {
-        matches!(self, Self::Plan | Self::Prompt | Self::Parent)
+        matches!(self, Self::Plan | Self::Prompt | Self::Parent | Self::Bead)
+    }
+
+    fn allows_unlinked_label(self) -> bool {
+        self == Self::Bead
     }
 }
 
@@ -429,12 +436,19 @@ pub fn render_sdd_plan_header_block(
     for section in sections {
         if section.kind.is_link() {
             let label = section.label.as_deref().expect("normalized label");
-            let target = section.target.as_deref().expect("normalized target");
-            lines.push(format!(
-                "- **{}:** [{}]({target})",
-                section.kind.as_str(),
-                escape_link_label(label)
-            ));
+            if let Some(target) = section.target.as_deref() {
+                lines.push(format!(
+                    "- **{}:** [{}]({target})",
+                    section.kind.as_str(),
+                    escape_link_label(label)
+                ));
+            } else {
+                lines.push(format!(
+                    "- **{}:** {}",
+                    section.kind.as_str(),
+                    escape_markdown_text(label)
+                ));
+            }
             continue;
         }
 
@@ -734,6 +748,7 @@ fn normalize_sections(
         SddPlanHeaderSectionKindWire::Plan,
         SddPlanHeaderSectionKindWire::Prompt,
         SddPlanHeaderSectionKindWire::Parent,
+        SddPlanHeaderSectionKindWire::Bead,
         SddPlanHeaderSectionKindWire::Agents,
         SddPlanHeaderSectionKindWire::Commits,
     ]
@@ -758,15 +773,16 @@ fn normalize_section(
                 section.kind.as_str()
             ))
         })?;
-        let target = section.target.as_deref().ok_or_else(|| {
-            PlanError::validation(format!(
+        validate_label(label).map_err(PlanError::validation)?;
+        if let Some(target) = section.target.as_deref() {
+            validate_section_target(section.kind, target)
+                .map_err(PlanError::validation)?;
+        } else if !section.kind.allows_unlinked_label() {
+            return Err(PlanError::validation(format!(
                 "{} requires a target",
                 section.kind.as_str()
-            ))
-        })?;
-        validate_label(label).map_err(PlanError::validation)?;
-        validate_section_target(section.kind, target)
-            .map_err(PlanError::validation)?;
+            )));
+        }
         return Ok(Some(section.clone()));
     }
 
@@ -856,25 +872,39 @@ fn parse_block(
                 append_continuation(&mut logical, lines[index].text);
                 index += 1;
             }
-            let (label, target, rest) = parse_markdown_link(logical.trim())
-                .ok_or_else(|| {
-                    format!(
-                        "malformed {} plan header link Markdown",
+            let logical = logical.trim();
+            let (label, target) = if logical.starts_with('[') {
+                let (label, target, rest) = parse_markdown_link(logical)
+                    .ok_or_else(|| {
+                        format!(
+                            "malformed {} plan header link Markdown",
+                            kind.as_str()
+                        )
+                    })?;
+                if !rest.trim().is_empty() {
+                    return Err(format!(
+                        "unexpected trailing text in {} plan header section",
                         kind.as_str()
-                    )
-                })?;
-            if !rest.trim().is_empty() {
+                    ));
+                }
+                (label, Some(target))
+            } else if kind.allows_unlinked_label() {
+                (unescape_markdown(logical)?, None)
+            } else {
                 return Err(format!(
-                    "unexpected trailing text in {} plan header section",
+                    "malformed {} plan header link Markdown",
                     kind.as_str()
                 ));
-            }
+            };
             validate_label(&label).map_err(str::to_string)?;
-            validate_section_target(kind, &target).map_err(str::to_string)?;
+            if let Some(target) = target.as_deref() {
+                validate_section_target(kind, target)
+                    .map_err(str::to_string)?;
+            }
             sections.push(SddPlanHeaderSectionWire {
                 kind,
                 label: Some(label),
-                target: Some(target),
+                target,
                 entries: Vec::new(),
                 omitted: 0,
             });
@@ -1370,6 +1400,9 @@ fn validate_section_target(
         SddPlanHeaderSectionKindWire::Parent => {
             validate_absolute_or_relative_target(target)
         }
+        SddPlanHeaderSectionKindWire::Bead => {
+            validate_absolute_or_relative_target(target)
+        }
         SddPlanHeaderSectionKindWire::Agents
         | SddPlanHeaderSectionKindWire::Commits => {
             Err("list-shaped section cannot have a target")
@@ -1528,18 +1561,78 @@ mod tests {
                 "202607/epic.md",
                 "https://github.com/sase-org/sase--plans/blob/main/202607/epic.md",
             ),
+            link_section(
+                SddPlanHeaderSectionKindWire::Bead,
+                "sase-ai.8",
+                "https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/sase-ai.8.md",
+            ),
         ];
         let rendered = render_sdd_plan_header_block(&sections).unwrap();
         assert!(rendered.starts_with("- **PROMPT:**"));
         let document = format!("{rendered}\n\n# Plan\n");
         let parsed = parse_sdd_plan_header_block(&document);
         assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
-        assert_eq!(parsed.sections.len(), 3);
+        assert_eq!(parsed.sections.len(), 4);
         assert_eq!(
             render_sdd_plan_header_block(&parsed.sections).unwrap(),
             rendered
         );
         assert_eq!(parsed.body, "# Plan\n");
+    }
+
+    #[test]
+    fn bead_section_supports_linked_unlinked_and_prettier_wrapped_labels() {
+        let linked = link_section(
+            SddPlanHeaderSectionKindWire::Bead,
+            "sase-ai.8",
+            "https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/sase-ai.8.md",
+        );
+        let rendered =
+            render_sdd_plan_header_block(std::slice::from_ref(&linked))
+                .unwrap();
+        assert_eq!(
+            rendered,
+            "- **BEAD:** [sase-ai.8](https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/sase-ai.8.md)"
+        );
+
+        let wrapped = "- **BEAD:**\n  [sase-ai.8](https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/sase-ai.8.md)\n\n# Plan\n";
+        let parsed = parse_sdd_plan_header_block(wrapped);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert_eq!(parsed.sections, vec![linked]);
+
+        let unlinked = SddPlanHeaderSectionWire {
+            kind: SddPlanHeaderSectionKindWire::Bead,
+            label: Some("sase-ai.8".to_string()),
+            target: None,
+            entries: Vec::new(),
+            omitted: 0,
+        };
+        let rendered =
+            render_sdd_plan_header_block(std::slice::from_ref(&unlinked))
+                .unwrap();
+        assert_eq!(rendered, "- **BEAD:** sase-ai.8");
+        let parsed =
+            parse_sdd_plan_header_block(&format!("{rendered}\n\n# Plan\n"));
+        assert_eq!(parsed.sections, vec![unlinked]);
+    }
+
+    #[test]
+    fn bead_upsert_keeps_bead_frontmatter() {
+        let document =
+            "---\ntier: tale\nbead: sase-ai.8\nbead_id: sase-ai\n---\n\n# Plan\n";
+        let section = link_section(
+            SddPlanHeaderSectionKindWire::Bead,
+            "sase-ai",
+            "https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/README.md",
+        );
+
+        let updated =
+            upsert_sdd_plan_header_section(document, section, true, false)
+                .unwrap();
+
+        assert!(updated.contains("bead: sase-ai.8"));
+        assert!(updated.contains("bead_id: sase-ai"));
+        assert!(updated.contains("- **BEAD:** [sase-ai]"));
     }
 
     #[test]

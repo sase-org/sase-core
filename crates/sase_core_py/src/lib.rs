@@ -7330,6 +7330,11 @@ mod tests {
                         "target": "prompts/example.md"
                     },
                     {
+                        "kind": "BEAD",
+                        "label": "sase-ai.8",
+                        "target": "https://github.com/sase-org/sase--beads/blob/main/pages/sase-ai/sase-ai.8.md"
+                    },
+                    {
                         "kind": "COMMITS",
                         "entries": [{
                             "label": "699456a",
@@ -7348,8 +7353,9 @@ mod tests {
             let document = format!("{rendered}\n\n# Plan\n");
             let parsed = py_sdd_plan_header_block_parse(py, &document).unwrap();
             let parsed = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed["schema_version"], json!(1));
-            assert_eq!(parsed["sections"][1]["kind"], json!("COMMITS"));
+            assert_eq!(parsed["schema_version"], json!(2));
+            assert_eq!(parsed["sections"][1]["kind"], json!("BEAD"));
+            assert_eq!(parsed["sections"][2]["kind"], json!("COMMITS"));
 
             let section_obj = json_value_to_py(
                 py,
