@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5](https://github.com/sase-org/sase-core/compare/v0.12.4...v0.12.5) - 2026-07-28
+
+### Added
+
+- *(beads)* support atomic close notes
+- *(beads)* add epic-aware idempotent preclaims
+- *(plan)* add reciprocal bead header sections (sase-ai.8)
+
+### Fixed
+
+- *(beads)* resolve clippy lints in close-note support
+- *(beads)* expose mutation changes in CLI summaries
+- *(beads)* stabilize regenerated projection ordering
+
 ## [0.12.4](https://github.com/sase-org/sase-core/compare/v0.12.3...v0.12.4) - 2026-07-28
 
 ### Added
