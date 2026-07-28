@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::plan::canonicalize_plan_reference;
 
 use super::mutation::{
-    add_dependency, close_issues, create_issue, open_issue,
+    add_dependency, close_issues_with_note, create_issue, open_issue,
     remove_dependencies, remove_issues, update_issue, BeadCreateRequestWire,
     BeadMutationOutcomeWire, BeadUpdateFieldsWire,
 };
@@ -920,14 +920,25 @@ fn handle_close(
     args: &[String],
     write_beads_dir: &Path,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    let Some((ids, force, reason, resolution)) = parse_close_args(args) else {
+    let Some((ids, force, note, reason, resolution)) = parse_close_args(args)
+    else {
         return Ok(defer());
     };
     if ids.is_empty() {
         return Ok(defer());
     }
     let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    match close_issues(write_beads_dir, &ids, reason, resolution, force, None) {
+    let note_author = note.as_ref().and_then(|_| close_note_author());
+    match close_issues_with_note(
+        write_beads_dir,
+        &ids,
+        reason,
+        resolution,
+        force,
+        note,
+        note_author,
+        None,
+    ) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -1432,12 +1443,14 @@ type ParsedCloseArgs = (
     Vec<String>,
     bool,
     Option<String>,
+    Option<String>,
     Option<BeadResolutionWire>,
 );
 
 fn parse_close_args(args: &[String]) -> Option<ParsedCloseArgs> {
     let mut ids = Vec::new();
     let mut force = false;
+    let mut note = None;
     let mut reason = None;
     let mut resolution = None;
     let mut idx = 0;
@@ -1445,6 +1458,11 @@ fn parse_close_args(args: &[String]) -> Option<ParsedCloseArgs> {
         let arg = &args[idx];
         if arg == "-f" || arg == "--force" {
             force = true;
+        } else if arg == "-n" || arg == "--note" {
+            idx += 1;
+            note = Some(args.get(idx)?.clone());
+        } else if let Some(value) = arg.strip_prefix("--note=") {
+            note = Some(value.to_string());
         } else if arg == "-r" || arg == "--reason" {
             idx += 1;
             reason = Some(args.get(idx)?.clone());
@@ -1462,7 +1480,18 @@ fn parse_close_args(args: &[String]) -> Option<ParsedCloseArgs> {
         }
         idx += 1;
     }
-    Some((ids, force, reason, resolution))
+    Some((ids, force, note, reason, resolution))
+}
+
+fn close_note_author() -> Option<String> {
+    ["SASE_AGENT_NAME", "SASE_AGENT"]
+        .into_iter()
+        .find_map(|key| {
+            env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 fn parse_resolution(value: &str) -> Option<BeadResolutionWire> {
@@ -2755,10 +2784,65 @@ mod tests {
     }
 
     #[test]
+    fn close_fast_path_accepts_note_and_updates_once() {
+        let store = seed_issues(vec![phase_issue(
+            "beads-1.1",
+            "Active phase",
+            "",
+            StatusWire::InProgress,
+            "2026-01-01T00:01:00Z",
+        )]);
+        let outcome = execute_bead_cli(
+            &[
+                "close".to_string(),
+                "beads-1.1".to_string(),
+                "--note".to_string(),
+                "verified with cargo test".to_string(),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 0);
+        let summary = outcome.mutation_summary.unwrap();
+        assert_eq!(summary.operation, "close");
+        assert_eq!(summary.issue_ids, vec!["beads-1.1"]);
+        let issue = read_store_issues(&store.beads_dir)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == "beads-1.1")
+            .unwrap();
+        assert_eq!(issue.status, StatusWire::Closed);
+        assert!(issue.notes.ends_with("] verified with cargo test"));
+        let (_manifest, streams) =
+            super::super::jsonl::read_event_store(&store.beads_dir).unwrap();
+        let operations = streams[0]
+            .events
+            .iter()
+            .rev()
+            .take(2)
+            .map(|event| event.operation.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                super::super::events::BeadEventOperationWire::IssueClosed,
+                super::super::events::BeadEventOperationWire::IssueUpdated,
+            ]
+        );
+    }
+
+    #[test]
     fn close_parser_accepts_force_with_reason_and_resolution() {
-        let (ids, force, reason, resolution) = parse_close_args(&[
+        let (ids, force, note, reason, resolution) = parse_close_args(&[
             "beads-1".to_string(),
             "--force".to_string(),
+            "-n".to_string(),
+            "verified".to_string(),
             "--reason".to_string(),
             "Requirements changed".to_string(),
             "--resolution=canceled".to_string(),
@@ -2767,6 +2851,7 @@ mod tests {
 
         assert_eq!(ids, vec!["beads-1"]);
         assert!(force);
+        assert_eq!(note.as_deref(), Some("verified"));
         assert_eq!(reason.as_deref(), Some("Requirements changed"));
         assert_eq!(resolution, Some(BeadResolutionWire::Canceled));
     }

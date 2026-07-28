@@ -163,6 +163,7 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
+//! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -347,7 +348,7 @@ use sase_core::bead::{
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
     claim_for_agent_launch as core_bead_claim_for_agent_launch,
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
-    close_issues as core_bead_close_issues,
+    close_issues_with_note as core_bead_close_issues_with_note,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
     doctor_with_plan_roots as core_bead_doctor_with_plan_roots,
     execute_bead_cli as core_execute_bead_cli,
@@ -3159,7 +3160,16 @@ fn py_bead_open<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_close")]
-#[pyo3(signature = (beads_dir, issue_ids, reason=None, resolution=None, force=false, now=None))]
+#[pyo3(signature = (
+    beads_dir,
+    issue_ids,
+    reason=None,
+    resolution=None,
+    force=false,
+    now=None,
+    note=None,
+    author=None,
+))]
 fn py_bead_close<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -3168,6 +3178,8 @@ fn py_bead_close<'py>(
     resolution: Option<String>,
     force: bool,
     now: Option<String>,
+    note: Option<String>,
+    author: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     let resolution = resolution
@@ -3177,8 +3189,9 @@ fn py_bead_close<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| {
-            core_bead_close_issues(
-                &beads_dir, &issue_ids, reason, resolution, force, now,
+            core_bead_close_issues_with_note(
+                &beads_dir, &issue_ids, reason, resolution, force, note,
+                author, now,
             )
         }),
     )

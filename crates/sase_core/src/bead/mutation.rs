@@ -303,34 +303,47 @@ pub fn append_issue_note(
         let author = author
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| store.config.owner.clone());
-        let new_notes = appended_note_text(
-            &store.issues[index].notes,
-            &now,
-            &author,
-            entry,
-        );
-        store.issues[index].notes = new_notes.clone();
-        store.issues[index].updated_at = now.clone();
-        let issue = store.issues[index].clone();
-        issue.validate()?;
-        store.append_issue_event(
-            issue_id,
-            BeadEventOperationWire::IssueUpdated,
-            BeadEventPayloadWire::IssueUpdated {
-                fields: BeadIssueUpdateEventFieldsWire {
-                    notes: Some(new_notes),
-                    ..Default::default()
-                },
-            },
-            &now,
-            &author,
-        )?;
+        let issue =
+            append_note_to_store(&mut store, index, entry, &author, &now)?;
         store.save()?;
 
         let mut result = outcome("note", true, vec![issue.id.clone()]);
         result.issue = Some(issue);
         Ok(result)
     })
+}
+
+fn append_note_to_store(
+    store: &mut MutableStore,
+    issue_index: usize,
+    entry: &str,
+    author: &str,
+    now: &str,
+) -> Result<IssueWire, BeadError> {
+    let issue_id = store.issues[issue_index].id.clone();
+    let new_notes = appended_note_text(
+        &store.issues[issue_index].notes,
+        now,
+        author,
+        entry,
+    );
+    store.issues[issue_index].notes = new_notes.clone();
+    store.issues[issue_index].updated_at = now.to_string();
+    let issue = store.issues[issue_index].clone();
+    issue.validate()?;
+    store.append_issue_event(
+        &issue_id,
+        BeadEventOperationWire::IssueUpdated,
+        BeadEventPayloadWire::IssueUpdated {
+            fields: BeadIssueUpdateEventFieldsWire {
+                notes: Some(new_notes),
+                ..Default::default()
+            },
+        },
+        now,
+        author,
+    )?;
+    Ok(issue)
 }
 
 pub fn claim_for_agent_launch(
@@ -727,6 +740,34 @@ pub fn close_issues(
     force: bool,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    close_issues_with_note(
+        beads_dir, issue_ids, reason, resolution, force, None, None, now,
+    )
+}
+
+pub fn close_issues_with_note(
+    beads_dir: &Path,
+    issue_ids: &[String],
+    reason: Option<String>,
+    resolution: Option<BeadResolutionWire>,
+    force: bool,
+    note: Option<String>,
+    note_author: Option<String>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let note = match note {
+        None => None,
+        Some(entry) => {
+            let entry = entry.trim().to_string();
+            if entry.is_empty() {
+                return Err(BeadError::validation(
+                    "note entry cannot be empty or blank",
+                ));
+            }
+            Some((entry, note_author))
+        }
+    };
+
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
         let now = now.unwrap_or_else(now_utc);
@@ -749,10 +790,12 @@ pub fn close_issues(
             }
         }
         let mut standard_close_ids = BTreeSet::new();
+        let mut requested_ids = BTreeSet::new();
         let mut unresolved_by_request = Vec::new();
 
         for issue_id in issue_ids {
             let issue = store.get_issue(issue_id)?;
+            requested_ids.insert(issue.id.clone());
             standard_close_ids.insert(issue.id.clone());
             let unresolved = unresolved_descendants(&store.issues, issue_id);
             if !force && !unresolved.is_empty() {
@@ -770,6 +813,20 @@ pub fn close_issues(
                     .map(|descendant| descendant.id.clone())
                     .collect::<Vec<_>>(),
             ));
+        }
+
+        let mut noted_ids = Vec::new();
+        if let Some((entry, requested_author)) = note.as_ref() {
+            let author = requested_author
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&store.config.owner)
+                .to_string();
+            for issue_id in &requested_ids {
+                let index = store.issue_index(issue_id)?;
+                append_note_to_store(&mut store, index, entry, &author, &now)?;
+                noted_ids.push(issue_id.clone());
+            }
         }
         let mut batch = CloseBatch {
             standard_close_ids,
@@ -823,11 +880,17 @@ pub fn close_issues(
             )?;
         }
 
-        let changed = !batch.closed_ids.is_empty();
+        let changed = !batch.closed_ids.is_empty() || !noted_ids.is_empty();
         if changed {
             store.save()?;
         }
-        let mut result = outcome("close", changed, batch.closed_ids);
+        let mut affected_ids = batch.closed_ids;
+        for issue_id in noted_ids {
+            if !affected_ids.contains(&issue_id) {
+                affected_ids.push(issue_id);
+            }
+        }
+        let mut result = outcome("close", changed, affected_ids);
         if !changed {
             result.message =
                 "all requested issues were already closed".to_string();
@@ -3522,6 +3585,112 @@ mod tests {
         let error =
             append_issue_note(&beads_dir, &issue.id, " \t ", None, None)
                 .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(error.message, "note entry cannot be empty or blank");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn close_with_note_appends_to_every_requested_issue_before_close() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let first = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                notes: "Existing context".to_string(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let second = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Second".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let result = close_issues_with_note(
+            &beads_dir,
+            &[first.id.clone(), second.id.clone()],
+            None,
+            None,
+            false,
+            Some(" verified with cargo test ".to_string()),
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.issue_ids, vec![first.id.clone(), second.id.clone()]);
+        assert_eq!(result.issues.len(), 2);
+        let store = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(
+            store.get_issue(&first.id).unwrap().notes,
+            "Existing context\n\n[2026-01-01T00:02:00Z · agent-1] verified with cargo test"
+        );
+        assert_eq!(
+            store.get_issue(&second.id).unwrap().notes,
+            "[2026-01-01T00:02:00Z · agent-1] verified with cargo test"
+        );
+        for issue_id in [&first.id, &second.id] {
+            let issue = store.get_issue(issue_id).unwrap();
+            assert_eq!(issue.status, StatusWire::Closed);
+            assert_eq!(issue.updated_at, "2026-01-01T00:02:00Z");
+            let stream = store
+                .streams
+                .iter()
+                .find(|stream| stream.root_issue_id == *issue_id)
+                .unwrap();
+            assert_eq!(
+                stream
+                    .events
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .map(|event| event.operation.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    BeadEventOperationWire::IssueClosed,
+                    BeadEventOperationWire::IssueUpdated,
+                ]
+            );
+            assert_eq!(stream.events[stream.events.len() - 2].actor, "agent-1");
+        }
+    }
+
+    #[test]
+    fn close_with_note_rejects_blank_entry_without_writing() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = close_issues_with_note(
+            &beads_dir,
+            &[phase_id],
+            None,
+            None,
+            false,
+            Some(" \t ".to_string()),
+            None,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap_err();
 
         assert_eq!(error.kind, "validation");
         assert_eq!(error.message, "note entry cannot be empty or blank");
