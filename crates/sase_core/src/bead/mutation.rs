@@ -240,10 +240,18 @@ pub fn update_issue(
         if fields.status.as_deref() == Some("closed") {
             reject_unclosed_descendants(&store.issues, issue_id)?;
         }
-        let was_closed = store.issues[index].status == StatusWire::Closed;
-        let mut issue = store.issues[index].clone();
+        let current = store.issues[index].clone();
+        let was_closed = current.status == StatusWire::Closed;
+        let mut issue = current.clone();
         let event_fields = event_fields_from_update_fields(&fields)?;
+        let now = fields.now.clone().unwrap_or_else(now_utc);
         apply_update_fields(&mut issue, fields)?;
+        if issue == current {
+            let mut result = outcome("update", false, vec![current.id.clone()]);
+            result.issue = Some(current);
+            return Ok(result);
+        }
+        issue.updated_at = now;
         issue.validate()?;
         store.issues[index] = issue.clone();
         store.append_issue_event(
@@ -350,6 +358,19 @@ pub fn claim_for_agent_launch(
             });
         }
 
+        let current = store.issues[index].clone();
+        if current.status == StatusWire::InProgress
+            && current.assignee == agent_name
+        {
+            let mut result = outcome(
+                "claim_for_agent_launch",
+                false,
+                vec![current.id.clone()],
+            );
+            result.issue = Some(current);
+            return Ok(result);
+        }
+
         let now = now.unwrap_or_else(now_utc);
         store.issues[index].status = StatusWire::InProgress;
         store.issues[index].assignee = agent_name.to_string();
@@ -398,8 +419,10 @@ pub fn claim_for_agent_wait(
         let index = store.issue_index(issue_id)?;
         let current = store.issues[index].clone();
 
-        if current.status == StatusWire::Claimed
-            && current.assignee == agent_name
+        if matches!(
+            current.status,
+            StatusWire::Claimed | StatusWire::InProgress
+        ) && current.assignee == agent_name
         {
             let mut result = outcome(
                 "claim_for_agent_wait",
@@ -520,11 +543,13 @@ pub fn preclaim_epic_work_plan(
     beads_dir: &Path,
     epic_id: &str,
     assignments: &[BeadPreclaimAssignmentWire],
+    epic_agent_name: Option<String>,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
-        let epic = store.get_issue(epic_id)?;
+        let epic_index = store.issue_index(epic_id)?;
+        let epic = store.issues[epic_index].clone();
         if epic.issue_type != IssueTypeWire::Plan {
             return Err(BeadError {
                 kind: "not_a_plan".to_string(),
@@ -542,10 +567,24 @@ pub fn preclaim_epic_work_plan(
                 ),
             });
         }
+        if let Some(agent_name) = epic_agent_name.as_deref() {
+            if agent_name.trim().is_empty() {
+                return Err(BeadError::validation(
+                    "epic agent name for work preclaim cannot be empty or blank",
+                ));
+            }
+            if epic.status == StatusWire::Closed {
+                return Err(BeadError::validation(format!(
+                    "preclaim target is closed: {epic_id}"
+                )));
+            }
+        }
 
         let mut seen = HashSet::new();
+        let target_count =
+            assignments.len() + usize::from(epic_agent_name.is_some());
         let mut indexes = Vec::with_capacity(assignments.len());
-        let mut rollback = Vec::with_capacity(assignments.len());
+        let mut rollback = Vec::with_capacity(target_count);
         for assignment in assignments {
             if !seen.insert(assignment.bead_id.as_str()) {
                 return Err(BeadError::validation(format!(
@@ -580,9 +619,16 @@ pub fn preclaim_epic_work_plan(
                 assignee: issue.assignee.clone(),
             });
         }
+        if epic_agent_name.is_some() {
+            rollback.push(BeadPreclaimRollbackWire {
+                bead_id: epic.id.clone(),
+                status: epic.status.clone(),
+                assignee: epic.assignee.clone(),
+            });
+        }
 
         let now = now.unwrap_or_else(now_utc);
-        let mut updated = Vec::with_capacity(assignments.len());
+        let mut updated = Vec::with_capacity(target_count);
         for (assignment, index) in assignments.iter().zip(indexes) {
             let issue = &mut store.issues[index];
             issue.status = StatusWire::InProgress;
@@ -602,11 +648,29 @@ pub fn preclaim_epic_work_plan(
                 &issue.created_by,
             )?;
         }
+        if let Some(agent_name) = epic_agent_name {
+            let issue = &mut store.issues[epic_index];
+            issue.status = StatusWire::InProgress;
+            issue.assignee = agent_name.clone();
+            issue.updated_at = now.clone();
+            issue.validate()?;
+            let updated_epic = issue.clone();
+            store.append_issue_event(
+                epic_id,
+                BeadEventOperationWire::EpicWorkPreclaimed,
+                BeadEventPayloadWire::EpicWorkPreclaimed { agent_name },
+                &now,
+                &updated_epic.created_by,
+            )?;
+            updated.push(updated_epic);
+        }
 
-        store.save()?;
+        if !updated.is_empty() {
+            store.save()?;
+        }
         let mut result = outcome(
             "preclaim_epic_work",
-            !assignments.is_empty(),
+            !updated.is_empty(),
             updated.iter().map(|issue| issue.id.clone()).collect(),
         );
         result.issues = updated;
@@ -759,8 +823,10 @@ pub fn close_issues(
             )?;
         }
 
-        store.save()?;
         let changed = !batch.closed_ids.is_empty();
+        if changed {
+            store.save()?;
+        }
         let mut result = outcome("close", changed, batch.closed_ids);
         if !changed {
             result.message =
@@ -1312,7 +1378,6 @@ fn apply_update_fields(
     if let Some(value) = fields.tier {
         issue.tier = Some(value);
     }
-    issue.updated_at = fields.now.unwrap_or_else(now_utc);
     Ok(())
 }
 
@@ -1940,6 +2005,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "Only phase issues can carry size metadata");
+    }
+
+    #[test]
+    fn update_with_matching_fields_is_a_quiet_no_op() {
+        let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+        let before = persisted_claim_state(&beads_dir);
+
+        let result = update_issue(
+            &beads_dir,
+            &phase_id,
+            BeadUpdateFieldsWire {
+                title: Some("Phase".to_string()),
+                status: Some("open".to_string()),
+                assignee: Some(String::new()),
+                model: Some(String::new()),
+                now: Some("2026-01-01T00:09:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.operation, "update");
+        assert!(!result.changed);
+        assert_eq!(result.issue_ids, vec![phase_id]);
+        assert_eq!(result.issue.unwrap().updated_at, "2026-01-01T00:01:00Z");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
     }
 
     #[test]
@@ -3142,7 +3233,7 @@ mod tests {
                 "Already done",
                 "plan",
                 None,
-                "closed",
+                "open",
                 "2026-01-01T00:00:00Z",
             ) + "\n",
         )
@@ -3161,6 +3252,7 @@ mod tests {
             .iter()
             .flat_map(|stream| stream.events.iter())
             .count();
+        let before = persisted_claim_state(&beads_dir);
 
         let result = close_issues(
             &beads_dir,
@@ -3183,6 +3275,7 @@ mod tests {
             .flat_map(|stream| stream.events.iter())
             .count();
         assert_eq!(event_count_after, event_count_before);
+        assert_eq!(persisted_claim_state(&beads_dir), before);
     }
 
     #[test]
@@ -3512,6 +3605,19 @@ mod tests {
             reduced.iter().find(|issue| issue.id == phase.id).unwrap();
         assert_eq!(reduced_phase.assignee, "agent-1");
 
+        let before_repeated = persisted_claim_state(&beads_dir);
+        let repeated = claim_for_agent_launch(
+            &beads_dir,
+            &phase.id,
+            "agent-1",
+            Some("2026-01-01T00:02:30Z".to_string()),
+        )
+        .unwrap();
+        assert!(!repeated.changed);
+        assert!(repeated.message.is_empty());
+        assert_eq!(repeated.issue.unwrap().updated_at, "2026-01-01T00:02:00Z");
+        assert_eq!(persisted_claim_state(&beads_dir), before_repeated);
+
         fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
         let reassigned = claim_for_agent_launch(
             &beads_dir,
@@ -3647,6 +3753,18 @@ mod tests {
         )
         .unwrap();
         let before_in_progress = persisted_claim_state(&beads_dir);
+        let retained = claim_for_agent_wait(
+            &beads_dir,
+            &phase_id,
+            "agent-2",
+            Some("2026-01-01T00:04:30Z".to_string()),
+        )
+        .unwrap();
+        assert!(!retained.changed);
+        assert!(retained.message.is_empty());
+        assert_eq!(retained.issue.unwrap().updated_at, "2026-01-01T00:04:00Z");
+        assert_eq!(persisted_claim_state(&beads_dir), before_in_progress);
+
         let in_progress = claim_for_agent_wait(
             &beads_dir,
             &phase_id,
@@ -4094,12 +4212,16 @@ mod tests {
                     agent_name: "agent-2".to_string(),
                 },
             ],
+            Some("land-agent".to_string()),
             Some("2026-01-01T00:04:00Z".to_string()),
         )
         .unwrap();
 
         assert_eq!(outcome.operation, "preclaim_epic_work");
-        assert_eq!(outcome.issue_ids, vec![p1.id.clone(), p2.id.clone()]);
+        assert_eq!(
+            outcome.issue_ids,
+            vec![p1.id.clone(), p2.id.clone(), epic.id.clone()]
+        );
         assert_eq!(
             outcome.rollback_preclaims,
             vec![
@@ -4113,10 +4235,19 @@ mod tests {
                     status: StatusWire::Open,
                     assignee: String::new(),
                 },
+                BeadPreclaimRollbackWire {
+                    bead_id: epic.id.clone(),
+                    status: StatusWire::Open,
+                    assignee: String::new(),
+                },
             ]
         );
 
         let store = MutableStore::load(&beads_dir).unwrap();
+        let updated_epic = store.get_issue(&epic.id).unwrap();
+        assert_eq!(updated_epic.status, StatusWire::InProgress);
+        assert_eq!(updated_epic.assignee, "land-agent");
+        assert_eq!(updated_epic.updated_at, "2026-01-01T00:04:00Z");
         let updated_p1 = store.get_issue(&p1.id).unwrap();
         assert_eq!(updated_p1.status, StatusWire::InProgress);
         assert_eq!(updated_p1.assignee, "agent-1");
@@ -4195,6 +4326,7 @@ mod tests {
                     agent_name: "agent-2".to_string(),
                 },
             ],
+            None,
             Some("2026-01-01T00:04:00Z".to_string()),
         )
         .unwrap_err();

@@ -3116,12 +3116,13 @@ fn py_bead_release_agent_claim<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "bead_preclaim_epic_work", signature = (beads_dir, epic_id, assignments, now=None))]
+#[pyo3(name = "bead_preclaim_epic_work", signature = (beads_dir, epic_id, assignments, epic_agent_name=None, now=None))]
 fn py_bead_preclaim_epic_work<'py>(
     py: Python<'py>,
     beads_dir: &str,
     epic_id: &str,
     assignments: &Bound<'py, PyList>,
+    epic_agent_name: Option<String>,
     now: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
@@ -3133,6 +3134,7 @@ fn py_bead_preclaim_epic_work<'py>(
                 &beads_dir,
                 epic_id,
                 &assignments,
+                epic_agent_name,
                 now,
             )
         }),
@@ -6098,6 +6100,7 @@ pub use sase_core as core;
 mod tests {
     use super::*;
     use pyo3::Python;
+    use sase_core::bead::IssueTypeWire;
     use serde_json::json;
     use std::fs;
 
@@ -6140,6 +6143,116 @@ mod tests {
                     "NOTE: bead design reference validation skipped: plan roots unavailable"
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn bead_mutation_bindings_preserve_changed_and_epic_preclaim() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let epic = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let path = beads_dir.to_str().unwrap();
+            let first = py_bead_claim_for_agent_launch(
+                py,
+                path,
+                &phase.id,
+                "worker",
+                Some("2026-01-01T00:02:00Z".to_string()),
+            )
+            .unwrap();
+            assert!(py_to_json_value(first.bind(py)).unwrap()["changed"]
+                .as_bool()
+                .unwrap());
+
+            let repeated = py_bead_claim_for_agent_launch(
+                py,
+                path,
+                &phase.id,
+                "worker",
+                Some("2026-01-01T00:03:00Z".to_string()),
+            )
+            .unwrap();
+            let repeated = py_to_json_value(repeated.bind(py)).unwrap();
+            assert!(!repeated["changed"].as_bool().unwrap());
+            assert_eq!(repeated["issue"]["updated_at"], "2026-01-01T00:02:00Z");
+
+            let retained = py_bead_claim_for_agent_wait(
+                py,
+                path,
+                &phase.id,
+                "worker",
+                Some("2026-01-01T00:04:00Z".to_string()),
+            )
+            .unwrap();
+            let retained = py_to_json_value(retained.bind(py)).unwrap();
+            assert!(!retained["changed"].as_bool().unwrap());
+            assert_eq!(retained["message"], "");
+
+            let fields = json_value_to_py(
+                py,
+                &json!({
+                    "title": "Phase",
+                    "now": "2026-01-01T00:05:00Z"
+                }),
+            )
+            .unwrap();
+            let fields = fields.bind(py).downcast::<PyDict>().unwrap();
+            let unchanged =
+                py_bead_update(py, path, &phase.id, fields).unwrap();
+            assert!(!py_to_json_value(unchanged.bind(py)).unwrap()["changed"]
+                .as_bool()
+                .unwrap());
+
+            let assignments = PyList::empty_bound(py);
+            append_json(
+                py,
+                &assignments,
+                json!({
+                    "bead_id": phase.id,
+                    "agent_name": "worker-2"
+                }),
+            );
+            let preclaimed = py_bead_preclaim_epic_work(
+                py,
+                path,
+                &epic.id,
+                &assignments,
+                Some("land".to_string()),
+                Some("2026-01-01T00:06:00Z".to_string()),
+            )
+            .unwrap();
+            let preclaimed = py_to_json_value(preclaimed.bind(py)).unwrap();
+            assert!(preclaimed["changed"].as_bool().unwrap());
+            assert_eq!(preclaimed["issue_ids"], json!([phase.id, epic.id]));
+            assert_eq!(preclaimed["rollback_preclaims"][1]["bead_id"], epic.id);
         });
     }
 
