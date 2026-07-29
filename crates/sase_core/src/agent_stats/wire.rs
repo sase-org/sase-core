@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 4;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -12,6 +12,14 @@ fn default_top_n() -> u32 {
 
 fn default_work_top_n() -> u32 {
     50
+}
+
+fn default_xprompt_top_n() -> u32 {
+    40
+}
+
+fn default_xprompt_breakdown_n() -> u32 {
+    5
 }
 
 /// Dimension used by the runtime ranking in a run-statistics response.
@@ -51,6 +59,15 @@ pub struct AgentRunStatsRequestWire {
     /// Maximum number of ChangeSpec work rows returned.
     #[serde(default = "default_work_top_n")]
     pub work_top_n: u32,
+    /// Maximum number of ranked xprompt rows returned.
+    #[serde(default = "default_xprompt_top_n")]
+    pub xprompt_top_n: u32,
+    /// Maximum number of model/project/partner rows per ranked xprompt.
+    #[serde(default = "default_xprompt_breakdown_n")]
+    pub xprompt_breakdown_top_n: u32,
+    /// Exact xprompt name to include as an unbounded focused breakdown.
+    #[serde(default)]
+    pub xprompt_focus: Option<String>,
 }
 
 /// Query controls for durable activity-log and plan statistics.
@@ -227,6 +244,64 @@ pub struct AgentRunBucketWire {
     pub runs: u64,
 }
 
+/// Ranked launch-boundary usage for one xprompt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentXPromptStatsRowWire {
+    pub name: String,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub runs: u64,
+    pub references: u64,
+    pub distinct_agents: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub success_rate: f64,
+    pub total_runtime_seconds: f64,
+    pub mean_runtime_seconds: Option<f64>,
+    pub first_run_ts: f64,
+    pub last_run_ts: f64,
+    pub models: Vec<AgentStatsCountWire>,
+    pub projects: Vec<AgentStatsCountWire>,
+    pub partners: Vec<AgentStatsCountWire>,
+}
+
+/// Full launch-boundary usage breakdown for one requested xprompt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentXPromptFocusWire {
+    pub name: String,
+    pub found: bool,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub runs: u64,
+    pub references: u64,
+    pub distinct_agents: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub success_rate: f64,
+    pub total_runtime_seconds: f64,
+    pub mean_runtime_seconds: Option<f64>,
+    pub first_run_ts: f64,
+    pub last_run_ts: f64,
+    pub models: Vec<AgentStatsCountWire>,
+    pub providers: Vec<AgentStatsCountWire>,
+    pub projects: Vec<AgentStatsCountWire>,
+    pub partners: Vec<AgentStatsCountWire>,
+    pub tribes: Vec<AgentStatsCountWire>,
+    pub buckets: Vec<AgentRunBucketWire>,
+}
+
+/// Launch-boundary xprompt usage across the selected run window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentXPromptStatsWire {
+    pub runs_with_xprompts: u64,
+    pub runs_without_xprompts: u64,
+    pub distinct_xprompts: u64,
+    pub total_references: u64,
+    pub rows: Vec<AgentXPromptStatsRowWire>,
+    pub truncated_rows: u64,
+    pub focus: Option<AgentXPromptFocusWire>,
+}
+
 /// Duration distribution for one requested runtime dimension value.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentRuntimeGroupStatsWire {
@@ -314,6 +389,9 @@ pub struct AgentRunStatsResponseWire {
     /// active runner coverage (or when reading an older/partial payload).
     #[serde(default)]
     pub runners: Option<AgentRunnerStatsWire>,
+    /// Launch-boundary xprompt usage is absent in older response payloads.
+    #[serde(default)]
+    pub xprompts: Option<AgentXPromptStatsWire>,
     /// In-window rows whose cached `record_json` could not be decoded.
     pub malformed_rows_skipped: u64,
 }
@@ -383,5 +461,31 @@ mod tests {
         let decoded: AgentRunStatsResponseWire =
             serde_json::from_value(payload).unwrap();
         assert!(decoded.runners.is_none());
+    }
+
+    #[test]
+    fn older_run_stats_payload_without_xprompts_deserializes() {
+        let mut payload =
+            serde_json::to_value(AgentRunStatsResponseWire::default()).unwrap();
+        let Value::Object(fields) = &mut payload else {
+            panic!("run statistics response must serialize as an object");
+        };
+        fields.remove("xprompts");
+
+        let decoded: AgentRunStatsResponseWire =
+            serde_json::from_value(payload).unwrap();
+        assert!(decoded.xprompts.is_none());
+    }
+
+    #[test]
+    fn older_run_stats_request_uses_xprompt_defaults() {
+        let decoded: AgentRunStatsRequestWire = serde_json::from_value(
+            serde_json::json!({"start_ts": 1, "end_ts": 2}),
+        )
+        .unwrap();
+
+        assert_eq!(decoded.xprompt_top_n, 40);
+        assert_eq!(decoded.xprompt_breakdown_top_n, 5);
+        assert_eq!(decoded.xprompt_focus, None);
     }
 }

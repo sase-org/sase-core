@@ -22,7 +22,8 @@ use super::wire::{
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
     AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
     AgentStatsCountWire, AgentStatsRuntimeGroupByWire, AgentWorkStatsWire,
-    AgentWorkspaceStatsWire, AGENT_STATS_WIRE_SCHEMA_VERSION,
+    AgentWorkspaceStatsWire, AgentXPromptFocusWire, AgentXPromptStatsRowWire,
+    AgentXPromptStatsWire, AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 
 const INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,6 +98,47 @@ struct ChangespecWorkAccumulator {
 struct WorkAccumulators {
     projects: BTreeMap<String, ProjectWorkAccumulator>,
     changespecs: BTreeMap<(String, String), ChangespecWorkAccumulator>,
+}
+
+#[derive(Debug, Default)]
+struct XPromptAccumulator {
+    kind: String,
+    tags: Vec<String>,
+    runs: u64,
+    references: u64,
+    agents: BTreeSet<String>,
+    completed: u64,
+    failed: u64,
+    duration_count: u64,
+    total_runtime_seconds: f64,
+    first_run_ts: f64,
+    last_run_ts: f64,
+    models: BTreeMap<String, u64>,
+    projects: BTreeMap<String, u64>,
+    partners: BTreeMap<String, u64>,
+}
+
+#[derive(Debug)]
+struct XPromptFocusAccumulator {
+    providers: BTreeMap<String, u64>,
+    tribes: BTreeMap<String, u64>,
+    buckets: Vec<AgentRunBucketWire>,
+}
+
+#[derive(Debug)]
+struct XPromptAccumulators {
+    runs_with_xprompts: u64,
+    runs_without_xprompts: u64,
+    total_references: u64,
+    by_name: BTreeMap<String, XPromptAccumulator>,
+    focus: Option<XPromptFocusAccumulator>,
+}
+
+#[derive(Debug)]
+struct RunXPrompt {
+    kind: String,
+    tags: Vec<String>,
+    references: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +244,19 @@ fn query_run_stats_with_liveness(
     let mut workspace_counts = BTreeMap::<(String, i64), u64>::new();
     let mut runtime_groups = BTreeMap::<String, DurationAccumulator>::new();
     let mut work = WorkAccumulators::default();
+    let mut xprompts = XPromptAccumulators {
+        runs_with_xprompts: 0,
+        runs_without_xprompts: 0,
+        total_references: 0,
+        by_name: BTreeMap::new(),
+        focus: request.xprompt_focus.as_ref().map(|_| {
+            XPromptFocusAccumulator {
+                providers: BTreeMap::new(),
+                tribes: BTreeMap::new(),
+                buckets: build_empty_buckets(&request, bucket_count),
+            }
+        }),
+    };
     let mut runner_stats = RunnerStatsBuilder::default();
     let requested_start = request.start_ts as f64;
     let requested_end = request.end_ts as f64;
@@ -250,6 +305,16 @@ fn query_run_stats_with_liveness(
 
         let duration = run_duration_seconds(&record, &row);
         let attribution = resolve_run_attribution(&record, &row);
+        fold_xprompts(
+            &record,
+            &row,
+            launch_ts,
+            duration,
+            outcome.as_deref(),
+            &attribution,
+            &request,
+            &mut xprompts,
+        );
         let provider_key = provider_key(&record, &row);
         let provider_stats = providers.entry(provider_key).or_default();
         provider_stats.runs += 1;
@@ -312,6 +377,7 @@ fn query_run_stats_with_liveness(
     response.runtime_groups =
         finish_runtime_groups(runtime_groups, request.top_n as usize);
     response.work = finish_work(work, request.work_top_n as usize);
+    response.xprompts = Some(finish_xprompts(xprompts, &request));
     response.runners = runner_stats.finish(
         requested_start,
         requested_end,
@@ -662,6 +728,186 @@ fn fold_workspace(
         *workspaces
             .entry((row.project_name.clone(), workspace_num))
             .or_default() += 1;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_xprompts(
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+    launch_ts: f64,
+    duration: Option<f64>,
+    outcome: Option<&str>,
+    attribution: &RunAttribution,
+    request: &AgentRunStatsRequestWire,
+    xprompts: &mut XPromptAccumulators,
+) {
+    let mut run_xprompts = BTreeMap::<String, RunXPrompt>::new();
+    for used in &record.used_xprompts {
+        let entry =
+            run_xprompts.entry(used.name.clone()).or_insert_with(|| {
+                RunXPrompt {
+                    kind: used.kind.clone(),
+                    tags: used.tags.clone(),
+                    references: 0,
+                }
+            });
+        entry.references += used.references;
+    }
+    if run_xprompts.is_empty() {
+        xprompts.runs_without_xprompts += 1;
+        return;
+    }
+    xprompts.runs_with_xprompts += 1;
+
+    let agent = normalized(row.agent_name.as_deref());
+    let model = normalized(row.model.as_deref());
+    let project = row.project_name.clone();
+    let partner_names = run_xprompts.keys().cloned().collect::<Vec<_>>();
+
+    for (name, used) in &run_xprompts {
+        xprompts.total_references += used.references;
+        let value = xprompts.by_name.entry(name.clone()).or_insert_with(|| {
+            XPromptAccumulator {
+                kind: used.kind.clone(),
+                tags: used.tags.clone(),
+                ..XPromptAccumulator::default()
+            }
+        });
+        let first_run = value.runs == 0;
+        value.runs += 1;
+        value.references += used.references;
+        value.agents.insert(agent.clone());
+        match outcome {
+            Some("completed") => value.completed += 1,
+            Some("failed" | "epic_launch_failed") => value.failed += 1,
+            _ => {}
+        }
+        if let Some(duration) = duration {
+            value.duration_count += 1;
+            value.total_runtime_seconds += duration;
+        }
+        if first_run || launch_ts < value.first_run_ts {
+            value.first_run_ts = launch_ts;
+        }
+        if first_run || launch_ts > value.last_run_ts {
+            value.last_run_ts = launch_ts;
+        }
+        *value.models.entry(model.clone()).or_default() += 1;
+        *value.projects.entry(project.clone()).or_default() += 1;
+        for partner in partner_names.iter().filter(|partner| *partner != name) {
+            *value.partners.entry(partner.clone()).or_default() += 1;
+        }
+
+        if request.xprompt_focus.as_deref() == Some(name.as_str()) {
+            let focus = xprompts
+                .focus
+                .as_mut()
+                .expect("focus accumulator exists for a focused request");
+            *focus
+                .providers
+                .entry(normalized(row.provider.as_deref()))
+                .or_default() += 1;
+            for tribe in runtime_group_values(
+                AgentStatsRuntimeGroupByWire::Tribe,
+                record,
+                row,
+                attribution,
+            ) {
+                *focus.tribes.entry(tribe).or_default() += 1;
+            }
+            increment_bucket(&mut focus.buckets, request, launch_ts);
+        }
+    }
+}
+
+fn finish_xprompts(
+    mut xprompts: XPromptAccumulators,
+    request: &AgentRunStatsRequestWire,
+) -> AgentXPromptStatsWire {
+    let distinct_xprompts = xprompts.by_name.len() as u64;
+    let focus = request.xprompt_focus.as_deref().map(|name| {
+        let extra = xprompts
+            .focus
+            .take()
+            .expect("focus accumulator exists for a focused request");
+        if let Some(value) = xprompts.by_name.get(name) {
+            AgentXPromptFocusWire {
+                name: name.to_string(),
+                found: true,
+                kind: value.kind.clone(),
+                tags: value.tags.clone(),
+                runs: value.runs,
+                references: value.references,
+                distinct_agents: value.agents.len() as u64,
+                completed: value.completed,
+                failed: value.failed,
+                success_rate: ratio(value.completed, value.runs),
+                total_runtime_seconds: value.total_runtime_seconds,
+                mean_runtime_seconds: (value.duration_count > 0).then_some(
+                    value.total_runtime_seconds / value.duration_count as f64,
+                ),
+                first_run_ts: value.first_run_ts,
+                last_run_ts: value.last_run_ts,
+                models: ranked_counts(value.models.clone(), None),
+                providers: ranked_counts(extra.providers, None),
+                projects: ranked_counts(value.projects.clone(), None),
+                partners: ranked_counts(value.partners.clone(), None),
+                tribes: ranked_counts(extra.tribes, None),
+                buckets: extra.buckets,
+            }
+        } else {
+            AgentXPromptFocusWire {
+                name: name.to_string(),
+                found: false,
+                kind: UNKNOWN.to_string(),
+                buckets: extra.buckets,
+                ..AgentXPromptFocusWire::default()
+            }
+        }
+    });
+
+    let breakdown_top_n = request.xprompt_breakdown_top_n as usize;
+    let mut rows = xprompts
+        .by_name
+        .into_iter()
+        .map(|(name, value)| AgentXPromptStatsRowWire {
+            name,
+            kind: value.kind,
+            tags: value.tags,
+            runs: value.runs,
+            references: value.references,
+            distinct_agents: value.agents.len() as u64,
+            completed: value.completed,
+            failed: value.failed,
+            success_rate: ratio(value.completed, value.runs),
+            total_runtime_seconds: value.total_runtime_seconds,
+            mean_runtime_seconds: (value.duration_count > 0).then_some(
+                value.total_runtime_seconds / value.duration_count as f64,
+            ),
+            first_run_ts: value.first_run_ts,
+            last_run_ts: value.last_run_ts,
+            models: ranked_counts(value.models, Some(breakdown_top_n)),
+            projects: ranked_counts(value.projects, Some(breakdown_top_n)),
+            partners: ranked_counts(value.partners, Some(breakdown_top_n)),
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .runs
+            .cmp(&left.runs)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    rows.truncate(request.xprompt_top_n as usize);
+
+    AgentXPromptStatsWire {
+        runs_with_xprompts: xprompts.runs_with_xprompts,
+        runs_without_xprompts: xprompts.runs_without_xprompts,
+        distinct_xprompts,
+        total_references: xprompts.total_references,
+        truncated_rows: distinct_xprompts.saturating_sub(rows.len() as u64),
+        rows,
+        focus,
     }
 }
 
@@ -1205,6 +1451,9 @@ mod tests {
             top_n: 10,
             project: None,
             work_top_n: 50,
+            xprompt_top_n: 40,
+            xprompt_breakdown_top_n: 5,
+            xprompt_focus: None,
         }
     }
 
@@ -1236,6 +1485,9 @@ mod tests {
             top_n: 10,
             project: None,
             work_top_n: 50,
+            xprompt_top_n: 40,
+            xprompt_breakdown_top_n: 5,
+            xprompt_focus: None,
         }
     }
 
@@ -1423,6 +1675,9 @@ mod tests {
         assert_eq!(result.totals.waiting, 1);
         assert_eq!(result.totals.in_progress, 0);
         assert_eq!(result.malformed_rows_skipped, 1);
+        let xprompts = result.xprompts.as_ref().unwrap();
+        assert_eq!(xprompts.runs_with_xprompts, 0);
+        assert_eq!(xprompts.runs_without_xprompts, 4);
         assert_eq!(
             result
                 .outcomes
@@ -1512,6 +1767,236 @@ mod tests {
         // decoding. Keep the variable live to make that relationship clear.
         assert!(first.exists());
         assert_eq!(result.work.projects[0].runs, 4);
+    }
+
+    #[test]
+    fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+
+        let first_start = "2026-07-10T01:00:00Z";
+        let first = add_project_run(
+            &projects,
+            "alpha-project",
+            "20260710010000",
+            json!({
+                "name": "alpha",
+                "run_started_at": first_start,
+                "llm_provider": "codex",
+                "model": "gpt-5",
+                "clan_tribe": "builders"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(first_start, 60.0)
+            })),
+            false,
+        );
+        write_json(
+            &first.join("xprompts.json"),
+            json!([
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]},
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]},
+                {"name": "split_file", "kind": "part", "tags": []}
+            ]),
+        );
+
+        let second_start = "2026-07-10T02:00:00Z";
+        let second = add_project_run(
+            &projects,
+            "beta-project",
+            "20260710020000",
+            json!({
+                "name": "beta",
+                "run_started_at": second_start,
+                "llm_provider": "claude",
+                "model": "opus",
+                "clan_tribe": "reviewers"
+            }),
+            Some(json!({
+                "outcome": "failed",
+                "finished_at": finish_at(second_start, 30.0)
+            })),
+            false,
+        );
+        write_json(
+            &second.join("xprompts.json"),
+            json!([{"name": "gh", "kind": "workflow", "tags": ["vcs"]}]),
+        );
+
+        let third = add_project_run(
+            &projects,
+            "beta-project",
+            "20260710070000",
+            json!({
+                "name": "alpha",
+                "run_started_at": "2026-07-10T07:00:00Z",
+                "llm_provider": "codex",
+                "model": "gpt-5",
+                "clan_tribe": "builders"
+            }),
+            None,
+            false,
+        );
+        write_json(
+            &third.join("xprompts.json"),
+            json!([
+                {"name": "plan", "kind": "part", "tags": ["planning"]},
+                {"name": "split_file", "kind": "part", "tags": []}
+            ]),
+        );
+        add_project_run(
+            &projects,
+            "beta-project",
+            "20260710130000",
+            json!({
+                "name": "no-xprompts",
+                "run_started_at": "2026-07-10T13:00:00Z"
+            }),
+            None,
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let mut focused_request = request();
+        focused_request.xprompt_top_n = 2;
+        focused_request.xprompt_breakdown_top_n = 1;
+        focused_request.xprompt_focus = Some("gh".to_string());
+        let result = query_run_stats(&index, focused_request).unwrap();
+        assert_eq!(result.schema_version, 4);
+        let xprompts = result.xprompts.as_ref().unwrap();
+        assert_eq!(xprompts.runs_with_xprompts, 3);
+        assert_eq!(xprompts.runs_without_xprompts, 1);
+        assert_eq!(xprompts.distinct_xprompts, 3);
+        assert_eq!(xprompts.total_references, 6);
+        assert_eq!(xprompts.truncated_rows, 1);
+        assert_eq!(
+            xprompts
+                .rows
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gh", "split_file"]
+        );
+
+        let gh = &xprompts.rows[0];
+        assert_eq!(gh.kind, "workflow");
+        assert_eq!(gh.tags, vec!["vcs"]);
+        assert_eq!(gh.runs, 2);
+        assert_eq!(gh.references, 3);
+        assert_eq!(gh.distinct_agents, 2);
+        assert_eq!(gh.completed, 1);
+        assert_eq!(gh.failed, 1);
+        assert_eq!(gh.success_rate, 0.5);
+        assert_eq!(gh.total_runtime_seconds, 90.0);
+        assert_eq!(gh.mean_runtime_seconds, Some(45.0));
+        assert_eq!(gh.models.len(), 1);
+        assert_eq!(gh.models[0].name, "gpt-5");
+        assert_eq!(gh.projects.len(), 1);
+        assert_eq!(gh.projects[0].name, "alpha-project");
+        assert_eq!(
+            gh.partners
+                .iter()
+                .map(|row| (row.name.as_str(), row.count))
+                .collect::<Vec<_>>(),
+            vec![("split_file", 1)]
+        );
+
+        let focus = xprompts.focus.as_ref().unwrap();
+        assert!(focus.found);
+        assert_eq!(focus.name, "gh");
+        assert_eq!(focus.runs, 2);
+        assert_eq!(focus.references, 3);
+        assert_eq!(focus.distinct_agents, 2);
+        assert_eq!(focus.completed, 1);
+        assert_eq!(focus.failed, 1);
+        assert_eq!(focus.total_runtime_seconds, 90.0);
+        assert_eq!(focus.mean_runtime_seconds, Some(45.0));
+        assert_eq!(
+            focus
+                .models
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5", "opus"]
+        );
+        assert_eq!(
+            focus
+                .providers
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex"]
+        );
+        assert_eq!(
+            focus
+                .projects
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha-project", "beta-project"]
+        );
+        assert_eq!(
+            focus
+                .tribes
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["builders", "reviewers"]
+        );
+        assert_eq!(
+            focus
+                .buckets
+                .iter()
+                .map(|bucket| bucket.runs)
+                .collect::<Vec<_>>(),
+            vec![2, 0, 0, 0]
+        );
+
+        let mut filtered_request = request();
+        filtered_request.project = Some("alpha-project".to_string());
+        let filtered = query_run_stats(&index, filtered_request).unwrap();
+        let filtered_xprompts = filtered.xprompts.unwrap();
+        assert_eq!(filtered_xprompts.runs_with_xprompts, 1);
+        assert_eq!(filtered_xprompts.runs_without_xprompts, 0);
+        assert_eq!(filtered_xprompts.total_references, 3);
+        assert_eq!(filtered_xprompts.rows[0].projects.len(), 1);
+        assert_eq!(filtered_xprompts.rows[0].projects[0].name, "alpha-project");
+
+        let mut unknown_request = request();
+        unknown_request.xprompt_focus = Some("missing".to_string());
+        let unknown = query_run_stats(&index, unknown_request)
+            .unwrap()
+            .xprompts
+            .unwrap()
+            .focus
+            .unwrap();
+        assert_eq!(unknown.name, "missing");
+        assert!(!unknown.found);
+        assert_eq!(unknown.kind, UNKNOWN);
+        assert_eq!(unknown.runs, 0);
+        assert_eq!(unknown.buckets.len(), 4);
+        assert!(unknown.buckets.iter().all(|bucket| bucket.runs == 0));
+
+        let mut no_duration_request = request();
+        no_duration_request.xprompt_focus = Some("plan".to_string());
+        let no_duration = query_run_stats(&index, no_duration_request)
+            .unwrap()
+            .xprompts
+            .unwrap()
+            .focus
+            .unwrap();
+        assert!(no_duration.found);
+        assert_eq!(no_duration.runs, 1);
+        assert_eq!(no_duration.total_runtime_seconds, 0.0);
+        assert_eq!(no_duration.mean_runtime_seconds, None);
     }
 
     #[test]
@@ -1878,7 +2363,7 @@ mod tests {
         .unwrap();
         let runners = result.runners.as_ref().unwrap();
 
-        assert_eq!(result.schema_version, 3);
+        assert_eq!(result.schema_version, 4);
         assert_eq!(result.totals.runs, 4);
         assert_eq!(runners.start_ts, RUNNER_BASE as f64);
         assert_eq!(runners.end_ts, (RUNNER_BASE + 100) as f64);
@@ -2375,6 +2860,9 @@ mod tests {
                 top_n: 10,
                 project: None,
                 work_top_n: 50,
+                xprompt_top_n: 40,
+                xprompt_breakdown_top_n: 5,
+                xprompt_focus: None,
             },
         )
         .unwrap();

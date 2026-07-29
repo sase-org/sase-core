@@ -197,7 +197,8 @@ pub use agent_stats::{
     AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
-    AgentWorkStatsWire, AgentWorkspaceStatsWire,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
+    AgentXPromptStatsRowWire, AgentXPromptStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{

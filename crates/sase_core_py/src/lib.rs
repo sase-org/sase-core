@@ -8732,7 +8732,7 @@ mod tests {
                 py_agent_stats_query_runs(py, index.to_str().unwrap(), request)
                     .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(3));
+            assert_eq!(result["schema_version"], json!(4));
             assert_eq!(result["totals"]["runs"], json!(1));
             assert_eq!(result["totals"]["completed"], json!(1));
             assert_eq!(result["providers"][0]["effort"], json!("high"));
@@ -8751,6 +8751,7 @@ mod tests {
             assert_eq!(result["runners"]["peak_seconds"], json!(60.0));
             assert_eq!(result["runners"]["average_runners"], json!(0.6));
             assert_eq!(result["runners"]["runner_seconds"], json!(60.0));
+            assert_eq!(result["xprompts"]["runs_without_xprompts"], json!(1));
             assert_eq!(
                 result["runners"]["distribution"][0]["seconds"],
                 json!(40.0)
@@ -8817,7 +8818,7 @@ mod tests {
             )
             .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(3));
+            assert_eq!(result["schema_version"], json!(4));
             assert_eq!(result["skills"][0]["name"], json!("review"));
             assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
             assert_eq!(result["questions"]["sessions"], json!(1));

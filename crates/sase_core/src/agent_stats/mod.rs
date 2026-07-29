@@ -16,6 +16,7 @@ pub use wire::{
     AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
-    AgentWorkStatsWire, AgentWorkspaceStatsWire,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
+    AgentXPromptStatsRowWire, AgentXPromptStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
