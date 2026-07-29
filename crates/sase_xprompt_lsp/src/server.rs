@@ -16,10 +16,12 @@ use lsp_types::{
     ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, LSPAny, Location, MessageType, OneOf,
-    OptionalVersionedTextDocumentIdentifier, Position, Range,
-    ServerCapabilities, ServerInfo, TextDocumentEdit,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
-    WorkDoneProgressOptions, WorkspaceEdit,
+    OptionalVersionedTextDocumentIdentifier, Position, Range, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    ServerInfo, TextDocumentEdit, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Uri, WorkDoneProgressOptions,
+    WorkspaceEdit,
 };
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
@@ -60,6 +62,7 @@ use crate::lsp_convert::{
     to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
+use crate::semantic_tokens::{artifact_ref_tokens, legend};
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
@@ -630,6 +633,42 @@ impl XpromptLspServer {
         diagnostics.into_iter().map(lsp_diagnostic).collect()
     }
 
+    pub fn semantic_tokens_for_text(&self, text: String) -> SemanticTokens {
+        self.semantic_tokens_for_document(DocumentSnapshot::new(text))
+    }
+
+    pub fn semantic_tokens_for_uri_text(
+        &self,
+        uri: &Uri,
+        text: String,
+    ) -> SemanticTokens {
+        let document = if let Some(path) = uri.to_file_path() {
+            DocumentSnapshot::with_source_path(text, path.into_owned())
+        } else {
+            DocumentSnapshot::new(text)
+        };
+        self.semantic_tokens_for_document(document)
+    }
+
+    fn semantic_tokens_for_document(
+        &self,
+        document: DocumentSnapshot,
+    ) -> SemanticTokens {
+        let config = self.current_config();
+        let vcs_catalog =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let artifact_catalog =
+            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+        active_artifact_ref_context(
+            &document,
+            &config,
+            &vcs_catalog,
+            &artifact_catalog,
+        )
+        .map(|context| artifact_ref_tokens(&document, context))
+        .unwrap_or_default()
+    }
+
     pub async fn code_actions_for_text(
         &self,
         uri: Uri,
@@ -1083,6 +1122,19 @@ impl LanguageServer for XpromptLspServer {
                         resolve_provider: Some(false),
                     }),
                 ),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options:
+                                WorkDoneProgressOptions {
+                                    work_done_progress: Some(false),
+                                },
+                            legend: legend(),
+                            range: None,
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -1131,6 +1183,23 @@ impl LanguageServer for XpromptLspServer {
             documents.remove(&uri.to_string());
         }
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let Some(document) = self.document_for_uri(&uri) else {
+            return Ok(None);
+        };
+        if !document.eligible {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.semantic_tokens_for_uri_text(&uri, document.text)
+                .into(),
+        ))
     }
 
     async fn completion(
@@ -4557,6 +4626,55 @@ mod tests {
         assert!(triggers.contains(&"(".to_string()), "{triggers:?}");
     }
 
+    #[tokio::test]
+    async fn advertises_full_semantic_tokens_with_standard_legend() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let provider = result
+            .capabilities
+            .semantic_tokens_provider
+            .expect("semantic tokens provider");
+        let SemanticTokensServerCapabilities::SemanticTokensOptions(options) =
+            provider
+        else {
+            panic!("expected semantic token options");
+        };
+
+        assert_eq!(
+            options
+                .legend
+                .token_types
+                .iter()
+                .map(|token_type| token_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["namespace", "string", "number"]
+        );
+        assert_eq!(
+            options
+                .legend
+                .token_modifiers
+                .iter()
+                .map(|modifier| modifier.as_str())
+                .collect::<Vec<_>>(),
+            vec!["documentation"]
+        );
+        assert!(matches!(
+            options.full,
+            Some(SemanticTokensFullOptions::Bool(true))
+        ));
+        assert_eq!(options.range, None);
+    }
+
     #[test]
     fn loads_v1_vcs_project_catalog_with_project_defaults() {
         let temp = tempfile::tempdir().unwrap();
@@ -4888,6 +5006,73 @@ mod tests {
                 .count(),
             1,
             "{diagnostics:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encodes_known_artifact_refs_and_skips_unknown_and_literal_tokens()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.artifact_ref_catalog = Some(artifact_path);
+            config.vcs_project_catalog = None;
+        }
+
+        let tokens = server.semantic_tokens_for_text(
+            "é @designs:guide.md#L2-L4 @commit:sase@0123456 \
+             @user:handle\n```\n@designs:fenced.md\n```"
+                .to_string(),
+        );
+
+        assert_eq!(
+            tokens.data,
+            vec![
+                lsp_types::SemanticToken {
+                    delta_line: 0,
+                    delta_start: 3,
+                    length: 7,
+                    token_type: 0,
+                    token_modifiers_bitset: 1,
+                },
+                lsp_types::SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 8,
+                    token_type: 1,
+                    token_modifiers_bitset: 1,
+                },
+                lsp_types::SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 6,
+                    token_type: 2,
+                    token_modifiers_bitset: 1,
+                },
+                lsp_types::SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 6,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                },
+                lsp_types::SemanticToken {
+                    delta_line: 0,
+                    delta_start: 7,
+                    length: 12,
+                    token_type: 1,
+                    token_modifiers_bitset: 0,
+                },
+            ]
         );
     }
 
