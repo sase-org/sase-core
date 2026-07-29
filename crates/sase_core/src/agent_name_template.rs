@@ -1,7 +1,7 @@
 //! Agent-name template primitives.
 //!
-//! A template contains exactly one `@` marker. Rendering replaces that
-//! marker with a token from the shared auto-name sequence:
+//! A template contains exactly one bare `@` or keyed `{@<id>}` marker.
+//! Rendering replaces that marker with a token from the shared auto-name sequence:
 //! `0, 1, ..., 9, a, ..., z, 00, 01, ...`.
 
 use std::cmp::Ordering;
@@ -13,10 +13,27 @@ pub const AGENT_NAME_TEMPLATE_ALPHABET: &str =
     "0123456789abcdefghijklmnopqrstuvwxyz";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNameTemplateKey {
+    pub id: String,
+    pub qualified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNameTemplateMarker {
+    pub start: usize,
+    pub end: usize,
+    pub id: Option<String>,
+    pub qualified: bool,
+    pub braced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentNameTemplate {
     pub template: String,
     pub prefix: String,
     pub suffix: String,
+    pub marker: String,
+    pub key: Option<AgentNameTemplateKey>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -34,20 +51,25 @@ pub enum AgentNameTemplateError {
 
 impl AgentNameTemplate {
     pub fn parse(template: &str) -> Result<Self, AgentNameTemplateError> {
-        if template.matches(AGENT_NAME_TEMPLATE_MARKER).count() != 1 {
+        let markers = iter_agent_name_key_markers(template);
+        if markers.len() != 1 {
             return Err(AgentNameTemplateError::InvalidMarkerCount {
                 template: template.to_string(),
             });
         }
 
-        let marker_idx = template
-            .find(AGENT_NAME_TEMPLATE_MARKER)
-            .expect("marker count was checked before locating the marker");
-        let marker_len = AGENT_NAME_TEMPLATE_MARKER.len_utf8();
+        let matched = &markers[0];
+        let marker = template[matched.start..matched.end].to_string();
+        let key = matched.id.as_ref().map(|id| AgentNameTemplateKey {
+            id: id.clone(),
+            qualified: matched.qualified,
+        });
         Ok(Self {
             template: template.to_string(),
-            prefix: template[..marker_idx].to_string(),
-            suffix: template[marker_idx + marker_len..].to_string(),
+            prefix: template[..matched.start].to_string(),
+            suffix: template[matched.end..].to_string(),
+            marker,
+            key,
         })
     }
 
@@ -72,7 +94,7 @@ impl AgentNameTemplate {
             Some(dot_idx) => format!(
                 "{}{}{}",
                 self.prefix,
-                AGENT_NAME_TEMPLATE_MARKER,
+                self.marker,
                 &self.suffix[..dot_idx]
             ),
             None => self.template.clone(),
@@ -130,7 +152,62 @@ impl AgentNameTemplate {
 }
 
 pub fn is_agent_name_template(value: &str) -> bool {
-    value.matches(AGENT_NAME_TEMPLATE_MARKER).count() == 1
+    iter_agent_name_key_markers(value).len() == 1
+}
+
+pub fn iter_agent_name_key_markers(text: &str) -> Vec<AgentNameTemplateMarker> {
+    let bytes = text.as_bytes();
+    let mut markers = Vec::new();
+    let mut cursor = 0;
+    let mut brace_depth = 0_usize;
+
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'{' && bytes.get(cursor + 1) == Some(&b'@') {
+            if let Some((end, id, qualified)) =
+                parse_braced_marker(bytes, cursor)
+            {
+                markers.push(AgentNameTemplateMarker {
+                    start: cursor,
+                    end,
+                    id: Some(id),
+                    qualified,
+                    braced: true,
+                });
+                cursor = end;
+            } else {
+                // An invalid braced form is ordinary text, including any `@`
+                // before its closing brace.
+                brace_depth += 1;
+                cursor += 2;
+            }
+            continue;
+        }
+
+        if bytes[cursor] == b'{' {
+            brace_depth += 1;
+        } else if bytes[cursor] == b'}' {
+            brace_depth = brace_depth.saturating_sub(1);
+        } else if bytes[cursor] == AGENT_NAME_TEMPLATE_MARKER as u8
+            && brace_depth == 0
+        {
+            markers.push(AgentNameTemplateMarker {
+                start: cursor,
+                end: cursor + AGENT_NAME_TEMPLATE_MARKER.len_utf8(),
+                id: None,
+                qualified: false,
+                braced: false,
+            });
+        }
+        cursor += 1;
+    }
+
+    markers
+}
+
+pub fn agent_name_template_key(
+    template: &str,
+) -> Result<Option<AgentNameTemplateKey>, AgentNameTemplateError> {
+    Ok(parse_agent_name_template(template)?.key)
 }
 
 pub fn parse_agent_name_template(
@@ -238,6 +315,45 @@ fn indices_to_token(indices: &[usize]) -> String {
     indices.iter().map(|idx| alphabet[*idx] as char).collect()
 }
 
+fn parse_braced_marker(
+    bytes: &[u8],
+    start: usize,
+) -> Option<(usize, String, bool)> {
+    let id_start = start + 2;
+    let mut cursor = id_start;
+
+    if !bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+
+    loop {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'.') {
+            break;
+        }
+        cursor += 1;
+        if !bytes.get(cursor).is_some_and(u8::is_ascii_alphanumeric) {
+            return None;
+        }
+    }
+
+    let id_end = cursor;
+    let qualified = bytes.get(cursor) == Some(&b'!');
+    if qualified {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'}') {
+        return None;
+    }
+
+    let id = std::str::from_utf8(&bytes[id_start..id_end])
+        .expect("agent-name key ids contain only ASCII")
+        .to_string();
+    Some((cursor + 1, id, qualified))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,9 +363,51 @@ mod tests {
         let parsed = parse_agent_name_template("research.@.final").unwrap();
         assert_eq!(parsed.prefix, "research.");
         assert_eq!(parsed.suffix, ".final");
+        assert_eq!(parsed.marker, "@");
+        assert_eq!(parsed.key, None);
 
         assert!(parse_agent_name_template("plain").is_err());
         assert!(parse_agent_name_template("too@many@markers").is_err());
+    }
+
+    #[test]
+    fn parses_keyed_markers() {
+        let cases = [
+            ("research.{@1}.cdx", "research.", ".cdx", "1", false),
+            ("{@a}", "", "", "a", false),
+            ("foo.{@lead.a}", "foo.", "", "lead.a", false),
+            ("research.{@x!}", "research.", "", "x", true),
+        ];
+
+        for (template, prefix, suffix, id, qualified) in cases {
+            let parsed = parse_agent_name_template(template).unwrap();
+            assert_eq!(parsed.prefix, prefix);
+            assert_eq!(parsed.suffix, suffix);
+            assert_eq!(
+                parsed.marker,
+                template[prefix.len()..template.len() - suffix.len()]
+            );
+            assert_eq!(
+                parsed.key,
+                Some(AgentNameTemplateKey {
+                    id: id.to_string(),
+                    qualified,
+                })
+            );
+            assert_eq!(agent_name_template_key(template).unwrap(), parsed.key);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_or_multiple_markers() {
+        for template in ["{@1}.{@2}", "a@b{@1}", "{@}", "{@-bad}"] {
+            assert_eq!(
+                parse_agent_name_template(template),
+                Err(AgentNameTemplateError::InvalidMarkerCount {
+                    template: template.to_string(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -293,6 +451,15 @@ mod tests {
         assert_eq!(
             agent_name_template_namespace_template("foo.@x.bar").unwrap(),
             "foo.@x"
+        );
+        assert_eq!(
+            agent_name_template_namespace_template("research.{@1}.cdx")
+                .unwrap(),
+            "research.{@1}"
+        );
+        assert_eq!(
+            agent_name_template_namespace_template("foo.{@1!}x.bar").unwrap(),
+            "foo.{@1!}x"
         );
     }
 
@@ -339,7 +506,19 @@ mod tests {
 
     #[test]
     fn render_and_match_are_exact_inverses() {
-        let templates = ["@", "@.cld", "foo.f@", "foo-@", "foo.@"];
+        let templates = [
+            "@",
+            "@.cld",
+            "foo.f@",
+            "foo-@",
+            "foo.@",
+            "{@1}",
+            "{@1}.cld",
+            "foo.f{@1}",
+            "foo-{@1}",
+            "foo.{@1}",
+            "foo.{@qualified!}.cld",
+        ];
         let tokens = ["0", "9", "a", "z", "0a", "a0", "00"];
 
         for template in templates {
@@ -352,6 +531,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scans_markers_with_round_trip_byte_spans() {
+        let text = "α prose `research.{@lead.a}.cdx`, then @ and {@shared!}.";
+        let markers = iter_agent_name_key_markers(text);
+        let slices: Vec<&str> = markers
+            .iter()
+            .map(|marker| &text[marker.start..marker.end])
+            .collect();
+        assert_eq!(slices, ["{@lead.a}", "@", "{@shared!}"]);
+        assert_eq!(
+            markers,
+            vec![
+                AgentNameTemplateMarker {
+                    start: text.find("{@lead.a}").unwrap(),
+                    end: text.find("{@lead.a}").unwrap() + "{@lead.a}".len(),
+                    id: Some("lead.a".to_string()),
+                    qualified: false,
+                    braced: true,
+                },
+                AgentNameTemplateMarker {
+                    start: text.find("then @").unwrap() + "then ".len(),
+                    end: text.find("then @").unwrap() + "then @".len(),
+                    id: None,
+                    qualified: false,
+                    braced: false,
+                },
+                AgentNameTemplateMarker {
+                    start: text.find("{@shared!}").unwrap(),
+                    end: text.find("{@shared!}").unwrap() + "{@shared!}".len(),
+                    id: Some("shared".to_string()),
+                    qualified: true,
+                    braced: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn scanner_ignores_invalid_braced_and_jinja_forms() {
+        let text = "{@} { @1 } {@-bad} {{ prompt }}";
+        assert!(iter_agent_name_key_markers(text).is_empty());
     }
 
     #[test]

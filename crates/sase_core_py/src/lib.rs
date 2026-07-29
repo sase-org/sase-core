@@ -75,6 +75,8 @@
 //! - `prune_tasks(path: str, history_limit: int) -> dict`
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
+//! - `agent_name_template_key(template: str) -> dict | None`
+//! - `iter_agent_name_key_markers(text: str) -> list[dict]`
 //! - `render_agent_name_template(template: str, token: str) -> str`
 //! - `agent_name_template_namespace_template(template: str) -> str`
 //! - `match_agent_name_template(template: str, concrete: str) -> str | None`
@@ -277,13 +279,16 @@ use sase_core::agent_launch::{
     AgentLaunchRequestWire, WorkspaceClaimRequestWire,
 };
 use sase_core::agent_name_template::{
+    agent_name_template_key as core_agent_name_template_key,
     agent_name_template_namespace_template as core_agent_name_template_namespace_template,
     agent_name_template_tokens_after as core_agent_name_template_tokens_after,
     compare_agent_name_template_tokens as core_compare_agent_name_template_tokens,
     is_agent_name_template as core_is_agent_name_template,
+    iter_agent_name_key_markers as core_iter_agent_name_key_markers,
     match_agent_name_template as core_match_agent_name_template,
     parse_agent_name_template as core_parse_agent_name_template,
     render_agent_name_template as core_render_agent_name_template,
+    AgentNameTemplateKey,
 };
 use sase_core::agent_runtime::{
     aggregate_clan_runtime as core_aggregate_clan_runtime,
@@ -551,7 +556,56 @@ fn py_parse_agent_name_template<'py>(
     dict.set_item("template", parsed.template)?;
     dict.set_item("prefix", parsed.prefix)?;
     dict.set_item("suffix", parsed.suffix)?;
+    dict.set_item("marker", parsed.marker)?;
+    match parsed.key {
+        Some(key) => {
+            dict.set_item("key", agent_name_template_key_to_py(py, &key)?)?
+        }
+        None => dict.set_item("key", py.None())?,
+    }
     Ok(dict)
+}
+
+fn agent_name_template_key_to_py<'py>(
+    py: Python<'py>,
+    key: &AgentNameTemplateKey,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("id", &key.id)?;
+    dict.set_item("qualified", key.qualified)?;
+    Ok(dict)
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_name_template_key")]
+fn py_agent_name_template_key<'py>(
+    py: Python<'py>,
+    template: &str,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    core_agent_name_template_key(template)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?
+        .as_ref()
+        .map(|key| agent_name_template_key_to_py(py, key))
+        .transpose()
+}
+
+#[pyfunction]
+#[pyo3(name = "iter_agent_name_key_markers")]
+fn py_iter_agent_name_key_markers<'py>(
+    py: Python<'py>,
+    text: &str,
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty_bound(py);
+    for marker in core_iter_agent_name_key_markers(text) {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("start", marker.start)?;
+        dict.set_item("end", marker.end)?;
+        dict.set_item("id", marker.id.as_deref())?;
+        dict.set_item("qualified", marker.qualified)?;
+        dict.set_item("braced", marker.braced)?;
+        list.append(dict)?;
+    }
+    Ok(list)
 }
 
 #[pyfunction]
@@ -5784,6 +5838,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQueryProgramHandle>()?;
     m.add_function(wrap_pyfunction!(py_is_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_agent_name_template, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_name_template_key, m)?)?;
+    m.add_function(wrap_pyfunction!(py_iter_agent_name_key_markers, m)?)?;
     m.add_function(wrap_pyfunction!(py_render_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_name_template_namespace_template,
