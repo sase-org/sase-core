@@ -177,11 +177,12 @@ pub use agent_scan::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentClanContextWire,
     AgentMetaWire, DoneMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, WaitingMarkerWire, WorkflowArtifactCandidate,
-    WorkflowArtifactCandidates, WorkflowStateWire, WorkflowStepStateWire,
-    ACE_RUN_WORKFLOW_DIR, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION, DAY_SHARDED_LAYOUT_VERSION,
-    DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
+    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire,
+    WorkflowArtifactCandidate, WorkflowArtifactCandidates, WorkflowStateWire,
+    WorkflowStepStateWire, ACE_RUN_WORKFLOW_DIR,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    DAY_SHARDED_LAYOUT_VERSION, DONE_WORKFLOW_DIR_NAMES,
+    DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };
 pub use agent_stats::{

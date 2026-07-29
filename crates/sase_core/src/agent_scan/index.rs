@@ -32,7 +32,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 18;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 19;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -42,6 +42,7 @@ const MARKER_FILES: &[&str] = &[
     "pending_question.json",
     "workflow_state.json",
     "plan_path.json",
+    "xprompts.json",
 ];
 
 const TERMINAL_WORKFLOW_STATUSES: &[&str] =
@@ -686,6 +687,7 @@ fn open_index_with_busy_timeout(
             workflow_state_sig TEXT,
             plan_path_sig TEXT,
             prompt_steps_sig TEXT,
+            xprompts_sig TEXT,
             record_json TEXT NOT NULL,
             indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -790,6 +792,10 @@ fn open_index_with_busy_timeout(
     }
     if prior_version.map_or(true, |v| v < 18) {
         migrate_record_json_refresh_v18(&mut conn)?;
+    }
+    if prior_version.map_or(true, |v| v < 19) {
+        ensure_agent_artifacts_column(&conn, "xprompts_sig", "TEXT")?;
+        migrate_record_json_refresh_v19(&mut conn)?;
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
@@ -1090,6 +1096,17 @@ fn migrate_record_json_refresh_v18(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v19 adds the launch-boundary `used_xprompts` projection to `record_json`
+/// and signs `xprompts.json` so late writes refresh cached rows.
+///
+/// The Python lifecycle rebuilds older indexes from source after detecting
+/// this schema bump, populating the projection for historical records.
+fn migrate_record_json_refresh_v19(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
 fn upsert_record(
     conn: &Connection,
     projects_root: &Path,
@@ -1111,7 +1128,7 @@ fn upsert_record(
             step_index, step_name, retry_of_timestamp, retried_as_timestamp,
             retry_chain_root_timestamp, retry_attempt, agent_meta_sig, done_sig,
             running_sig, waiting_sig, pending_question_sig,
-            workflow_state_sig, plan_path_sig, prompt_steps_sig,
+            workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
             indexed_at
         ) VALUES (
@@ -1119,7 +1136,7 @@ fn upsert_record(
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -1160,6 +1177,7 @@ fn upsert_record(
             workflow_state_sig = excluded.workflow_state_sig,
             plan_path_sig = excluded.plan_path_sig,
             prompt_steps_sig = excluded.prompt_steps_sig,
+            xprompts_sig = excluded.xprompts_sig,
             agent_clan_generation = excluded.agent_clan_generation,
             clan_tribe = excluded.clan_tribe,
             clan_summary = excluded.clan_summary,
@@ -1206,6 +1224,7 @@ fn upsert_record(
             signatures.workflow_state,
             signatures.plan_path,
             signatures.prompt_steps,
+            signatures.xprompts,
             summary.agent_clan_generation,
             summary.clan_tribe,
             summary.clan_summary,
@@ -1251,7 +1270,7 @@ fn select_terminalization_candidates(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig FROM agent_artifacts \
+         prompt_steps_sig, xprompts_sig FROM agent_artifacts \
          WHERE has_done_marker = 0 \
            AND has_running_marker = 0 \
            AND has_waiting_marker = 0 \
@@ -1456,7 +1475,7 @@ fn refresh_stale_rows(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig FROM agent_artifacts {where_sql}"
+         prompt_steps_sig, xprompts_sig FROM agent_artifacts {where_sql}"
     );
     let mut pending: Vec<PendingRow> = Vec::new();
     {
@@ -1495,7 +1514,7 @@ fn select_records(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig \
+         prompt_steps_sig, xprompts_sig \
          FROM agent_artifacts {}",
         query.where_sql
     );
@@ -1600,6 +1619,7 @@ fn pending_row_from_sql_with_artifact_dir(
         workflow_state: row.get(8).map_err(|e| e.to_string())?,
         plan_path: row.get(9).map_err(|e| e.to_string())?,
         prompt_steps: row.get(10).map_err(|e| e.to_string())?,
+        xprompts: row.get(11).map_err(|e| e.to_string())?,
     };
     Ok(PendingRow {
         artifact_dir,
@@ -2124,6 +2144,7 @@ struct MarkerSignatures {
     workflow_state: Option<String>,
     plan_path: Option<String>,
     prompt_steps: Option<String>,
+    xprompts: Option<String>,
 }
 
 impl MarkerSignatures {
@@ -2140,6 +2161,7 @@ impl MarkerSignatures {
             workflow_state: marker_signature(&dir.join("workflow_state.json")),
             plan_path: marker_signature(&dir.join("plan_path.json")),
             prompt_steps: None,
+            xprompts: marker_signature(&dir.join("xprompts.json")),
         };
 
         let mut step_sigs: Vec<String> = Vec::new();
@@ -2264,6 +2286,69 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         );
         assert_eq!(indexed.records, source.records);
+    }
+
+    #[test]
+    fn late_xprompts_file_refreshes_cached_record() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260729121000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "late-xprompt-user"}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let initial = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire::default(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(initial.records.len(), 1);
+        assert!(initial.records[0].used_xprompts.is_empty());
+
+        write_json(
+            &artifact_dir.join("xprompts.json"),
+            json!([
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]},
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]}
+            ]),
+        );
+
+        let refreshed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire::default(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(refreshed.records.len(), 1);
+        assert_eq!(refreshed.records[0].used_xprompts.len(), 1);
+        assert_eq!(refreshed.records[0].used_xprompts[0].name, "gh");
+        assert_eq!(refreshed.records[0].used_xprompts[0].references, 2);
+
+        let conn = Connection::open(&index).unwrap();
+        let (signature, record_json): (Option<String>, String) = conn
+            .query_row(
+                "SELECT xprompts_sig, record_json FROM agent_artifacts \
+                 WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(signature.is_some());
+        let stored: AgentArtifactRecordWire =
+            serde_json::from_str(&record_json).unwrap();
+        assert_eq!(stored.used_xprompts, refreshed.records[0].used_xprompts);
     }
 
     #[test]
@@ -3424,6 +3509,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn schema_v18_upgrade_adds_xprompts_signature_column() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        drop(open_index(&index).unwrap());
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE agent_artifacts DROP COLUMN xprompts_sig;
+                 INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '18');",
+            )
+            .unwrap();
+        }
+
+        drop(open_index(&index).unwrap());
+
+        let conn = Connection::open(&index).unwrap();
+        let columns = {
+            let mut stmt =
+                conn.prepare("PRAGMA table_info(agent_artifacts)").unwrap();
+            let rows =
+                stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert!(columns.iter().any(|column| column == "xprompts_sig"));
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "19");
     }
 
     #[test]

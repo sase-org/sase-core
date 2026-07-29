@@ -44,8 +44,8 @@ pub use wire::{
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
     AgentArtifactScanWire, AgentClanContextWire, AgentMetaWire, DoneMarkerWire,
     PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
-    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION, DONE_WORKFLOW_DIR_NAMES,
-    DONE_WORKFLOW_DIR_PREFIXES, WORKFLOW_STATE_DIR_NAMES,
-    WORKFLOW_STATE_DIR_PREFIXES,
+    UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    DONE_WORKFLOW_DIR_NAMES, DONE_WORKFLOW_DIR_PREFIXES,
+    WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };

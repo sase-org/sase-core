@@ -506,6 +506,17 @@ pub struct PlanPathMarkerWire {
     pub plan_path: Option<String>,
 }
 
+/// Compact projection of one launch-boundary `xprompts.json` entry,
+/// deduplicated by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsedXPromptWire {
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub references: u64,
+}
+
 /// One artifact directory's parsed markers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentArtifactRecordWire {
@@ -533,6 +544,8 @@ pub struct AgentArtifactRecordWire {
     pub prompt_steps: Vec<PromptStepMarkerWire>,
     #[serde(default)]
     pub raw_prompt_snippet: Option<String>,
+    #[serde(default)]
+    pub used_xprompts: Vec<UsedXPromptWire>,
     #[serde(default)]
     pub has_done_marker: bool,
 }

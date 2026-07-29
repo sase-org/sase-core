@@ -625,6 +625,98 @@ fn records_are_sorted_deterministically() {
 }
 
 #[test]
+fn launch_xprompts_project_to_deduplicated_deterministic_records() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let artifact_dir = root
+        .join("proj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260729120000");
+    write_json(
+        &artifact_dir.join("agent_meta.json"),
+        &json!({"name": "xprompt-user"}),
+    );
+    write_json(
+        &artifact_dir.join("xprompts.json"),
+        &json!([
+            {
+                "name": "z_workflow",
+                "kind": "workflow",
+                "tags": ["vcs", "rollover", "vcs", "", 42],
+            },
+            {
+                "name": "alpha",
+                "kind": "unexpected",
+                "tags": [" beta ", "alpha"],
+            },
+            {
+                "name": "z_workflow",
+                "kind": "part",
+                "tags": ["ignored-from-duplicate"],
+            },
+            {"name": "   ", "kind": "part"},
+            {"name": 42, "kind": "part"},
+            {"kind": "part"},
+        ]),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    assert_eq!(snapshot.records.len(), 1);
+    let used = &snapshot.records[0].used_xprompts;
+    assert_eq!(
+        used.iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "z_workflow"]
+    );
+    assert_eq!(used[0].kind, "unknown");
+    assert_eq!(used[0].tags, vec!["alpha", "beta"]);
+    assert_eq!(used[0].references, 1);
+    assert_eq!(used[1].kind, "workflow");
+    assert_eq!(used[1].tags, vec!["rollover", "vcs"]);
+    assert_eq!(used[1].references, 2);
+}
+
+#[test]
+fn absent_and_invalid_xprompts_are_soft_scan_errors() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let variants = [
+        ("20260729120100", None),
+        ("20260729120200", Some("")),
+        ("20260729120300", Some("[]")),
+        ("20260729120400", Some("{not json")),
+        ("20260729120500", Some(r#"{"name":"not-an-array"}"#)),
+    ];
+    for (timestamp, payload) in variants {
+        let artifact_dir = root
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            &json!({"name": timestamp}),
+        );
+        if let Some(payload) = payload {
+            write_text(&artifact_dir.join("xprompts.json"), payload);
+        }
+    }
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    assert_eq!(snapshot.records.len(), variants.len());
+    assert!(snapshot
+        .records
+        .iter()
+        .all(|record| record.used_xprompts.is_empty()));
+    assert_eq!(snapshot.stats.json_decode_errors, 3);
+    assert_eq!(snapshot.stats.os_errors, 0);
+}
+
+#[test]
 fn stats_count_decode_errors() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));

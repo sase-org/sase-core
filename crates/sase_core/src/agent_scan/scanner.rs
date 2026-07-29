@@ -31,7 +31,7 @@ use super::wire::{
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
     AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire,
     PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, WaitingMarkerWire, WorkflowStateWire,
+    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
@@ -40,6 +40,7 @@ use crate::project_spec::{
 };
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
+const USED_XPROMPTS_FILE: &str = "xprompts.json";
 
 #[derive(Debug)]
 struct ArtifactCandidate {
@@ -596,6 +597,9 @@ fn scan_artifact_dir(
         None
     };
 
+    let used_xprompts =
+        load_used_xprompts(&artifact_dir.join(USED_XPROMPTS_FILE), stats);
+
     AgentArtifactRecordWire {
         project_name: project_name.to_string(),
         project_dir: project_dir.to_string_lossy().into_owned(),
@@ -615,6 +619,7 @@ fn scan_artifact_dir(
         plan_path,
         prompt_steps,
         raw_prompt_snippet,
+        used_xprompts,
         has_done_marker,
     }
 }
@@ -652,6 +657,85 @@ fn load_marker_object(
             None
         }
     }
+}
+
+/// Read and normalize launch-boundary xprompt usage.
+///
+/// Missing and unreadable files yield no usage. Malformed JSON and valid
+/// non-array payloads also yield no usage while incrementing the scanner's
+/// soft-error diagnostics.
+fn load_used_xprompts(
+    path: &Path,
+    stats: &mut AgentArtifactScanStatsWire,
+) -> Vec<UsedXPromptWire> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                stats.os_errors += 1;
+            }
+            return Vec::new();
+        }
+    };
+    let entries = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Array(entries)) => {
+            stats.marker_files_parsed += 1;
+            entries
+        }
+        Ok(_) | Err(_) => {
+            stats.json_decode_errors += 1;
+            return Vec::new();
+        }
+    };
+
+    let mut by_name: BTreeMap<String, UsedXPromptWire> = BTreeMap::new();
+    for entry in entries {
+        let Value::Object(object) = entry else {
+            continue;
+        };
+        let Some(name) = object
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+
+        if let Some(existing) = by_name.get_mut(name) {
+            existing.references = existing.references.saturating_add(1);
+            continue;
+        }
+
+        let kind = match object.get("kind").and_then(Value::as_str) {
+            Some("workflow") => "workflow",
+            Some("part") => "part",
+            _ => "unknown",
+        };
+        let tags = object
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        by_name.insert(
+            name.to_string(),
+            UsedXPromptWire {
+                name: name.to_string(),
+                kind: kind.to_string(),
+                tags,
+                references: 1,
+            },
+        );
+    }
+
+    by_name.into_values().collect()
 }
 
 fn read_raw_prompt_snippet(
