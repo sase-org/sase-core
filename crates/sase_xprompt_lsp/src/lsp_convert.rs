@@ -5,6 +5,7 @@ use lsp_types::{
     Range, TextEdit,
 };
 use sase_core::{
+    AtReferenceGroup, AtReferenceMenuWire, AtReferenceRowWire,
     CompletionCandidate, CompletionList, DiagnosticSeverity, EditorDiagnostic,
     EditorPosition, EditorRange, EditorTextEdit, HoverPayload, VcsRepoEntry,
 };
@@ -33,6 +34,55 @@ pub fn completion_response(
             .map(|candidate| completion_item(candidate, replacement_range))
             .collect(),
     )
+}
+
+pub fn at_reference_completion_response(
+    menu: AtReferenceMenuWire,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        menu.rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                at_reference_completion_item(row, replacement_range, index)
+            })
+            .collect(),
+    )
+}
+
+fn at_reference_completion_item(
+    row: AtReferenceRowWire,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let (group, kind, description) = match row.group {
+        AtReferenceGroup::Artifact => {
+            (0, CompletionItemKind::ENUM_MEMBER, "artifact kind")
+        }
+        AtReferenceGroup::File if row.is_dir => {
+            (1, CompletionItemKind::FOLDER, "directory")
+        }
+        AtReferenceGroup::File => (1, CompletionItemKind::FILE, "file"),
+        AtReferenceGroup::Payload => (0, CompletionItemKind::FILE, "file"),
+    };
+    CompletionItem {
+        label: row.insertion.clone(),
+        label_details: Some(CompletionItemLabelDetails {
+            detail: None,
+            description: Some(description.to_string()),
+        }),
+        kind: Some(kind),
+        detail: (!row.detail.is_empty()).then_some(row.detail),
+        filter_text: Some(row.insertion.clone()),
+        sort_text: Some(format!("{group}:{index:04}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: row.insertion,
+        })),
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
 }
 
 /// Render `%model` rows with model/alias kinds and stable catalog ordering.

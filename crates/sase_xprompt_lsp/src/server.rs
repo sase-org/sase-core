@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -26,8 +26,8 @@ use lsp_types::{
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
     editor_build_agent_completion_candidates,
-    editor_build_artifact_ref_kind_completion_candidates,
     editor_build_artifact_ref_payload_completion_candidates,
+    editor_build_at_reference_menu,
     editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
@@ -41,12 +41,16 @@ use sase_core::{
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
-    editor_definition_at_position, editor_directive_argument_candidates,
-    editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, ArtifactRefContextWire, CompletionCandidate,
-    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
-    EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    editor_definition_at_position, editor_detect_at_reference_context,
+    editor_directive_argument_candidates, editor_directive_metadata,
+    editor_extract_token_at_position, editor_hover_at_position,
+    ArtifactRefCompletionMode, ArtifactRefCompletionTrigger,
+    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
+    AtReferenceKindRowWire, AtReferencePathRowWire, AtReferencePayloadRowWire,
+    AtReferenceStage, CompletionCandidate, CompletionContextKind,
+    CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
+    HelperHostBridge, VcsNamespaceEntry, VcsProjectEntry,
+    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -55,7 +59,8 @@ use tracing::{info, warn};
 
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
-    agent_completion_response, apply_replacement, completion_response,
+    agent_completion_response, apply_replacement,
+    at_reference_completion_response, completion_response,
     diagnostic as lsp_diagnostic, hover as lsp_hover,
     model_completion_response, placeholder_completion_response,
     sase_snippet_completion_item, snippet_completion_item, to_editor_position,
@@ -243,25 +248,17 @@ impl XpromptLspServer {
             &vcs_catalog,
             &artifact_catalog,
         );
-        if let Some(context) =
-            editor_classify_completion_context_with_artifacts_and_workflows(
-                &document,
-                editor_position,
-                &[],
-                &vcs_catalog.workflow_names,
-                artifact_context,
-            )
-            .filter(|context| {
-                matches!(
-                    context.kind,
-                    CompletionContextKind::ArtifactRefKind
-                        | CompletionContextKind::ArtifactRefPayload
-                )
-            })
-        {
-            return Some(self.artifact_ref_completion(
+        let known_kinds = known_at_reference_kinds(artifact_context);
+        if let Some(context) = editor_detect_at_reference_context(
+            &document,
+            editor_position,
+            &known_kinds,
+        ) {
+            return Some(self.at_reference_completion(
                 &context,
-                artifact_context.expect("artifact context was classified"),
+                artifact_context,
+                &config,
+                &document,
             ));
         }
 
@@ -274,16 +271,6 @@ impl XpromptLspServer {
                 &vcs_catalog.workflow_names,
                 artifact_context,
             )?;
-        if matches!(
-            context.kind,
-            CompletionContextKind::ArtifactRefKind
-                | CompletionContextKind::ArtifactRefPayload
-        ) {
-            return Some(self.artifact_ref_completion(
-                &context,
-                artifact_context.expect("artifact context was classified"),
-            ));
-        }
         if context.kind == CompletionContextKind::VcsProject {
             return Some(self.vcs_project_completion(
                 &context, &document, position, &config,
@@ -374,32 +361,28 @@ impl XpromptLspServer {
         Some(response)
     }
 
-    fn artifact_ref_completion(
+    fn at_reference_completion(
         &self,
-        context: &sase_core::CompletionContext,
-        artifact_context: &ArtifactRefContextWire,
+        context: &AtReferenceContextWire,
+        artifact_context: Option<&ArtifactRefContextWire>,
+        config: &ServerConfig,
+        document: &DocumentSnapshot,
     ) -> CompletionResponse {
-        let Some(trigger) = context.artifact_ref.as_ref() else {
+        let Some(replacement_range) = document.byte_range_to_range(
+            context.candidate_span.0,
+            context.candidate_span.1,
+        ) else {
             return empty_completion_response();
         };
-        let list = match context.kind {
-            CompletionContextKind::ArtifactRefKind => {
-                editor_build_artifact_ref_kind_completion_candidates(
-                    trigger,
-                    Some(context.replacement_range),
-                    artifact_context,
-                )
-            }
-            CompletionContextKind::ArtifactRefPayload => {
-                editor_build_artifact_ref_payload_completion_candidates(
-                    trigger,
-                    Some(context.replacement_range),
-                    artifact_context,
-                )
-            }
-            _ => return empty_completion_response(),
+        let inventory = AtReferenceInventoryWire {
+            kinds: at_reference_kind_inventory(artifact_context),
+            paths: at_reference_path_inventory(context, config),
+            payloads: at_reference_payload_inventory(context, artifact_context),
         };
-        completion_response(list, context.replacement_range)
+        at_reference_completion_response(
+            editor_build_at_reference_menu(context, &inventory),
+            replacement_range,
+        )
     }
 
     /// Build the `+` (`vcs_project`) completion response.
@@ -1865,6 +1848,139 @@ fn load_artifact_ref_catalog(path: Option<&Path>) -> ArtifactRefCatalog {
             })
             .collect(),
     }
+}
+
+fn known_at_reference_kinds(
+    context: Option<&ArtifactRefContextWire>,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    sase_core::editor::at_reference::BUILTIN_ARTIFACT_REF_KINDS
+        .iter()
+        .copied()
+        .chain(
+            context
+                .into_iter()
+                .flat_map(|context| context.document_roots.iter())
+                .map(|root| root.kind.as_str()),
+        )
+        .filter(|kind| !kind.is_empty())
+        .filter(|kind| seen.insert((*kind).to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn at_reference_kind_inventory(
+    context: Option<&ArtifactRefContextWire>,
+) -> Vec<AtReferenceKindRowWire> {
+    known_at_reference_kinds(context)
+        .into_iter()
+        .map(|kind| {
+            let builtin =
+                sase_core::editor::at_reference::is_builtin_at_reference_kind(
+                    &kind,
+                );
+            let detail = if builtin {
+                "builtin artifact kind".to_string()
+            } else {
+                context
+                    .into_iter()
+                    .flat_map(|context| context.document_roots.iter())
+                    .find(|root| root.kind == kind)
+                    .map(|root| format!("document artifact · {}", root.root))
+                    .unwrap_or_else(|| "document artifact".to_string())
+            };
+            AtReferenceKindRowWire {
+                kind,
+                builtin,
+                detail,
+            }
+        })
+        .collect()
+}
+
+fn at_reference_path_inventory(
+    context: &AtReferenceContextWire,
+    config: &ServerConfig,
+) -> Vec<AtReferencePathRowWire> {
+    if context.stage != AtReferenceStage::Kind {
+        return Vec::new();
+    }
+    let Some(path_query) = context.path_query.as_ref() else {
+        return Vec::new();
+    };
+    let Some(directory) = resolve_at_reference_directory(
+        config.root_dir.as_deref(),
+        &path_query.directory,
+    ) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .take(1_000)
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            Some(AtReferencePathRowWire {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                is_dir: file_type.is_dir(),
+            })
+        })
+        .collect()
+}
+
+fn resolve_at_reference_directory(
+    root_dir: Option<&Path>,
+    directory: &str,
+) -> Option<PathBuf> {
+    let expanded = if directory == "~/" {
+        std::env::var_os("HOME").map(PathBuf::from)?
+    } else if let Some(rest) = directory.strip_prefix("~/") {
+        std::env::var_os("HOME").map(PathBuf::from)?.join(rest)
+    } else {
+        PathBuf::from(directory)
+    };
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        root_dir?.join(expanded)
+    };
+    resolved.canonicalize().ok()
+}
+
+fn at_reference_payload_inventory(
+    context: &AtReferenceContextWire,
+    artifact_context: Option<&ArtifactRefContextWire>,
+) -> Vec<AtReferencePayloadRowWire> {
+    if context.stage != AtReferenceStage::Payload {
+        return Vec::new();
+    }
+    let Some(artifact_context) = artifact_context else {
+        return Vec::new();
+    };
+    let trigger = ArtifactRefCompletionTrigger {
+        mode: ArtifactRefCompletionMode::Payload,
+        candidate_span: context.candidate_span,
+        replacement_span: context.replacement_span,
+        query_span: context.query_span,
+        query: context.query.clone(),
+        kind: context.kind.clone(),
+    };
+    editor_build_artifact_ref_payload_completion_candidates(
+        &trigger,
+        None,
+        artifact_context,
+    )
+    .candidates
+    .into_iter()
+    .map(|candidate| AtReferencePayloadRowWire {
+        payload: candidate.insertion,
+        label: candidate.name,
+        detail: candidate.detail.unwrap_or_default(),
+        age: String::new(),
+    })
+    .collect()
 }
 
 fn active_artifact_ref_context<'a>(
@@ -4470,6 +4586,10 @@ mod tests {
                         {
                             "kind": "designs",
                             "root": project_root.join("designs")
+                        },
+                        {
+                            "kind": "plan",
+                            "root": project_root.join("plans")
                         }
                     ],
                     "chats_root": project_root.join("chats"),
@@ -4577,6 +4697,29 @@ mod tests {
             .unwrap_or_default();
 
         assert!(triggers.contains(&"<".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn advertises_at_reference_completion_trigger_character() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&"@".to_string()), "{triggers:?}");
     }
 
     #[tokio::test]
@@ -4878,11 +5021,11 @@ mod tests {
         }
 
         for (text, expected) in [
-            ("#gh:ship-completion @designs:sa", "sase.md"),
-            ("#git:local @designs:lo", "local.md"),
-            ("@designs:lo", "local.md"),
-            ("@chat:202607/a", "202607/agent.md"),
-            ("@file:default:", "default:52895d68931185056fd0e49f"),
+            ("#gh:ship-completion @designs:sa", "@designs:sase.md"),
+            ("#git:local @designs:lo", "@designs:local.md"),
+            ("@designs:lo", "@designs:local.md"),
+            ("@chat:202607/a", "@chat:202607/agent.md"),
+            ("@file:default:", "@file:default:52895d68931185056fd0e49f"),
         ] {
             let items = completion_items(
                 server
@@ -4904,7 +5047,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(kind_items.len(), 1);
-        assert_eq!(kind_items[0].label, "designs:");
+        assert_eq!(kind_items[0].label, "@designs:");
 
         let payload_text = "@designs:lo";
         let payload_items = completion_items(
@@ -4921,7 +5064,7 @@ mod tests {
         else {
             panic!("expected artifact payload text edit");
         };
-        assert_eq!(edit.range.start, Position::new(0, 9));
+        assert_eq!(edit.range.start, Position::new(0, 0));
         assert_eq!(edit.range.end, Position::new(0, 11));
 
         for text in ["@commit:sase@0123456", "@bug:sase#1"] {
@@ -4948,7 +5091,140 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].label, "sase.md");
+        assert_eq!(items[0].label, "@designs:sase.md");
+    }
+
+    #[tokio::test]
+    async fn completes_grouped_at_references_from_the_client_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join("plans")).unwrap();
+        fs::write(workspace.join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(workspace.join("Justfile"), "check:").unwrap();
+        fs::write(workspace.join(".hidden"), "secret").unwrap();
+
+        let project_root = temp.path().join("sase");
+        fs::create_dir_all(project_root.join("plans")).unwrap();
+        fs::write(project_root.join("plans/roadmap.md"), "roadmap").unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.root_dir = Some(workspace);
+            config.project = Some("sase".to_string());
+            config.artifact_ref_catalog = Some(artifact_path);
+        }
+
+        let bare_items = completion_items(
+            server
+                .completion_for_text("@".to_string(), Position::new(0, 1))
+                .await
+                .unwrap(),
+        );
+        let bare_labels = bare_items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bare_labels,
+            vec![
+                "@commit:",
+                "@chat:",
+                "@bug:",
+                "@file:",
+                "@designs:",
+                "@plan:",
+                "@plans/",
+                "@src/",
+                "@Justfile",
+            ]
+        );
+        assert!(!bare_labels.contains(&"@.hidden"));
+        assert!(bare_items[..6].iter().all(|item| {
+            item.kind == Some(lsp_types::CompletionItemKind::ENUM_MEMBER)
+                && item
+                    .sort_text
+                    .as_deref()
+                    .is_some_and(|sort| sort.starts_with("0:"))
+        }));
+        assert!(bare_items[6..].iter().all(|item| {
+            item.sort_text
+                .as_deref()
+                .is_some_and(|sort| sort.starts_with("1:"))
+        }));
+        assert_eq!(
+            bare_items[6].kind,
+            Some(lsp_types::CompletionItemKind::FOLDER)
+        );
+        assert_eq!(
+            bare_items[8].kind,
+            Some(lsp_types::CompletionItemKind::FILE)
+        );
+        for item in &bare_items {
+            assert_eq!(item.filter_text.as_deref(), Some(item.label.as_str()));
+            let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+            else {
+                panic!("expected @ reference text edit");
+            };
+            assert_eq!(
+                edit.range,
+                Range::new(Position::new(0, 0), Position::new(0, 1))
+            );
+        }
+
+        let narrowed_items = completion_items(
+            server
+                .completion_for_text("@p".to_string(), Position::new(0, 2))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            narrowed_items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@plan:", "@plans/"]
+        );
+
+        let path_items = completion_items(
+            server
+                .completion_for_text("@src/".to_string(), Position::new(0, 5))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(path_items.len(), 1);
+        assert_eq!(path_items[0].label, "@src/main.rs");
+        assert_eq!(
+            path_items[0].kind,
+            Some(lsp_types::CompletionItemKind::FILE)
+        );
+        let Some(CompletionTextEdit::Edit(path_edit)) =
+            path_items[0].text_edit.as_ref()
+        else {
+            panic!("expected local path text edit");
+        };
+        assert_eq!(
+            path_edit.range,
+            Range::new(Position::new(0, 0), Position::new(0, 5))
+        );
+
+        let payload_items = completion_items(
+            server
+                .completion_for_text("@plan:".to_string(), Position::new(0, 6))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(payload_items.len(), 1);
+        assert_eq!(payload_items[0].label, "@plan:roadmap.md");
     }
 
     #[tokio::test]
