@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.12](https://github.com/sase-org/sase-core/compare/v0.12.11...v0.12.12) - 2026-07-29
+
+### Added
+
+- add core artifact reference APIs
+
 ## [0.12.11](https://github.com/sase-org/sase-core/compare/v0.12.10...v0.12.11) - 2026-07-29
 
 ### Added
