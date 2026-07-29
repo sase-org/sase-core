@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.8](https://github.com/sase-org/sase-core/compare/v0.12.7...v0.12.8) - 2026-07-29
+
+### Added
+
+- add keyed agent name template markers
+
 ## [0.12.7](https://github.com/sase-org/sase-core/compare/v0.12.6...v0.12.7) - 2026-07-29
 
 ### Fixed
