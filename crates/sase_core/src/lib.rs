@@ -19,6 +19,7 @@ pub mod agent_name_template;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
+pub mod artifact_ref;
 pub mod axe_chop;
 pub mod axe_status;
 pub mod bead;
@@ -39,6 +40,7 @@ pub mod project_spec;
 pub mod prompt_literals;
 pub mod prompt_stash;
 pub mod query;
+mod reference_path;
 pub mod runner_limit_override;
 pub mod sections;
 pub mod status;
@@ -200,6 +202,16 @@ pub use agent_stats::{
     AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
     AgentXPromptStatsRowWire, AgentXPromptStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
+};
+pub use artifact_ref::{
+    canonicalize_artifact_ref, parse_artifact_ref, render_artifact_ref,
+    resolve_artifact_ref, scan_artifact_refs, ArtifactFileSourceWire,
+    ArtifactRefContextWire, ArtifactRefDocumentRootWire, ArtifactRefError,
+    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefPayloadWire,
+    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
+    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{
     apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,

@@ -320,6 +320,16 @@ use sase_core::agent_stats::{
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
     AgentRunStatsRequestWire,
 };
+use sase_core::artifact_ref::{
+    canonicalize_artifact_ref as core_canonicalize_artifact_ref,
+    parse_artifact_ref as core_parse_artifact_ref,
+    render_artifact_ref as core_render_artifact_ref,
+    resolve_artifact_ref as core_resolve_artifact_ref,
+    scan_artifact_refs as core_scan_artifact_refs, ArtifactRefContextWire,
+    ArtifactRefError, ParsedArtifactRefWire,
+    ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+};
 use sase_core::axe_chop::{
     apply_checkpoint_update as core_apply_checkpoint_update,
     check_and_record_once_per as core_check_and_record_once_per,
@@ -2831,6 +2841,81 @@ fn py_plan_reference_resolution_wire_schema_version() -> u64 {
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION
 }
 
+/// Parse one canonical kind-tagged artifact reference.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_parse")]
+fn py_artifact_ref_parse<'py>(
+    py: Python<'py>,
+    value: &str,
+) -> PyResult<PyObject> {
+    artifact_ref_result_to_py(py, core_parse_artifact_ref(value))
+}
+
+/// Render a parsed artifact-reference dictionary.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_render")]
+fn py_artifact_ref_render(reference: &Bound<'_, PyAny>) -> PyResult<String> {
+    let reference = artifact_ref_from_py(reference)?;
+    core_render_artifact_ref(&reference).map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Canonicalize an absolute path against caller-supplied local context.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_canonicalize")]
+fn py_artifact_ref_canonicalize(
+    path: &str,
+    context: &Bound<'_, PyDict>,
+) -> PyResult<Option<String>> {
+    let context = artifact_ref_context_from_pydict(context)?;
+    let path = PathBuf::from(path);
+    core_canonicalize_artifact_ref(&path, &context)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Resolve a string or parsed reference against caller-supplied context.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_resolve")]
+fn py_artifact_ref_resolve<'py>(
+    py: Python<'py>,
+    reference: &Bound<'py, PyAny>,
+    context: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let reference = artifact_ref_from_py(reference)?;
+    let context = artifact_ref_context_from_pydict(context)?;
+    artifact_ref_result_to_py(
+        py,
+        py.allow_threads(|| core_resolve_artifact_ref(&reference, &context)),
+    )
+}
+
+/// Scan prompt text for kind-tagged artifact-reference candidates.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_scan_prompt")]
+fn py_artifact_ref_scan_prompt<'py>(
+    py: Python<'py>,
+    text: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_scan_artifact_refs(text)).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "internal artifact reference serialize error: {error}"
+            ))
+        },
+    )?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the shared v1 parse/resolution artifact-reference wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_wire_schema_version")]
+fn py_artifact_ref_wire_schema_version() -> u64 {
+    debug_assert_eq!(
+        ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+        ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION
+    );
+    ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION
+}
+
 /// Parse canonical and historical artifact links from one SDD document.
 #[pyfunction]
 #[pyo3(name = "sdd_artifact_link_parse")]
@@ -3622,6 +3707,53 @@ where
 
 fn plan_error_to_pyerr(err: PlanError) -> PyErr {
     PyValueError::new_err(format!("{err}"))
+}
+
+fn artifact_ref_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, ArtifactRefError>,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value =
+        serde_json::to_value(result.map_err(artifact_ref_error_to_pyerr)?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal artifact reference serialize error: {error}"
+                ))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+fn artifact_ref_error_to_pyerr(error: ArtifactRefError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn artifact_ref_from_py(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<ParsedArtifactRefWire> {
+    if let Ok(reference) = value.extract::<String>() {
+        return core_parse_artifact_ref(&reference)
+            .map_err(artifact_ref_error_to_pyerr);
+    }
+    serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "reference is not a valid ParsedArtifactRefWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_ref_context_from_pydict(
+    context: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactRefContextWire> {
+    serde_json::from_value(py_to_json_value(context.as_any())?).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "context is not a valid ArtifactRefContextWire dict: {error}"
+            ))
+        },
+    )
 }
 
 fn bead_create_request_from_pydict(
@@ -6017,6 +6149,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_plan_reference_resolution_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_canonicalize, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
@@ -7444,6 +7582,75 @@ mod tests {
                 json!(target.to_string_lossy())
             );
             assert_eq!(py_plan_reference_resolution_wire_schema_version(), 1);
+        });
+    }
+
+    #[test]
+    fn artifact_ref_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plans");
+        let target = root.join("202607/plan.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# Plan\n").unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "artifact_ref_parse",
+                "artifact_ref_render",
+                "artifact_ref_canonicalize",
+                "artifact_ref_resolve",
+                "artifact_ref_scan_prompt",
+                "artifact_ref_wire_schema_version",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let parsed =
+                py_artifact_ref_parse(py, "plans:202607/plan.md#L2").unwrap();
+            let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(parsed_value["schema_version"], json!(1));
+            assert_eq!(parsed_value["kind"]["type"], json!("document"));
+            assert_eq!(parsed_value["fragment"]["type"], json!("lines"));
+            assert_eq!(
+                py_artifact_ref_render(parsed.bind(py)).unwrap(),
+                "plans:202607/plan.md#L2"
+            );
+
+            let context_value = json!({
+                "document_roots": [{
+                    "kind": "plans",
+                    "root": root.to_string_lossy()
+                }]
+            });
+            let context_object = json_value_to_py(py, &context_value).unwrap();
+            let context = context_object.bind(py).downcast::<PyDict>().unwrap();
+
+            assert_eq!(
+                py_artifact_ref_canonicalize(target.to_str().unwrap(), context)
+                    .unwrap()
+                    .as_deref(),
+                Some("plans:202607/plan.md")
+            );
+            let resolved =
+                py_artifact_ref_resolve(py, parsed.bind(py), context).unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(resolved["schema_version"], json!(1));
+            assert_eq!(resolved["status"], json!("exact"));
+            assert_eq!(
+                resolved["resolved_path"],
+                json!(target.to_string_lossy())
+            );
+
+            let scanned =
+                py_artifact_ref_scan_prompt(py, "é @plans:x.md.").unwrap();
+            let scanned = py_to_json_value(scanned.bind(py)).unwrap();
+            assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
+            assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
+            assert_eq!(py_artifact_ref_wire_schema_version(), 1);
+            assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
         });
     }
 

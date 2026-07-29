@@ -4,6 +4,12 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::reference_path::{
+    path_to_relative_payload, resolve_ordered_root_file,
+    validate_relative_payload, DriftPolicy, PathPayloadError,
+    RelativePayloadError,
+};
+
 use super::wire::{
     PlanError, PlanReferenceResolutionWire,
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -89,113 +95,52 @@ pub fn resolve_plan_reference(
         (PathBuf::from(&parsed.path), Vec::new())
     };
 
-    if parsed.legacy {
-        for candidate in &candidates {
-            if candidate.is_file() {
-                return Ok(resolution(
-                    "exact",
-                    Some(candidate.clone()),
-                    candidates,
-                ));
-            }
-        }
-    }
-
-    for root in roots {
-        let candidate = root.join(&payload);
-        candidates.push(candidate.clone());
-        if candidate.is_file() {
-            return Ok(resolution("exact", Some(candidate), candidates));
-        }
-    }
-
-    if let Some(filename) = drift_filename(&payload) {
-        let mut drift_matches = Vec::new();
-        for root in roots {
-            let Ok(month_dirs) = std::fs::read_dir(root) else {
-                continue;
-            };
-            let mut month_dirs = month_dirs
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir())
-                .collect::<Vec<_>>();
-            month_dirs.sort();
-            for month_dir in month_dirs {
-                let candidate = month_dir.join(filename);
-                if candidate.is_file() {
-                    drift_matches.push(candidate);
-                }
-            }
-        }
-        if drift_matches.len() == 1 {
-            let resolved_path = drift_matches[0].clone();
-            return Ok(resolution(
-                "drifted",
-                Some(resolved_path),
-                drift_matches,
-            ));
-        }
-        if drift_matches.len() > 1 {
-            return Ok(resolution("ambiguous", None, drift_matches));
-        }
-    }
-
-    Ok(resolution("missing", None, candidates))
+    let shared = resolve_ordered_root_file(
+        &payload,
+        roots,
+        std::mem::take(&mut candidates),
+        DriftPolicy::SixDigitShard,
+    );
+    Ok(resolution(
+        shared.status.as_str(),
+        shared.resolved_path,
+        shared.candidates,
+    ))
 }
 
 fn validate_reference_path(path: &str) -> Result<(), PlanError> {
-    if path.is_empty() {
-        return Err(PlanError::validation(
-            "plan reference path must not be empty",
-        ));
-    }
-    if path.starts_with('/') {
-        return Err(PlanError::validation(
-            "plan reference path must be relative",
-        ));
-    }
-    if path.contains('\\') {
-        return Err(PlanError::validation(
-            "plan reference path must use forward slashes",
-        ));
-    }
-    if path.split('/').any(|segment| segment.is_empty()) {
-        return Err(PlanError::validation(
-            "plan reference path contains an empty segment",
-        ));
-    }
-    if path.split('/').any(|segment| segment == "..") {
-        return Err(PlanError::validation(
-            "plan reference path must not contain '..'",
-        ));
-    }
-    Ok(())
+    validate_relative_payload(path).map_err(|error| {
+        PlanError::validation(match error {
+            RelativePayloadError::Empty => {
+                "plan reference path must not be empty"
+            }
+            RelativePayloadError::Absolute => {
+                "plan reference path must be relative"
+            }
+            RelativePayloadError::Backslash => {
+                "plan reference path must use forward slashes"
+            }
+            RelativePayloadError::EmptySegment => {
+                "plan reference path contains an empty segment"
+            }
+            RelativePayloadError::ParentSegment => {
+                "plan reference path must not contain '..'"
+            }
+        })
+    })
 }
 
 fn path_to_reference_payload(path: &Path) -> Result<String, PlanError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    PlanError::validation(
-                        "plan reference path must contain valid UTF-8",
-                    )
-                })?;
-                parts.push(part);
+    path_to_relative_payload(path).map_err(|error| {
+        PlanError::validation(match error {
+            PathPayloadError::InvalidUtf8 => {
+                "plan reference path must contain valid UTF-8"
             }
-            Component::CurDir => {}
-            Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
-                return Err(PlanError::validation(
-                    "plan reference path escapes its plans root",
-                ));
+            PathPayloadError::EscapesRoot => {
+                "plan reference path escapes its plans root"
             }
-        }
-    }
-    Ok(parts.join("/"))
+        })
+    })
 }
 
 fn legacy_payload_and_candidates(value: &str) -> (PathBuf, Vec<PathBuf>) {
@@ -227,24 +172,6 @@ fn find_subsequence(haystack: &[&str], needle: &[&str]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-fn drift_filename(path: &Path) -> Option<&Path> {
-    let components = path.components().collect::<Vec<_>>();
-    if components.len() != 2 {
-        return None;
-    }
-    let month = match components[0] {
-        Component::Normal(month) => month.to_str()?,
-        _ => return None,
-    };
-    if month.len() != 6 || !month.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    match components[1] {
-        Component::Normal(filename) => Some(Path::new(filename)),
-        _ => None,
-    }
 }
 
 fn resolution(
@@ -299,6 +226,43 @@ mod tests {
             assert!(parse_plan_reference(value).is_err(), "{value}");
         }
         assert!(render_plan_reference("research", "202607/plan.md").is_err());
+    }
+
+    #[test]
+    fn validation_messages_remain_stable_after_helper_extraction() {
+        for (value, message) in [
+            (
+                "plans:",
+                "validation: plan reference path must not be empty",
+            ),
+            (
+                "plans:/tmp/plan.md",
+                "validation: plan reference path must be relative",
+            ),
+            (
+                r"plans:202607\plan.md",
+                "validation: plan reference path must use forward slashes",
+            ),
+            (
+                "plans:202607//plan.md",
+                "validation: plan reference path contains an empty segment",
+            ),
+            (
+                "plans:202607/../plan.md",
+                "validation: plan reference path must not contain '..'",
+            ),
+        ] {
+            assert_eq!(
+                parse_plan_reference(value).unwrap_err().to_string(),
+                message
+            );
+        }
+        assert_eq!(
+            render_plan_reference("research", "202607/plan.md")
+                .unwrap_err()
+                .to_string(),
+            "validation: unsupported plan reference kind: research"
+        );
     }
 
     #[test]
