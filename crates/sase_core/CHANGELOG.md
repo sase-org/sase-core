@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.13](https://github.com/sase-org/sase-core/compare/v0.12.12...v0.12.13) - 2026-07-29
+
+### Added
+
+- *(editor)* complete artifact references in xprompt LSP
+
 ## [0.12.12](https://github.com/sase-org/sase-core/compare/v0.12.11...v0.12.12) - 2026-07-29
 
 ### Added
