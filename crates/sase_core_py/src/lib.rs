@@ -160,6 +160,9 @@
 //! - `sdd_plan_header_block_upsert_section(document: str, section: dict, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `sdd_plan_header_block_replace(document: str, sections: list[dict], remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `sdd_plan_header_block_remove_section(document: str, kind: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
+//! - `at_reference_context(text: str, line: int, character: int, known_kinds:
+//!   Sequence[str] | None = None) -> dict | None`
+//! - `at_reference_menu(context: dict, inventory: dict) -> dict`
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
@@ -4666,6 +4669,69 @@ fn py_validate_frontmatter_field(
     json_value_to_py(py, &json)
 }
 
+// --- At-reference menu surface ------------------------------------------
+//
+// These bindings expose the core `@` reference context detector and grouped
+// menu builder through plain JSON-shaped Python dict/list values.
+
+/// Return `@` reference context at the cursor, or `None` when the cursor is
+/// not inside a valid reference candidate.
+#[pyfunction]
+#[pyo3(name = "at_reference_context")]
+#[pyo3(signature = (text, line, character, known_kinds = None))]
+fn py_at_reference_context(
+    py: Python<'_>,
+    text: &str,
+    line: u32,
+    character: u32,
+    known_kinds: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let known_kinds = known_kinds.unwrap_or_default();
+    let document = sase_core::DocumentSnapshot::new(text);
+    let context = sase_core::editor_detect_at_reference_context(
+        &document,
+        sase_core::EditorPosition { line, character },
+        &known_kinds,
+    );
+    let value = serde_json::to_value(&context).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return grouped `@` reference menu rows for a detected context and caller
+/// supplied inventory.
+#[pyfunction]
+#[pyo3(name = "at_reference_menu")]
+fn py_at_reference_menu(
+    py: Python<'_>,
+    context: Bound<'_, PyDict>,
+    inventory: Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let context = serde_json::from_value::<sase_core::AtReferenceContextWire>(
+        py_to_json_value(context.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "context is not a valid AtReferenceContextWire dict: {error}"
+        ))
+    })?;
+    let inventory =
+        serde_json::from_value::<sase_core::AtReferenceInventoryWire>(
+            py_to_json_value(inventory.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "inventory is not a valid AtReferenceInventoryWire dict: {error}"
+            ))
+        })?;
+    let menu = sase_core::editor_build_at_reference_menu(&context, &inventory);
+    let value = serde_json::to_value(&menu).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Placeholder completion and highlighting surface ---------------------
 //
 // These bindings expose the same Rust placeholder engine consumed directly
@@ -6280,6 +6346,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
+    m.add_function(wrap_pyfunction!(py_at_reference_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_at_reference_menu, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
@@ -7964,6 +8032,98 @@ mod tests {
                 ]),
                 vec!["the_plan", "the_plan_2"]
             );
+        });
+    }
+
+    #[test]
+    fn at_reference_bindings_return_plain_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_at_reference_context, &module).unwrap(),
+                )
+                .unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_at_reference_menu, &module).unwrap(),
+                )
+                .unwrap();
+
+            let context = module
+                .getattr("at_reference_context")
+                .unwrap()
+                .call1(("open @fi", 0_u32, 8_u32))
+                .unwrap();
+            let context_value = py_to_json_value(&context).unwrap();
+            assert_eq!(context_value["stage"], json!("kind"));
+            assert_eq!(context_value["candidate_span"], json!([5, 8]));
+            assert_eq!(context_value["replacement_span"], json!([6, 8]));
+            assert_eq!(context_value["query_span"], json!([6, 8]));
+            assert_eq!(context_value["query"], json!("fi"));
+            assert_eq!(context_value["kind"], JsonValue::Null);
+            assert_eq!(
+                context_value["path_query"],
+                json!({
+                    "directory": "",
+                    "partial": "fi",
+                    "show_hidden": false,
+                })
+            );
+
+            let inventory = json_value_to_py(
+                py,
+                &json!({
+                    "kinds": [
+                        {
+                            "kind": "fixture",
+                            "builtin": false,
+                            "detail": "Custom references",
+                        },
+                        {
+                            "kind": "file",
+                            "builtin": true,
+                            "detail": "Tracked files",
+                        },
+                    ],
+                    "paths": [
+                        {"name": "final.md", "is_dir": false},
+                        {"name": "fixtures", "is_dir": true},
+                        {"name": ".hidden", "is_dir": false},
+                    ],
+                    "payloads": [],
+                }),
+            )
+            .unwrap();
+            let menu = module
+                .getattr("at_reference_menu")
+                .unwrap()
+                .call1((&context, inventory.bind(py)))
+                .unwrap();
+            let menu_value = py_to_json_value(&menu).unwrap();
+            assert_eq!(menu_value["artifact_count"], json!(2));
+            assert_eq!(menu_value["file_count"], json!(2));
+            assert_eq!(menu_value["shared_extension"], json!(""));
+            assert_eq!(menu_value["rows"][0]["group"], json!("artifact"));
+            assert_eq!(menu_value["rows"][0]["label"], json!("file"));
+            assert_eq!(menu_value["rows"][0]["insertion"], json!("@file:"));
+            assert_eq!(menu_value["rows"][1]["label"], json!("fixture"));
+            assert_eq!(menu_value["rows"][2]["group"], json!("file"));
+            assert_eq!(menu_value["rows"][2]["label"], json!("fixtures/"));
+            assert_eq!(menu_value["rows"][2]["insertion"], json!("@fixtures/"));
+            assert_eq!(menu_value["rows"][3]["label"], json!("final.md"));
+
+            let payload_context = module
+                .getattr("at_reference_context")
+                .unwrap()
+                .call1(("see @bug:sa", 0_u32, 11_u32))
+                .unwrap();
+            let payload_context_value =
+                py_to_json_value(&payload_context).unwrap();
+            assert_eq!(payload_context_value["stage"], json!("payload"));
+            assert_eq!(payload_context_value["query"], json!("sa"));
+            assert_eq!(payload_context_value["kind"], json!("bug"));
         });
     }
 
