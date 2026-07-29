@@ -52,6 +52,7 @@ pub struct PlaceholderContext {
 #[serde(rename_all = "lowercase")]
 pub enum PlaceholderCandidateSource {
     /// Extracted from another `<...>` span in the document being edited.
+    /// Literal-zone spans are included after live spans within this group.
     Prompt,
     /// Supplied by the caller from the durable common-placeholder store.
     Common,
@@ -72,8 +73,9 @@ pub struct PlaceholderCompletion {
     /// Range of the current inner text. An existing closing `>` is excluded.
     pub replacement_range: EditorRange,
     pub append_closing_bracket: bool,
-    /// Distinct inner texts filtered by `prefix`: document-order prompt
-    /// candidates first, then caller-order common candidates.
+    /// Distinct inner texts filtered by `prefix`: live prompt candidates in
+    /// document order, literal-zone prompt candidates in document order, then
+    /// caller-order common candidates.
     pub candidates: Vec<PlaceholderCandidate>,
 }
 
@@ -249,9 +251,10 @@ pub fn detect_placeholder_context_at_position(
 ///
 /// `common` holds caller-supplied placeholders from a durable store, already
 /// ranked by the caller. They are appended, in the order given, after every
-/// candidate found in the document itself. Prompt-local candidates always
-/// precede common ones, and an empty `common` slice reproduces the
-/// document-only behaviour exactly.
+/// candidate found in the document itself. Live prompt spans are ranked in
+/// document order before literal-zone spans, which are also ranked in document
+/// order. Prompt-local candidates always precede common ones, and an empty
+/// `common` slice reproduces the document-only behaviour exactly.
 pub fn build_placeholder_completion_candidates(
     document: &DocumentSnapshot,
     position: EditorPosition,
@@ -262,21 +265,23 @@ pub fn build_placeholder_completion_candidates(
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
 
-    for placeholder in scan_placeholder_spans(document) {
-        if placeholder.opening_byte == context.opening_byte {
-            continue;
-        }
-        if !placeholder.span.raw {
-            continue;
-        }
-        let text = placeholder.span.text;
-        if text.to_lowercase().starts_with(&prefix_lower)
-            && seen.insert(text.clone())
-        {
-            candidates.push(PlaceholderCandidate {
-                text,
-                source: PlaceholderCandidateSource::Prompt,
-            });
+    let placeholders = scan_placeholder_spans(document);
+    for raw in [true, false] {
+        for placeholder in &placeholders {
+            if placeholder.opening_byte == context.opening_byte
+                || placeholder.span.raw != raw
+            {
+                continue;
+            }
+            let text = &placeholder.span.text;
+            if text.to_lowercase().starts_with(&prefix_lower)
+                && seen.insert(text.clone())
+            {
+                candidates.push(PlaceholderCandidate {
+                    text: text.clone(),
+                    source: PlaceholderCandidateSource::Prompt,
+                });
+            }
         }
     }
 
@@ -712,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_candidates_exclude_literal_spans() {
+    fn completion_candidates_rank_literal_spans_after_live_spans() {
         let (document, cursor) = marked_document(
             "`<alpha>`\n```\n<alpine>\n```\n<apricot> use <a<CURSOR>>",
         );
@@ -720,7 +725,33 @@ mod tests {
             build_placeholder_completion_candidates(&document, cursor, &[])
                 .unwrap();
 
-        assert_eq!(texts(&completion), vec!["apricot"]);
+        assert_eq!(texts(&completion), vec!["apricot", "alpha", "alpine"]);
+        assert!(completion
+            .candidates
+            .iter()
+            .all(|candidate| candidate.source
+                == PlaceholderCandidateSource::Prompt));
+    }
+
+    #[test]
+    fn live_candidate_dedups_literal_and_common_occurrences_at_live_position() {
+        let (document, cursor) =
+            marked_document("`<alpha>` <anchor> <alpha> use <a<CURSOR>>");
+        let completion = build_placeholder_completion_candidates(
+            &document,
+            cursor,
+            &common(&["alpha"]),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&completion), vec!["anchor", "alpha"]);
+        assert_eq!(
+            sources(&completion),
+            vec![
+                PlaceholderCandidateSource::Prompt,
+                PlaceholderCandidateSource::Prompt,
+            ]
+        );
     }
 
     #[test]
