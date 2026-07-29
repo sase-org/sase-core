@@ -1,3 +1,4 @@
+pub mod at_reference;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
@@ -10,6 +11,13 @@ pub mod token;
 pub mod wire;
 mod xprompt_args;
 
+pub use at_reference::{
+    build_at_reference_menu, detect_at_reference_context,
+    AtReferenceContextWire, AtReferenceGroup, AtReferenceInventoryWire,
+    AtReferenceKindRowWire, AtReferenceMenuWire, AtReferencePathQueryWire,
+    AtReferencePathRowWire, AtReferencePayloadRowWire, AtReferenceRowWire,
+    AtReferenceStage, AT_REFERENCE_MAX_GROUP_ROWS,
+};
 pub use completion::{
     apply_vcs_project_selection, apply_vcs_ref_selection,
     apply_vcs_repo_selection, assist_entries_from_catalog,

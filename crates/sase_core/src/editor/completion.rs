@@ -7,10 +7,16 @@ use std::sync::OnceLock;
 
 use crate::artifact_ref::read_artifact_index_entries;
 use crate::{
-    scan_artifact_refs, ArtifactRefContextWire, EditorSnippetEntryWire,
+    ArtifactRefContextWire, EditorSnippetEntryWire,
     EditorXpromptCatalogEntryWire,
 };
 
+use super::at_reference::{
+    build_at_reference_menu, detect_at_reference_context,
+    is_builtin_at_reference_kind, AtReferenceContextWire,
+    AtReferenceInventoryWire, AtReferenceKindRowWire,
+    AtReferencePayloadRowWire, AtReferenceStage,
+};
 use super::directive::canonical_directive_name;
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
@@ -27,11 +33,9 @@ use super::wire::{
     XpromptInputHint,
 };
 
-const ARTIFACT_REF_PREFIX_LOOKBACK: usize = 128;
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
 const ARTIFACT_REF_MAX_VISITED: usize = 4096;
 const ARTIFACT_REF_MAX_RESULTS: usize = 200;
-const BUILTIN_ARTIFACT_REF_KINDS: &[&str] = &["commit", "chat", "bug", "file"];
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
@@ -206,82 +210,30 @@ pub fn detect_artifact_ref_context_at_position(
     position: EditorPosition,
     context: &ArtifactRefContextWire,
 ) -> Option<CompletionContext> {
-    let text = document.text();
-    let cursor = document.position_to_byte_offset(position)?;
-
-    if let Some(candidate) =
-        scan_artifact_refs(text).into_iter().find(|candidate| {
-            cursor >= candidate.sigil_span.end
-                && cursor <= candidate.candidate_span.end
-        })
-    {
-        let candidate_span =
-            (candidate.candidate_span.start, candidate.candidate_span.end);
-        let (kind, mode, replacement_span, query_span) =
-            if cursor <= candidate.separator_span.start {
-                (
-                    None,
-                    ArtifactRefCompletionMode::Kind,
-                    (candidate.kind_span.start, candidate.separator_span.end),
-                    (
-                        candidate.kind_span.start,
-                        cursor.min(candidate.kind_span.end),
-                    ),
-                )
-            } else {
-                (
-                    Some(candidate.kind.clone()),
-                    ArtifactRefCompletionMode::Payload,
-                    (candidate.payload_span.start, candidate.payload_span.end),
-                    (
-                        candidate.payload_span.start,
-                        cursor.min(candidate.payload_span.end),
-                    ),
-                )
-            };
-        return artifact_ref_completion_context(
-            document,
-            candidate_span,
-            replacement_span,
-            query_span,
-            kind,
-            mode,
-        );
-    }
-
-    let (candidate_start, candidate_end) =
-        incomplete_artifact_kind_candidate(text, cursor)?;
-    let query_span = (candidate_start + 1, cursor);
-    let query = text.get(query_span.0..query_span.1)?;
-    if !known_artifact_ref_kinds(context)
-        .iter()
-        .any(|kind| prefix_matches(kind, &query.to_lowercase()))
-    {
-        return None;
-    }
-    artifact_ref_completion_context(
+    let detected = detect_at_reference_context(
         document,
-        (candidate_start, candidate_end),
-        (candidate_start + 1, candidate_end),
-        query_span,
-        None,
-        ArtifactRefCompletionMode::Kind,
-    )
+        position,
+        &known_artifact_ref_kinds(context),
+    )?;
+    artifact_ref_completion_context(document, &detected)
 }
 
 fn artifact_ref_completion_context(
     document: &DocumentSnapshot,
-    candidate_span: (usize, usize),
-    replacement_span: (usize, usize),
-    query_span: (usize, usize),
-    kind: Option<String>,
-    mode: ArtifactRefCompletionMode,
+    detected: &AtReferenceContextWire,
 ) -> Option<CompletionContext> {
-    let query = document.text().get(query_span.0..query_span.1)?.to_string();
-    let token_range =
-        document.byte_range_to_range(candidate_span.0, candidate_span.1)?;
-    let replacement_range =
-        document.byte_range_to_range(replacement_span.0, replacement_span.1)?;
+    let mode = match detected.stage {
+        AtReferenceStage::Kind => ArtifactRefCompletionMode::Kind,
+        AtReferenceStage::Payload => ArtifactRefCompletionMode::Payload,
+    };
+    let token_range = document.byte_range_to_range(
+        detected.candidate_span.0,
+        detected.candidate_span.1,
+    )?;
+    let replacement_range = document.byte_range_to_range(
+        detected.replacement_span.0,
+        detected.replacement_span.1,
+    )?;
     Some(CompletionContext {
         kind: match mode {
             ArtifactRefCompletionMode::Kind => {
@@ -294,11 +246,11 @@ fn artifact_ref_completion_context(
         token: Some(TokenInfo {
             text: document
                 .text()
-                .get(candidate_span.0..candidate_span.1)?
+                .get(detected.candidate_span.0..detected.candidate_span.1)?
                 .to_string(),
             range: token_range,
-            byte_start: candidate_span.0,
-            byte_end: candidate_span.1,
+            byte_start: detected.candidate_span.0,
+            byte_end: detected.candidate_span.1,
         }),
         active_xprompt: None,
         active_input: None,
@@ -308,57 +260,44 @@ fn artifact_ref_completion_context(
         vcs_ref: None,
         artifact_ref: Some(ArtifactRefCompletionTrigger {
             mode,
-            candidate_span,
-            replacement_span,
-            query_span,
-            query,
-            kind,
+            candidate_span: detected.candidate_span,
+            replacement_span: detected.replacement_span,
+            query_span: detected.query_span,
+            query: detected.query.clone(),
+            kind: detected.kind.clone(),
         }),
         replacement_range,
     })
 }
 
-fn incomplete_artifact_kind_candidate(
-    text: &str,
-    cursor: usize,
-) -> Option<(usize, usize)> {
-    let floor = cursor.saturating_sub(ARTIFACT_REF_PREFIX_LOOKBACK);
-    let mut start = cursor;
-    while start > floor {
-        let previous = previous_char_boundary(text, start)?;
-        let character = text[previous..].chars().next()?;
-        if character.is_whitespace() || matches!(character, '"' | '\'' | '`') {
-            break;
+fn legacy_at_reference_context(
+    trigger: &ArtifactRefCompletionTrigger,
+) -> AtReferenceContextWire {
+    let stage = match trigger.mode {
+        ArtifactRefCompletionMode::Kind => AtReferenceStage::Kind,
+        ArtifactRefCompletionMode::Payload => AtReferenceStage::Payload,
+    };
+    let path_query = (stage == AtReferenceStage::Kind).then(|| {
+        let (directory, partial) = trigger
+            .query
+            .rfind('/')
+            .map(|separator| trigger.query.split_at(separator + 1))
+            .unwrap_or(("", &trigger.query));
+        super::at_reference::AtReferencePathQueryWire {
+            directory: directory.to_string(),
+            partial: partial.to_string(),
+            show_hidden: partial.starts_with('.'),
         }
-        start = previous;
+    });
+    AtReferenceContextWire {
+        stage,
+        candidate_span: trigger.candidate_span,
+        replacement_span: trigger.replacement_span,
+        query_span: trigger.query_span,
+        query: trigger.query.clone(),
+        kind: trigger.kind.clone(),
+        path_query,
     }
-    if text.get(start..start + 1) != Some("@") || cursor < start + 1 {
-        return None;
-    }
-    if start > 0 {
-        let previous = text[..start].chars().next_back()?;
-        if !previous.is_whitespace() && !matches!(previous, '"' | '\'' | '`') {
-            return None;
-        }
-    }
-
-    let mut end = cursor;
-    while end < text.len() && end - start <= ARTIFACT_REF_PREFIX_LOOKBACK {
-        let character = text[end..].chars().next()?;
-        if character.is_whitespace() || matches!(character, '"' | '\'' | '`') {
-            break;
-        }
-        end += character.len_utf8();
-    }
-    let body = text.get(start + 1..end)?;
-    if body.contains(':')
-        || !body.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
-        })
-    {
-        return None;
-    }
-    Some((start, end))
 }
 
 pub fn build_artifact_ref_kind_completion_candidates(
@@ -369,34 +308,50 @@ pub fn build_artifact_ref_kind_completion_candidates(
     if trigger.mode != ArtifactRefCompletionMode::Kind {
         return empty_artifact_ref_completion_list();
     }
-    let query = trigger.query.to_lowercase();
-    let mut candidates = Vec::new();
-    for kind in known_artifact_ref_kinds(context) {
-        if !prefix_matches(&kind, &query) {
-            continue;
-        }
-        let detail = if BUILTIN_ARTIFACT_REF_KINDS.contains(&kind.as_str()) {
-            "builtin artifact kind".to_string()
-        } else {
-            context
-                .document_roots
-                .iter()
-                .find(|root| root.kind == kind)
-                .map(|root| format!("document artifact · {}", root.root))
-                .unwrap_or_else(|| "document artifact".to_string())
-        };
-        let insertion = format!("{kind}:");
-        candidates.push(artifact_ref_candidate(
-            kind.clone(),
-            insertion,
-            detail,
-            replacement_range,
-            "artifact_kind",
-        ));
-    }
+    let detected = legacy_at_reference_context(trigger);
+    let inventory = AtReferenceInventoryWire {
+        kinds: known_artifact_ref_kinds(context)
+            .into_iter()
+            .map(|kind| {
+                let builtin = is_builtin_at_reference_kind(&kind);
+                let detail = if builtin {
+                    "builtin artifact kind".to_string()
+                } else {
+                    context
+                        .document_roots
+                        .iter()
+                        .find(|root| root.kind == kind)
+                        .map(|root| {
+                            format!("document artifact · {}", root.root)
+                        })
+                        .unwrap_or_else(|| "document artifact".to_string())
+                };
+                AtReferenceKindRowWire {
+                    kind,
+                    builtin,
+                    detail,
+                }
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let menu = build_at_reference_menu(&detected, &inventory);
+    let candidates = menu
+        .rows
+        .into_iter()
+        .map(|row| {
+            artifact_ref_candidate(
+                row.label.clone(),
+                row.insertion.trim_start_matches('@').to_string(),
+                row.detail,
+                replacement_range,
+                "artifact_kind",
+            )
+        })
+        .collect();
     CompletionList {
         candidates,
-        shared_extension: String::new(),
+        shared_extension: menu.shared_extension,
     }
 }
 
@@ -456,16 +411,47 @@ pub fn build_artifact_ref_payload_completion_candidates(
             }
         }
     }
+    let detected = legacy_at_reference_context(trigger);
+    let inventory = AtReferenceInventoryWire {
+        payloads: candidates
+            .into_iter()
+            .map(|candidate| AtReferencePayloadRowWire {
+                payload: candidate.insertion,
+                label: candidate.name,
+                detail: candidate.detail.unwrap_or_default(),
+                age: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let menu = build_at_reference_menu(&detected, &inventory);
+    let prefix = format!("@{kind}:");
+    let candidates = menu
+        .rows
+        .into_iter()
+        .map(|row| {
+            artifact_ref_candidate(
+                row.label,
+                row.insertion
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&row.insertion)
+                    .to_string(),
+                row.detail,
+                replacement_range,
+                "artifact_payload",
+            )
+        })
+        .collect();
     CompletionList {
         candidates,
-        shared_extension: String::new(),
+        shared_extension: menu.shared_extension,
     }
 }
 
 fn known_artifact_ref_kinds(context: &ArtifactRefContextWire) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut kinds = Vec::new();
-    for kind in BUILTIN_ARTIFACT_REF_KINDS
+    for kind in super::at_reference::BUILTIN_ARTIFACT_REF_KINDS
         .iter()
         .copied()
         .chain(context.document_roots.iter().map(|root| root.kind.as_str()))
@@ -2671,7 +2657,8 @@ mod tests {
     }
 
     #[test]
-    fn artifact_replacement_ranges_are_utf16_safe_and_at_paths_stay_files() {
+    fn artifact_replacement_ranges_are_utf16_safe_and_at_paths_stay_references()
+    {
         let temp = tempfile::tempdir().unwrap();
         let context = artifact_context(temp.path());
         let text = "é @designs:guidé.md";
@@ -2700,8 +2687,10 @@ mod tests {
             Some(&context),
         )
         .unwrap();
-        assert_eq!(context.kind, CompletionContextKind::FilePath);
-        assert!(context.artifact_ref.is_none());
+        assert_eq!(context.kind, CompletionContextKind::ArtifactRefKind);
+        let trigger = context.artifact_ref.unwrap();
+        assert_eq!(trigger.query, "src/foo");
+        assert_eq!(trigger.candidate_span, (0, 8));
     }
 
     #[test]
