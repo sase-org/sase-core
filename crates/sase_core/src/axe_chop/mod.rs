@@ -23,7 +23,7 @@ pub use decision::evaluate_chop_decision;
 pub use targets::expand_chop_targets;
 pub use validation::{
     derive_chop_agent_name, parse_chop_result, validate_chop_proposal,
-    validate_chop_result,
+    validate_chop_result, CHOP_REPORT_MAX_BYTES,
 };
 pub use wire::*;
 

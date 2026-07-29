@@ -82,6 +82,101 @@ pub struct ChopLaunchProposalWire {
     pub wait_on: Option<ProposalWaitOnWire>,
 }
 
+/// A structured, frontend-agnostic report authored by a chop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopReportWire {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub blocks: Vec<ChopReportBlockWire>,
+}
+
+/// One report block.
+///
+/// The vocabulary is deliberately closed: unknown block kinds are rejected
+/// fail-closed instead of being partially rendered by older SASE versions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChopReportBlockWire {
+    Headline {
+        text: String,
+        #[serde(default)]
+        tone: Option<ChopReportToneWire>,
+    },
+    Heading {
+        text: String,
+    },
+    Text {
+        text: String,
+        #[serde(default)]
+        tone: Option<ChopReportToneWire>,
+    },
+    Kv {
+        items: Vec<ChopReportKvItemWire>,
+    },
+    Rows {
+        #[serde(default)]
+        columns: Option<Vec<String>>,
+        rows: Vec<ChopReportRowWire>,
+    },
+    Bullets {
+        items: Vec<ChopReportBulletWire>,
+    },
+    Gauge {
+        label: String,
+        value: i64,
+        max: i64,
+        #[serde(default)]
+        tone: Option<ChopReportToneWire>,
+    },
+    Divider {},
+}
+
+/// One key/value item in a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopReportKvItemWire {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub tone: Option<ChopReportToneWire>,
+}
+
+/// One tabular row in a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopReportRowWire {
+    pub cells: Vec<String>,
+    #[serde(default)]
+    pub tone: Option<ChopReportToneWire>,
+    #[serde(default)]
+    pub glyph: Option<String>,
+}
+
+/// One bullet item in a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopReportBulletWire {
+    pub text: String,
+    #[serde(default)]
+    pub tone: Option<ChopReportToneWire>,
+    #[serde(default)]
+    pub glyph: Option<String>,
+}
+
+/// Semantic presentation tone for report content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChopReportToneWire {
+    Neutral,
+    Muted,
+    Info,
+    Ok,
+    Warn,
+    Error,
+    Accent,
+}
+
 /// Versioned document written to `SASE_CHOP_RESULT_FILE`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +187,8 @@ pub struct ChopResultDocumentWire {
     pub summary: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
+    pub report: Option<ChopReportWire>,
     #[serde(default)]
     pub counters: BTreeMap<String, i64>,
     #[serde(default)]

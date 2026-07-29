@@ -3,6 +3,263 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn chop_report_round_trips_every_block_kind() {
+    let parsed = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "summary": "report ready",
+            "report": {
+                "title": "CI WATCH",
+                "blocks": [
+                    {
+                        "kind": "headline",
+                        "text": "4 green · 1 red",
+                        "tone": "warn"
+                    },
+                    {"kind": "heading", "text": "REPOSITORIES"},
+                    {
+                        "kind": "text",
+                        "text": "One repository needs attention.",
+                        "tone": "info"
+                    },
+                    {
+                        "kind": "kv",
+                        "items": [
+                            {
+                                "key": "mode",
+                                "value": "dry run",
+                                "tone": "muted"
+                            }
+                        ]
+                    },
+                    {
+                        "kind": "rows",
+                        "columns": ["REPOSITORY", "STATE"],
+                        "rows": [
+                            {
+                                "cells": ["sase-org/sase", "red"],
+                                "tone": "error",
+                                "glyph": "▲"
+                            },
+                            {
+                                "cells": ["sase-org/sase-core", "green"],
+                                "tone": "ok"
+                            }
+                        ]
+                    },
+                    {
+                        "kind": "bullets",
+                        "items": [
+                            {
+                                "text": "Open the failing job",
+                                "tone": "accent",
+                                "glyph": "↗"
+                            }
+                        ]
+                    },
+                    {
+                        "kind": "gauge",
+                        "label": "budget",
+                        "value": 12,
+                        "max": 10,
+                        "tone": "neutral"
+                    },
+                    {"kind": "divider"}
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let report = parsed.report.as_ref().unwrap();
+    assert_eq!(report.title.as_deref(), Some("CI WATCH"));
+    assert_eq!(report.blocks.len(), 8);
+    let encoded = serde_json::to_string(&parsed).unwrap();
+    assert_eq!(parse_chop_result(&encoded).unwrap(), parsed);
+}
+
+#[test]
+fn chop_result_without_report_remains_valid_and_serializes_null() {
+    let parsed = parse_chop_result(
+        r#"{"schema_version":1,"status":"ok","summary":"legacy"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(parsed.report, None);
+    assert_eq!(serde_json::to_value(parsed).unwrap()["report"], json!(null));
+}
+
+#[test]
+fn chop_report_rejects_unknown_block_kinds_and_tones() {
+    let invalid_reports = [
+        json!({"blocks": [{"kind": "chart", "text": "future"}]}),
+        json!({
+            "blocks": [{
+                "kind": "headline",
+                "text": "status",
+                "tone": "purple"
+            }]
+        }),
+    ];
+
+    for report in invalid_reports {
+        let error = parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "report": report
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_result");
+    }
+}
+
+#[test]
+fn chop_report_rejects_control_characters_and_overlong_text() {
+    let invalid = [
+        (
+            json!({"blocks": [{"kind": "text", "text": "line one\nline two"}]}),
+            "invalid_report_text",
+        ),
+        (
+            json!({
+                "blocks": [{
+                    "kind": "headline",
+                    "text": "x".repeat(513)
+                }]
+            }),
+            "report_text_too_long",
+        ),
+    ];
+
+    for (report, expected_code) in invalid {
+        let error = parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "report": report
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        assert_eq!(error.path, "$.report.blocks[0].text");
+    }
+}
+
+#[test]
+fn chop_report_rejects_oversize_documents() {
+    let items: Vec<_> =
+        (0..64).map(|_| json!({"text": "x".repeat(512)})).collect();
+    let error = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "report": {
+                "blocks": [{"kind": "bullets", "items": items}]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, "report_too_large");
+    assert_eq!(error.path, "$.report");
+    assert!(error.message.contains(&CHOP_REPORT_MAX_BYTES.to_string()));
+}
+
+#[test]
+fn chop_report_rejects_excess_blocks_and_rows() {
+    let blocks = vec![json!({"kind": "divider"}); 49];
+    let too_many_blocks = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "report": {"blocks": blocks}
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(too_many_blocks.code, "invalid_report_count");
+    assert_eq!(too_many_blocks.path, "$.report.blocks");
+
+    let rows = vec![json!({"cells": ["value"]}); 65];
+    let too_many_rows = parse_chop_result(
+        &json!({
+            "schema_version": 1,
+            "status": "ok",
+            "report": {
+                "blocks": [{
+                    "kind": "rows",
+                    "rows": rows
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap_err();
+    assert_eq!(too_many_rows.code, "invalid_report_count");
+    assert_eq!(too_many_rows.path, "$.report.blocks[0].rows");
+}
+
+#[test]
+fn chop_report_rejects_ragged_rows_disallowed_glyphs_and_invalid_gauges() {
+    let invalid = [
+        (
+            json!({
+                "blocks": [{
+                    "kind": "rows",
+                    "columns": ["A", "B"],
+                    "rows": [{"cells": ["only one"]}]
+                }]
+            }),
+            "ragged_report_rows",
+            "$.report.blocks[0].rows[0].cells",
+        ),
+        (
+            json!({
+                "blocks": [{
+                    "kind": "bullets",
+                    "items": [{"text": "item", "glyph": "🚀"}]
+                }]
+            }),
+            "invalid_report_glyph",
+            "$.report.blocks[0].items[0].glyph",
+        ),
+        (
+            json!({
+                "blocks": [{
+                    "kind": "gauge",
+                    "label": "budget",
+                    "value": 0,
+                    "max": 0
+                }]
+            }),
+            "invalid_report_gauge",
+            "$.report.blocks[0].max",
+        ),
+    ];
+
+    for (report, expected_code, expected_path) in invalid {
+        let error = parse_chop_result(
+            &json!({
+                "schema_version": 1,
+                "status": "ok",
+                "report": report
+            })
+            .to_string(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        assert_eq!(error.path, expected_path);
+    }
+}
+
+#[test]
 fn result_validation_accepts_proposals_and_rejects_workflows() {
     let parsed = parse_chop_result(
         &json!({

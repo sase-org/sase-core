@@ -5,11 +5,22 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::wire::{
-    ChopEngineError, ChopLaunchProposalWire, ChopResultDocumentWire,
-    ChopResultStatusWire, ProposalWaitOnWire, CHOP_RESULT_SCHEMA_VERSION,
+    ChopEngineError, ChopLaunchProposalWire, ChopReportBlockWire,
+    ChopReportBulletWire, ChopReportKvItemWire, ChopReportRowWire,
+    ChopReportWire, ChopResultDocumentWire, ChopResultStatusWire,
+    ProposalWaitOnWire, CHOP_RESULT_SCHEMA_VERSION,
 };
 
 const CLAN_SUMMARY_MAX_BYTES: usize = 32 * 1024;
+pub const CHOP_REPORT_MAX_BYTES: usize = 32 * 1024;
+const CHOP_REPORT_MAX_BLOCKS: usize = 48;
+const CHOP_REPORT_MAX_ENTRIES: usize = 64;
+const CHOP_REPORT_MAX_COLUMNS: usize = 6;
+const CHOP_REPORT_MAX_TEXT_CHARS: usize = 512;
+const CHOP_REPORT_MAX_TITLE_CHARS: usize = 64;
+const CHOP_REPORT_GLYPHS: &[char] = &[
+    '▲', '◆', '•', '·', '●', '○', '✓', '✗', '↗', '↷', '⏱', '!', '▸', '─',
+];
 
 /// Parse and validate one versioned chop result JSON document.
 pub fn parse_chop_result(
@@ -83,6 +94,9 @@ pub fn validate_chop_result(
     }
     validate_optional_text(result.summary.as_deref(), "$.summary")?;
     validate_optional_text(result.reason.as_deref(), "$.reason")?;
+    if let Some(report) = result.report.as_ref() {
+        validate_chop_report(report)?;
+    }
     for key in result.counters.keys() {
         if key.trim().is_empty() {
             return Err(ChopEngineError::new(
@@ -137,6 +151,296 @@ pub fn validate_chop_result(
             }
             prior_ids.push(id.clone());
         }
+    }
+    Ok(())
+}
+
+fn validate_chop_report(
+    report: &ChopReportWire,
+) -> Result<(), ChopEngineError> {
+    let serialized = serde_json::to_vec(report).map_err(|error| {
+        ChopEngineError::new(
+            "invalid_report",
+            "$.report",
+            format!("report could not be serialized: {error}"),
+        )
+    })?;
+    if serialized.len() > CHOP_REPORT_MAX_BYTES {
+        return Err(ChopEngineError::new(
+            "report_too_large",
+            "$.report",
+            format!(
+                "report must not exceed {CHOP_REPORT_MAX_BYTES} UTF-8 bytes"
+            ),
+        ));
+    }
+    if let Some(title) = report.title.as_deref() {
+        validate_report_text(
+            title,
+            "$.report.title",
+            "report title",
+            CHOP_REPORT_MAX_TITLE_CHARS,
+        )?;
+    }
+    validate_report_count(
+        report.blocks.len(),
+        "$.report.blocks",
+        "report blocks",
+        CHOP_REPORT_MAX_BLOCKS,
+    )?;
+
+    for (block_index, block) in report.blocks.iter().enumerate() {
+        let base = format!("$.report.blocks[{block_index}]");
+        match block {
+            ChopReportBlockWire::Headline { text, .. } => {
+                validate_report_text(
+                    text,
+                    &format!("{base}.text"),
+                    "headline text",
+                    CHOP_REPORT_MAX_TEXT_CHARS,
+                )?;
+            }
+            ChopReportBlockWire::Heading { text } => {
+                validate_report_text(
+                    text,
+                    &format!("{base}.text"),
+                    "heading text",
+                    CHOP_REPORT_MAX_TEXT_CHARS,
+                )?;
+            }
+            ChopReportBlockWire::Text { text, .. } => {
+                validate_report_text(
+                    text,
+                    &format!("{base}.text"),
+                    "text block",
+                    CHOP_REPORT_MAX_TEXT_CHARS,
+                )?;
+            }
+            ChopReportBlockWire::Kv { items } => {
+                validate_report_count(
+                    items.len(),
+                    &format!("{base}.items"),
+                    "key/value items",
+                    CHOP_REPORT_MAX_ENTRIES,
+                )?;
+                for (item_index, item) in items.iter().enumerate() {
+                    validate_report_kv_item(
+                        item,
+                        &format!("{base}.items[{item_index}]"),
+                    )?;
+                }
+            }
+            ChopReportBlockWire::Rows { columns, rows } => {
+                validate_report_rows(columns.as_deref(), rows, &base)?;
+            }
+            ChopReportBlockWire::Bullets { items } => {
+                validate_report_count(
+                    items.len(),
+                    &format!("{base}.items"),
+                    "bullet items",
+                    CHOP_REPORT_MAX_ENTRIES,
+                )?;
+                for (item_index, item) in items.iter().enumerate() {
+                    validate_report_bullet(
+                        item,
+                        &format!("{base}.items[{item_index}]"),
+                    )?;
+                }
+            }
+            ChopReportBlockWire::Gauge {
+                label, value, max, ..
+            } => {
+                validate_report_text(
+                    label,
+                    &format!("{base}.label"),
+                    "gauge label",
+                    CHOP_REPORT_MAX_TEXT_CHARS,
+                )?;
+                if *max <= 0 {
+                    return Err(ChopEngineError::new(
+                        "invalid_report_gauge",
+                        format!("{base}.max"),
+                        "gauge max must be greater than zero",
+                    ));
+                }
+                if *value < 0 {
+                    return Err(ChopEngineError::new(
+                        "invalid_report_gauge",
+                        format!("{base}.value"),
+                        "gauge value must be non-negative",
+                    ));
+                }
+            }
+            ChopReportBlockWire::Divider {} => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_report_kv_item(
+    item: &ChopReportKvItemWire,
+    base: &str,
+) -> Result<(), ChopEngineError> {
+    validate_report_text(
+        &item.key,
+        &format!("{base}.key"),
+        "key/value key",
+        CHOP_REPORT_MAX_TEXT_CHARS,
+    )?;
+    validate_report_text(
+        &item.value,
+        &format!("{base}.value"),
+        "key/value value",
+        CHOP_REPORT_MAX_TEXT_CHARS,
+    )
+}
+
+fn validate_report_bullet(
+    item: &ChopReportBulletWire,
+    base: &str,
+) -> Result<(), ChopEngineError> {
+    validate_report_text(
+        &item.text,
+        &format!("{base}.text"),
+        "bullet text",
+        CHOP_REPORT_MAX_TEXT_CHARS,
+    )?;
+    if let Some(glyph) = item.glyph.as_deref() {
+        validate_report_glyph(glyph, &format!("{base}.glyph"))?;
+    }
+    Ok(())
+}
+
+fn validate_report_rows(
+    columns: Option<&[String]>,
+    rows: &[ChopReportRowWire],
+    base: &str,
+) -> Result<(), ChopEngineError> {
+    validate_report_count(
+        rows.len(),
+        &format!("{base}.rows"),
+        "rows",
+        CHOP_REPORT_MAX_ENTRIES,
+    )?;
+
+    let expected_cells = if let Some(columns) = columns {
+        if columns.is_empty() || columns.len() > CHOP_REPORT_MAX_COLUMNS {
+            return Err(ChopEngineError::new(
+                "invalid_report_columns",
+                format!("{base}.columns"),
+                format!(
+                    "columns must contain 1–{CHOP_REPORT_MAX_COLUMNS} names"
+                ),
+            ));
+        }
+        for (column_index, column) in columns.iter().enumerate() {
+            validate_report_text(
+                column,
+                &format!("{base}.columns[{column_index}]"),
+                "column name",
+                CHOP_REPORT_MAX_TEXT_CHARS,
+            )?;
+        }
+        columns.len()
+    } else {
+        let first_cells = rows[0].cells.len();
+        if first_cells == 0 || first_cells > CHOP_REPORT_MAX_COLUMNS {
+            return Err(ChopEngineError::new(
+                "invalid_report_cells",
+                format!("{base}.rows[0].cells"),
+                format!("rows must contain 1–{CHOP_REPORT_MAX_COLUMNS} cells"),
+            ));
+        }
+        first_cells
+    };
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let row_base = format!("{base}.rows[{row_index}]");
+        if row.cells.len() != expected_cells {
+            return Err(ChopEngineError::new(
+                "ragged_report_rows",
+                format!("{row_base}.cells"),
+                format!(
+                    "row has {} cells, expected {expected_cells}",
+                    row.cells.len()
+                ),
+            ));
+        }
+        for (cell_index, cell) in row.cells.iter().enumerate() {
+            validate_report_text(
+                cell,
+                &format!("{row_base}.cells[{cell_index}]"),
+                "row cell",
+                CHOP_REPORT_MAX_TEXT_CHARS,
+            )?;
+        }
+        if let Some(glyph) = row.glyph.as_deref() {
+            validate_report_glyph(glyph, &format!("{row_base}.glyph"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_report_count(
+    count: usize,
+    path: &str,
+    label: &str,
+    maximum: usize,
+) -> Result<(), ChopEngineError> {
+    if count == 0 || count > maximum {
+        return Err(ChopEngineError::new(
+            "invalid_report_count",
+            path,
+            format!("{label} must contain 1–{maximum} entries"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_text(
+    value: &str,
+    path: &str,
+    label: &str,
+    maximum_chars: usize,
+) -> Result<(), ChopEngineError> {
+    if value.trim().is_empty() {
+        return Err(ChopEngineError::new(
+            "blank_report_text",
+            path,
+            format!("{label} must not be blank"),
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ChopEngineError::new(
+            "invalid_report_text",
+            path,
+            format!("{label} must not contain control characters"),
+        ));
+    }
+    if value.chars().count() > maximum_chars {
+        return Err(ChopEngineError::new(
+            "report_text_too_long",
+            path,
+            format!("{label} must not exceed {maximum_chars} characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_glyph(
+    glyph: &str,
+    path: &str,
+) -> Result<(), ChopEngineError> {
+    let mut characters = glyph.chars();
+    let character = characters.next();
+    if characters.next().is_some()
+        || !character.is_some_and(|item| CHOP_REPORT_GLYPHS.contains(&item))
+    {
+        return Err(ChopEngineError::new(
+            "invalid_report_glyph",
+            path,
+            "glyph must be exactly one allowlisted character",
+        ));
     }
     Ok(())
 }
