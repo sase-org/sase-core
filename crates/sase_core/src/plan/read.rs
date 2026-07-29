@@ -1,8 +1,10 @@
 //! Read-only plan discovery: scan + parse markdown plan artifacts.
 //!
 //! Repo plans live canonically under `<sdd_root>/plans/<YYYYMM>/*.md`, with
-//! their tale/epic classification stored in `tier` frontmatter. Local plans
-//! live under `<local_dir>/*.md` (flat) and `<local_dir>/<YYYYMM>/*.md` (sharded).
+//! their tale/epic classification stored in `tier` frontmatter. Callers may
+//! instead provide explicit `(root, kind)` document corpora, each supporting
+//! flat and sharded layouts. Local plans live under `<local_dir>/*.md` (flat)
+//! and `<local_dir>/<YYYYMM>/*.md` (sharded).
 //! Discovery is deliberately resilient: missing root directories yield no
 //! plans (not an error), unreadable/non-UTF-8 files are skipped, and malformed
 //! or absent frontmatter degrades to a body-derived title and a file-mtime
@@ -41,25 +43,79 @@ const CANONICAL_DT_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// Discover plans from a repo `sdd/` tree and/or the local archive.
 ///
-/// Either root may be `None` (so callers can scope by `--source`). `kinds`
-/// filters the repo corpus by kind label; `None` selects every kind. Local
-/// plans are not affected by `kinds` (they have no kind directory). Results are
-/// returned in a deterministic order: repo plans first (grouped by the
-/// [`REPO_PLAN_KINDS`] order, then shard, then filename), followed by local
-/// plans (flat files, then sharded files).
+/// Either root may be `None` (so callers can scope by `--source`). When
+/// `document_corpora` is supplied, it replaces the legacy repo `sdd/`
+/// subdirectory scan; each pair is `(corpus root, kind label)`. `kinds` filters
+/// the repo corpus by its final kind label; `None` selects every kind. Local
+/// plans are not affected by `kinds` (they have no kind directory).
+///
+/// Results are returned in a deterministic order: repo plans first (in the
+/// supplied corpus order, or grouped by the [`REPO_PLAN_KINDS`] order when
+/// corpora are omitted), followed by local plans. Explicit corpora and local
+/// plans each yield flat files before sharded files.
 pub fn read_plans(
     repo_sdd_root: Option<&Path>,
     local_plans_dir: Option<&Path>,
     kinds: Option<&[String]>,
+    document_corpora: Option<&[(PathBuf, String)]>,
 ) -> Result<Vec<PlanWire>, PlanError> {
     let mut plans = Vec::new();
-    if let Some(root) = repo_sdd_root {
+    if let Some(corpora) = document_corpora {
+        read_document_corpora(corpora, kinds, &mut plans)?;
+    } else if let Some(root) = repo_sdd_root {
         read_repo_plans(root, kinds, &mut plans)?;
     }
     if let Some(dir) = local_plans_dir {
         read_local_plans(dir, &mut plans)?;
     }
     Ok(plans)
+}
+
+fn read_document_corpora(
+    corpora: &[(PathBuf, String)],
+    kinds: Option<&[String]>,
+    out: &mut Vec<PlanWire>,
+) -> Result<(), PlanError> {
+    for (root, kind) in corpora {
+        read_document_corpus(root, kind, kinds, out)?;
+    }
+    Ok(())
+}
+
+fn read_document_corpus(
+    root: &Path,
+    kind: &str,
+    kinds: Option<&[String]>,
+    out: &mut Vec<PlanWire>,
+) -> Result<(), PlanError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for file in sorted_markdown_files(root)? {
+        push_repo_plan(root, kind, kinds, &file, out);
+    }
+    for shard in sorted_subdirs(root)? {
+        for file in sorted_markdown_files(&shard)? {
+            push_repo_plan(root, kind, kinds, &file, out);
+        }
+    }
+    Ok(())
+}
+
+fn push_repo_plan(
+    root: &Path,
+    kind: &str,
+    kinds: Option<&[String]>,
+    file: &Path,
+    out: &mut Vec<PlanWire>,
+) {
+    if let Some(plan) =
+        build_plan(REPO_SOURCE, kind, root, file, kind == "plans")
+    {
+        if kind_selected(kinds, &plan.kind) {
+            out.push(plan);
+        }
+    }
 }
 
 fn read_repo_plans(
@@ -463,7 +519,7 @@ mod tests {
             );
         }
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans.len(), REPO_PLAN_KINDS.len());
         for (dir_name, kind) in REPO_PLAN_KINDS {
@@ -478,6 +534,86 @@ mod tests {
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
         assert_eq!(kinds, ["tale", "research"]);
+    }
+
+    #[test]
+    fn explicit_document_corpora_replace_legacy_scan_and_keep_own_relpaths() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        let designs = temp.path().join("designs");
+        let decisions = temp.path().join("decisions");
+        write(
+            &sdd.join("plans").join("202606").join("legacy.md"),
+            "# Legacy\n",
+        );
+        write(&designs.join("flat.md"), "# Flat design\n");
+        write(
+            &designs.join("202607").join("sharded.md"),
+            "# Sharded design\n",
+        );
+        write(
+            &decisions.join("202606").join("accepted.md"),
+            "# Accepted decision\n",
+        );
+        let corpora = vec![
+            (designs, "designs".to_string()),
+            (decisions, "decisions".to_string()),
+        ];
+
+        let plans = read_plans(Some(&sdd), None, None, Some(&corpora)).unwrap();
+
+        let discovered: Vec<(&str, &str)> = plans
+            .iter()
+            .map(|plan| (plan.relpath.as_str(), plan.kind.as_str()))
+            .collect();
+        assert_eq!(
+            discovered,
+            [
+                ("flat.md", "designs"),
+                ("202607/sharded.md", "designs"),
+                ("202606/accepted.md", "decisions"),
+            ]
+        );
+        assert!(plans.iter().all(|plan| plan.source == REPO_SOURCE));
+        assert!(plans.iter().all(|plan| plan.name != "legacy"));
+    }
+
+    #[test]
+    fn explicit_plans_corpus_honors_tier_and_other_labels_ignore_it() {
+        let temp = tempdir().unwrap();
+        let plans_root = temp.path().join("canonical-plans");
+        let designs_root = temp.path().join("designs");
+        write(
+            &plans_root.join("202607").join("epic.md"),
+            "---\ntier: epic\n---\n# Epic\n",
+        );
+        write(
+            &designs_root.join("202607").join("not_a_tale.md"),
+            "---\ntier: tale\n---\n# Design\n",
+        );
+        let corpora = vec![
+            (plans_root, "plans".to_string()),
+            (designs_root, "designs".to_string()),
+        ];
+
+        let plans = read_plans(None, None, None, Some(&corpora)).unwrap();
+
+        assert_eq!(plan_with(&plans, "202607/epic.md").kind, "epic");
+        assert_eq!(plan_with(&plans, "202607/not_a_tale.md").kind, "designs");
+    }
+
+    #[test]
+    fn explicit_empty_corpora_disable_the_legacy_repo_scan() {
+        let temp = tempdir().unwrap();
+        let sdd = temp.path().join("sdd");
+        write(
+            &sdd.join("plans").join("202606").join("legacy.md"),
+            "# Legacy\n",
+        );
+
+        let plans = read_plans(Some(&sdd), None, None, Some(&[])).unwrap();
+
+        assert!(plans.is_empty());
     }
 
     #[test]
@@ -501,7 +637,7 @@ mod tests {
             "---\ntier: : bad\n---\n# Malformed\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plan_with(&plans, "plans/202606/epic.md").kind, "epic");
         assert_eq!(plan_with(&plans, "plans/202606/bare.md").kind, "tale");
@@ -527,18 +663,20 @@ mod tests {
         );
 
         let epic = vec!["epic".to_string()];
-        let epic_plans = read_plans(Some(&sdd), None, Some(&epic)).unwrap();
+        let epic_plans =
+            read_plans(Some(&sdd), None, Some(&epic), None).unwrap();
         assert_eq!(epic_plans.len(), 1);
         assert_eq!(epic_plans[0].relpath, "plans/202606/declared_epic.md");
 
         let tale = vec!["tale".to_string()];
-        let tale_plans = read_plans(Some(&sdd), None, Some(&tale)).unwrap();
+        let tale_plans =
+            read_plans(Some(&sdd), None, Some(&tale), None).unwrap();
         assert_eq!(tale_plans.len(), 1);
         assert_eq!(tale_plans[0].relpath, "plans/202606/declared_tale.md");
 
         let research = vec!["research".to_string()];
         let research_plans =
-            read_plans(Some(&sdd), None, Some(&research)).unwrap();
+            read_plans(Some(&sdd), None, Some(&research), None).unwrap();
         assert_eq!(research_plans.len(), 1);
         assert_eq!(research_plans[0].kind, "research");
     }
@@ -553,7 +691,7 @@ mod tests {
             "# Sharded plan\n\nBody.\n",
         );
 
-        let plans = read_plans(None, Some(&local), None).unwrap();
+        let plans = read_plans(None, Some(&local), None, None).unwrap();
 
         assert_eq!(plans.len(), 2);
         // Flat files are surfaced before sharded ones.
@@ -576,7 +714,7 @@ mod tests {
         );
         write(&local.join("local.md"), "# Local\n");
 
-        let plans = read_plans(Some(&sdd), Some(&local), None).unwrap();
+        let plans = read_plans(Some(&sdd), Some(&local), None, None).unwrap();
 
         let sources: Vec<&str> =
             plans.iter().map(|plan| plan.source.as_str()).collect();
@@ -598,7 +736,7 @@ mod tests {
              # Unified auth\n\nFirst paragraph.\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans.len(), 1);
         let plan = &plans[0];
@@ -631,7 +769,7 @@ mod tests {
              Real summary.\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans[0].prompt_link, "202607/prompts/linked.md");
         assert!(!plans[0].frontmatter.contains_key("prompt"));
@@ -649,7 +787,7 @@ mod tests {
             "- **PLAN:** [../202607/linked.md](../linked.md)\n\nOriginal prompt.\n",
         );
 
-        let plans = read_plans(None, Some(&prompts), None).unwrap();
+        let plans = read_plans(None, Some(&prompts), None, None).unwrap();
 
         assert_eq!(plans[0].prompt_link, "../202607/linked.md");
         assert_eq!(plans[0].title, "Linked");
@@ -680,7 +818,7 @@ mod tests {
              # Linked plan\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans[0].prompt_link, "sdd/plans/202607/prompts/linked.md");
 
@@ -692,7 +830,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
         assert_eq!(plans[0].prompt_link, "");
     }
 
@@ -709,7 +847,7 @@ mod tests {
             "Just prose, no heading at all.\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(
             plan_with(&plans, "plans/202606/with_h1.md").title,
@@ -730,7 +868,7 @@ mod tests {
             "# No time\n\nBody.\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans.len(), 1);
         // mtime fallback yields a canonical, parseable timestamp.
@@ -758,7 +896,7 @@ mod tests {
             "# Bare plan\n\nBody.\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         let broken = plan_with(&plans, "plans/202606/broken.md");
         assert_eq!(broken.title, "Broken plan");
@@ -782,7 +920,7 @@ mod tests {
         write(&sdd.join("research").join("202606").join("c.md"), "# C\n");
 
         let kinds = vec!["epic".to_string(), "research".to_string()];
-        let plans = read_plans(Some(&sdd), None, Some(&kinds)).unwrap();
+        let plans = read_plans(Some(&sdd), None, Some(&kinds), None).unwrap();
 
         let kinds: Vec<&str> =
             plans.iter().map(|plan| plan.kind.as_str()).collect();
@@ -801,7 +939,8 @@ mod tests {
         write(&local.join("l.md"), "# L\n");
 
         let kinds = vec!["tale".to_string()];
-        let plans = read_plans(Some(&sdd), Some(&local), Some(&kinds)).unwrap();
+        let plans =
+            read_plans(Some(&sdd), Some(&local), Some(&kinds), None).unwrap();
 
         // No repo tales exist, but the local plan is unaffected by --kind.
         assert_eq!(plans.len(), 1);
@@ -814,7 +953,7 @@ mod tests {
         let sdd = temp.path().join("sdd");
         write(&sdd.join("plans").join("202606").join("a.md"), "# A\n");
 
-        let plans = read_plans(Some(&sdd), None, Some(&[])).unwrap();
+        let plans = read_plans(Some(&sdd), None, Some(&[]), None).unwrap();
 
         assert!(plans.is_empty());
     }
@@ -826,11 +965,12 @@ mod tests {
         let missing_local = temp.path().join("nope/plans");
 
         let plans =
-            read_plans(Some(&missing_sdd), Some(&missing_local), None).unwrap();
+            read_plans(Some(&missing_sdd), Some(&missing_local), None, None)
+                .unwrap();
 
         assert!(plans.is_empty());
         // Passing no roots at all is also valid and empty.
-        assert!(read_plans(None, None, None).unwrap().is_empty());
+        assert!(read_plans(None, None, None, None).unwrap().is_empty());
     }
 
     #[test]
@@ -844,7 +984,7 @@ mod tests {
         write(&sdd.join("plans").join("202606").join("skip.txt"), "nope\n");
         write(&sdd.join("plans").join("202606").join("notes"), "nope\n");
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].name, "keep");
@@ -857,7 +997,7 @@ mod tests {
         write(&sdd.join("plans").join("202606").join("zebra.md"), "# Z\n");
         write(&sdd.join("plans").join("202606").join("alpha.md"), "# A\n");
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         let names: Vec<&str> =
             plans.iter().map(|plan| plan.name.as_str()).collect();
@@ -877,7 +1017,7 @@ mod tests {
             "---\ncreate_time: 2026-06-18\n---\n# Date only\n",
         );
 
-        let plans = read_plans(Some(&sdd), None, None).unwrap();
+        let plans = read_plans(Some(&sdd), None, None, None).unwrap();
 
         assert_eq!(
             plan_with(&plans, "plans/202606/aware.md").created_at,

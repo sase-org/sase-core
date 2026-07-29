@@ -17,7 +17,7 @@
 //! it, mirroring the bead-search architecture.
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
@@ -74,13 +74,15 @@ enum DateBound {
 /// Search and rank plans discovered under a repo `sdd/` tree and/or the local
 /// archive.
 ///
-/// Either root may be `None` (so callers can scope by `--source`). `kinds`
-/// narrows the repo corpus at read time (local plans are unaffected, governed
-/// by `sources`). `query` is optional: `Some(non-blank)` does case-insensitive
-/// substring matching and ranks by relevance; `None`/blank lists every plan
-/// (browse mode). The remaining arguments filter by frontmatter `statuses`,
-/// `sources`, and a `[since, until]` `created_at` range, then `sort`/`limit`
-/// shape the output (`limit` of `0`/`None` is unlimited).
+/// Either root may be `None` (so callers can scope by `--source`).
+/// `document_corpora`, when supplied, replaces the legacy repo-root scan with
+/// explicit `(root, kind)` pairs. `kinds` narrows the repo corpus at read time
+/// (local plans are unaffected, governed by `sources`). `query` is optional:
+/// `Some(non-blank)` does case-insensitive substring matching and ranks by
+/// relevance; `None`/blank lists every plan (browse mode). The remaining
+/// arguments filter by frontmatter `statuses`, `sources`, and a
+/// `[since, until]` `created_at` range, then `sort`/`limit` shape the output
+/// (`limit` of `0`/`None` is unlimited).
 #[allow(clippy::too_many_arguments)]
 pub fn search_plans(
     repo_sdd_root: Option<&Path>,
@@ -93,8 +95,10 @@ pub fn search_plans(
     until: Option<&str>,
     sort: Option<&str>,
     limit: Option<usize>,
+    document_corpora: Option<&[(PathBuf, String)]>,
 ) -> Result<Vec<PlanSearchMatchWire>, PlanError> {
-    let plans = read_plans(repo_sdd_root, local_plans_dir, kinds)?;
+    let plans =
+        read_plans(repo_sdd_root, local_plans_dir, kinds, document_corpora)?;
     search_in_plans(
         plans,
         query,
@@ -1083,6 +1087,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1118,6 +1123,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1128,6 +1134,40 @@ mod tests {
         assert!(kinds.contains(&"epic"));
         assert!(kinds.contains(&"local"));
         assert!(!kinds.contains(&"tale"));
+    }
+
+    #[test]
+    fn public_search_filters_across_explicit_corpus_labels() {
+        let temp = tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        let decisions = temp.path().join("decisions");
+        write(&designs.join("202607").join("ui.md"), "# UI design\n");
+        write(
+            &decisions.join("202607").join("storage.md"),
+            "# Storage decision\n",
+        );
+        let corpora = vec![
+            (designs, "designs".to_string()),
+            (decisions, "decisions".to_string()),
+        ];
+
+        let results = search_plans(
+            None,
+            None,
+            None,
+            Some(&["decisions".to_string()]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&corpora),
+        )
+        .unwrap();
+
+        assert_eq!(relpaths(&results), vec!["202607/storage.md"]);
+        assert_eq!(results[0].plan.kind, "decisions");
     }
 
     fn write(path: &Path, content: &str) {

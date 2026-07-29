@@ -2701,11 +2701,13 @@ fn py_bead_search<'py>(
 /// scope by `--source` (pass `None` to skip a corpus). The remaining arguments
 /// mirror [`core_plan_search`]: optional `query` (browse when omitted), repo
 /// `kinds`, frontmatter `statuses`, a `sources` filter, a `[since, until]` date
-/// range, `sort` mode, and `limit` (`0`/`None` = unlimited). Returns a list of
+/// range, `sort` mode, and `limit` (`0`/`None` = unlimited).
+/// `document_corpora`, when supplied, replaces the legacy repo-root scan with
+/// explicit `(root, kind)` pairs. Returns a list of
 /// `{plan, matched_fields, score}` dicts, following `bead_search`'s JSON shape.
 #[pyfunction]
 #[pyo3(name = "plan_search")]
-#[pyo3(signature = (repo_sdd_root=None, local_plans_dir=None, query=None, kinds=None, statuses=None, sources=None, since=None, until=None, sort=None, limit=None))]
+#[pyo3(signature = (repo_sdd_root=None, local_plans_dir=None, query=None, kinds=None, statuses=None, sources=None, since=None, until=None, sort=None, limit=None, document_corpora=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_plan_search<'py>(
     py: Python<'py>,
@@ -2719,9 +2721,16 @@ fn py_plan_search<'py>(
     until: Option<String>,
     sort: Option<String>,
     limit: Option<usize>,
+    document_corpora: Option<Vec<(String, String)>>,
 ) -> PyResult<PyObject> {
     let repo_sdd_root = repo_sdd_root.map(PathBuf::from);
     let local_plans_dir = local_plans_dir.map(PathBuf::from);
+    let document_corpora = document_corpora.map(|corpora| {
+        corpora
+            .into_iter()
+            .map(|(root, kind)| (PathBuf::from(root), kind))
+            .collect::<Vec<_>>()
+    });
     plan_result_to_py(
         py,
         py.allow_threads(|| {
@@ -2736,6 +2745,7 @@ fn py_plan_search<'py>(
                 until.as_deref(),
                 sort.as_deref(),
                 limit,
+                document_corpora.as_deref(),
             )
         }),
     )
@@ -7860,6 +7870,43 @@ mod tests {
 
             assert_eq!(value[0]["issue"]["id"], json!("beads-1.1"));
             assert_eq!(value[0]["matched_fields"], json!(["title"]));
+        });
+    }
+
+    #[test]
+    fn plan_search_binding_accepts_explicit_document_corpora() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let designs = temp.path().join("designs");
+            fs::create_dir_all(designs.join("202607")).unwrap();
+            fs::write(
+                designs.join("202607").join("entry.md"),
+                "# Binding design\n",
+            )
+            .unwrap();
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let kwargs = PyDict::new_bound(py);
+            kwargs
+                .set_item(
+                    "document_corpora",
+                    vec![(
+                        designs.to_string_lossy().into_owned(),
+                        "designs".to_string(),
+                    )],
+                )
+                .unwrap();
+
+            let result = module
+                .getattr("plan_search")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
+
+            assert_eq!(value[0]["plan"]["kind"], json!("designs"));
+            assert_eq!(value[0]["plan"]["relpath"], json!("202607/entry.md"));
         });
     }
 
