@@ -50,9 +50,9 @@ use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     agent_completion_response, apply_replacement, completion_response,
     diagnostic as lsp_diagnostic, hover as lsp_hover,
-    placeholder_completion_response, sase_snippet_completion_item,
-    snippet_completion_item, to_editor_position, to_lsp_range,
-    vcs_project_completion_response, vcs_ref_completion_response,
+    model_completion_response, placeholder_completion_response,
+    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
+    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
 
@@ -106,6 +106,18 @@ struct ModelCompletionEntry {
     kind: String,
     provider: String,
     aliases: Vec<String>,
+    alias_kind: String,
+    target_provider: String,
+    target_model: String,
+    target_effort: String,
+    provenance: String,
+    reference: String,
+    reference_effort: String,
+    selector_mode: String,
+    pool_available: u64,
+    pool_total: u64,
+    config_source: String,
+    bucket: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -269,6 +281,14 @@ impl XpromptLspServer {
                 context.replacement_range,
                 append_text_arg_space,
             )));
+        }
+        if context.kind == CompletionContextKind::DirectiveArgument
+            && context.directive_name.as_deref() == Some("model")
+        {
+            return Some(model_completion_response(
+                list,
+                context.replacement_range,
+            ));
         }
         let mut response = completion_response(list, context.replacement_range);
         if config.snippet_support
@@ -1423,34 +1443,106 @@ fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
         } else {
             entry.display.clone()
         };
-        let detail_parts: Vec<&str> = [
-            (!entry.provider.is_empty()).then_some(entry.provider.as_str()),
-            (!entry.description.is_empty())
-                .then_some(entry.description.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let detail =
-            (!detail_parts.is_empty()).then(|| detail_parts.join("  "));
+        let detail = model_completion_detail(&entry);
+        let documentation = model_completion_documentation(&entry);
         candidates.push(CompletionCandidate {
             display,
             insertion: entry.value.clone(),
             detail,
-            documentation: None,
+            documentation,
             is_dir: false,
             name: filter_text,
             replacement: None,
             additional_edits: Vec::new(),
             kind: entry.kind,
             project: String::new(),
-            status: String::new(),
+            status: entry.alias_kind,
         });
     }
     CompletionList {
         candidates,
         shared_extension: String::new(),
     }
+}
+
+fn is_model_alias_kind(kind: &str) -> bool {
+    matches!(kind, "implicit_alias" | "user_alias")
+}
+
+fn model_completion_detail(entry: &ModelCompletionEntry) -> Option<String> {
+    if !is_model_alias_kind(&entry.kind) {
+        return (!entry.provider.is_empty()).then(|| entry.provider.clone());
+    }
+
+    let mut target = match (
+        entry.target_provider.is_empty(),
+        entry.target_model.is_empty(),
+    ) {
+        (false, false) => format!(
+            "{}({})",
+            entry.target_provider.to_uppercase(),
+            entry.target_model
+        ),
+        (true, false) => entry.target_model.clone(),
+        (false, true) => entry.target_provider.to_uppercase(),
+        (true, true) => String::new(),
+    };
+    if !target.is_empty() && !entry.target_effort.is_empty() {
+        target.push_str(" @ ");
+        target.push_str(&entry.target_effort);
+    }
+    if !target.is_empty() {
+        return Some(target);
+    }
+
+    // Additive v1 compatibility: an older catalog has none of the structured
+    // target fields, so retain its legacy provider/description detail.
+    let legacy_parts: Vec<&str> = [
+        (!entry.provider.is_empty()).then_some(entry.provider.as_str()),
+        (!entry.description.is_empty()).then_some(entry.description.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!legacy_parts.is_empty()).then(|| legacy_parts.join("  "))
+}
+
+fn model_completion_documentation(
+    entry: &ModelCompletionEntry,
+) -> Option<String> {
+    let mut sections = Vec::new();
+    if !entry.description.is_empty() {
+        sections.push(entry.description.clone());
+    }
+    if !entry.provenance.is_empty() {
+        let mut provenance = entry.provenance.clone();
+        if !entry.reference.is_empty() {
+            provenance.push_str(" → @");
+            provenance.push_str(entry.reference.trim_start_matches('@'));
+            if !entry.reference_effort.is_empty() {
+                provenance.push_str(" @ ");
+                provenance.push_str(&entry.reference_effort);
+            }
+        }
+        sections.push(format!("**Provenance:** {provenance}"));
+    }
+    if !entry.config_source.is_empty() {
+        sections.push(format!(
+            "**Config:** `llm_provider.model_aliases.{}.{}`",
+            entry.config_source,
+            entry.value.trim_start_matches('@')
+        ));
+    }
+    if !entry.bucket.is_empty() {
+        sections.push(format!("**Bucket:** `{}`", entry.bucket));
+    }
+    if entry.selector_mode == "round_robin" {
+        sections.push(format!(
+            "**Pool:** {}/{} available",
+            entry.pool_available, entry.pool_total
+        ));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn file_history() -> Vec<String> {
@@ -1596,6 +1688,18 @@ fn model_entry(value: &serde_json::Value) -> Option<ModelCompletionEntry> {
         kind: json_string(object, "kind"),
         provider: json_string(object, "provider"),
         aliases,
+        alias_kind: json_string(object, "alias_kind"),
+        target_provider: json_string(object, "target_provider"),
+        target_model: json_string(object, "target_model"),
+        target_effort: json_string(object, "target_effort"),
+        provenance: json_string(object, "provenance"),
+        reference: json_string(object, "reference"),
+        reference_effort: json_string(object, "reference_effort"),
+        selector_mode: json_string(object, "selector_mode"),
+        pool_available: json_u64(object, "pool_available"),
+        pool_total: json_u64(object, "pool_total"),
+        config_source: json_string(object, "config_source"),
+        bucket: json_string(object, "bucket"),
     })
 }
 
@@ -1608,6 +1712,16 @@ fn json_string(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn json_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> u64 {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
 }
 
 fn entry_for_token<'a>(
@@ -3449,6 +3563,94 @@ mod tests {
         .unwrap();
     }
 
+    fn write_enriched_model_catalog(path: &Path) {
+        fs::write(
+            path,
+            r#"{
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "value": "opus",
+                        "display": "opus",
+                        "description": "Claude",
+                        "kind": "model",
+                        "provider": "claude",
+                        "aliases": []
+                    },
+                    {
+                        "value": "gpt-5.6-sol",
+                        "display": "gpt-5.6-sol",
+                        "description": "Codex",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": ["gpt56sol"]
+                    },
+                    {
+                        "value": "@default",
+                        "display": "@default",
+                        "description": "Default model for prompts.",
+                        "kind": "implicit_alias",
+                        "provider": "",
+                        "aliases": ["default"],
+                        "alias_kind": "default",
+                        "target_provider": "claude",
+                        "target_model": "opus",
+                        "target_effort": "high",
+                        "provenance": "implicit",
+                        "reference": "coder",
+                        "reference_effort": "medium",
+                        "selector_mode": "",
+                        "pool_available": 0,
+                        "pool_total": 0,
+                        "config_source": "",
+                        "bucket": ""
+                    },
+                    {
+                        "value": "@claude_coder",
+                        "display": "@claude_coder",
+                        "description": "Claude coder follow-up model.",
+                        "kind": "implicit_alias",
+                        "provider": "",
+                        "aliases": ["claude_coder"],
+                        "alias_kind": "provider_coder",
+                        "target_provider": "claude",
+                        "target_model": "opus",
+                        "target_effort": "",
+                        "provenance": "implicit",
+                        "reference": "coder",
+                        "reference_effort": "",
+                        "selector_mode": "",
+                        "pool_available": 0,
+                        "pool_total": 0,
+                        "config_source": "",
+                        "bucket": ""
+                    },
+                    {
+                        "value": "@scout",
+                        "display": "@scout",
+                        "description": "Fast scouting pool.",
+                        "kind": "user_alias",
+                        "provider": "",
+                        "aliases": ["scout"],
+                        "alias_kind": "user",
+                        "target_provider": "codex",
+                        "target_model": "gpt-5.6-sol",
+                        "target_effort": "low",
+                        "provenance": "configured",
+                        "reference": "",
+                        "reference_effort": "",
+                        "selector_mode": "round_robin",
+                        "pool_available": 2,
+                        "pool_total": 3,
+                        "config_source": "custom",
+                        "bucket": "fast"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_model_catalog_rejects_unknown_schema() {
         let temp = tempfile::tempdir().unwrap();
@@ -3497,7 +3699,21 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.label, "claude-fable-5");
         assert_eq!(item.filter_text.as_deref(), Some("claude-fable-5"));
-        assert_eq!(item.detail.as_deref(), Some("claude  Claude (fable)"));
+        assert_eq!(item.kind, Some(CompletionItemKind::VALUE));
+        assert_eq!(item.detail.as_deref(), Some("claude"));
+        assert_eq!(item.sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("model")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected model documentation");
+        };
+        assert_eq!(documentation.value, "Claude (fable)");
         let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
         else {
             panic!("expected text edit");
@@ -3505,6 +3721,199 @@ mod tests {
         assert_eq!(edit.range.start, Position::new(0, 7));
         assert_eq!(edit.range.end, Position::new(0, 7));
         assert_eq!(edit.new_text, "claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn enriched_model_catalog_renders_alias_detail_and_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("%model:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opus", "gpt-5.6-sol", "@default", "@claude_coder", "@scout"]
+        );
+        assert_eq!(
+            items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                Some(CompletionItemKind::VALUE),
+                Some(CompletionItemKind::VALUE),
+                Some(CompletionItemKind::ENUM_MEMBER),
+                Some(CompletionItemKind::ENUM_MEMBER),
+                Some(CompletionItemKind::ENUM_MEMBER),
+            ]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.sort_text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["0:0000", "0:0001", "1:0002", "1:0003", "1:0004"]
+        );
+
+        let default =
+            items.iter().find(|item| item.label == "@default").unwrap();
+        assert_eq!(default.detail.as_deref(), Some("CLAUDE(opus) @ high"));
+        assert_eq!(
+            default
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("default")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            default.documentation.as_ref()
+        else {
+            panic!("expected alias documentation");
+        };
+        assert_eq!(
+            documentation.value,
+            "Default model for prompts.\n\n\
+             **Provenance:** implicit → @coder @ medium"
+        );
+
+        let coder = items
+            .iter()
+            .find(|item| item.label == "@claude_coder")
+            .unwrap();
+        assert_eq!(
+            coder
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("coder")
+        );
+
+        let scout = items.iter().find(|item| item.label == "@scout").unwrap();
+        assert_eq!(scout.detail.as_deref(), Some("CODEX(gpt-5.6-sol) @ low"));
+        assert_eq!(
+            scout
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("custom")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            scout.documentation.as_ref()
+        else {
+            panic!("expected pooled alias documentation");
+        };
+        assert_eq!(
+            documentation.value,
+            "Fast scouting pool.\n\n\
+             **Provenance:** configured\n\n\
+             **Config:** `llm_provider.model_aliases.custom.scout`\n\n\
+             **Bucket:** `fast`\n\n\
+             **Pool:** 2/3 available"
+        );
+    }
+
+    #[tokio::test]
+    async fn leading_at_filters_model_completion_to_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("%model:@".to_string(), Position::new(0, 8))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@default", "@claude_coder", "@scout"]
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.kind == Some(CompletionItemKind::ENUM_MEMBER)));
+    }
+
+    #[tokio::test]
+    async fn stale_v1_alias_catalog_still_produces_items() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        fs::write(
+            &catalog_path,
+            r#"{
+                "schema_version": 1,
+                "entries": [{
+                    "value": "@default",
+                    "display": "@default",
+                    "description": "alias for the default model",
+                    "kind": "implicit_alias",
+                    "provider": "",
+                    "aliases": ["default"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text("%model:def".to_string(), Position::new(0, 10))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "@default");
+        assert_eq!(items[0].filter_text.as_deref(), Some("default"));
+        assert_eq!(items[0].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("alias for the default model")
+        );
     }
 
     #[tokio::test]

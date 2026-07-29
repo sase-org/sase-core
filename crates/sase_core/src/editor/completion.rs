@@ -2627,6 +2627,12 @@ mod tests {
             classify_completion_context(&doc, pos(11), &catalog).unwrap();
         assert_eq!(context.directive_name.as_deref(), Some("model"));
         assert_eq!(context.token.as_ref().unwrap().text, "@oth");
+
+        let doc = DocumentSnapshot::new("%model:@");
+        let context =
+            classify_completion_context(&doc, pos(8), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("model"));
+        assert_eq!(context.token.as_ref().unwrap().text, "@");
     }
 
     #[test]

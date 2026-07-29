@@ -35,6 +35,59 @@ pub fn completion_response(
     )
 }
 
+/// Render `%model` rows with model/alias kinds and stable catalog ordering.
+pub fn model_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let kind = candidate.kind.clone();
+                let alias_kind = candidate.status.clone();
+                let is_alias = is_model_alias_kind(&kind);
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(if is_alias {
+                    CompletionItemKind::ENUM_MEMBER
+                } else {
+                    CompletionItemKind::VALUE
+                });
+                item.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(model_completion_kind_label(
+                        &kind,
+                        &alias_kind,
+                    )),
+                });
+                let group = u8::from(is_alias);
+                item.sort_text = Some(format!("{group}:{index:04}"));
+                item
+            })
+            .collect(),
+    )
+}
+
+fn is_model_alias_kind(kind: &str) -> bool {
+    matches!(kind, "implicit_alias" | "user_alias")
+}
+
+fn model_completion_kind_label(kind: &str, alias_kind: &str) -> String {
+    if !is_model_alias_kind(kind) {
+        return "model".to_string();
+    }
+    match alias_kind {
+        "default" => "default",
+        "role" => "role",
+        "provider_coder" => "coder",
+        "user" => "custom",
+        _ if kind == "user_alias" => "custom",
+        _ => "role",
+    }
+    .to_string()
+}
+
 /// Render kind-aware wait/fork targets without losing the core candidate order.
 pub fn agent_completion_response(
     list: CompletionList,
