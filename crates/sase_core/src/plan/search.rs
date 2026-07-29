@@ -349,7 +349,7 @@ fn source_rank(plan: &PlanWire) -> u8 {
     }
 }
 
-fn current_date() -> NaiveDate {
+pub(crate) fn current_date() -> NaiveDate {
     let now: DateTime<Utc> = SystemTime::now().into();
     now.date_naive()
 }
@@ -386,6 +386,14 @@ fn parse_date_bound(
         return Ok(month_bound(year, month, bound));
     }
     Err(PlanError::validation(format!("invalid date: {raw}")))
+}
+
+/// Parse one plan-search `--since` value for reuse by other query APIs.
+pub(crate) fn parse_since_date_bound(
+    raw: &str,
+    now: NaiveDate,
+) -> Result<NaiveDate, PlanError> {
+    parse_date_bound(raw, now, DateBound::Since)
 }
 
 /// Parse a relative `Nd`/`Nw`/`Nm` bound as `now` minus the period. Returns

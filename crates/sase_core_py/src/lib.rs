@@ -149,6 +149,8 @@
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
+//! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
+//! - `artifact_file_query_wire_schema_version() -> int`
 //! - `sdd_artifact_link_parse(document: str) -> dict`
 //! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
 //! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
@@ -319,6 +321,10 @@ use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
     AgentRunStatsRequestWire,
+};
+use sase_core::artifact_file::{
+    query_artifact_files as core_query_artifact_files, ArtifactFileQueryError,
+    ArtifactFileQueryFiltersWire, ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_ref::{
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
@@ -2916,6 +2922,42 @@ fn py_artifact_ref_wire_schema_version() -> u64 {
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION
 }
 
+/// Query the tolerant artifact-file index using a frontend-neutral filter dict.
+#[pyfunction]
+#[pyo3(name = "artifact_files_query")]
+fn py_artifact_files_query<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    filters: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let filters = serde_json::from_value::<ArtifactFileQueryFiltersWire>(
+        py_to_json_value(filters.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "filters is not a valid ArtifactFileQueryFiltersWire dict: \
+                 {error}"
+        ))
+    })?;
+    let index_path = PathBuf::from(index_path);
+    let rows = py
+        .allow_threads(|| core_query_artifact_files(&index_path, &filters))
+        .map_err(artifact_file_query_error_to_pyerr)?;
+    let value = serde_json::to_value(rows).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-file query serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the artifact-file query result wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_file_query_wire_schema_version")]
+fn py_artifact_file_query_wire_schema_version() -> u64 {
+    ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION
+}
+
 /// Parse canonical and historical artifact links from one SDD document.
 #[pyfunction]
 #[pyo3(name = "sdd_artifact_link_parse")]
@@ -3727,6 +3769,10 @@ where
 }
 
 fn artifact_ref_error_to_pyerr(error: ArtifactRefError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn artifact_file_query_error_to_pyerr(error: ArtifactFileQueryError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
@@ -6155,6 +6201,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_resolve, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_files_query, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_file_query_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
@@ -7651,6 +7702,50 @@ mod tests {
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
             assert_eq!(py_artifact_ref_wire_schema_version(), 1);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
+        });
+    }
+
+    #[test]
+    fn artifact_file_query_binding_returns_full_rows_and_handshake() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("index.jsonl");
+        fs::write(
+            &index,
+            concat!(
+                "{\"schema_version\":1,\"artifact\":{\"id\":\"old\",",
+                "\"label\":\"Old\",\"kind\":\"image\",\"path\":\"/old\",",
+                "\"created_at\":\"2026-07-01T00:00:00Z\"}}\n",
+                "{\"schema_version\":2,\"artifact\":{\"id\":\"new\",",
+                "\"label\":\"New\",\"kind\":\"image\",\"path\":\"/new\",",
+                "\"created_at\":\"2026-07-02T00:00:00Z\",",
+                "\"sha256\":\"abc\",\"size_bytes\":3,",
+                "\"mime_type\":\"image/png\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("artifact_files_query").is_ok());
+            assert!(module
+                .getattr("artifact_file_query_wire_schema_version")
+                .is_ok());
+
+            let filters = PyDict::new_bound(py);
+            filters.set_item("kinds", ["image"]).unwrap();
+            filters.set_item("limit", 1).unwrap();
+            let result =
+                py_artifact_files_query(py, index.to_str().unwrap(), &filters)
+                    .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value[0]["id"], json!("new"));
+            assert_eq!(value[0]["schema_version"], json!(2));
+            assert_eq!(value[0]["sha256"], json!("abc"));
+            assert_eq!(value[0]["size_bytes"], json!(3));
+            assert_eq!(value[0]["mime_type"], json!("image/png"));
+            assert_eq!(py_artifact_file_query_wire_schema_version(), 1);
         });
     }
 

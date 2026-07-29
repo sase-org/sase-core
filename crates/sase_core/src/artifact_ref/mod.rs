@@ -3,11 +3,9 @@
 mod scanner;
 mod wire;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
+use crate::artifact_file::read_artifact_file_index;
 use crate::reference_path::{
     path_to_relative_payload, resolve_ordered_root_file,
     validate_relative_payload, DriftPolicy, PathPayloadError,
@@ -24,8 +22,6 @@ pub use wire::{
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
-
-const ARTIFACT_FILE_INDEX_SCHEMA_VERSION: u64 = 1;
 
 /// Parse and validate one canonical `<kind>:<payload>[#<fragment>]` value.
 pub fn parse_artifact_ref(
@@ -715,44 +711,10 @@ fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct ArtifactIndexEnvelope {
-    schema_version: u64,
-    artifact: ArtifactIndexRow,
-}
-
-#[derive(Debug, Deserialize)]
-struct ArtifactIndexRow {
-    id: String,
-    path: String,
-}
-
 fn read_artifact_index(
     path: &Path,
-) -> Result<Vec<ArtifactIndexRow>, ArtifactRefError> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            serde_json::from_str::<ArtifactIndexEnvelope>(line)
-                .ok()
-                .filter(|envelope| {
-                    envelope.schema_version
-                        == ARTIFACT_FILE_INDEX_SCHEMA_VERSION
-                })
-                .map(|envelope| envelope.artifact)
-        })
-        .collect())
+) -> Result<Vec<crate::artifact_file::ArtifactFileWire>, ArtifactRefError> {
+    Ok(read_artifact_file_index(path)?)
 }
 
 pub(crate) fn read_artifact_index_entries(
@@ -1012,16 +974,19 @@ mod tests {
     }
 
     #[test]
-    fn indexed_file_resolution_uses_schema_one_envelopes() {
+    fn indexed_file_resolution_accepts_supported_envelope_range() {
         let temp = tempdir().unwrap();
-        let target = temp.path().join("image.png");
+        let v1_target = temp.path().join("v1.png");
+        let v2_target = temp.path().join("v2.png");
         let index = temp.path().join("index.jsonl");
         fs::write(
             &index,
             format!(
-                "{{\"schema_version\":2,\"artifact\":{{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"ignored\"}}}}\n\
-                 {{\"schema_version\":1,\"artifact\":{{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":{}}}}}\n",
-                serde_json::to_string(target.to_str().unwrap()).unwrap()
+                "{{\"schema_version\":3,\"artifact\":{{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"ignored\"}}}}\n\
+                 {{\"schema_version\":1,\"artifact\":{{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":{}}}}}\n\
+                 {{\"schema_version\":2,\"artifact\":{{\"id\":\"explicit:0123456789abcdef01234567\",\"path\":{}}}}}\n",
+                serde_json::to_string(v1_target.to_str().unwrap()).unwrap(),
+                serde_json::to_string(v2_target.to_str().unwrap()).unwrap(),
             ),
         )
         .unwrap();
@@ -1038,7 +1003,17 @@ mod tests {
         assert_eq!(result.status, "exact");
         assert_eq!(
             result.resolved_path.as_deref(),
-            Some(target.to_str().unwrap())
+            Some(v1_target.to_str().unwrap())
+        );
+        let v2_result = resolve_artifact_ref(
+            &parse_artifact_ref("file:explicit:0123456789abcdef01234567")
+                .unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            v2_result.resolved_path.as_deref(),
+            Some(v2_target.to_str().unwrap())
         );
     }
 

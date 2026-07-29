@@ -19,6 +19,7 @@ pub mod agent_name_template;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
+pub mod artifact_file;
 pub mod artifact_ref;
 pub mod axe_chop;
 pub mod axe_status;
@@ -202,6 +203,13 @@ pub use agent_stats::{
     AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
     AgentXPromptStatsRowWire, AgentXPromptStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
+};
+pub use artifact_file::{
+    query_artifact_files, read_artifact_file_index, ArtifactFileQueryError,
+    ArtifactFileQueryFiltersWire, ArtifactFileWire,
+    ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION,
+    ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION,
+    ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_ref::{
     canonicalize_artifact_ref, parse_artifact_ref, render_artifact_ref,
