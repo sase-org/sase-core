@@ -13,17 +13,22 @@ mod xprompt_args;
 pub use completion::{
     apply_vcs_project_selection, apply_vcs_ref_selection,
     apply_vcs_repo_selection, assist_entries_from_catalog,
-    build_agent_completion_candidates, build_snippet_completion_candidates,
+    build_agent_completion_candidates,
+    build_artifact_ref_kind_completion_candidates,
+    build_artifact_ref_payload_completion_candidates,
+    build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     build_wait_completion_candidates, build_xprompt_arg_name_candidates,
     build_xprompt_completion_candidates, classify_completion_context,
+    classify_completion_context_with_artifacts_and_workflows,
     classify_completion_context_with_workflows, colon_args_skeleton,
+    detect_artifact_ref_context_at_position,
     detect_vcs_ref_context_at_position, detect_vcs_repo_context_at_position,
     named_args_skeleton,
 };
 pub use definition::{definition_at_position, DefinitionTarget};
-pub use diagnostics::analyze_document;
+pub use diagnostics::{analyze_artifact_refs, analyze_document};
 pub use directive::{
     build_directive_completion_candidates, canonical_directive_name,
     directive_argument_candidates, directive_metadata, DIRECTIVES,
@@ -56,6 +61,7 @@ pub use token::{
 };
 pub use wire::{
     AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
+    ArtifactRefCompletionMode, ArtifactRefCompletionTrigger,
     CompletionCandidate, CompletionContext, CompletionContextKind,
     CompletionList, DiagnosticSeverity, DirectiveMetadata, EditorDiagnostic,
     EditorPosition, EditorRange, EditorTextEdit, FrontmatterFieldKind,

@@ -32,6 +32,8 @@ pub struct TokenInfo {
 #[serde(rename_all = "snake_case")]
 pub enum CompletionContextKind {
     Placeholder,
+    ArtifactRefKind,
+    ArtifactRefPayload,
     Xprompt,
     SlashSkill,
     FilePath,
@@ -50,6 +52,30 @@ pub enum CompletionContextKind {
     VcsRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRefCompletionMode {
+    Kind,
+    Payload,
+}
+
+/// Detected kind or payload completion trigger for an artifact reference.
+///
+/// Spans are UTF-8 byte offsets into the document. `candidate_span` covers
+/// the complete `@kind:payload` candidate, `replacement_span` is the segment
+/// frontends should replace on accept, and `query_span` is the prefix used to
+/// filter completion rows at the active cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefCompletionTrigger {
+    pub mode: ArtifactRefCompletionMode,
+    pub candidate_span: (usize, usize),
+    pub replacement_span: (usize, usize),
+    pub query_span: (usize, usize),
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionContext {
     pub kind: CompletionContextKind,
@@ -66,6 +92,8 @@ pub struct CompletionContext {
     pub vcs_repo: Option<VcsRepoTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_ref: Option<VcsRefTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<ArtifactRefCompletionTrigger>,
     pub replacement_range: EditorRange,
 }
 

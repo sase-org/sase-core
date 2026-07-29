@@ -3,6 +3,11 @@ use serde_yaml::{Mapping, Value};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::{
+    parse_artifact_ref, prompt_literal_zone_ranges, resolve_artifact_ref,
+    scan_artifact_refs, ArtifactRefContextWire, ArtifactRefKindWire,
+};
+
 use super::directive::canonical_directive_name;
 use super::frontmatter;
 use super::token::DocumentSnapshot;
@@ -33,6 +38,90 @@ pub fn analyze_document(
     diagnostics.extend(directive_diagnostics(document));
     diagnostics.extend(argument_diagnostics(document, entries));
     diagnostics
+}
+
+pub fn analyze_artifact_refs(
+    document: &DocumentSnapshot,
+    context: &ArtifactRefContextWire,
+) -> Vec<EditorDiagnostic> {
+    let literal_ranges = prompt_literal_zone_ranges(document.text());
+    let known_kinds = known_artifact_ref_kinds(context);
+    let mut diagnostics = Vec::new();
+    for candidate in scan_artifact_refs(document.text()) {
+        let span =
+            (candidate.candidate_span.start, candidate.candidate_span.end);
+        if !known_kinds.contains(&candidate.kind)
+            || literal_ranges
+                .iter()
+                .any(|literal| ranges_intersect(span, *literal))
+        {
+            continue;
+        }
+
+        let parsed = match parse_artifact_ref(&candidate.reference) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                push_diagnostic(
+                    document,
+                    &mut diagnostics,
+                    span.0,
+                    span.1,
+                    "malformed_artifact_ref",
+                    format!(
+                        "Malformed artifact reference `{}`: {}",
+                        candidate.text, error.message
+                    ),
+                );
+                continue;
+            }
+        };
+        if matches!(
+            &parsed.kind,
+            ArtifactRefKindWire::Commit | ArtifactRefKindWire::Bug
+        ) {
+            continue;
+        }
+        match resolve_artifact_ref(&parsed, context) {
+            Ok(resolution) if resolution.resolved_path.is_some() => {}
+            Ok(resolution) => push_diagnostic(
+                document,
+                &mut diagnostics,
+                span.0,
+                span.1,
+                "unresolved_artifact_ref",
+                format!(
+                    "Unresolved artifact reference `@{}` ({})",
+                    resolution.rendered, resolution.status
+                ),
+            ),
+            Err(error) => push_diagnostic(
+                document,
+                &mut diagnostics,
+                span.0,
+                span.1,
+                "unresolved_artifact_ref",
+                format!(
+                    "Unable to resolve artifact reference `@{}`: {}",
+                    parsed.rendered, error.message
+                ),
+            ),
+        }
+    }
+    diagnostics
+}
+
+fn known_artifact_ref_kinds(
+    context: &ArtifactRefContextWire,
+) -> HashSet<String> {
+    ["commit", "chat", "bug", "file"]
+        .into_iter()
+        .map(str::to_string)
+        .chain(context.document_roots.iter().map(|root| root.kind.clone()))
+        .collect()
+}
+
+fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < right.1 && right.0 < left.1
 }
 
 fn merged_entries(
@@ -586,7 +675,10 @@ fn directive_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::ArtifactRefDocumentRootWire;
 
     fn catalog() -> Vec<XpromptAssistEntry> {
         vec![
@@ -743,6 +835,101 @@ mod tests {
             .iter()
             .filter(|diagnostic| diagnostic.code == code)
             .count()
+    }
+
+    fn artifact_context(root: &std::path::Path) -> ArtifactRefContextWire {
+        ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: root.join("designs").to_string_lossy().into_owned(),
+            }],
+            chats_root: Some(root.join("chats").to_string_lossy().into_owned()),
+            artifact_index_path: Some(
+                root.join("artifact-index.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn artifact_diagnostics_report_malformed_and_unresolved_known_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        let text = "@designs:guide.md#page=0 @designs:missing.md @user:handle";
+        let document = DocumentSnapshot::new(text);
+
+        let diagnostics = analyze_artifact_refs(&document, &context);
+
+        assert_eq!(diagnostic_count(&diagnostics, "malformed_artifact_ref"), 1);
+        assert_eq!(
+            diagnostic_count(&diagnostics, "unresolved_artifact_ref"),
+            1
+        );
+        assert_eq!(
+            diagnostic_text(
+                text,
+                diagnostic(&diagnostics, "malformed_artifact_ref")
+            ),
+            "@designs:guide.md#page=0"
+        );
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("@user:handle")));
+    }
+
+    #[test]
+    fn artifact_diagnostics_resolve_document_chat_and_file_locally() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        fs::create_dir_all(temp.path().join("designs/202607")).unwrap();
+        fs::create_dir_all(temp.path().join("chats/202607")).unwrap();
+        fs::write(temp.path().join("designs/202607/design.md"), "design")
+            .unwrap();
+        fs::write(temp.path().join("chats/202607/agent.md"), "chat").unwrap();
+        fs::write(
+            temp.path().join("artifact-index.jsonl"),
+            "{\"schema_version\":1,\"artifact\":{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/tmp/image.png\"}}\n",
+        )
+        .unwrap();
+        let document = DocumentSnapshot::new(
+            "@designs:202607/design.md @chat:202607/agent.md @file:default:52895d68931185056fd0e49f",
+        );
+
+        let diagnostics = analyze_artifact_refs(&document, &context);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn artifact_diagnostics_skip_literal_ranges_and_unknown_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        let document = DocumentSnapshot::new(
+            "`@designs:missing.md`\n```\n@designs:fenced.md\n```\n@user:handle",
+        );
+
+        let diagnostics = analyze_artifact_refs(&document, &context);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn artifact_diagnostics_shape_check_commit_and_bug_without_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        let document = DocumentSnapshot::new(
+            "@commit:missing@0123456 @bug:missing#42 @commit:missing@bad @bug:missing#0",
+        );
+
+        let diagnostics = analyze_artifact_refs(&document, &context);
+
+        assert_eq!(diagnostic_count(&diagnostics, "malformed_artifact_ref"), 2);
+        assert_eq!(
+            diagnostic_count(&diagnostics, "unresolved_artifact_ref"),
+            0
+        );
     }
 
     #[test]

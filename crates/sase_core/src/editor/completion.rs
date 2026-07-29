@@ -1,9 +1,15 @@
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::{EditorSnippetEntryWire, EditorXpromptCatalogEntryWire};
+use crate::artifact_ref::read_artifact_index_entries;
+use crate::{
+    scan_artifact_refs, ArtifactRefContextWire, EditorSnippetEntryWire,
+    EditorXpromptCatalogEntryWire,
+};
 
 use super::directive::canonical_directive_name;
 use super::placeholder::detect_placeholder_context_at_position;
@@ -13,12 +19,19 @@ use super::token::{
     DocumentSnapshot,
 };
 use super::wire::{
-    AgentCompletionEntry, CompletionCandidate, CompletionContext,
+    AgentCompletionEntry, ArtifactRefCompletionMode,
+    ArtifactRefCompletionTrigger, CompletionCandidate, CompletionContext,
     CompletionContextKind, CompletionList, EditorPosition, EditorRange,
     EditorTextEdit, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
     VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
     XpromptInputHint,
 };
+
+const ARTIFACT_REF_PREFIX_LOOKBACK: usize = 128;
+const ARTIFACT_REF_MAX_DEPTH: usize = 8;
+const ARTIFACT_REF_MAX_VISITED: usize = 4096;
+const ARTIFACT_REF_MAX_RESULTS: usize = 200;
+const BUILTIN_ARTIFACT_REF_KINDS: &[&str] = &["commit", "chat", "bug", "file"];
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
@@ -80,6 +93,22 @@ pub fn classify_completion_context_with_workflows(
     entries: &[XpromptAssistEntry],
     known_workflow_names: &[String],
 ) -> Option<CompletionContext> {
+    classify_completion_context_with_artifacts_and_workflows(
+        document,
+        position,
+        entries,
+        known_workflow_names,
+        None,
+    )
+}
+
+pub fn classify_completion_context_with_artifacts_and_workflows(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    entries: &[XpromptAssistEntry],
+    known_workflow_names: &[String],
+    artifact_context: Option<&ArtifactRefContextWire>,
+) -> Option<CompletionContext> {
     if let Some(placeholder) =
         detect_placeholder_context_at_position(document, position)
     {
@@ -97,8 +126,14 @@ pub fn classify_completion_context_with_workflows(
             selected_values: Vec::new(),
             vcs_repo: None,
             vcs_ref: None,
+            artifact_ref: None,
             replacement_range: placeholder.replacement_range,
         });
+    }
+    if let Some(context) = artifact_context.and_then(|context| {
+        detect_artifact_ref_context_at_position(document, position, context)
+    }) {
+        return Some(context);
     }
     if let Some(context) = detect_vcs_repo_context_at_position(
         document,
@@ -146,6 +181,7 @@ pub fn classify_completion_context_with_workflows(
                 selected_values: Vec::new(),
                 vcs_repo: None,
                 vcs_ref: None,
+                artifact_ref: None,
                 replacement_range: document.byte_range_to_range(byte, byte)?,
             })
         }
@@ -162,6 +198,430 @@ pub fn classify_completion_context_with_workflows(
             context_for_token(CompletionContextKind::SnippetTrigger, token),
         ),
         _ => None,
+    }
+}
+
+pub fn detect_artifact_ref_context_at_position(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    context: &ArtifactRefContextWire,
+) -> Option<CompletionContext> {
+    let text = document.text();
+    let cursor = document.position_to_byte_offset(position)?;
+
+    if let Some(candidate) =
+        scan_artifact_refs(text).into_iter().find(|candidate| {
+            cursor >= candidate.sigil_span.end
+                && cursor <= candidate.candidate_span.end
+        })
+    {
+        let candidate_span =
+            (candidate.candidate_span.start, candidate.candidate_span.end);
+        let (kind, mode, replacement_span, query_span) =
+            if cursor <= candidate.separator_span.start {
+                (
+                    None,
+                    ArtifactRefCompletionMode::Kind,
+                    (candidate.kind_span.start, candidate.separator_span.end),
+                    (
+                        candidate.kind_span.start,
+                        cursor.min(candidate.kind_span.end),
+                    ),
+                )
+            } else {
+                (
+                    Some(candidate.kind.clone()),
+                    ArtifactRefCompletionMode::Payload,
+                    (candidate.payload_span.start, candidate.payload_span.end),
+                    (
+                        candidate.payload_span.start,
+                        cursor.min(candidate.payload_span.end),
+                    ),
+                )
+            };
+        return artifact_ref_completion_context(
+            document,
+            candidate_span,
+            replacement_span,
+            query_span,
+            kind,
+            mode,
+        );
+    }
+
+    let (candidate_start, candidate_end) =
+        incomplete_artifact_kind_candidate(text, cursor)?;
+    let query_span = (candidate_start + 1, cursor);
+    let query = text.get(query_span.0..query_span.1)?;
+    if !known_artifact_ref_kinds(context)
+        .iter()
+        .any(|kind| prefix_matches(kind, &query.to_lowercase()))
+    {
+        return None;
+    }
+    artifact_ref_completion_context(
+        document,
+        (candidate_start, candidate_end),
+        (candidate_start + 1, candidate_end),
+        query_span,
+        None,
+        ArtifactRefCompletionMode::Kind,
+    )
+}
+
+fn artifact_ref_completion_context(
+    document: &DocumentSnapshot,
+    candidate_span: (usize, usize),
+    replacement_span: (usize, usize),
+    query_span: (usize, usize),
+    kind: Option<String>,
+    mode: ArtifactRefCompletionMode,
+) -> Option<CompletionContext> {
+    let query = document.text().get(query_span.0..query_span.1)?.to_string();
+    let token_range =
+        document.byte_range_to_range(candidate_span.0, candidate_span.1)?;
+    let replacement_range =
+        document.byte_range_to_range(replacement_span.0, replacement_span.1)?;
+    Some(CompletionContext {
+        kind: match mode {
+            ArtifactRefCompletionMode::Kind => {
+                CompletionContextKind::ArtifactRefKind
+            }
+            ArtifactRefCompletionMode::Payload => {
+                CompletionContextKind::ArtifactRefPayload
+            }
+        },
+        token: Some(TokenInfo {
+            text: document
+                .text()
+                .get(candidate_span.0..candidate_span.1)?
+                .to_string(),
+            range: token_range,
+            byte_start: candidate_span.0,
+            byte_end: candidate_span.1,
+        }),
+        active_xprompt: None,
+        active_input: None,
+        directive_name: None,
+        selected_values: Vec::new(),
+        vcs_repo: None,
+        vcs_ref: None,
+        artifact_ref: Some(ArtifactRefCompletionTrigger {
+            mode,
+            candidate_span,
+            replacement_span,
+            query_span,
+            query,
+            kind,
+        }),
+        replacement_range,
+    })
+}
+
+fn incomplete_artifact_kind_candidate(
+    text: &str,
+    cursor: usize,
+) -> Option<(usize, usize)> {
+    let floor = cursor.saturating_sub(ARTIFACT_REF_PREFIX_LOOKBACK);
+    let mut start = cursor;
+    while start > floor {
+        let previous = previous_char_boundary(text, start)?;
+        let character = text[previous..].chars().next()?;
+        if character.is_whitespace() || matches!(character, '"' | '\'' | '`') {
+            break;
+        }
+        start = previous;
+    }
+    if text.get(start..start + 1) != Some("@") || cursor < start + 1 {
+        return None;
+    }
+    if start > 0 {
+        let previous = text[..start].chars().next_back()?;
+        if !previous.is_whitespace() && !matches!(previous, '"' | '\'' | '`') {
+            return None;
+        }
+    }
+
+    let mut end = cursor;
+    while end < text.len() && end - start <= ARTIFACT_REF_PREFIX_LOOKBACK {
+        let character = text[end..].chars().next()?;
+        if character.is_whitespace() || matches!(character, '"' | '\'' | '`') {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    let body = text.get(start + 1..end)?;
+    if body.contains(':')
+        || !body.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return None;
+    }
+    Some((start, end))
+}
+
+pub fn build_artifact_ref_kind_completion_candidates(
+    trigger: &ArtifactRefCompletionTrigger,
+    replacement_range: Option<EditorRange>,
+    context: &ArtifactRefContextWire,
+) -> CompletionList {
+    if trigger.mode != ArtifactRefCompletionMode::Kind {
+        return empty_artifact_ref_completion_list();
+    }
+    let query = trigger.query.to_lowercase();
+    let mut candidates = Vec::new();
+    for kind in known_artifact_ref_kinds(context) {
+        if !prefix_matches(&kind, &query) {
+            continue;
+        }
+        let detail = if BUILTIN_ARTIFACT_REF_KINDS.contains(&kind.as_str()) {
+            "builtin artifact kind".to_string()
+        } else {
+            context
+                .document_roots
+                .iter()
+                .find(|root| root.kind == kind)
+                .map(|root| format!("document artifact · {}", root.root))
+                .unwrap_or_else(|| "document artifact".to_string())
+        };
+        let insertion = format!("{kind}:");
+        candidates.push(artifact_ref_candidate(
+            kind.clone(),
+            insertion,
+            detail,
+            replacement_range,
+            "artifact_kind",
+        ));
+    }
+    CompletionList {
+        candidates,
+        shared_extension: String::new(),
+    }
+}
+
+pub fn build_artifact_ref_payload_completion_candidates(
+    trigger: &ArtifactRefCompletionTrigger,
+    replacement_range: Option<EditorRange>,
+    context: &ArtifactRefContextWire,
+) -> CompletionList {
+    if trigger.mode != ArtifactRefCompletionMode::Payload {
+        return empty_artifact_ref_completion_list();
+    }
+    let Some(kind) = trigger.kind.as_deref() else {
+        return empty_artifact_ref_completion_list();
+    };
+    if matches!(kind, "commit" | "bug") {
+        return empty_artifact_ref_completion_list();
+    }
+
+    let query = trigger.query.to_lowercase();
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    if kind == "chat" {
+        if let Some(root) = context.chats_root.as_deref() {
+            append_artifact_path_candidates(
+                &mut candidates,
+                &mut seen,
+                kind,
+                Path::new(root),
+                &query,
+                replacement_range,
+            );
+        }
+    } else if kind == "file" {
+        append_artifact_index_candidates(
+            &mut candidates,
+            &mut seen,
+            context,
+            &query,
+            replacement_range,
+        );
+    } else {
+        for root in context
+            .document_roots
+            .iter()
+            .filter(|root| root.kind == kind)
+        {
+            append_artifact_path_candidates(
+                &mut candidates,
+                &mut seen,
+                kind,
+                Path::new(&root.root),
+                &query,
+                replacement_range,
+            );
+            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+                break;
+            }
+        }
+    }
+    CompletionList {
+        candidates,
+        shared_extension: String::new(),
+    }
+}
+
+fn known_artifact_ref_kinds(context: &ArtifactRefContextWire) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut kinds = Vec::new();
+    for kind in BUILTIN_ARTIFACT_REF_KINDS
+        .iter()
+        .copied()
+        .chain(context.document_roots.iter().map(|root| root.kind.as_str()))
+    {
+        if !kind.is_empty() && seen.insert(kind.to_string()) {
+            kinds.push(kind.to_string());
+        }
+    }
+    kinds
+}
+
+fn append_artifact_path_candidates(
+    candidates: &mut Vec<CompletionCandidate>,
+    seen: &mut BTreeSet<String>,
+    kind: &str,
+    root: &Path,
+    query: &str,
+    replacement_range: Option<EditorRange>,
+) {
+    for path in bounded_relative_files(root) {
+        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+            break;
+        }
+        if !path.to_lowercase().starts_with(query) || !seen.insert(path.clone())
+        {
+            continue;
+        }
+        candidates.push(artifact_ref_candidate(
+            path.clone(),
+            path,
+            format!("{kind} · {}", root.display()),
+            replacement_range,
+            "artifact_payload",
+        ));
+    }
+}
+
+fn append_artifact_index_candidates(
+    candidates: &mut Vec<CompletionCandidate>,
+    seen: &mut BTreeSet<String>,
+    context: &ArtifactRefContextWire,
+    query: &str,
+    replacement_range: Option<EditorRange>,
+) {
+    let Some(index_path) = context.artifact_index_path.as_deref() else {
+        return;
+    };
+    let Ok(mut entries) = read_artifact_index_entries(Path::new(index_path))
+    else {
+        return;
+    };
+    entries.sort();
+    for (id, path) in entries {
+        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+            break;
+        }
+        if !id.to_lowercase().starts_with(query) || !seen.insert(id.clone()) {
+            continue;
+        }
+        candidates.push(artifact_ref_candidate(
+            id.clone(),
+            id,
+            format!("file · {path}"),
+            replacement_range,
+            "artifact_payload",
+        ));
+    }
+}
+
+fn bounded_relative_files(root: &Path) -> Vec<String> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    let mut files = Vec::new();
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > ARTIFACT_REF_MAX_DEPTH
+            || visited >= ARTIFACT_REF_MAX_VISITED
+            || files.len() >= ARTIFACT_REF_MAX_RESULTS
+        {
+            continue;
+        }
+        let Ok(read_dir) = fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut directories = Vec::<PathBuf>::new();
+        for entry in entries {
+            visited += 1;
+            if visited > ARTIFACT_REF_MAX_VISITED {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if depth < ARTIFACT_REF_MAX_DEPTH {
+                    directories.push(entry.path());
+                }
+            } else if file_type.is_file() {
+                let path = entry.path();
+                let Ok(relative) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let payload = relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if !payload.is_empty() {
+                    files.push(payload);
+                }
+                if files.len() >= ARTIFACT_REF_MAX_RESULTS {
+                    break;
+                }
+            }
+        }
+        for directory in directories.into_iter().rev() {
+            pending.push((directory, depth + 1));
+        }
+    }
+    files.sort();
+    files
+}
+
+fn artifact_ref_candidate(
+    name: String,
+    insertion: String,
+    detail: String,
+    replacement_range: Option<EditorRange>,
+    kind: &str,
+) -> CompletionCandidate {
+    CompletionCandidate {
+        display: insertion.clone(),
+        insertion: insertion.clone(),
+        detail: Some(detail),
+        documentation: None,
+        is_dir: false,
+        name,
+        replacement: replacement_range.map(|range| EditorTextEdit {
+            range,
+            new_text: insertion,
+        }),
+        additional_edits: Vec::new(),
+        kind: kind.to_string(),
+        project: String::new(),
+        status: String::new(),
+    }
+}
+
+fn empty_artifact_ref_completion_list() -> CompletionList {
+    CompletionList {
+        candidates: Vec::new(),
+        shared_extension: String::new(),
     }
 }
 
@@ -667,6 +1127,7 @@ pub fn detect_vcs_repo_context_at_position(
         selected_values: Vec::new(),
         vcs_repo: Some(trigger),
         vcs_ref: None,
+        artifact_ref: None,
         replacement_range,
     })
 }
@@ -967,6 +1428,7 @@ pub fn detect_vcs_ref_context_at_position(
         selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: Some(trigger),
+        artifact_ref: None,
         replacement_range,
     })
 }
@@ -1111,6 +1573,7 @@ fn detect_vcs_project_context_at_position(
         selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: None,
+        artifact_ref: None,
     })
 }
 
@@ -1565,6 +2028,7 @@ fn arg_context(
         selected_values: target.selected_values,
         vcs_repo: None,
         vcs_ref: None,
+        artifact_ref: None,
         replacement_range,
     })
 }
@@ -1644,6 +2108,7 @@ fn detect_directive_context_at_position(
             selected_values: Vec::new(),
             vcs_repo: None,
             vcs_ref: None,
+            artifact_ref: None,
             replacement_range: range,
         });
     }
@@ -1682,6 +2147,7 @@ fn detect_directive_context_at_position(
             selected_values: target.selected_values,
             vcs_repo: None,
             vcs_ref: None,
+            artifact_ref: None,
             replacement_range: range,
         });
     }
@@ -1816,6 +2282,7 @@ fn context_for_token(
         selected_values: Vec::new(),
         vcs_repo: None,
         vcs_ref: None,
+        artifact_ref: None,
     }
 }
 
@@ -1924,7 +2391,10 @@ mod tests {
     use super::*;
     use crate::editor::directive::directive_argument_candidates;
     use crate::effort::EFFORT_LEVELS_ORDERED;
-    use crate::{EditorXpromptCatalogEntryWire, MobileXpromptInputWire};
+    use crate::{
+        ArtifactRefDocumentRootWire, EditorXpromptCatalogEntryWire,
+        MobileXpromptInputWire,
+    };
 
     fn pos(character: u32) -> EditorPosition {
         EditorPosition { line: 0, character }
@@ -2008,6 +2478,230 @@ mod tests {
                 definition_range: None,
             },
         ])
+    }
+
+    fn artifact_context(root: &Path) -> ArtifactRefContextWire {
+        ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: root.join("designs").to_string_lossy().into_owned(),
+            }],
+            chats_root: Some(root.join("chats").to_string_lossy().into_owned()),
+            artifact_index_path: Some(
+                root.join("artifact-index.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn artifact_completion_context(
+        text: &str,
+        cursor: usize,
+        context: &ArtifactRefContextWire,
+    ) -> CompletionContext {
+        let document = DocumentSnapshot::new(text);
+        let position = document.byte_offset_to_position(cursor).unwrap();
+        classify_completion_context_with_artifacts_and_workflows(
+            &document,
+            position,
+            &entries(),
+            &[],
+            Some(context),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "expected artifact completion context for {text:?} at {cursor}"
+            )
+        })
+    }
+
+    #[test]
+    fn classifies_artifact_kind_and_payload_at_every_cursor_position() {
+        let context = artifact_context(Path::new("/tmp/artifacts"));
+        let incomplete = "@des";
+        for cursor in 1..=incomplete.len() {
+            let completion =
+                artifact_completion_context(incomplete, cursor, &context);
+            assert_eq!(
+                completion.kind,
+                CompletionContextKind::ArtifactRefKind,
+                "cursor {cursor}"
+            );
+        }
+
+        let reference = "@designs:202607/guide.md";
+        let separator = reference.find(':').unwrap();
+        for cursor in 1..=reference.len() {
+            let completion =
+                artifact_completion_context(reference, cursor, &context);
+            let expected = if cursor <= separator {
+                CompletionContextKind::ArtifactRefKind
+            } else {
+                CompletionContextKind::ArtifactRefPayload
+            };
+            assert_eq!(completion.kind, expected, "cursor {cursor}");
+            let trigger = completion.artifact_ref.unwrap();
+            assert_eq!(trigger.candidate_span, (0, reference.len()));
+            assert_eq!(
+                trigger.kind.as_deref(),
+                (cursor > separator).then_some("designs")
+            );
+        }
+    }
+
+    #[test]
+    fn builds_dynamic_kind_and_payload_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        fs::create_dir_all(designs.join("202607")).unwrap();
+        fs::write(designs.join("202607/Guide.md"), "guide").unwrap();
+        fs::write(designs.join("202607/other.md"), "other").unwrap();
+        let context = artifact_context(temp.path());
+
+        let kind_context = artifact_completion_context("@DES", 4, &context);
+        let kind_list = build_artifact_ref_kind_completion_candidates(
+            kind_context.artifact_ref.as_ref().unwrap(),
+            Some(kind_context.replacement_range),
+            &context,
+        );
+        assert_eq!(kind_list.candidates.len(), 1);
+        assert_eq!(kind_list.candidates[0].insertion, "designs:");
+
+        let payload_text = "@designs:202607/g";
+        let payload_context = artifact_completion_context(
+            payload_text,
+            payload_text.len(),
+            &context,
+        );
+        let payload_list = build_artifact_ref_payload_completion_candidates(
+            payload_context.artifact_ref.as_ref().unwrap(),
+            Some(payload_context.replacement_range),
+            &context,
+        );
+        assert_eq!(payload_list.candidates.len(), 1);
+        assert_eq!(payload_list.candidates[0].insertion, "202607/Guide.md");
+        assert!(payload_list.candidates[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("designs"));
+    }
+
+    #[test]
+    fn payload_enumeration_is_bounded_and_deduplicated() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        for index in 0..205 {
+            fs::write(first.join(format!("{index:03}.md")), "x").unwrap();
+        }
+        fs::write(second.join("000.md"), "duplicate").unwrap();
+        fs::write(second.join("unique.md"), "unique").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![
+                ArtifactRefDocumentRootWire {
+                    kind: "designs".to_string(),
+                    root: first.to_string_lossy().into_owned(),
+                },
+                ArtifactRefDocumentRootWire {
+                    kind: "designs".to_string(),
+                    root: second.to_string_lossy().into_owned(),
+                },
+            ],
+            ..Default::default()
+        };
+        let completion = artifact_completion_context("@designs:", 9, &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            None,
+            &context,
+        );
+
+        assert_eq!(list.candidates.len(), ARTIFACT_REF_MAX_RESULTS);
+        assert_eq!(
+            list.candidates
+                .iter()
+                .filter(|candidate| candidate.insertion == "000.md")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn builds_chat_and_indexed_file_payloads_but_not_remote_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        fs::create_dir_all(temp.path().join("chats/202607")).unwrap();
+        fs::write(temp.path().join("chats/202607/agent.md"), "chat").unwrap();
+        fs::write(
+            temp.path().join("artifact-index.jsonl"),
+            "{\"schema_version\":1,\"artifact\":{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/tmp/image.png\"}}\n",
+        )
+        .unwrap();
+
+        for (text, expected) in [
+            ("@chat:202607/a", "202607/agent.md"),
+            ("@file:default:", "default:52895d68931185056fd0e49f"),
+        ] {
+            let completion =
+                artifact_completion_context(text, text.len(), &context);
+            let list = build_artifact_ref_payload_completion_candidates(
+                completion.artifact_ref.as_ref().unwrap(),
+                None,
+                &context,
+            );
+            assert_eq!(list.candidates.len(), 1, "{text}");
+            assert_eq!(list.candidates[0].insertion, expected, "{text}");
+        }
+
+        for text in ["@commit:sase@0123456", "@bug:sase#1", "@unknown:value"] {
+            let completion =
+                artifact_completion_context(text, text.len(), &context);
+            let list = build_artifact_ref_payload_completion_candidates(
+                completion.artifact_ref.as_ref().unwrap(),
+                None,
+                &context,
+            );
+            assert!(list.candidates.is_empty(), "{text}: {list:?}");
+        }
+    }
+
+    #[test]
+    fn artifact_replacement_ranges_are_utf16_safe_and_at_paths_stay_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = artifact_context(temp.path());
+        let text = "é @designs:guidé.md";
+        let completion =
+            artifact_completion_context(text, text.len(), &context);
+        assert_eq!(
+            completion.replacement_range,
+            EditorRange {
+                start: EditorPosition {
+                    line: 0,
+                    character: 11,
+                },
+                end: EditorPosition {
+                    line: 0,
+                    character: 19,
+                },
+            }
+        );
+
+        let document = DocumentSnapshot::new("@src/foo");
+        let context = classify_completion_context_with_artifacts_and_workflows(
+            &document,
+            pos(8),
+            &entries(),
+            &[],
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(context.kind, CompletionContextKind::FilePath);
+        assert!(context.artifact_ref.is_none());
     }
 
     #[test]

@@ -72,6 +72,17 @@ fn trim_candidate_end(text: &str, start: usize, mut end: usize) -> usize {
         let Some(character) = text[start..end].chars().next_back() else {
             break;
         };
+        // A lone trailing colon is the kind separator for an incomplete
+        // `@kind:` reference, not prose punctuation. Keep it so editor
+        // completion and diagnostics can classify the empty payload.
+        if character == ':' {
+            let candidate = &text[start..end];
+            let colon_count = candidate.matches(':').count();
+            let kind = candidate.split_once(':').map(|(kind, _)| kind);
+            if colon_count == 1 || kind == Some("file") && colon_count == 2 {
+                break;
+            }
+        }
         if !TRAILING_PUNCTUATION.contains(&character) {
             break;
         }

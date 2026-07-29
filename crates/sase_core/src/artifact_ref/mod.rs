@@ -755,6 +755,17 @@ fn read_artifact_index(
         .collect())
 }
 
+pub(crate) fn read_artifact_index_entries(
+    path: &Path,
+) -> Result<Vec<(String, String)>, ArtifactRefError> {
+    read_artifact_index(path).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| (entry.id, entry.path))
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

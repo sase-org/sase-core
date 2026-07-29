@@ -22,7 +22,10 @@ use lsp_types::{
     WorkDoneProgressOptions, WorkspaceEdit,
 };
 use sase_core::{
-    editor_analyze_document, editor_build_agent_completion_candidates,
+    editor_analyze_artifact_refs, editor_analyze_document,
+    editor_build_agent_completion_candidates,
+    editor_build_artifact_ref_kind_completion_candidates,
+    editor_build_artifact_ref_payload_completion_candidates,
     editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
@@ -34,14 +37,16 @@ use sase_core::{
     editor_build_wait_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
+    editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_directive_argument_candidates,
     editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, CompletionCandidate, CompletionContextKind,
-    CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
-    HelperHostBridge, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    editor_hover_at_position, ArtifactRefContextWire, CompletionCandidate,
+    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
+    EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
 };
+use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
 use tracing::{info, warn};
@@ -66,6 +71,7 @@ const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 /// fresh on every `+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
+const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -82,6 +88,9 @@ struct ServerConfig {
     /// [`MODEL_CATALOG_ENV`] at startup. The file itself is re-read fresh on
     /// each `%model` argument completion request.
     model_catalog: Option<PathBuf>,
+    /// Path to the launcher-materialized artifact-reference catalog. The file
+    /// is re-read for every completion and diagnostic request.
+    artifact_ref_catalog: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -94,6 +103,7 @@ impl Default for ServerConfig {
             allow_all_markdown: false,
             vcs_project_catalog: vcs_project_catalog_path(),
             model_catalog: model_catalog_path(),
+            artifact_ref_catalog: artifact_ref_catalog_path(),
         }
     }
 }
@@ -125,6 +135,21 @@ struct VcsProjectCatalog {
     entries: Vec<VcsProjectEntry>,
     workflow_names: Vec<String>,
     namespaces: HashMap<String, Vec<VcsNamespaceEntry>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ArtifactRefCatalog {
+    default_project: Option<String>,
+    projects: Vec<ArtifactRefCatalogProject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ArtifactRefCatalogProject {
+    name: String,
+    key: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    context: ArtifactRefContextWire,
 }
 
 #[derive(Debug, Clone)]
@@ -205,15 +230,57 @@ impl XpromptLspServer {
             ));
         }
 
-        let entries = self.entries_for_completion(&config).await;
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
-        let context = editor_classify_completion_context_with_workflows(
+        let artifact_catalog =
+            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+        let artifact_context = active_artifact_ref_context(
             &document,
-            editor_position,
-            entries.as_slice(),
-            &vcs_catalog.workflow_names,
-        )?;
+            &config,
+            &vcs_catalog,
+            &artifact_catalog,
+        );
+        if let Some(context) =
+            editor_classify_completion_context_with_artifacts_and_workflows(
+                &document,
+                editor_position,
+                &[],
+                &vcs_catalog.workflow_names,
+                artifact_context,
+            )
+            .filter(|context| {
+                matches!(
+                    context.kind,
+                    CompletionContextKind::ArtifactRefKind
+                        | CompletionContextKind::ArtifactRefPayload
+                )
+            })
+        {
+            return Some(self.artifact_ref_completion(
+                &context,
+                artifact_context.expect("artifact context was classified"),
+            ));
+        }
+
+        let entries = self.entries_for_completion(&config).await;
+        let context =
+            editor_classify_completion_context_with_artifacts_and_workflows(
+                &document,
+                editor_position,
+                entries.as_slice(),
+                &vcs_catalog.workflow_names,
+                artifact_context,
+            )?;
+        if matches!(
+            context.kind,
+            CompletionContextKind::ArtifactRefKind
+                | CompletionContextKind::ArtifactRefPayload
+        ) {
+            return Some(self.artifact_ref_completion(
+                &context,
+                artifact_context.expect("artifact context was classified"),
+            ));
+        }
         if context.kind == CompletionContextKind::VcsProject {
             return Some(self.vcs_project_completion(
                 &context, &document, position, &config,
@@ -302,6 +369,34 @@ impl XpromptLspServer {
             }
         }
         Some(response)
+    }
+
+    fn artifact_ref_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        artifact_context: &ArtifactRefContextWire,
+    ) -> CompletionResponse {
+        let Some(trigger) = context.artifact_ref.as_ref() else {
+            return empty_completion_response();
+        };
+        let list = match context.kind {
+            CompletionContextKind::ArtifactRefKind => {
+                editor_build_artifact_ref_kind_completion_candidates(
+                    trigger,
+                    Some(context.replacement_range),
+                    artifact_context,
+                )
+            }
+            CompletionContextKind::ArtifactRefPayload => {
+                editor_build_artifact_ref_payload_completion_candidates(
+                    trigger,
+                    Some(context.replacement_range),
+                    artifact_context,
+                )
+            }
+            _ => return empty_completion_response(),
+        };
+        completion_response(list, context.replacement_range)
     }
 
     /// Build the `+` (`vcs_project`) completion response.
@@ -517,10 +612,22 @@ impl XpromptLspServer {
     ) -> Vec<lsp_types::Diagnostic> {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
-        editor_analyze_document(&document, entries.as_slice())
-            .into_iter()
-            .map(lsp_diagnostic)
-            .collect()
+        let mut diagnostics =
+            editor_analyze_document(&document, entries.as_slice());
+        let vcs_catalog =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let artifact_catalog =
+            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+        if let Some(context) = active_artifact_ref_context(
+            &document,
+            &config,
+            &vcs_catalog,
+            &artifact_catalog,
+        ) {
+            diagnostics
+                .extend(editor_analyze_artifact_refs(&document, context));
+        }
+        diagnostics.into_iter().map(lsp_diagnostic).collect()
     }
 
     pub async fn code_actions_for_text(
@@ -742,6 +849,10 @@ impl XpromptLspServer {
                 )
                 .map(|completion| completion.into_completion_list())
                 .unwrap_or_else(empty_completion_list)
+            }
+            CompletionContextKind::ArtifactRefKind
+            | CompletionContextKind::ArtifactRefPayload => {
+                empty_completion_list()
             }
             CompletionContextKind::Xprompt
             | CompletionContextKind::SlashSkill => {
@@ -1172,6 +1283,7 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
             .unwrap_or(false),
         vcs_project_catalog: vcs_project_catalog_path(),
         model_catalog: model_catalog_path(),
+        artifact_ref_catalog: artifact_ref_catalog_path(),
     }
 }
 
@@ -1181,6 +1293,10 @@ fn vcs_project_catalog_path() -> Option<PathBuf> {
 
 fn model_catalog_path() -> Option<PathBuf> {
     std::env::var_os(MODEL_CATALOG_ENV).map(PathBuf::from)
+}
+
+fn artifact_ref_catalog_path() -> Option<PathBuf> {
+    std::env::var_os(ARTIFACT_REF_CATALOG_ENV).map(PathBuf::from)
 }
 
 fn snippet_support(capabilities: &ClientCapabilities) -> bool {
@@ -1631,6 +1747,137 @@ fn load_vcs_project_catalog(path: Option<&Path>) -> VcsProjectCatalog {
         workflow_names,
         namespaces,
     }
+}
+
+/// Load the launcher-generated local artifact-reference catalog.
+///
+/// The schema is version-gated and every failure degrades to no artifact
+/// assistance. The caller re-reads the file per request so launcher refreshes
+/// and external rewrites become visible without restarting the server.
+fn load_artifact_ref_catalog(path: Option<&Path>) -> ArtifactRefCatalog {
+    let Some(path) = path else {
+        return ArtifactRefCatalog::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return ArtifactRefCatalog::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        warn!("failed to parse artifact-reference catalog at {path:?}");
+        return ArtifactRefCatalog::default();
+    };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if schema_version != Some(1) {
+        warn!(
+            "unsupported artifact-reference catalog schema_version {:?} at {path:?}",
+            schema_version
+        );
+        return ArtifactRefCatalog::default();
+    }
+    ArtifactRefCatalog {
+        default_project: value
+            .get("default_project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        projects: value
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|project| {
+                serde_json::from_value::<ArtifactRefCatalogProject>(
+                    project.clone(),
+                )
+                .ok()
+            })
+            .filter(|project| {
+                !project.name.is_empty() && !project.key.is_empty()
+            })
+            .collect(),
+    }
+}
+
+fn active_artifact_ref_context<'a>(
+    document: &DocumentSnapshot,
+    config: &ServerConfig,
+    vcs_catalog: &VcsProjectCatalog,
+    artifact_catalog: &'a ArtifactRefCatalog,
+) -> Option<&'a ArtifactRefContextWire> {
+    let leading_project =
+        leading_vcs_project(document.text(), &vcs_catalog.entries);
+    leading_project
+        .and_then(|project| artifact_ref_project(artifact_catalog, project))
+        .or_else(|| {
+            artifact_catalog
+                .default_project
+                .as_deref()
+                .and_then(|project| {
+                    artifact_ref_project(artifact_catalog, project)
+                })
+        })
+        .or_else(|| {
+            config.project.as_deref().and_then(|project| {
+                artifact_ref_project(artifact_catalog, project).or_else(|| {
+                    initialized_project_basename(project).and_then(|basename| {
+                        artifact_ref_project(artifact_catalog, basename)
+                    })
+                })
+            })
+        })
+        .map(|project| &project.context)
+}
+
+fn leading_vcs_project<'a>(
+    text: &str,
+    entries: &'a [VcsProjectEntry],
+) -> Option<&'a str> {
+    let token = text.split_ascii_whitespace().next()?;
+    if !token.starts_with('#') {
+        return None;
+    }
+    entries.iter().find_map(|entry| {
+        let canonical = token == entry.display_tag;
+        let alias = token
+            .strip_prefix(&format!("#{}:", entry.vcs_prefix))
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case(&entry.name)
+                    || entry
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(value))
+            });
+        if !canonical && !alias {
+            return None;
+        }
+        if !entry.project.is_empty() {
+            Some(entry.project.as_str())
+        } else {
+            Some(entry.name.as_str())
+        }
+    })
+}
+
+fn artifact_ref_project<'a>(
+    catalog: &'a ArtifactRefCatalog,
+    identity: &str,
+) -> Option<&'a ArtifactRefCatalogProject> {
+    catalog.projects.iter().find(|project| {
+        project.name.eq_ignore_ascii_case(identity)
+            || project.key.eq_ignore_ascii_case(identity)
+            || project
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(identity))
+    })
+}
+
+fn initialized_project_basename(project: &str) -> Option<&str> {
+    let (basename, suffix) = project.rsplit_once('_')?;
+    (!basename.is_empty()
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some(basename)
 }
 
 /// Load the `%model` completion catalog from the materialized JSON file.
@@ -4138,6 +4385,50 @@ mod tests {
         .unwrap();
     }
 
+    fn write_artifact_ref_catalog(
+        path: &Path,
+        root: &Path,
+        default_project: Option<&str>,
+    ) {
+        let project = |name: &str| {
+            let project_root = root.join(name);
+            serde_json::json!({
+                "name": name,
+                "key": format!("key_{name}"),
+                "aliases": [format!("{name}-alias")],
+                "context": {
+                    "document_roots": [
+                        {
+                            "kind": "designs",
+                            "root": project_root.join("designs")
+                        }
+                    ],
+                    "chats_root": project_root.join("chats"),
+                    "artifact_index_path": project_root.join("artifact-index.jsonl"),
+                    "repositories": [],
+                    "projects": []
+                }
+            })
+        };
+        fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "default_project": default_project,
+                "projects": [project("sase"), project("local")]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn completion_items(response: CompletionResponse) -> Vec<CompletionItem> {
+        match response {
+            CompletionResponse::Array(items) => items,
+            CompletionResponse::List(list) => list.items,
+        }
+    }
+
     fn repo_entry(
         name: &str,
         description: &str,
@@ -4382,6 +4673,222 @@ mod tests {
         assert!(catalog.entries.is_empty());
         assert!(catalog.workflow_names.is_empty());
         assert!(catalog.namespaces.is_empty());
+    }
+
+    #[test]
+    fn artifact_catalog_loader_is_tolerant_and_schema_gated() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("artifact_ref_catalog.json");
+
+        assert_eq!(
+            load_artifact_ref_catalog(None),
+            ArtifactRefCatalog::default()
+        );
+        fs::write(&catalog_path, "{not json").unwrap();
+        assert_eq!(
+            load_artifact_ref_catalog(Some(&catalog_path)),
+            ArtifactRefCatalog::default()
+        );
+        fs::write(&catalog_path, r#"{"schema_version":99,"projects":[]}"#)
+            .unwrap();
+        assert_eq!(
+            load_artifact_ref_catalog(Some(&catalog_path)),
+            ArtifactRefCatalog::default()
+        );
+        fs::write(
+            &catalog_path,
+            r#"{
+                "schema_version": 1,
+                "default_project": "sase",
+                "projects": [
+                    {"name": "broken"},
+                    {
+                        "name": "sase",
+                        "key": "key_sase",
+                        "context": {"document_roots": []}
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let catalog = load_artifact_ref_catalog(Some(&catalog_path));
+
+        assert_eq!(catalog.default_project.as_deref(), Some("sase"));
+        assert_eq!(catalog.projects.len(), 1);
+        assert_eq!(catalog.projects[0].key, "key_sase");
+    }
+
+    #[tokio::test]
+    async fn completes_artifact_kinds_and_local_payloads_per_active_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        let vcs_path = temp.path().join("vcs_project_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("local"));
+        write_vcs_ref_catalog(&vcs_path);
+        for project in ["sase", "local"] {
+            let project_root = temp.path().join(project);
+            fs::create_dir_all(project_root.join("designs")).unwrap();
+            fs::create_dir_all(project_root.join("chats/202607")).unwrap();
+            fs::write(
+                project_root.join("designs").join(format!("{project}.md")),
+                project,
+            )
+            .unwrap();
+            fs::write(project_root.join("chats/202607/agent.md"), project)
+                .unwrap();
+            fs::write(
+                project_root.join("artifact-index.jsonl"),
+                format!(
+                    "{{\"schema_version\":1,\"artifact\":{{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/{project}/image.png\"}}}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.artifact_ref_catalog = Some(artifact_path.clone());
+            config.vcs_project_catalog = Some(vcs_path);
+            config.project = Some("sase_18".to_string());
+        }
+
+        for (text, expected) in [
+            ("#gh:ship-completion @designs:sa", "sase.md"),
+            ("#git:local @designs:lo", "local.md"),
+            ("@designs:lo", "local.md"),
+            ("@chat:202607/a", "202607/agent.md"),
+            ("@file:default:", "default:52895d68931185056fd0e49f"),
+        ] {
+            let items = completion_items(
+                server
+                    .completion_for_text(
+                        text.to_string(),
+                        Position::new(0, text.len() as u32),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(items.len(), 1, "{text}: {items:?}");
+            assert_eq!(items[0].label, expected, "{text}");
+        }
+
+        let kind_items = completion_items(
+            server
+                .completion_for_text("@de".to_string(), Position::new(0, 3))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(kind_items.len(), 1);
+        assert_eq!(kind_items[0].label, "designs:");
+
+        let payload_text = "@designs:lo";
+        let payload_items = completion_items(
+            server
+                .completion_for_text(
+                    payload_text.to_string(),
+                    Position::new(0, payload_text.len() as u32),
+                )
+                .await
+                .unwrap(),
+        );
+        let Some(CompletionTextEdit::Edit(edit)) =
+            payload_items[0].text_edit.as_ref()
+        else {
+            panic!("expected artifact payload text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 9));
+        assert_eq!(edit.range.end, Position::new(0, 11));
+
+        for text in ["@commit:sase@0123456", "@bug:sase#1"] {
+            let items = completion_items(
+                server
+                    .completion_for_text(
+                        text.to_string(),
+                        Position::new(0, text.len() as u32),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert!(items.is_empty(), "{text}: {items:?}");
+        }
+
+        write_artifact_ref_catalog(&artifact_path, temp.path(), None);
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:sa".to_string(),
+                    Position::new(0, 11),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "sase.md");
+    }
+
+    #[tokio::test]
+    async fn appends_known_kind_artifact_diagnostics_from_active_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        let vcs_path = temp.path().join("vcs_project_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("local"));
+        write_vcs_ref_catalog(&vcs_path);
+        fs::create_dir_all(temp.path().join("sase/designs")).unwrap();
+        fs::write(temp.path().join("sase/designs/exists.md"), "exists")
+            .unwrap();
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.artifact_ref_catalog = Some(artifact_path);
+            config.vcs_project_catalog = Some(vcs_path);
+        }
+
+        let diagnostics = server
+            .diagnostics_for_text(
+                "#gh:sase @designs:exists.md @designs:missing.md \
+                 @designs:bad.md#page=0 @user:handle \
+                 `@designs:literal.md` @commit:missing@0123456 @bug:missing#1"
+                    .to_string(),
+            )
+            .await;
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code))
+                        if code == "unresolved_artifact_ref"
+                ))
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| matches!(
+                    diagnostic.code.as_ref(),
+                    Some(lsp_types::NumberOrString::String(code))
+                        if code == "malformed_artifact_ref"
+                ))
+                .count(),
+            1,
+            "{diagnostics:?}"
+        );
     }
 
     #[tokio::test]
