@@ -214,11 +214,13 @@ pub use artifact_file::{
 pub use artifact_ref::{
     canonicalize_artifact_ref, parse_artifact_ref, render_artifact_ref,
     resolve_artifact_ref, scan_artifact_refs, ArtifactFileSourceWire,
-    ArtifactRefContextWire, ArtifactRefDocumentRootWire, ArtifactRefError,
-    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefPayloadWire,
-    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
-    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
-    ParsedArtifactRefWire, ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+    ArtifactRefAgentOwnerWire, ArtifactRefAgentRootWire,
+    ArtifactRefBeadStoreWire, ArtifactRefContextWire,
+    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
+    ArtifactRefKindWire, ArtifactRefPayloadWire, ArtifactRefProjectWire,
+    ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
+    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
+    ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 pub use axe_chop::{

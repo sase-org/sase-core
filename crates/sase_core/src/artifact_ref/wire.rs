@@ -157,6 +157,25 @@ pub struct ArtifactRefProjectWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefBeadStoreWire {
+    pub project: String,
+    pub prefix: String,
+    pub root: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefAgentRootWire {
+    pub project: String,
+    pub root: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefAgentOwnerWire {
+    pub username: String,
+    pub machine_name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefContextWire {
     #[serde(default)]
     pub document_roots: Vec<ArtifactRefDocumentRootWire>,
@@ -168,6 +187,12 @@ pub struct ArtifactRefContextWire {
     pub repositories: Vec<ArtifactRefRepositoryWire>,
     #[serde(default)]
     pub projects: Vec<ArtifactRefProjectWire>,
+    #[serde(default)]
+    pub bead_stores: Vec<ArtifactRefBeadStoreWire>,
+    #[serde(default)]
+    pub agent_roots: Vec<ArtifactRefAgentRootWire>,
+    #[serde(default)]
+    pub agent_owner: Option<ArtifactRefAgentOwnerWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
