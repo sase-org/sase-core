@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/sase-org/sase-core/compare/v0.14.2...v0.15.0) - 2026-07-30
+
+### Added
+
+- *(agent-scan)* [**breaking**] preserve list-valued output variables
+- *(beads)* report projection drift diagnostics
+- *(bead)* [**breaking**] add convergent note append events
+
+### Fixed
+
+- *(bead)* satisfy clippy in the doctor reader
+
 ## [0.14.2](https://github.com/sase-org/sase-core/compare/v0.14.1...v0.14.2) - 2026-07-30
 
 ### Fixed
