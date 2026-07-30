@@ -5,6 +5,7 @@ use thiserror::Error;
 
 pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 3;
 pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 3;
+pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -205,6 +206,18 @@ pub struct ArtifactRefResolutionWire {
     pub locator: Option<String>,
     pub resolved_path: Option<String>,
     pub candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefListEntryWire {
+    pub rendered: String,
+    pub resolution: ArtifactRefResolutionWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefListResolutionWire {
+    pub schema_version: u64,
+    pub entries: Vec<ArtifactRefListEntryWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

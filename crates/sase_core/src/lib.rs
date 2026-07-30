@@ -236,14 +236,17 @@ pub use artifact_file::{
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_ref::{
-    canonicalize_artifact_ref, parse_artifact_ref, render_artifact_ref,
-    resolve_artifact_ref, scan_artifact_refs, ArtifactFileSourceWire,
+    canonicalize_artifact_ref, normalize_artifact_ref_list, parse_artifact_ref,
+    parse_artifact_ref_list, render_artifact_ref, resolve_artifact_ref,
+    resolve_artifact_ref_list, scan_artifact_refs, ArtifactFileSourceWire,
     ArtifactRefAgentOwnerWire, ArtifactRefAgentRootWire,
     ArtifactRefBeadStoreWire, ArtifactRefContextWire,
     ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
-    ArtifactRefKindWire, ArtifactRefPayloadWire, ArtifactRefProjectWire,
-    ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
-    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
+    ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefListResolutionWire, ArtifactRefPayloadWire,
+    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
+    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };

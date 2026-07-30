@@ -96,6 +96,7 @@ pub fn get_searchable_text(cs: &ChangeSpecWire) -> String {
     parts.push(cs.description.clone());
     parts.push(cs.status.clone());
     parts.push(project_dir_name(&cs.file_path).to_string());
+    parts.extend(cs.refs.iter().cloned());
 
     if let Some(parent) = &cs.parent {
         parts.push(parent.clone());
@@ -186,5 +187,16 @@ mod tests {
         );
         assert_eq!(project_dir_name("only.sase"), "");
         assert_eq!(project_dir_name("/just/file"), "just");
+    }
+
+    #[test]
+    fn artifact_references_are_searchable() {
+        let specs = crate::parser::parse_project_bytes(
+            "projects/sase/sase.sase",
+            b"NAME: refs\nSTATUS: WIP\nREFS:\n  research:202607/report.md\n",
+        )
+        .unwrap();
+        assert!(get_searchable_text(&specs[0])
+            .contains("research:202607/report.md"));
     }
 }

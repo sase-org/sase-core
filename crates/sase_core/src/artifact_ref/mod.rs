@@ -1,5 +1,6 @@
 //! Kind-tagged logical references to SASE artifacts.
 
+mod list;
 mod scanner;
 mod wire;
 
@@ -17,14 +18,20 @@ use crate::reference_path::{
     RelativePayloadError,
 };
 
+pub use list::{
+    normalize_artifact_ref_list, parse_artifact_ref_list,
+    resolve_artifact_ref_list,
+};
 pub use scanner::scan_artifact_refs;
 pub use wire::{
     ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
     ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
-    ArtifactRefKindWire, ArtifactRefPayloadWire, ArtifactRefProjectWire,
-    ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
-    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
+    ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefListResolutionWire, ArtifactRefPayloadWire,
+    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
+    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
@@ -509,10 +516,24 @@ fn resolve_file(
     let Some(index_path) = &context.artifact_index_path else {
         return Ok(resolution("missing", rendered));
     };
+    let artifacts = read_artifact_index(Path::new(index_path))?;
+    resolve_file_from_artifacts(source, digest, rendered, Some(&artifacts))
+}
+
+pub(super) fn resolve_file_from_artifacts(
+    source: ArtifactFileSourceWire,
+    digest: &str,
+    rendered: String,
+    artifacts: Option<&[ArtifactFileWire]>,
+) -> Result<ArtifactRefResolutionWire, ArtifactRefError> {
+    let Some(artifacts) = artifacts else {
+        return Ok(resolution("missing", rendered));
+    };
     let id = format!("{}:{digest}", source.label());
-    let matches = read_artifact_index(Path::new(index_path))?
-        .into_iter()
+    let matches = artifacts
+        .iter()
         .filter(|artifact| artifact.id == id)
+        .cloned()
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [artifact] if artifact_file_is_vcs_backed(artifact) => {
@@ -1036,7 +1057,7 @@ fn paths_to_strings(paths: Vec<PathBuf>) -> Vec<String> {
         .collect()
 }
 
-fn read_artifact_index(
+pub(super) fn read_artifact_index(
     path: &Path,
 ) -> Result<Vec<crate::artifact_file::ArtifactFileWire>, ArtifactRefError> {
     Ok(read_artifact_file_index(path)?)

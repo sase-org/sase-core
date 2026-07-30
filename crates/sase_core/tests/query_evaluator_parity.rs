@@ -281,6 +281,7 @@ fn ancestor_walk_avoids_cycles() {
         pr_url: None,
         bug: None,
         description: String::new(),
+        refs: vec![],
         commits: vec![],
         hooks: vec![],
         comments: vec![],

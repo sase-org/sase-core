@@ -49,7 +49,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj.sase", MYPROJ_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "alpha",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -64,6 +64,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": "https://example.test/repo/pull/1",
             "bug": "BUG-100",
             "description": "Initial feature work.\nSpans multiple lines.",
+            "refs": [],
             "commits": [
                 {
                     "number": 1,
@@ -132,7 +133,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             ]
         },
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "beta",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -147,6 +148,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": null,
             "bug": null,
             "description": "Sibling feature.",
+            "refs": [],
             "commits": [],
             "hooks": [],
             "comments": [],
@@ -155,7 +157,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "beta__260102_010101",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -170,6 +172,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": null,
             "bug": null,
             "description": "Reverted retry of beta.",
+            "refs": [],
             "commits": [],
             "hooks": [],
             "comments": [],
@@ -178,7 +181,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "gamma",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -193,6 +196,7 @@ fn project_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": null,
             "bug": null,
             "description": "Ready feature with running agent.",
+            "refs": [],
             "commits": [],
             "hooks": [
                 {
@@ -225,7 +229,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
     let actual = parse_to_json("myproj-archive.sase", MYPROJ_ARCHIVE_SASE);
     let expected: Value = json!([
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "archived_one",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -240,6 +244,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": "https://example.test/repo/pull/99",
             "bug": null,
             "description": "An archived spec.",
+            "refs": [],
             "commits": [
                 {
                     "number": 1,
@@ -260,7 +265,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "deltas": []
         },
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "name": "reverted_two",
             "project_basename": "myproj",
             "project_display_name": null,
@@ -275,6 +280,7 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "pr_url": null,
             "bug": null,
             "description": "A reverted spec.",
+            "refs": [],
             "commits": [],
             "hooks": [],
             "comments": [],

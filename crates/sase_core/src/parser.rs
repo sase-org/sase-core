@@ -8,7 +8,7 @@
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
 //! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted), `BUG`,
 //!   `STATUS`.
-//! - Section bodies: `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
+//! - Section bodies: `REFS`, `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
 //!   `TIMESTAMPS`, `DELTAS`. The wire records produced here match Python
 //!   parser output for the golden corpus.
 //! - Whitespace: inline header content stripped, two-space continuation
@@ -110,6 +110,7 @@ struct ParserState {
     pr_url: Option<String>,
     bug: Option<String>,
     status: Option<String>,
+    refs: Vec<String>,
 
     commits: Vec<CommitWire>,
     current_commit: Option<CommitWire>,
@@ -122,6 +123,7 @@ struct ParserState {
     deltas: Vec<DeltaWire>,
 
     in_description: bool,
+    in_refs: bool,
     in_commits: bool,
     in_hooks: bool,
     in_comments: bool,
@@ -133,6 +135,7 @@ struct ParserState {
 impl ParserState {
     fn reset_section_flags(&mut self) {
         self.in_description = false;
+        self.in_refs = false;
         self.in_commits = false;
         self.in_hooks = false;
         self.in_comments = false;
@@ -181,6 +184,7 @@ impl ParserState {
             pr_url: self.pr_url,
             bug: self.bug,
             description,
+            refs: self.refs,
             commits: self.commits,
             hooks: self.hooks,
             comments: self.comments,
@@ -256,6 +260,12 @@ fn try_field_header(state: &mut ParserState, line: &str) -> FieldHeaderOutcome {
 }
 
 fn try_section_header(state: &mut ParserState, line: &str) -> bool {
+    if line.starts_with("REFS:") {
+        state.save_pending_entries();
+        state.reset_section_flags();
+        state.in_refs = true;
+        return true;
+    }
     if line.starts_with("COMMITS:") {
         state.save_pending_entries();
         state.reset_section_flags();
@@ -301,6 +311,12 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
     // Section-specific parsing takes priority. Inside a section we never
     // fall through to description handling, even if
     // the line looks like a continuation.
+    if state.in_refs {
+        if !stripped.is_empty() {
+            state.refs.push(stripped.to_string());
+        }
+        return;
+    }
     if state.in_timestamps {
         parse_timestamps_line(line, stripped, &mut state.timestamps);
         return;
@@ -666,6 +682,9 @@ PARENT:
 PR: https://example.test/repo/pull/1
 BUG: BUG-100
 STATUS: Submitted
+REFS:
+  research:202607/report.md
+  not a valid reference
 COMMITS:
   (1) [run] Initial Commit
       | CHAT: ~/.sase/chats/alpha.md (0s)
@@ -686,6 +705,10 @@ DELTAS:
         let s = &parse(src)[0];
         assert_eq!(s.name, "alpha");
         assert_eq!(s.status, "Submitted");
+        assert_eq!(
+            s.refs,
+            ["research:202607/report.md", "not a valid reference"]
+        );
 
         assert_eq!(s.commits.len(), 1);
         let c = &s.commits[0];
@@ -731,6 +754,42 @@ STATUS: WIP
         assert_eq!(s.commits.len(), 1);
         assert_eq!(s.hooks.len(), 1);
         assert_eq!(s.mentors.len(), 1);
+    }
+
+    #[test]
+    fn refs_parse_in_canonical_position_and_preserve_raw_invalid_text() {
+        let src = "\
+NAME: a
+STATUS: WIP
+REFS:
+  research:202607/report.md
+  definitely not a reference
+COMMITS:
+  (1) one
+";
+        let s = &parse(src)[0];
+        assert_eq!(
+            s.refs,
+            ["research:202607/report.md", "definitely not a reference"]
+        );
+        assert_eq!(s.commits.len(), 1);
+    }
+
+    #[test]
+    fn refs_parse_at_end_of_spec() {
+        let src = "\
+NAME: a
+STATUS: WIP
+REFS:
+  bead:sase-bb
+";
+        assert_eq!(parse(src)[0].refs, ["bead:sase-bb"]);
+    }
+
+    #[test]
+    fn missing_refs_section_defaults_to_empty() {
+        let src = "NAME: a\nSTATUS: WIP\n";
+        assert!(parse(src)[0].refs.is_empty());
     }
 
     #[test]

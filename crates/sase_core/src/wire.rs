@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version mirrored from `wire.py::CHANGESPEC_WIRE_SCHEMA_VERSION`.
-pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 4;
+pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 5;
 
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -138,6 +138,8 @@ pub struct ChangeSpecWire {
     pub bug: Option<String>,
     pub description: String,
     #[serde(default)]
+    pub refs: Vec<String>,
+    #[serde(default)]
     pub commits: Vec<CommitWire>,
     #[serde(default)]
     pub hooks: Vec<HookWire>,
@@ -212,6 +214,7 @@ mod tests {
             pr_url: None,
             bug: None,
             description: "".to_string(),
+            refs: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -221,6 +224,7 @@ mod tests {
         };
         let json = serde_json::to_value(&cs).unwrap();
         for key in [
+            "refs",
             "commits",
             "hooks",
             "comments",
@@ -250,6 +254,7 @@ mod tests {
             pr_url: None,
             bug: None,
             description: "".to_string(),
+            refs: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -311,6 +316,7 @@ mod tests {
             pr_url: None,
             bug: None,
             description: "".to_string(),
+            refs: vec![],
             commits: vec![],
             hooks: vec![],
             comments: vec![],
@@ -331,6 +337,7 @@ mod tests {
             "pr_url",
             "bug",
             "description",
+            "refs",
             "commits",
             "hooks",
             "comments",
@@ -366,6 +373,7 @@ mod tests {
             pr_url: Some("123".to_string()),
             bug: None,
             description: "first line\nsecond line".to_string(),
+            refs: vec!["research:202607/report.md".to_string()],
             commits: vec![CommitWire {
                 number: 1,
                 note: "init".to_string(),

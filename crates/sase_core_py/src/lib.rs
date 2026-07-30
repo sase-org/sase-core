@@ -151,7 +151,16 @@
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `artifact_consumption_summary(log_path: str, refs: list[str] | None = None) -> dict`
 //! - `artifact_consumption_wire_schema_version() -> int`
+//! - `artifact_ref_parse(value: str) -> dict`
 //! - `artifact_ref_render(reference: dict) -> str`
+//! - `artifact_ref_canonicalize(path: str, context: dict) -> str | None`
+//! - `artifact_ref_resolve(reference: str | dict, context: dict) -> dict`
+//! - `artifact_ref_list_normalize(entries: list[str]) -> list[str]`
+//! - `artifact_ref_list_parse(entries: list[str]) -> list[dict]`
+//! - `artifact_ref_list_resolve(entries: list[str], context: dict) -> dict`
+//! - `artifact_ref_list_resolution_wire_schema_version() -> int`
+//! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
+//! - `artifact_ref_wire_schema_version() -> int`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
@@ -365,11 +374,15 @@ use sase_core::artifact_file::{
 };
 use sase_core::artifact_ref::{
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
+    normalize_artifact_ref_list as core_normalize_artifact_ref_list,
     parse_artifact_ref as core_parse_artifact_ref,
+    parse_artifact_ref_list as core_parse_artifact_ref_list,
     render_artifact_ref as core_render_artifact_ref,
     resolve_artifact_ref as core_resolve_artifact_ref,
+    resolve_artifact_ref_list as core_resolve_artifact_ref_list,
     scan_artifact_refs as core_scan_artifact_refs, ArtifactRefContextWire,
     ArtifactRefError, ParsedArtifactRefWire,
+    ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
@@ -2960,6 +2973,48 @@ fn py_artifact_ref_resolve<'py>(
         py,
         py.allow_threads(|| core_resolve_artifact_ref(&reference, &context)),
     )
+}
+
+/// Normalize a stored artifact-reference list.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_list_normalize")]
+fn py_artifact_ref_list_normalize(
+    entries: Vec<String>,
+) -> PyResult<Vec<String>> {
+    core_normalize_artifact_ref_list(&entries)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Parse every entry in a stored artifact-reference list.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_list_parse")]
+fn py_artifact_ref_list_parse<'py>(
+    py: Python<'py>,
+    entries: Vec<String>,
+) -> PyResult<PyObject> {
+    artifact_ref_result_to_py(py, core_parse_artifact_ref_list(&entries))
+}
+
+/// Resolve a stored artifact-reference list using one shared context.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_list_resolve")]
+fn py_artifact_ref_list_resolve<'py>(
+    py: Python<'py>,
+    entries: Vec<String>,
+    context: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let context = artifact_ref_context_from_pydict(context)?;
+    artifact_ref_result_to_py(
+        py,
+        py.allow_threads(|| core_resolve_artifact_ref_list(&entries, &context)),
+    )
+}
+
+/// Return the artifact-reference list-resolution wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_list_resolution_wire_schema_version")]
+fn py_artifact_ref_list_resolution_wire_schema_version() -> u64 {
+    ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION
 }
 
 /// Scan prompt text for kind-tagged artifact-reference candidates.
@@ -6587,6 +6642,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_canonicalize, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_list_normalize, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_list_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_list_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_list_resolution_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_consumption_summary, m)?)?;
@@ -8061,6 +8123,10 @@ mod tests {
                 "artifact_ref_render",
                 "artifact_ref_canonicalize",
                 "artifact_ref_resolve",
+                "artifact_ref_list_normalize",
+                "artifact_ref_list_parse",
+                "artifact_ref_list_resolve",
+                "artifact_ref_list_resolution_wire_schema_version",
                 "artifact_ref_scan_prompt",
                 "artifact_ref_wire_schema_version",
             ] {
@@ -8123,6 +8189,45 @@ mod tests {
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
             assert_eq!(py_artifact_ref_wire_schema_version(), 3);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
+            assert_eq!(
+                py_artifact_ref_list_normalize(vec![
+                    "plans:202607/plan.md".to_string(),
+                    "bead:sase-bb".to_string(),
+                    "plans:202607/plan.md".to_string(),
+                ])
+                .unwrap(),
+                ["plans:202607/plan.md", "bead:sase-bb"]
+            );
+            let list_parsed = py_artifact_ref_list_parse(
+                py,
+                vec!["bead:sase-bb".to_string()],
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(list_parsed.bind(py)).unwrap()[0]["rendered"],
+                json!("bead:sase-bb")
+            );
+            let list_resolved = py_artifact_ref_list_resolve(
+                py,
+                vec!["plans:202607/plan.md".to_string(), "broken".to_string()],
+                context,
+            )
+            .unwrap();
+            let list_resolved =
+                py_to_json_value(list_resolved.bind(py)).unwrap();
+            assert_eq!(list_resolved["schema_version"], json!(1));
+            assert_eq!(
+                list_resolved["entries"][0]["resolution"]["status"],
+                json!("exact")
+            );
+            assert_eq!(
+                list_resolved["entries"][1]["resolution"]["status"],
+                json!("unknown_kind")
+            );
+            assert_eq!(
+                py_artifact_ref_list_resolution_wire_schema_version(),
+                1
+            );
         });
     }
 
