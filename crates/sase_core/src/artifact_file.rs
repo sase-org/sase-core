@@ -1,5 +1,8 @@
 //! Tolerant artifact-file index reading and cross-frontend query semantics.
 
+mod economics;
+mod retention;
+mod trash;
 mod vcs;
 
 use std::collections::BTreeSet;
@@ -15,6 +18,24 @@ use crate::artifact_consumption::{
 };
 use crate::plan::search::{current_date, parse_since_date_bound};
 
+pub use economics::{
+    artifact_file_store_economics, ArtifactFileEconomicsGroupWire,
+    ArtifactFileEconomicsOptionsWire, ArtifactFileEconomicsWire,
+    ArtifactFileGenerationProjectionWire,
+};
+pub use retention::{
+    plan_artifact_file_retention, ArtifactFileProtectedItemWire,
+    ArtifactFileRetentionCountsWire, ArtifactFileRetentionItemWire,
+    ArtifactFileRetentionPlanWire, ArtifactFileRetentionPolicyWire,
+};
+pub use trash::{
+    list_artifact_file_trash, purge_artifact_file_trash,
+    restore_artifact_file_trash, trash_artifact_file,
+    ArtifactFileTrashEntryWire, ArtifactFileTrashListWire,
+    ArtifactFileTrashPurgeRequestWire, ArtifactFileTrashPurgeWire,
+    ArtifactFileTrashRequestWire, ArtifactFileTrashRestoreRequestWire,
+    ArtifactFileTrashRestoreWire,
+};
 pub use vcs::{
     materialize_vcs_artifact_file, ArtifactFileVcsMaterializationRequestWire,
     ArtifactFileVcsMaterializationWire,
@@ -23,6 +44,7 @@ pub use vcs::{
 pub const ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION: u64 = 3;
+pub const ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Error)]
 pub enum ArtifactFileQueryError {
@@ -30,6 +52,8 @@ pub enum ArtifactFileQueryError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     InvalidDate(String),
+    #[error("{0}")]
+    InvalidWire(String),
 }
 
 /// One complete artifact-file row, annotated with its envelope version.

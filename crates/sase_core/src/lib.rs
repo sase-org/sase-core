@@ -214,12 +214,25 @@ pub use artifact_consumption::{
     ARTIFACT_CONSUMPTION_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_file::{
-    artifact_file_is_vcs_backed, materialize_vcs_artifact_file,
-    query_artifact_files, read_artifact_file_index, ArtifactFileQueryError,
-    ArtifactFileQueryFiltersWire, ArtifactFileVcsMaterializationRequestWire,
+    artifact_file_is_vcs_backed, artifact_file_store_economics,
+    list_artifact_file_trash, materialize_vcs_artifact_file,
+    plan_artifact_file_retention, purge_artifact_file_trash,
+    query_artifact_files, read_artifact_file_index,
+    restore_artifact_file_trash, trash_artifact_file,
+    ArtifactFileEconomicsGroupWire, ArtifactFileEconomicsOptionsWire,
+    ArtifactFileEconomicsWire, ArtifactFileGenerationProjectionWire,
+    ArtifactFileProtectedItemWire, ArtifactFileQueryError,
+    ArtifactFileQueryFiltersWire, ArtifactFileRetentionCountsWire,
+    ArtifactFileRetentionItemWire, ArtifactFileRetentionPlanWire,
+    ArtifactFileRetentionPolicyWire, ArtifactFileTrashEntryWire,
+    ArtifactFileTrashListWire, ArtifactFileTrashPurgeRequestWire,
+    ArtifactFileTrashPurgeWire, ArtifactFileTrashRequestWire,
+    ArtifactFileTrashRestoreRequestWire, ArtifactFileTrashRestoreWire,
+    ArtifactFileVcsMaterializationRequestWire,
     ArtifactFileVcsMaterializationWire, ArtifactFileWire,
     ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION,
     ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION,
+    ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_ref::{

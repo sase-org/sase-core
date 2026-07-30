@@ -155,6 +155,13 @@
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
+//! - `artifact_file_store_economics(index_path: str, options: dict) -> dict`
+//! - `artifact_file_retention_plan(index_path: str, policy: dict) -> dict`
+//! - `artifact_file_trash_store(request: dict) -> dict`
+//! - `artifact_file_trash_list(trash_root: str) -> dict`
+//! - `artifact_file_trash_restore(request: dict) -> dict`
+//! - `artifact_file_trash_purge(request: dict) -> dict`
+//! - `artifact_file_lifecycle_wire_schema_version() -> int`
 //! - `sdd_artifact_link_parse(document: str) -> dict`
 //! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
 //! - `sdd_artifact_link_upsert(document: str, link_type: str, label: str, target: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
@@ -340,9 +347,20 @@ use sase_core::artifact_consumption::{
     ARTIFACT_CONSUMPTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_file::{
+    artifact_file_store_economics as core_artifact_file_store_economics,
+    list_artifact_file_trash as core_list_artifact_file_trash,
     materialize_vcs_artifact_file as core_materialize_vcs_artifact_file,
-    query_artifact_files as core_query_artifact_files, ArtifactFileQueryError,
-    ArtifactFileQueryFiltersWire, ArtifactFileVcsMaterializationRequestWire,
+    plan_artifact_file_retention as core_plan_artifact_file_retention,
+    purge_artifact_file_trash as core_purge_artifact_file_trash,
+    query_artifact_files as core_query_artifact_files,
+    restore_artifact_file_trash as core_restore_artifact_file_trash,
+    trash_artifact_file as core_trash_artifact_file,
+    ArtifactFileEconomicsOptionsWire, ArtifactFileQueryError,
+    ArtifactFileQueryFiltersWire, ArtifactFileRetentionPolicyWire,
+    ArtifactFileTrashPurgeRequestWire, ArtifactFileTrashRequestWire,
+    ArtifactFileTrashRestoreRequestWire,
+    ArtifactFileVcsMaterializationRequestWire,
+    ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_ref::{
@@ -3065,6 +3083,146 @@ fn py_artifact_file_materialize_vcs<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Aggregate artifact-file store economics without mutating the index.
+#[pyfunction]
+#[pyo3(name = "artifact_file_store_economics")]
+fn py_artifact_file_store_economics<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    options: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let options = serde_json::from_value::<ArtifactFileEconomicsOptionsWire>(
+        py_to_json_value(options.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "options is not a valid ArtifactFileEconomicsOptionsWire dict: \
+             {error}"
+        ))
+    })?;
+    let index_path = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| {
+            core_artifact_file_store_economics(&index_path, &options)
+        })
+        .map_err(artifact_file_query_error_to_pyerr)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "economics")
+}
+
+/// Plan deterministic artifact-file retention without mutating the index.
+#[pyfunction]
+#[pyo3(name = "artifact_file_retention_plan")]
+fn py_artifact_file_retention_plan<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    policy: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let policy = serde_json::from_value::<ArtifactFileRetentionPolicyWire>(
+        py_to_json_value(policy.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "policy is not a valid ArtifactFileRetentionPolicyWire dict: \
+             {error}"
+        ))
+    })?;
+    let index_path = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| {
+            core_plan_artifact_file_retention(&index_path, &policy)
+        })
+        .map_err(artifact_file_query_error_to_pyerr)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "retention plan")
+}
+
+/// Move one artifact payload and its complete record into restorable trash.
+#[pyfunction]
+#[pyo3(name = "artifact_file_trash_store")]
+fn py_artifact_file_trash_store<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<ArtifactFileTrashRequestWire>(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactFileTrashRequestWire dict: \
+             {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_trash_artifact_file(&request))
+        .map_err(PyRuntimeError::new_err)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "trash store")
+}
+
+/// List restorable trash entries newest first.
+#[pyfunction]
+#[pyo3(name = "artifact_file_trash_list")]
+fn py_artifact_file_trash_list<'py>(
+    py: Python<'py>,
+    trash_root: &str,
+) -> PyResult<PyObject> {
+    let trash_root = PathBuf::from(trash_root);
+    let result = py
+        .allow_threads(|| core_list_artifact_file_trash(&trash_root))
+        .map_err(PyRuntimeError::new_err)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "trash list")
+}
+
+/// Restore one trash entry's payload and return its complete original record.
+#[pyfunction]
+#[pyo3(name = "artifact_file_trash_restore")]
+fn py_artifact_file_trash_restore<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request =
+        serde_json::from_value::<ArtifactFileTrashRestoreRequestWire>(
+            py_to_json_value(request.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid \
+                 ArtifactFileTrashRestoreRequestWire dict: {error}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| core_restore_artifact_file_trash(&request))
+        .map_err(PyRuntimeError::new_err)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "trash restore")
+}
+
+/// Permanently remove trash entries at or before an explicit cutoff.
+#[pyfunction]
+#[pyo3(name = "artifact_file_trash_purge")]
+fn py_artifact_file_trash_purge<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<ArtifactFileTrashPurgeRequestWire>(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactFileTrashPurgeRequestWire \
+                 dict: {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_purge_artifact_file_trash(&request))
+        .map_err(PyRuntimeError::new_err)?;
+    artifact_file_lifecycle_value_to_py(py, &result, "trash purge")
+}
+
+/// Return the shared artifact-file lifecycle request/result wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_file_lifecycle_wire_schema_version")]
+fn py_artifact_file_lifecycle_wire_schema_version() -> u64 {
+    ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION
+}
+
 /// Parse canonical and historical artifact links from one SDD document.
 #[pyfunction]
 #[pyo3(name = "sdd_artifact_link_parse")]
@@ -3881,6 +4039,19 @@ fn artifact_ref_error_to_pyerr(error: ArtifactRefError) -> PyErr {
 
 fn artifact_file_query_error_to_pyerr(error: ArtifactFileQueryError) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn artifact_file_lifecycle_value_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+    operation: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-file {operation} serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 fn artifact_ref_from_py(
@@ -6425,6 +6596,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_files_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_file_materialize_vcs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_store_economics, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_retention_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_trash_store, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_trash_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_trash_restore, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_trash_purge, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_file_lifecycle_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_file_query_wire_schema_version,
         m
@@ -8070,6 +8251,165 @@ mod tests {
                 py_artifact_file_materialize_vcs(py, &request).unwrap();
             let materialized = py_to_json_value(materialized.bind(py)).unwrap();
             assert_eq!(materialized["status"], json!("missing"));
+        });
+    }
+
+    #[test]
+    fn artifact_file_lifecycle_bindings_round_trip_plain_python_shapes() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("index.jsonl");
+        let stored = temp.path().join("store/payload.bin");
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"payload").unwrap();
+        fs::write(
+            &index,
+            format!(
+                "{{\"schema_version\":2,\"artifact\":{{\"id\":\"old\",\
+                 \"label\":\"x\",\"kind\":\"file\",\"path\":{},\
+                 \"project\":\"p\",\"created_at\":\"2026-07-01T00:00:00Z\",\
+                 \"size_bytes\":7}}}}\n",
+                serde_json::to_string(&stored.to_string_lossy()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "artifact_file_store_economics",
+                "artifact_file_retention_plan",
+                "artifact_file_trash_store",
+                "artifact_file_trash_list",
+                "artifact_file_trash_restore",
+                "artifact_file_trash_purge",
+                "artifact_file_lifecycle_wire_schema_version",
+            ] {
+                assert!(module.getattr(name).is_ok(), "{name}");
+            }
+            assert_eq!(
+                py_artifact_file_lifecycle_wire_schema_version(),
+                ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION
+            );
+
+            let options_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "project": null,
+                    "top_n": 10,
+                    "generation_projections": [1]
+                }),
+            )
+            .unwrap();
+            let options = options_obj.bind(py).downcast::<PyDict>().unwrap();
+            let economics = py_artifact_file_store_economics(
+                py,
+                index.to_str().unwrap(),
+                options,
+            )
+            .unwrap();
+            let economics = py_to_json_value(economics.bind(py)).unwrap();
+            assert_eq!(economics["schema_version"], json!(1));
+            assert_eq!(economics["total_rows"], json!(1));
+            assert_eq!(economics["total_bytes"], json!(7));
+
+            let policy_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "now": "2026-07-30T00:00:00Z",
+                    "keep_per_label": 0,
+                    "before": null,
+                    "kinds": null,
+                    "project": null,
+                    "min_size_bytes": null,
+                    "protected_ids": [],
+                    "limit": null
+                }),
+            )
+            .unwrap();
+            let policy = policy_obj.bind(py).downcast::<PyDict>().unwrap();
+            let plan = py_artifact_file_retention_plan(
+                py,
+                index.to_str().unwrap(),
+                policy,
+            )
+            .unwrap();
+            let plan = py_to_json_value(plan.bind(py)).unwrap();
+            assert_eq!(plan["schema_version"], json!(1));
+            assert_eq!(plan["counts"]["selected"], json!(0));
+
+            let trash_root = temp.path().join("trash");
+            let store_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "trash_root": trash_root,
+                    "record": {
+                        "id": "default:abcdef0123456789abcdef01",
+                        "path": stored,
+                        "size_bytes": 7
+                    },
+                    "stored_path": stored,
+                    "reason": "binding test",
+                    "trashed_at": "2026-07-30T12:00:00Z"
+                }),
+            )
+            .unwrap();
+            let store_request =
+                store_obj.bind(py).downcast::<PyDict>().unwrap();
+            let entry =
+                py_artifact_file_trash_store(py, store_request).unwrap();
+            let entry = py_to_json_value(entry.bind(py)).unwrap();
+            assert_eq!(entry["schema_version"], json!(1));
+            assert!(!stored.exists());
+
+            let listing =
+                py_artifact_file_trash_list(py, trash_root.to_str().unwrap())
+                    .unwrap();
+            let listing = py_to_json_value(listing.bind(py)).unwrap();
+            assert_eq!(listing["entries"].as_array().unwrap().len(), 1);
+
+            let restore_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "trash_root": trash_root,
+                    "entry_id": entry["entry_id"]
+                }),
+            )
+            .unwrap();
+            let restore_request =
+                restore_obj.bind(py).downcast::<PyDict>().unwrap();
+            let restored =
+                py_artifact_file_trash_restore(py, restore_request).unwrap();
+            let restored = py_to_json_value(restored.bind(py)).unwrap();
+            assert_eq!(
+                restored["record"]["id"],
+                json!("default:abcdef0123456789abcdef01")
+            );
+            assert_eq!(fs::read(&stored).unwrap(), b"payload");
+
+            let invalid_options_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 2,
+                    "project": null,
+                    "top_n": 10,
+                    "generation_projections": []
+                }),
+            )
+            .unwrap();
+            let invalid_options =
+                invalid_options_obj.bind(py).downcast::<PyDict>().unwrap();
+            assert!(py_artifact_file_store_economics(
+                py,
+                index.to_str().unwrap(),
+                invalid_options,
+            )
+            .is_err());
         });
     }
 
