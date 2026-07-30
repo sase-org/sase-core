@@ -27,7 +27,7 @@ pub use completion::{
     build_agent_completion_candidates,
     build_artifact_ref_kind_completion_candidates,
     build_artifact_ref_payload_completion_candidates,
-    build_snippet_completion_candidates,
+    build_artifact_ref_payload_inventory, build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     build_wait_completion_candidates, build_xprompt_arg_name_candidates,

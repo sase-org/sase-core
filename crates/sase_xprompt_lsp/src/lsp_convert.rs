@@ -52,6 +52,7 @@ pub fn at_reference_completion_response(
     replacement_range: EditorRange,
 ) -> CompletionResponse {
     let filter_text = at_reference_filter_text(context);
+    let truncated_payloads = menu.truncated_payloads;
     CompletionResponse::List(lsp_types::CompletionList {
         is_incomplete: true,
         items: menu
@@ -64,6 +65,7 @@ pub fn at_reference_completion_response(
                     &filter_text,
                     replacement_range,
                     index,
+                    truncated_payloads,
                 )
             })
             .collect(),
@@ -85,6 +87,7 @@ fn at_reference_completion_item(
     filter_text: &str,
     replacement_range: EditorRange,
     index: usize,
+    truncated_payloads: usize,
 ) -> CompletionItem {
     let (group, kind, description) = match row.group {
         AtReferenceGroup::Artifact => {
@@ -115,7 +118,7 @@ fn at_reference_completion_item(
             &row.label_match,
             title,
         ),
-        detail: (!row.detail.is_empty()).then_some(row.detail),
+        detail: at_reference_item_detail(row.detail, truncated_payloads),
         filter_text: Some(filter_text.to_string()),
         sort_text: Some(format!("{group}:{index:04}")),
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
@@ -125,6 +128,24 @@ fn at_reference_completion_item(
         tags: None::<Vec<CompletionItemTag>>,
         ..Default::default()
     }
+}
+
+fn at_reference_item_detail(
+    detail: String,
+    truncated_payloads: usize,
+) -> Option<String> {
+    if truncated_payloads == 0 {
+        return (!detail.is_empty()).then_some(detail);
+    }
+    let omitted = format!(
+        "at least {truncated_payloads} additional payload{} not shown",
+        if truncated_payloads == 1 { "" } else { "s" }
+    );
+    Some(if detail.is_empty() {
+        omitted
+    } else {
+        format!("{detail} · {omitted}")
+    })
 }
 
 /// Show *why* a fuzzy row is in the list: the matched payload with its matched
@@ -955,6 +976,7 @@ mod tests {
                 title_match: vec![(5, 9)],
                 match_tier: 2,
             }],
+            truncated_payloads: 3,
             ..Default::default()
         };
 
@@ -974,6 +996,10 @@ mod tests {
                 .as_ref()
                 .and_then(|details| details.detail.as_deref()),
             Some(" · SASE Sites Hub")
+        );
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("research · 3d · at least 3 additional payloads not shown")
         );
         let Some(Documentation::MarkupContent(documentation)) =
             item.documentation.as_ref()

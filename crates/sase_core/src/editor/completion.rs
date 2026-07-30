@@ -19,7 +19,6 @@ use super::at_reference::{
     AtReferencePayloadRowWire, AtReferenceStage,
 };
 use super::directive::canonical_directive_name;
-use super::fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
@@ -36,8 +35,8 @@ use super::wire::{
 };
 
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
-const ARTIFACT_REF_MAX_VISITED: usize = 4096;
-const ARTIFACT_REF_MAX_RESULTS: usize = 200;
+const ARTIFACT_REF_MAX_VISITED: usize = 20_000;
+const ARTIFACT_REF_MAX_SCAN_RESULTS: usize = 5_000;
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
@@ -372,73 +371,8 @@ pub fn build_artifact_ref_payload_completion_candidates(
         return empty_artifact_ref_completion_list();
     }
 
-    let query = trigger.query.to_lowercase();
-    let mut candidates = Vec::new();
-    let mut seen = BTreeSet::new();
-    if kind == "chat" {
-        if let Some(root) = context.chats_root.as_deref() {
-            append_artifact_path_candidates(
-                &mut candidates,
-                &mut seen,
-                kind,
-                Path::new(root),
-                replacement_range,
-            );
-        }
-    } else if kind == "bead" {
-        append_bead_page_candidates(
-            &mut candidates,
-            &mut seen,
-            context,
-            replacement_range,
-        );
-    } else if kind == "agent" {
-        append_agent_page_candidates(
-            &mut candidates,
-            &mut seen,
-            context,
-            &query,
-            replacement_range,
-        );
-    } else if kind == "file" {
-        append_artifact_index_candidates(
-            &mut candidates,
-            &mut seen,
-            context,
-            &query,
-            replacement_range,
-        );
-    } else {
-        for root in context
-            .document_roots
-            .iter()
-            .filter(|root| root.kind == kind)
-        {
-            append_artifact_path_candidates(
-                &mut candidates,
-                &mut seen,
-                kind,
-                Path::new(&root.root),
-                replacement_range,
-            );
-            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-                break;
-            }
-        }
-    }
+    let inventory = build_artifact_ref_payload_inventory(kind, context);
     let detected = legacy_at_reference_context(trigger);
-    let inventory = AtReferenceInventoryWire {
-        payloads: candidates
-            .into_iter()
-            .map(|candidate| AtReferencePayloadRowWire {
-                payload: candidate.insertion,
-                label: candidate.name,
-                detail: candidate.detail.unwrap_or_default(),
-                age: String::new(),
-            })
-            .collect(),
-        ..Default::default()
-    };
     let menu = build_at_reference_menu(&detected, &inventory);
     let prefix = format!("@{kind}:");
     let candidates = menu
@@ -463,6 +397,62 @@ pub fn build_artifact_ref_payload_completion_candidates(
     }
 }
 
+/// Enumerate and title the query-independent payload inventory for one kind.
+///
+/// Filesystem-backed roots scan up to [`ARTIFACT_REF_MAX_SCAN_RESULTS`] rows
+/// instead of limiting the corpus to the 200 rows an editor displays. The
+/// shared at-reference menu applies fuzzy matching and its display cap after
+/// this inventory is built, so a memorable match beyond the first 200 files
+/// remains reachable. Callers should cache this inventory: document titles
+/// require bounded file reads across the scanned corpus.
+pub fn build_artifact_ref_payload_inventory(
+    kind: &str,
+    context: &ArtifactRefContextWire,
+) -> AtReferenceInventoryWire {
+    if matches!(kind, "commit" | "bug") {
+        return AtReferenceInventoryWire::default();
+    }
+
+    let mut payloads = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut truncated_payloads = 0usize;
+    if kind == "chat" {
+        if let Some(root) = context.chats_root.as_deref() {
+            truncated_payloads += append_artifact_path_candidates(
+                &mut payloads,
+                &mut seen,
+                kind,
+                Path::new(root),
+            );
+        }
+    } else if kind == "bead" {
+        truncated_payloads +=
+            append_bead_page_candidates(&mut payloads, &mut seen, context);
+    } else if kind == "agent" {
+        append_agent_page_candidates(&mut payloads, &mut seen, context);
+    } else if kind == "file" {
+        append_artifact_index_candidates(&mut payloads, &mut seen, context);
+    } else {
+        for root in context
+            .document_roots
+            .iter()
+            .filter(|root| root.kind == kind)
+        {
+            truncated_payloads += append_artifact_path_candidates(
+                &mut payloads,
+                &mut seen,
+                kind,
+                Path::new(&root.root),
+            );
+        }
+    }
+    AtReferenceInventoryWire {
+        payloads,
+        truncated_payloads,
+        ..Default::default()
+    }
+}
+
 fn known_artifact_ref_kinds(context: &ArtifactRefContextWire) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut kinds = Vec::new();
@@ -478,52 +468,39 @@ fn known_artifact_ref_kinds(context: &ArtifactRefContextWire) -> Vec<String> {
     kinds
 }
 
-/// Collect every discoverable relative path under `root` as a payload
-/// candidate.
-///
-/// The query is deliberately not applied here: `bounded_relative_files` already
-/// caps the walk at [`ARTIFACT_REF_MAX_RESULTS`] files regardless of the query,
-/// so filtering here would only hide rows from the shared fuzzy menu that ranks
-/// these candidates downstream.
+/// Collect every scanned relative path under `root` as a payload row.
 fn append_artifact_path_candidates(
-    candidates: &mut Vec<CompletionCandidate>,
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
     seen: &mut BTreeSet<String>,
     kind: &str,
     root: &Path,
-    replacement_range: Option<EditorRange>,
-) {
-    for path in bounded_relative_files(root) {
-        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-            break;
-        }
+) -> usize {
+    let scan = bounded_relative_files(root);
+    for path in scan.files {
         if !seen.insert(path.clone()) {
             continue;
         }
-        candidates.push(artifact_ref_candidate(
-            artifact_path_title(kind, root, &path),
-            path,
-            format!("{kind} · {}", root.display()),
-            replacement_range,
-            "artifact_payload",
-        ));
+        payloads.push(AtReferencePayloadRowWire {
+            label: artifact_path_title(kind, root, &path),
+            payload: path,
+            detail: format!("{kind} · {}", root.display()),
+            age: String::new(),
+        });
     }
+    scan.truncated
 }
 
-/// Collect bead ids from every bead store's `pages` tree, leaving the match to
-/// the shared fuzzy menu for the same reason as
-/// [`append_artifact_path_candidates`].
 fn append_bead_page_candidates(
-    candidates: &mut Vec<CompletionCandidate>,
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
     seen: &mut BTreeSet<String>,
     context: &ArtifactRefContextWire,
-    replacement_range: Option<EditorRange>,
-) {
+) -> usize {
+    let mut truncated = 0usize;
     for store in &context.bead_stores {
         let pages_root = Path::new(&store.root).join("pages");
-        for path in bounded_relative_files(&pages_root) {
-            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-                break;
-            }
+        let scan = bounded_relative_files(&pages_root);
+        truncated += scan.truncated;
+        for path in scan.files {
             let Some(id) = bead_id_from_page_relative_path(&path) else {
                 continue;
             };
@@ -531,34 +508,24 @@ fn append_bead_page_candidates(
                 continue;
             }
             let page_path = pages_root.join(&path);
-            candidates.push(artifact_ref_candidate(
-                bead_page_title(&page_path, &id),
-                id,
-                format!("bead · {}", store.project),
-                replacement_range,
-                "artifact_payload",
-            ));
-        }
-        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-            break;
+            payloads.push(AtReferencePayloadRowWire {
+                label: bead_page_title(&page_path, &id),
+                payload: id,
+                detail: format!("bead · {}", store.project),
+                age: String::new(),
+            });
         }
     }
+    truncated
 }
 
-/// Collect published agent pages whose global name fuzzy-matches `query`.
-///
-/// Agent payloads are global names like `bbugyi200.athena.sase-b3.5`, so a
-/// prefix test would make a fragment such as `sase-b3` unreachable. The whole
-/// `agents` tree is enumerated — a query matching nothing already walked it —
-/// and the cap is applied to the ranked matches rather than to walk order.
+/// Collect all published agent pages. Matching and ranking happen in the shared
+/// at-reference menu after this inventory is cached.
 fn append_agent_page_candidates(
-    candidates: &mut Vec<CompletionCandidate>,
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
     seen: &mut BTreeSet<String>,
     context: &ArtifactRefContextWire,
-    query: &str,
-    replacement_range: Option<EditorRange>,
 ) {
-    let mut matched = Vec::new();
     for root in &context.agent_roots {
         let agents_root = Path::new(&root.root).join("agents");
         if !agents_root.is_dir() {
@@ -581,23 +548,17 @@ fn append_agent_page_candidates(
             if name.is_empty() {
                 continue;
             }
-            let title = agent_short_name(&name);
-            let Some(candidate) = matched_artifact_ref_candidate(
-                title,
-                name.clone(),
-                format!("agent · {}", root.project),
-                replacement_range,
-                query,
-            ) else {
-                continue;
-            };
-            if !seen.insert(name) {
+            if !seen.insert(name.clone()) {
                 continue;
             }
-            matched.push(candidate);
+            payloads.push(AtReferencePayloadRowWire {
+                label: agent_short_name(&name),
+                payload: name,
+                detail: format!("agent · {}", root.project),
+                age: String::new(),
+            });
         }
     }
-    append_ranked_artifact_ref_matches(candidates, matched, !query.is_empty());
 }
 
 fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
@@ -616,17 +577,12 @@ fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Collect indexed artifact files whose id fuzzy-matches `query`.
-///
-/// Indexed payloads are `<source>:<hex>` ids, so a prefix test reached them
-/// only by typing a digest prefix. Every index row is matched and ranked before
-/// the cap, for the same reason as [`append_agent_page_candidates`].
+/// Collect all indexed artifact files. Matching and ranking happen in the
+/// shared at-reference menu after this inventory is cached.
 fn append_artifact_index_candidates(
-    candidates: &mut Vec<CompletionCandidate>,
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
     seen: &mut BTreeSet<String>,
     context: &ArtifactRefContextWire,
-    query: &str,
-    replacement_range: Option<EditorRange>,
 ) {
     let Some(index_path) = context.artifact_index_path.as_deref() else {
         return;
@@ -640,92 +596,17 @@ fn append_artifact_index_candidates(
             .cmp(&right.id)
             .then_with(|| left.path.cmp(&right.path))
     });
-    let mut matched = Vec::new();
     for entry in entries {
         let id = entry.id;
-        let title = path_basename(&entry.path).unwrap_or_else(|| id.clone());
-        let Some(candidate) = matched_artifact_ref_candidate(
-            title,
-            id.clone(),
-            format!("file · {}", entry.path),
-            replacement_range,
-            query,
-        ) else {
-            continue;
-        };
-        if seen.insert(id) {
-            matched.push(candidate);
+        if seen.insert(id.clone()) {
+            payloads.push(AtReferencePayloadRowWire {
+                label: path_basename(&entry.path).unwrap_or_else(|| id.clone()),
+                payload: id,
+                detail: format!("file · {}", entry.path),
+                age: String::new(),
+            });
         }
     }
-    append_ranked_artifact_ref_matches(candidates, matched, !query.is_empty());
-}
-
-struct MatchedArtifactRefCandidate {
-    candidate: CompletionCandidate,
-    match_result: FuzzyMatch,
-    matched_text: String,
-}
-
-fn matched_artifact_ref_candidate(
-    title: String,
-    insertion: String,
-    detail: String,
-    replacement_range: Option<EditorRange>,
-    query: &str,
-) -> Option<MatchedArtifactRefCandidate> {
-    let payload_match = fuzzy_match(query, &insertion);
-    let title_match = fuzzy_match(query, &title);
-    let (match_result, matched_text) = match (payload_match, title_match) {
-        (Some(payload_match), Some(title_match)) => {
-            if compare_fuzzy(
-                (&payload_match, &insertion),
-                (&title_match, &title),
-            ) == std::cmp::Ordering::Greater
-            {
-                (title_match, title.clone())
-            } else {
-                (payload_match, insertion.clone())
-            }
-        }
-        (Some(payload_match), None) => (payload_match, insertion.clone()),
-        (None, Some(title_match)) => (title_match, title.clone()),
-        (None, None) => return None,
-    };
-    Some(MatchedArtifactRefCandidate {
-        candidate: artifact_ref_candidate(
-            title,
-            insertion,
-            detail,
-            replacement_range,
-            "artifact_payload",
-        ),
-        match_result,
-        matched_text,
-    })
-}
-
-fn append_ranked_artifact_ref_matches(
-    candidates: &mut Vec<CompletionCandidate>,
-    mut matched: Vec<MatchedArtifactRefCandidate>,
-    sort: bool,
-) {
-    if sort {
-        matched.sort_by(|left, right| {
-            compare_fuzzy(
-                (&left.match_result, &left.matched_text),
-                (&right.match_result, &right.matched_text),
-            )
-            .then_with(|| {
-                left.candidate.insertion.cmp(&right.candidate.insertion)
-            })
-        });
-    }
-    candidates.extend(
-        matched
-            .into_iter()
-            .take(ARTIFACT_REF_MAX_RESULTS.saturating_sub(candidates.len()))
-            .map(|matched| matched.candidate),
-    );
 }
 
 fn artifact_path_title(kind: &str, root: &Path, payload: &str) -> String {
@@ -776,29 +657,46 @@ fn nonempty_title(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-fn bounded_relative_files(root: &Path) -> Vec<String> {
+struct BoundedRelativeFiles {
+    files: Vec<String>,
+    /// Number of payloads known to have been omitted. A positive value is a
+    /// lower bound because the scan stops as soon as a configured bound bites.
+    truncated: usize,
+}
+
+fn bounded_relative_files(root: &Path) -> BoundedRelativeFiles {
     if !root.is_dir() {
-        return Vec::new();
+        return BoundedRelativeFiles {
+            files: Vec::new(),
+            truncated: 0,
+        };
     }
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut visited = 0usize;
     let mut files = Vec::new();
+    let mut truncated = 0usize;
     while let Some((directory, depth)) = pending.pop() {
-        if depth > ARTIFACT_REF_MAX_DEPTH
-            || visited >= ARTIFACT_REF_MAX_VISITED
-            || files.len() >= ARTIFACT_REF_MAX_RESULTS
+        if depth > ARTIFACT_REF_MAX_DEPTH {
+            truncated = truncated.saturating_add(1);
+            break;
+        }
+        if visited >= ARTIFACT_REF_MAX_VISITED
+            || files.len() >= ARTIFACT_REF_MAX_SCAN_RESULTS
         {
-            continue;
+            truncated = truncated.saturating_add(1);
+            break;
         }
         let Ok(read_dir) = fs::read_dir(&directory) else {
             continue;
         };
         let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.file_name());
+        let entry_count = entries.len();
         let mut directories = Vec::<PathBuf>::new();
-        for entry in entries {
+        for (entry_index, entry) in entries.into_iter().enumerate() {
             visited += 1;
             if visited > ARTIFACT_REF_MAX_VISITED {
+                truncated = truncated.saturating_add(1);
                 break;
             }
             let Ok(file_type) = entry.file_type() else {
@@ -807,6 +705,8 @@ fn bounded_relative_files(root: &Path) -> Vec<String> {
             if file_type.is_dir() {
                 if depth < ARTIFACT_REF_MAX_DEPTH {
                     directories.push(entry.path());
+                } else {
+                    truncated = truncated.saturating_add(1);
                 }
             } else if file_type.is_file() {
                 let path = entry.path();
@@ -821,17 +721,26 @@ fn bounded_relative_files(root: &Path) -> Vec<String> {
                 if !payload.is_empty() {
                     files.push(payload);
                 }
-                if files.len() >= ARTIFACT_REF_MAX_RESULTS {
+                if files.len() >= ARTIFACT_REF_MAX_SCAN_RESULTS {
+                    if entry_index + 1 < entry_count
+                        || !pending.is_empty()
+                        || !directories.is_empty()
+                    {
+                        truncated = truncated.saturating_add(1);
+                    }
                     break;
                 }
             }
+        }
+        if truncated > 0 {
+            break;
         }
         for directory in directories.into_iter().rev() {
             pending.push((directory, depth + 1));
         }
     }
     files.sort();
-    files
+    BoundedRelativeFiles { files, truncated }
 }
 
 fn artifact_ref_candidate(
@@ -3050,7 +2959,9 @@ mod tests {
         let agent_root = temp.path().join("agents-sidecar");
         // Every name below fuzzy-matches "zq", but only the last one — sorted
         // last in walk order — matches it as a prefix.
-        for index in 0..ARTIFACT_REF_MAX_RESULTS + 5 {
+        for index in
+            0..super::super::at_reference::AT_REFERENCE_MAX_GROUP_ROWS + 5
+        {
             let name = format!("aaz{index:04}q");
             fs::create_dir_all(agent_root.join("agents").join(&name)).unwrap();
             fs::write(
@@ -3114,7 +3025,10 @@ mod tests {
             &context,
         );
 
-        assert_eq!(list.candidates.len(), ARTIFACT_REF_MAX_RESULTS);
+        assert_eq!(
+            list.candidates.len(),
+            super::super::at_reference::AT_REFERENCE_MAX_GROUP_ROWS
+        );
         assert_eq!(
             list.candidates
                 .iter()
@@ -3122,6 +3036,62 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn payload_inventory_reaches_past_the_editor_display_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        fs::create_dir_all(&designs).unwrap();
+        for index in 0..205 {
+            fs::write(designs.join(format!("{index:03}.md")), "x").unwrap();
+        }
+        fs::write(designs.join("zzz-needle.md"), "x").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: designs.to_string_lossy().into_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("designs", &context);
+        assert_eq!(inventory.payloads.len(), 206);
+        assert_eq!(inventory.truncated_payloads, 0);
+
+        let completion =
+            artifact_completion_context("@designs:needle", 15, &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            None,
+            &context,
+        );
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].insertion, "zzz-needle.md");
+    }
+
+    #[test]
+    fn payload_inventory_discloses_the_scan_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        fs::create_dir_all(&designs).unwrap();
+        for index in 0..ARTIFACT_REF_MAX_SCAN_RESULTS + 1 {
+            fs::write(designs.join(format!("{index:05}.md")), "").unwrap();
+        }
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: designs.to_string_lossy().into_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("designs", &context);
+
+        assert_eq!(inventory.payloads.len(), ARTIFACT_REF_MAX_SCAN_RESULTS);
+        assert_eq!(inventory.truncated_payloads, 1);
     }
 
     #[test]

@@ -332,6 +332,7 @@ pub use editor::{
     build_agent_completion_candidates as editor_build_agent_completion_candidates,
     build_artifact_ref_kind_completion_candidates as editor_build_artifact_ref_kind_completion_candidates,
     build_artifact_ref_payload_completion_candidates as editor_build_artifact_ref_payload_completion_candidates,
+    build_artifact_ref_payload_inventory as editor_build_artifact_ref_payload_inventory,
     build_at_reference_menu as editor_build_at_reference_menu,
     build_at_reference_menu_with_options as editor_build_at_reference_menu_with_options,
     build_at_reference_menu_with_payload_index as editor_build_at_reference_menu_with_payload_index,

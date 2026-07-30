@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::{Duration, Instant, SystemTime},
 };
 
 use lsp_types::{
@@ -26,7 +27,7 @@ use lsp_types::{
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
     editor_build_agent_completion_candidates,
-    editor_build_artifact_ref_payload_completion_candidates,
+    editor_build_artifact_ref_payload_inventory,
     editor_build_at_reference_menu_with_options,
     editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
@@ -44,10 +45,9 @@ use sase_core::{
     editor_definition_at_position, editor_detect_at_reference_context,
     editor_directive_argument_candidates, editor_directive_metadata,
     editor_extract_token_at_position, editor_hover_at_position,
-    ArtifactRefCompletionMode, ArtifactRefCompletionTrigger,
     ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
     AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
-    AtReferencePayloadRowWire, AtReferenceStage, CompletionCandidate,
+    AtReferencePayloadIndex, AtReferenceStage, CompletionCandidate,
     CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
     EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
     VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
@@ -72,6 +72,7 @@ use crate::semantic_tokens::{artifact_ref_tokens, legend};
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
+const ARTIFACT_REF_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Env var carrying the path to the JSON `vcs_project` completion catalog
 /// (enabled-project entries + known VCS workflow names). Materialized by the
@@ -97,7 +98,8 @@ struct ServerConfig {
     /// each `%model` argument completion request.
     model_catalog: Option<PathBuf>,
     /// Path to the launcher-materialized artifact-reference catalog. The file
-    /// is re-read for every completion and diagnostic request.
+    /// and its enumerated payload inventories are cached briefly; path metadata
+    /// changes and explicit refreshes invalidate the cache immediately.
     artifact_ref_catalog: Option<PathBuf>,
 }
 
@@ -160,6 +162,27 @@ struct ArtifactRefCatalogProject {
     context: ArtifactRefContextWire,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactRefCatalogSignature {
+    path: Option<PathBuf>,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Debug)]
+struct CachedArtifactRefPayload {
+    index: AtReferencePayloadIndex,
+    truncated_payloads: usize,
+}
+
+#[derive(Debug, Default)]
+struct ArtifactRefCache {
+    signature: Option<ArtifactRefCatalogSignature>,
+    loaded_at: Option<Instant>,
+    catalog: ArtifactRefCatalog,
+    payloads: HashMap<(String, String), Arc<CachedArtifactRefPayload>>,
+}
+
 #[derive(Debug, Clone)]
 struct OpenDocument {
     text: String,
@@ -172,6 +195,7 @@ pub struct XpromptLspServer {
     client: Client,
     documents: RwLock<HashMap<String, OpenDocument>>,
     catalog_cache: Arc<CatalogCache>,
+    artifact_ref_cache: RwLock<ArtifactRefCache>,
     config: RwLock<ServerConfig>,
 }
 
@@ -181,6 +205,7 @@ impl XpromptLspServer {
             client,
             documents: RwLock::new(HashMap::new()),
             catalog_cache: Arc::new(CatalogCache::command_backed()),
+            artifact_ref_cache: RwLock::new(ArtifactRefCache::default()),
             config: RwLock::new(ServerConfig::default()),
         }
     }
@@ -193,6 +218,7 @@ impl XpromptLspServer {
             client,
             documents: RwLock::new(HashMap::new()),
             catalog_cache: Arc::new(CatalogCache::new(bridge)),
+            artifact_ref_cache: RwLock::new(ArtifactRefCache::default()),
             config: RwLock::new(ServerConfig::default()),
         }
     }
@@ -251,13 +277,14 @@ impl XpromptLspServer {
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
-            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
-        let artifact_context = active_artifact_ref_context(
+            self.artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+        let artifact_project = active_artifact_ref_project(
             &document,
             &config,
             &vcs_catalog,
             &artifact_catalog,
         );
+        let artifact_context = artifact_project.map(|project| &project.context);
         let known_kinds = known_at_reference_kinds(artifact_context);
         if let Some(context) = editor_detect_at_reference_context(
             &document,
@@ -266,7 +293,7 @@ impl XpromptLspServer {
         ) {
             return Some(self.at_reference_completion(
                 &context,
-                artifact_context,
+                artifact_project,
                 &config,
                 &document,
                 AtReferenceMenuOptionsWire {
@@ -378,7 +405,7 @@ impl XpromptLspServer {
     fn at_reference_completion(
         &self,
         context: &AtReferenceContextWire,
-        artifact_context: Option<&ArtifactRefContextWire>,
+        artifact_project: Option<&ArtifactRefCatalogProject>,
         config: &ServerConfig,
         document: &DocumentSnapshot,
         options: AtReferenceMenuOptionsWire,
@@ -389,19 +416,28 @@ impl XpromptLspServer {
         ) else {
             return empty_completion_response();
         };
+        let artifact_context = artifact_project.map(|project| &project.context);
+        let payload = artifact_project.and_then(|project| {
+            self.cached_at_reference_payload_inventory(context, project)
+        });
         let inventory = AtReferenceInventoryWire {
             kinds: at_reference_kind_inventory(artifact_context),
             paths: at_reference_path_inventory(context, config),
-            payloads: at_reference_payload_inventory(context, artifact_context),
+            truncated_payloads: payload
+                .as_ref()
+                .map_or(0, |payload| payload.truncated_payloads),
             ..Default::default()
         };
-        at_reference_completion_response(
-            editor_build_at_reference_menu_with_options(
-                context, &inventory, None, options,
-            ),
+        let mut menu = editor_build_at_reference_menu_with_options(
             context,
-            replacement_range,
-        )
+            &inventory,
+            payload.as_ref().map(|payload| &payload.index),
+            options,
+        );
+        menu.truncated_payloads = menu
+            .truncated_payloads
+            .saturating_add(menu.payload_count.saturating_sub(menu.rows.len()));
+        at_reference_completion_response(menu, context, replacement_range)
     }
 
     /// Build the `+` (`vcs_project`) completion response.
@@ -622,7 +658,7 @@ impl XpromptLspServer {
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
-            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+            self.artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
         if let Some(context) = active_artifact_ref_context(
             &document,
             &config,
@@ -660,7 +696,7 @@ impl XpromptLspServer {
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
-            load_artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
+            self.artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
         active_artifact_ref_context(
             &document,
             &config,
@@ -778,6 +814,72 @@ impl XpromptLspServer {
             .read()
             .map(|config| config.clone())
             .unwrap_or_default()
+    }
+
+    fn artifact_ref_catalog(&self, path: Option<&Path>) -> ArtifactRefCatalog {
+        let signature = artifact_ref_catalog_signature(path);
+        let now = Instant::now();
+        if let Ok(cache) = self.artifact_ref_cache.read() {
+            let fresh = cache.signature.as_ref() == Some(&signature)
+                && cache.loaded_at.is_some_and(|loaded_at| {
+                    now.saturating_duration_since(loaded_at)
+                        < ARTIFACT_REF_CACHE_TTL
+                });
+            if fresh {
+                return cache.catalog.clone();
+            }
+        }
+
+        let catalog = load_artifact_ref_catalog(path);
+        if let Ok(mut cache) = self.artifact_ref_cache.write() {
+            cache.signature = Some(signature);
+            cache.loaded_at = Some(now);
+            cache.catalog = catalog.clone();
+            cache.payloads.clear();
+        }
+        catalog
+    }
+
+    fn cached_at_reference_payload_inventory(
+        &self,
+        context: &AtReferenceContextWire,
+        project: &ArtifactRefCatalogProject,
+    ) -> Option<Arc<CachedArtifactRefPayload>> {
+        if context.stage != AtReferenceStage::Payload {
+            return None;
+        }
+        let kind = context.kind.as_deref()?;
+        if matches!(kind, "commit" | "bug") {
+            return None;
+        }
+        let key = (project.key.clone(), kind.to_string());
+        if let Ok(cache) = self.artifact_ref_cache.read() {
+            if let Some(payload) = cache.payloads.get(&key) {
+                return Some(Arc::clone(payload));
+            }
+        }
+
+        let inventory =
+            editor_build_artifact_ref_payload_inventory(kind, &project.context);
+        let payload = Arc::new(CachedArtifactRefPayload {
+            index: AtReferencePayloadIndex::new(inventory.payloads),
+            truncated_payloads: inventory.truncated_payloads,
+        });
+        if let Ok(mut cache) = self.artifact_ref_cache.write() {
+            return Some(Arc::clone(
+                cache
+                    .payloads
+                    .entry(key)
+                    .or_insert_with(|| Arc::clone(&payload)),
+            ));
+        }
+        Some(payload)
+    }
+
+    fn invalidate_artifact_ref_cache(&self) {
+        if let Ok(mut cache) = self.artifact_ref_cache.write() {
+            *cache = ArtifactRefCache::default();
+        }
     }
 
     fn open_document(
@@ -979,6 +1081,7 @@ impl XpromptLspServer {
     }
 
     async fn refresh_catalog_explicit(&self) {
+        self.invalidate_artifact_ref_cache();
         let config = self.current_config();
         let xprompt_result = self
             .catalog_cache
@@ -1307,6 +1410,7 @@ impl LanguageServer for XpromptLspServer {
             .any(|change| should_invalidate_for_uri(&change.uri))
         {
             self.catalog_cache.invalidate_all();
+            self.invalidate_artifact_ref_cache();
         }
     }
 }
@@ -1821,11 +1925,25 @@ fn load_vcs_project_catalog(path: Option<&Path>) -> VcsProjectCatalog {
     }
 }
 
+fn artifact_ref_catalog_signature(
+    path: Option<&Path>,
+) -> ArtifactRefCatalogSignature {
+    let metadata = path.and_then(|path| fs::metadata(path).ok());
+    ArtifactRefCatalogSignature {
+        path: path.map(Path::to_path_buf),
+        modified: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok()),
+        len: metadata.as_ref().map_or(0, fs::Metadata::len),
+    }
+}
+
 /// Load the launcher-generated local artifact-reference catalog.
 ///
 /// The schema is version-gated and every failure degrades to no artifact
-/// assistance. The caller re-reads the file per request so launcher refreshes
-/// and external rewrites become visible without restarting the server.
+/// assistance. [`XpromptLspServer::artifact_ref_catalog`] caches this parsed
+/// value together with the payload inventories and invalidates it by file
+/// signature, TTL, or explicit refresh.
 fn load_artifact_ref_catalog(path: Option<&Path>) -> ArtifactRefCatalog {
     let Some(path) = path else {
         return ArtifactRefCatalog::default();
@@ -1969,46 +2087,12 @@ fn resolve_at_reference_directory(
     resolved.canonicalize().ok()
 }
 
-fn at_reference_payload_inventory(
-    context: &AtReferenceContextWire,
-    artifact_context: Option<&ArtifactRefContextWire>,
-) -> Vec<AtReferencePayloadRowWire> {
-    if context.stage != AtReferenceStage::Payload {
-        return Vec::new();
-    }
-    let Some(artifact_context) = artifact_context else {
-        return Vec::new();
-    };
-    let trigger = ArtifactRefCompletionTrigger {
-        mode: ArtifactRefCompletionMode::Payload,
-        candidate_span: context.candidate_span,
-        replacement_span: context.replacement_span,
-        query_span: context.query_span,
-        query: context.query.clone(),
-        kind: context.kind.clone(),
-    };
-    editor_build_artifact_ref_payload_completion_candidates(
-        &trigger,
-        None,
-        artifact_context,
-    )
-    .candidates
-    .into_iter()
-    .map(|candidate| AtReferencePayloadRowWire {
-        payload: candidate.insertion,
-        label: candidate.name,
-        detail: candidate.detail.unwrap_or_default(),
-        age: String::new(),
-    })
-    .collect()
-}
-
-fn active_artifact_ref_context<'a>(
+fn active_artifact_ref_project<'a>(
     document: &DocumentSnapshot,
     config: &ServerConfig,
     vcs_catalog: &VcsProjectCatalog,
     artifact_catalog: &'a ArtifactRefCatalog,
-) -> Option<&'a ArtifactRefContextWire> {
+) -> Option<&'a ArtifactRefCatalogProject> {
     let leading_project =
         leading_vcs_project(document.text(), &vcs_catalog.entries);
     leading_project
@@ -2030,6 +2114,15 @@ fn active_artifact_ref_context<'a>(
                 })
             })
         })
+}
+
+fn active_artifact_ref_context<'a>(
+    document: &DocumentSnapshot,
+    config: &ServerConfig,
+    vcs_catalog: &VcsProjectCatalog,
+    artifact_catalog: &'a ArtifactRefCatalog,
+) -> Option<&'a ArtifactRefContextWire> {
+    active_artifact_ref_project(document, config, vcs_catalog, artifact_catalog)
         .map(|project| &project.context)
 }
 
@@ -5112,6 +5205,140 @@ mod tests {
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "@designs:sase.md");
+    }
+
+    #[tokio::test]
+    async fn artifact_payload_inventory_cache_rebuilds_on_all_invalidation_paths(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        let designs = temp.path().join("sase/designs");
+        fs::create_dir_all(&designs).unwrap();
+        fs::write(designs.join("first.md"), "first").unwrap();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().artifact_ref_catalog =
+            Some(artifact_path.clone());
+
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:first".to_string(),
+                    Position::new(0, 14),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(items.len(), 1);
+
+        // A stable catalog signature reuses the cached filesystem inventory.
+        fs::write(designs.join("second.md"), "second").unwrap();
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:second".to_string(),
+                    Position::new(0, 15),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(items.is_empty());
+
+        // A launcher catalog rewrite invalidates by path metadata.
+        let mut raw = fs::read(&artifact_path).unwrap();
+        raw.push(b'\n');
+        fs::write(&artifact_path, raw).unwrap();
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:second".to_string(),
+                    Position::new(0, 15),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(items.len(), 1);
+
+        // The explicit refresh command invalidates even when the catalog file
+        // itself is unchanged.
+        fs::write(designs.join("third.md"), "third").unwrap();
+        server.refresh_catalog_explicit().await;
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:third".to_string(),
+                    Position::new(0, 14),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(items.len(), 1);
+
+        // The short TTL eventually notices sidecar writes that do not touch
+        // the launcher catalog.
+        fs::write(designs.join("fourth.md"), "fourth").unwrap();
+        server.artifact_ref_cache.write().unwrap().loaded_at =
+            Some(Instant::now() - ARTIFACT_REF_CACHE_TTL);
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:fourth".to_string(),
+                    Position::new(0, 15),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn artifact_completion_discloses_the_display_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        let designs = temp.path().join("sase/designs");
+        fs::create_dir_all(&designs).unwrap();
+        for index in 0..205 {
+            fs::write(designs.join(format!("{index:03}.md")), "design")
+                .unwrap();
+        }
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().artifact_ref_catalog =
+            Some(artifact_path);
+
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    "@designs:".to_string(),
+                    Position::new(0, 9),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            items.len(),
+            sase_core::editor::at_reference::AT_REFERENCE_MAX_GROUP_ROWS
+        );
+        assert!(items.iter().all(|item| item
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail
+                .contains("at least 5 additional payloads not shown"))));
     }
 
     #[tokio::test]
