@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 2;
-pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 3;
+pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -145,6 +145,8 @@ pub struct ArtifactRefRepositoryWire {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub shas: Vec<String>,
+    #[serde(default)]
+    pub checkout_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

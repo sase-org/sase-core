@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use crate::agent_identity::{
     globalize_agent_name, validate_agent_reference_name, AgentOwnerIdentity,
 };
-use crate::artifact_file::read_artifact_file_index;
+use crate::artifact_file::{
+    artifact_file_is_vcs_backed, read_artifact_file_index, ArtifactFileWire,
+};
 use crate::reference_path::{
     path_to_relative_payload, resolve_ordered_root_file,
     validate_relative_payload, DriftPolicy, PathPayloadError,
@@ -212,7 +214,11 @@ pub fn canonicalize_artifact_ref(
     }
     if let Some(index_path) = &context.artifact_index_path {
         for artifact in read_artifact_index(Path::new(index_path))? {
-            if Path::new(&artifact.path) == path {
+            if artifact
+                .path
+                .as_deref()
+                .is_some_and(|stored_path| Path::new(stored_path) == path)
+            {
                 return parse_artifact_ref(&format!("file:{}", artifact.id))
                     .map(|reference| Some(reference.rendered));
             }
@@ -504,19 +510,31 @@ fn resolve_file(
         return Ok(resolution("missing", rendered));
     };
     let id = format!("{}:{digest}", source.label());
-    let candidates = read_artifact_index(Path::new(index_path))?
+    let matches = read_artifact_index(Path::new(index_path))?
         .into_iter()
         .filter(|artifact| artifact.id == id)
-        .map(|artifact| artifact.path)
         .collect::<Vec<_>>();
-    match candidates.as_slice() {
-        [path] => Ok(ArtifactRefResolutionWire {
+    match matches.as_slice() {
+        [artifact] if artifact_file_is_vcs_backed(artifact) => {
+            let Some(locator) = artifact_file_vcs_locator(artifact) else {
+                return Ok(resolution("missing", rendered));
+            };
+            Ok(ArtifactRefResolutionWire {
+                schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+                status: "vcs_backed".to_string(),
+                rendered,
+                locator: Some(locator.clone()),
+                resolved_path: None,
+                candidates: vec![locator],
+            })
+        }
+        [artifact] => Ok(ArtifactRefResolutionWire {
             schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
             status: "exact".to_string(),
             rendered,
             locator: None,
-            resolved_path: Some(path.clone()),
-            candidates,
+            resolved_path: artifact.path.clone(),
+            candidates: artifact_file_candidates(&matches),
         }),
         [] => Ok(resolution("missing", rendered)),
         _ => Ok(ArtifactRefResolutionWire {
@@ -525,9 +543,32 @@ fn resolve_file(
             rendered,
             locator: None,
             resolved_path: None,
-            candidates,
+            candidates: artifact_file_candidates(&matches),
         }),
     }
+}
+
+fn artifact_file_candidates(artifacts: &[ArtifactFileWire]) -> Vec<String> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .path
+                .clone()
+                .or_else(|| artifact_file_vcs_locator(artifact))
+        })
+        .collect()
+}
+
+fn artifact_file_vcs_locator(artifact: &ArtifactFileWire) -> Option<String> {
+    artifact_file_is_vcs_backed(artifact).then(|| {
+        format!(
+            "{}@{}:{}",
+            artifact.vcs_repo.as_deref().unwrap_or_default(),
+            artifact.vcs_sha.as_deref().unwrap_or_default(),
+            artifact.vcs_relpath.as_deref().unwrap_or_default(),
+        )
+    })
 }
 
 fn resolve_commit(
@@ -1082,7 +1123,7 @@ mod tests {
 
     #[test]
     fn parsed_references_carry_the_current_wire_schema() {
-        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 2);
+        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 3);
     }
 
     #[test]
@@ -1439,6 +1480,7 @@ mod tests {
                 name: "sase".to_string(),
                 aliases: vec!["core".to_string()],
                 shas: vec![FULL_SHA.to_string()],
+                checkout_paths: vec!["/workspaces/sase".to_string()],
             }],
             projects: vec![ArtifactRefProjectWire {
                 name: "sase".to_string(),
@@ -1535,6 +1577,43 @@ mod tests {
             v2_result.resolved_path.as_deref(),
             Some(v2_target.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn indexed_vcs_backed_file_resolution_is_pure_and_reports_provenance() {
+        let temp = tempdir().unwrap();
+        let index = temp.path().join("index.jsonl");
+        fs::write(
+            &index,
+            concat!(
+                "{\"schema_version\":2,\"artifact\":{",
+                "\"id\":\"default:fedcba987654321001234567\",",
+                "\"path\":null,\"vcs_repo\":\"sase\",",
+                "\"vcs_sha\":\"0123456789abcdef0123456789abcdef01234567\",",
+                "\"vcs_relpath\":\"docs/example.png\"}}\n"
+            ),
+        )
+        .unwrap();
+        let context = ArtifactRefContextWire {
+            artifact_index_path: Some(index.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let result = resolve_artifact_ref(
+            &parse_artifact_ref("file:default:fedcba987654321001234567")
+                .unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(result.status, "vcs_backed");
+        assert_eq!(
+            result.locator.as_deref(),
+            Some(
+                "sase@0123456789abcdef0123456789abcdef01234567:docs/example.png"
+            )
+        );
+        assert!(result.resolved_path.is_none());
+        assert_eq!(result.candidates, vec![result.locator.unwrap()]);
     }
 
     #[test]

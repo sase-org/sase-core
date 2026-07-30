@@ -205,8 +205,10 @@ pub use agent_stats::{
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_file::{
+    artifact_file_is_vcs_backed, materialize_vcs_artifact_file,
     query_artifact_files, read_artifact_file_index, ArtifactFileQueryError,
-    ArtifactFileQueryFiltersWire, ArtifactFileWire,
+    ArtifactFileQueryFiltersWire, ArtifactFileVcsMaterializationRequestWire,
+    ArtifactFileVcsMaterializationWire, ArtifactFileWire,
     ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION,
     ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,

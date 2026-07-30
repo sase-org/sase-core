@@ -150,6 +150,7 @@
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
+//! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
 //! - `sdd_artifact_link_parse(document: str) -> dict`
 //! - `sdd_artifact_link_render(link_type: str, label: str, target: str) -> str`
@@ -329,8 +330,10 @@ use sase_core::agent_stats::{
     AgentRunStatsRequestWire,
 };
 use sase_core::artifact_file::{
+    materialize_vcs_artifact_file as core_materialize_vcs_artifact_file,
     query_artifact_files as core_query_artifact_files, ArtifactFileQueryError,
-    ArtifactFileQueryFiltersWire, ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
+    ArtifactFileQueryFiltersWire, ArtifactFileVcsMaterializationRequestWire,
+    ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_ref::{
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
@@ -2948,7 +2951,7 @@ fn py_artifact_ref_scan_prompt<'py>(
     json_value_to_py(py, &value)
 }
 
-/// Return the shared v1 parse/resolution artifact-reference wire version.
+/// Return the shared parse/resolution artifact-reference wire version.
 #[pyfunction]
 #[pyo3(name = "artifact_ref_wire_schema_version")]
 fn py_artifact_ref_wire_schema_version() -> u64 {
@@ -2993,6 +2996,32 @@ fn py_artifact_files_query<'py>(
 #[pyo3(name = "artifact_file_query_wire_schema_version")]
 fn py_artifact_file_query_wire_schema_version() -> u64 {
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION
+}
+
+/// Materialize one VCS-backed artifact into its content-addressed cache.
+#[pyfunction]
+#[pyo3(name = "artifact_file_materialize_vcs")]
+fn py_artifact_file_materialize_vcs<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<
+        ArtifactFileVcsMaterializationRequestWire,
+    >(py_to_json_value(request.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid \
+                 ArtifactFileVcsMaterializationRequestWire dict: {error}"
+        ))
+    })?;
+    let result =
+        py.allow_threads(|| core_materialize_vcs_artifact_file(&request));
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-file materialization serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Parse canonical and historical artifact links from one SDD document.
@@ -6349,6 +6378,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_files_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_file_materialize_vcs, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_file_query_wire_schema_version,
         m
@@ -7813,7 +7843,7 @@ mod tests {
             let parsed =
                 py_artifact_ref_parse(py, "plans:202607/plan.md#L2").unwrap();
             let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed_value["schema_version"], json!(2));
+            assert_eq!(parsed_value["schema_version"], json!(3));
             assert_eq!(parsed_value["kind"]["type"], json!("document"));
             assert_eq!(parsed_value["fragment"]["type"], json!("lines"));
             assert_eq!(
@@ -7839,7 +7869,7 @@ mod tests {
             let resolved =
                 py_artifact_ref_resolve(py, parsed.bind(py), context).unwrap();
             let resolved = py_to_json_value(resolved.bind(py)).unwrap();
-            assert_eq!(resolved["schema_version"], json!(2));
+            assert_eq!(resolved["schema_version"], json!(3));
             assert_eq!(resolved["status"], json!("exact"));
             assert_eq!(
                 resolved["resolved_path"],
@@ -7851,7 +7881,7 @@ mod tests {
             let scanned = py_to_json_value(scanned.bind(py)).unwrap();
             assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
-            assert_eq!(py_artifact_ref_wire_schema_version(), 2);
+            assert_eq!(py_artifact_ref_wire_schema_version(), 3);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
         });
     }
@@ -7883,6 +7913,7 @@ mod tests {
             assert!(module
                 .getattr("artifact_file_query_wire_schema_version")
                 .is_ok());
+            assert!(module.getattr("artifact_file_materialize_vcs").is_ok());
 
             let filters = PyDict::new_bound(py);
             filters.set_item("kinds", ["image"]).unwrap();
@@ -7896,7 +7927,31 @@ mod tests {
             assert_eq!(value[0]["sha256"], json!("abc"));
             assert_eq!(value[0]["size_bytes"], json!(3));
             assert_eq!(value[0]["mime_type"], json!("image/png"));
-            assert_eq!(py_artifact_file_query_wire_schema_version(), 1);
+            assert_eq!(py_artifact_file_query_wire_schema_version(), 2);
+
+            let request = PyDict::new_bound(py);
+            request
+                .set_item("cache_root", temp.path().join("cache"))
+                .unwrap();
+            request
+                .set_item("checkout_paths", Vec::<String>::new())
+                .unwrap();
+            request
+                .set_item("vcs_sha", "0123456789abcdef0123456789abcdef01234567")
+                .unwrap();
+            request.set_item("vcs_relpath", "docs/missing.png").unwrap();
+            request
+                .set_item(
+                    "sha256",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .unwrap();
+            request.set_item("suffix", ".png").unwrap();
+            request.set_item("max_history_scan", 20).unwrap();
+            let materialized =
+                py_artifact_file_materialize_vcs(py, &request).unwrap();
+            let materialized = py_to_json_value(materialized.bind(py)).unwrap();
+            assert_eq!(materialized["status"], json!("missing"));
         });
     }
 

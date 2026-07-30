@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::artifact_file::read_artifact_file_index;
+use crate::artifact_file::{
+    artifact_file_is_vcs_backed, read_artifact_file_index,
+};
 use crate::plan::read::split_frontmatter;
 use crate::{
     ArtifactRefContextWire, EditorSnippetEntryWire,
@@ -597,12 +599,28 @@ fn append_artifact_index_candidates(
             .then_with(|| left.path.cmp(&right.path))
     });
     for entry in entries {
-        let id = entry.id;
+        let id = entry.id.clone();
         if seen.insert(id.clone()) {
+            let display_path = entry
+                .path
+                .as_deref()
+                .or(entry.vcs_relpath.as_deref())
+                .unwrap_or(&id);
+            let detail = if artifact_file_is_vcs_backed(&entry) {
+                format!(
+                    "file · {}@{}:{}",
+                    entry.vcs_repo.as_deref().unwrap_or_default(),
+                    entry.vcs_sha.as_deref().unwrap_or_default(),
+                    entry.vcs_relpath.as_deref().unwrap_or_default(),
+                )
+            } else {
+                format!("file · {display_path}")
+            };
             payloads.push(AtReferencePayloadRowWire {
-                label: path_basename(&entry.path).unwrap_or_else(|| id.clone()),
+                label: path_basename(display_path)
+                    .unwrap_or_else(|| id.clone()),
                 payload: id,
-                detail: format!("file · {}", entry.path),
+                detail,
                 age: String::new(),
             });
         }

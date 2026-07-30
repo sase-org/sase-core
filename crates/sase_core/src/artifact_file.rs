@@ -1,5 +1,7 @@
 //! Tolerant artifact-file index reading and cross-frontend query semantics.
 
+mod vcs;
+
 use std::fs;
 use std::path::Path;
 
@@ -9,9 +11,14 @@ use thiserror::Error;
 
 use crate::plan::search::{current_date, parse_since_date_bound};
 
+pub use vcs::{
+    materialize_vcs_artifact_file, ArtifactFileVcsMaterializationRequestWire,
+    ArtifactFileVcsMaterializationWire,
+};
+
 pub const ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION: u64 = 2;
-pub const ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Error)]
 pub enum ArtifactFileQueryError {
@@ -31,7 +38,14 @@ pub struct ArtifactFileWire {
     pub label: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub vcs_repo: Option<String>,
+    #[serde(default)]
+    pub vcs_sha: Option<String>,
+    #[serde(default)]
+    pub vcs_relpath: Option<String>,
     #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default)]
@@ -115,9 +129,37 @@ fn parse_artifact_file_index(content: &str) -> Vec<ArtifactFileWire> {
             }
             let mut artifact = envelope.artifact;
             artifact.schema_version = envelope.schema_version;
-            Some(artifact)
+            artifact_file_row_is_admissible(&artifact).then_some(artifact)
         })
         .collect()
+}
+
+/// Return whether an artifact-file row is backed by version-control content.
+///
+/// VCS-backed rows deliberately omit a stored path and carry the complete
+/// repository, commit, and relative-path provenance triple instead.
+pub fn artifact_file_is_vcs_backed(row: &ArtifactFileWire) -> bool {
+    row.path.is_none() && artifact_file_vcs_provenance_is_complete(row)
+}
+
+fn artifact_file_row_is_admissible(row: &ArtifactFileWire) -> bool {
+    nonempty(Some(row.id.as_str()))
+        && (row.path.as_deref().is_some_and(|path| nonempty(Some(path)))
+            || artifact_file_is_vcs_backed(row))
+}
+
+fn artifact_file_vcs_provenance_is_complete(row: &ArtifactFileWire) -> bool {
+    [
+        row.vcs_repo.as_deref(),
+        row.vcs_sha.as_deref(),
+        row.vcs_relpath.as_deref(),
+    ]
+    .into_iter()
+    .all(nonempty)
+}
+
+fn nonempty(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
 }
 
 pub fn query_artifact_files(
@@ -180,8 +222,9 @@ fn query_artifact_files_at(
                 needle.as_ref().map_or(true, |query| {
                     [
                         row.label.as_deref(),
-                        Some(row.path.as_str()),
+                        row.path.as_deref(),
                         row.source_path.as_deref(),
+                        row.vcs_relpath.as_deref(),
                     ]
                     .into_iter()
                     .flatten()
@@ -201,6 +244,7 @@ fn query_artifact_files_at(
             (None, None) => std::cmp::Ordering::Equal,
         }
         .then_with(|| left.id.cmp(&right.id))
+        .then_with(|| left.path.is_none().cmp(&right.path.is_none()))
         .then_with(|| left.path.cmp(&right.path))
     });
     if let Some(limit) = filters.limit {
@@ -297,14 +341,42 @@ mod tests {
             row(2, "v2", Some("2026-07-02T00:00:00+00:00")),
             row(3, "v3", Some("2026-07-03T00:00:00+00:00")),
             json!({"schema_version": 1, "artifact": {"id": "no-path"}}),
+            json!({
+                "schema_version": 2,
+                "artifact": {
+                    "id": "vcs",
+                    "path": null,
+                    "vcs_repo": "sase",
+                    "vcs_sha": "0123456789abcdef0123456789abcdef01234567",
+                    "vcs_relpath": "docs/image.png"
+                }
+            }),
+            json!({
+                "schema_version": 2,
+                "artifact": {
+                    "id": "partial",
+                    "path": null,
+                    "vcs_repo": "sase",
+                    "vcs_sha": "0123456789abcdef0123456789abcdef01234567"
+                }
+            }),
+            json!({
+                "schema_version": 2,
+                "artifact": {
+                    "id": "",
+                    "path": "/stored/empty-id.png"
+                }
+            }),
         ]);
         let rows = read_artifact_file_index(Path::new(&index)).unwrap();
         assert_eq!(
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            ["v1", "v2"]
+            ["v1", "v2", "vcs"]
         );
         assert_eq!(rows[0].schema_version, 1);
         assert_eq!(rows[1].schema_version, 2);
+        assert!(!artifact_file_is_vcs_backed(&rows[0]));
+        assert!(artifact_file_is_vcs_backed(&rows[2]));
         drop(temp);
     }
 
@@ -317,8 +389,24 @@ mod tests {
         second["artifact"]["project"] = json!("other");
         second["artifact"]["agent_name"] = json!("agent.two");
         second["artifact"]["explicit"] = json!(false);
-        second["artifact"]["source_path"] = json!("/source/needle.png");
-        let (temp, index) = write_index(&[first, second]);
+        second["artifact"]["source_path"] = json!("/source/target.png");
+        let vcs = json!({
+            "schema_version": 2,
+            "artifact": {
+                "id": "vcs",
+                "label": "Versioned",
+                "kind": "image",
+                "path": null,
+                "vcs_repo": "sase",
+                "vcs_sha": "0123456789abcdef0123456789abcdef01234567",
+                "vcs_relpath": "docs/vcs-needle.png",
+                "created_at": "2026-07-03T10:00:00+00:00",
+                "project": "vcs-project",
+                "agent_name": "agent.vcs",
+                "explicit": false
+            }
+        });
+        let (temp, index) = write_index(&[first, second, vcs]);
         let index = Path::new(&index);
 
         let cases = [
@@ -352,7 +440,7 @@ mod tests {
             ),
             (
                 ArtifactFileQueryFiltersWire {
-                    query: Some("NEEDLE".to_string()),
+                    query: Some("SOURCE/TARGET".to_string()),
                     ..Default::default()
                 },
                 vec!["second"],
@@ -363,6 +451,13 @@ mod tests {
                     ..Default::default()
                 },
                 vec!["first"],
+            ),
+            (
+                ArtifactFileQueryFiltersWire {
+                    query: Some("VCS-NEEDLE".to_string()),
+                    ..Default::default()
+                },
+                vec!["vcs"],
             ),
             (
                 ArtifactFileQueryFiltersWire {
