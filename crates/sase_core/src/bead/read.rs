@@ -11,6 +11,7 @@ use super::jsonl::{
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
+use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
 
 pub const BEAD_READ_WIRE_SCHEMA_VERSION: u64 = 1;
@@ -84,7 +85,11 @@ pub fn get_epic_children(
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
-    doctor_impl(beads_dir, PlanRootMode::NotRequested)
+    doctor_impl(
+        beads_dir,
+        PlanRootMode::NotRequested,
+        ReferenceContextMode::NotRequested,
+    )
 }
 
 pub fn doctor_with_plan_roots(
@@ -94,6 +99,22 @@ pub fn doctor_with_plan_roots(
     doctor_impl(
         beads_dir,
         plan_roots.map_or(PlanRootMode::Unavailable, PlanRootMode::Available),
+        ReferenceContextMode::NotRequested,
+    )
+}
+
+pub fn doctor_with_contexts(
+    beads_dir: &Path,
+    plan_roots: Option<&[PathBuf]>,
+    reference_context: Option<&ArtifactRefContextWire>,
+) -> Result<Vec<String>, BeadError> {
+    doctor_impl(
+        beads_dir,
+        plan_roots.map_or(PlanRootMode::Unavailable, PlanRootMode::Available),
+        reference_context.map_or(
+            ReferenceContextMode::Unavailable,
+            ReferenceContextMode::Available,
+        ),
     )
 }
 
@@ -103,9 +124,16 @@ enum PlanRootMode<'a> {
     Available(&'a [PathBuf]),
 }
 
+enum ReferenceContextMode<'a> {
+    NotRequested,
+    Unavailable,
+    Available(&'a ArtifactRefContextWire),
+}
+
 fn doctor_impl(
     beads_dir: &Path,
     plan_root_mode: PlanRootMode<'_>,
+    reference_context_mode: ReferenceContextMode<'_>,
 ) -> Result<Vec<String>, BeadError> {
     if !beads_dir.is_dir() {
         return Err(BeadError::io(format!(
@@ -173,6 +201,16 @@ fn doctor_impl(
             messages.extend(design_reference_diagnostics(&issues, plan_roots));
         }
     }
+    match reference_context_mode {
+        ReferenceContextMode::NotRequested => {}
+        ReferenceContextMode::Unavailable => messages.push(
+            "NOTE: bead artifact reference validation skipped: reference context unavailable"
+                .to_string(),
+        ),
+        ReferenceContextMode::Available(context) => {
+            messages.extend(reference_diagnostics(&issues, context));
+        }
+    }
 
     if event_store_is_present && legacy_path.exists() {
         let legacy_issues = read_legacy_jsonl_issues(beads_dir)?;
@@ -204,6 +242,79 @@ fn doctor_impl(
         messages.push("OK: no issues found".to_string());
     }
     Ok(messages)
+}
+
+pub fn reference_diagnostics(
+    issues: &[IssueWire],
+    context: &ArtifactRefContextWire,
+) -> Vec<String> {
+    let entries = issues
+        .iter()
+        .flat_map(|issue| {
+            issue
+                .refs
+                .iter()
+                .map(move |reference| (issue.id.as_str(), reference.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let raw = entries
+        .iter()
+        .map(|(_, reference)| *reference)
+        .collect::<Vec<_>>();
+    let resolution = match resolve_artifact_ref_list(&raw, context) {
+        Ok(resolution) => resolution,
+        Err(_) => {
+            return vec![
+                "NOTE: bead artifact reference validation skipped: reference context unavailable"
+                    .to_string(),
+            ];
+        }
+    };
+
+    let mut unknown = Vec::new();
+    let mut missing = Vec::new();
+    let mut ambiguous = Vec::new();
+    for ((issue_id, reference), entry) in
+        entries.iter().zip(resolution.entries.iter())
+    {
+        let rendered = format!("{issue_id} [{reference}]");
+        match entry.resolution.status.as_str() {
+            "unknown_kind" | "unknown_repo" | "unknown_project" => {
+                unknown.push(rendered);
+            }
+            "missing" => missing.push(rendered),
+            "ambiguous" => ambiguous.push(rendered),
+            "vcs_backed" | "exact" | "drifted" => {}
+            _ => {}
+        }
+    }
+
+    let mut messages = Vec::new();
+    if !unknown.is_empty() {
+        messages.push(format!(
+            "WARNING: artifact references with unknown kinds ({}): {}",
+            unknown.len(),
+            unknown.join(", ")
+        ));
+    }
+    if !missing.is_empty() {
+        messages.push(format!(
+            "WARNING: unresolvable artifact references ({}): {}",
+            missing.len(),
+            missing.join(", ")
+        ));
+    }
+    if !ambiguous.is_empty() {
+        messages.push(format!(
+            "WARNING: ambiguous artifact references ({}): {}",
+            ambiguous.len(),
+            ambiguous.join(", ")
+        ));
+    }
+    messages
 }
 
 fn design_reference_diagnostics(
@@ -516,7 +627,10 @@ fn issue_type_as_str(issue_type: &IssueTypeWire) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact_ref::ArtifactRefBeadStoreWire;
     use crate::bead::wire::{DependencyWire, IssueTypeWire};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn phase(id: &str, status: StatusWire) -> IssueWire {
         IssueWire {
@@ -537,6 +651,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            refs: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -585,5 +700,66 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, "claimed");
         assert_eq!(stats_for_issues(&issues).get("claimed"), Some(&1));
+    }
+
+    #[test]
+    fn reference_diagnostics_groups_unknown_missing_and_ambiguous_entries() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        for root in [first.path(), second.path()] {
+            let page = root.join("pages/foo-1/README.md");
+            fs::create_dir_all(page.parent().unwrap()).unwrap();
+            fs::write(page, "# bead\n").unwrap();
+        }
+        let context = ArtifactRefContextWire {
+            bead_stores: vec![
+                ArtifactRefBeadStoreWire {
+                    project: "first".to_string(),
+                    prefix: "foo".to_string(),
+                    root: first.path().display().to_string(),
+                },
+                ArtifactRefBeadStoreWire {
+                    project: "second".to_string(),
+                    prefix: "foo".to_string(),
+                    root: second.path().display().to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut issue = phase("epic.1", StatusWire::Open);
+        issue.refs = vec![
+            "reserch:202607/report.md".to_string(),
+            "bead:foo-2".to_string(),
+            "bead:foo-1".to_string(),
+        ];
+
+        let messages = reference_diagnostics(&[issue], &context);
+
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].starts_with(
+            "WARNING: artifact references with unknown kinds (1):"
+        ));
+        assert!(messages[0].contains("epic.1 [reserch:202607/report.md]"));
+        assert!(messages[1]
+            .starts_with("WARNING: unresolvable artifact references (1):"));
+        assert!(messages[1].contains("epic.1 [bead:foo-2]"));
+        assert!(messages[2]
+            .starts_with("WARNING: ambiguous artifact references (1):"));
+        assert!(messages[2].contains("epic.1 [bead:foo-1]"));
+    }
+
+    #[test]
+    fn doctor_marks_unavailable_reference_context_as_skipped() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        fs::write(beads_dir.join("beads.db"), "").unwrap();
+        fs::write(beads_dir.join("config.json"), "{}").unwrap();
+
+        let messages = doctor_with_contexts(&beads_dir, None, None).unwrap();
+
+        assert!(messages.iter().any(|message| message
+            == "NOTE: bead artifact reference validation skipped: reference context unavailable"));
     }
 }

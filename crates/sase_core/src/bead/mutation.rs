@@ -12,6 +12,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_ref::normalize_artifact_ref_list;
+
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
     import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
@@ -52,6 +54,8 @@ pub struct BeadCreateRequestWire {
     pub notes: String,
     #[serde(default)]
     pub design: String,
+    #[serde(default)]
+    pub refs: Vec<String>,
     #[serde(default)]
     pub model: String,
     #[serde(default, deserialize_with = "deserialize_option_phase_size")]
@@ -132,6 +136,8 @@ pub struct BeadMutationOutcomeWire {
     #[serde(default)]
     pub dependencies: Vec<DependencyWire>,
     #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
     pub next_counter: Option<u64>,
     #[serde(default)]
     pub rollback_preclaims: Vec<BeadPreclaimRollbackWire>,
@@ -164,6 +170,7 @@ pub fn create_issue(
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
         let tier = default_create_tier(&request);
+        let references = normalize_references(&request.refs)?;
         let now = request.now.unwrap_or_else(now_utc);
         let owner = store.config.owner.clone();
         let issue_id = match request.parent_id.as_deref() {
@@ -197,6 +204,7 @@ pub fn create_issue(
             description: request.description,
             notes: request.notes,
             design: request.design,
+            refs: references.clone(),
             model: normalize_model(request.model)?,
             size: request.size,
             is_ready_to_work: false,
@@ -208,6 +216,7 @@ pub fn create_issue(
         store.issues.push(issue.clone());
         let mut event_issue = issue.clone();
         event_issue.dependencies.clear();
+        event_issue.refs.clear();
         store.append_issue_event(
             &issue.id,
             BeadEventOperationWire::IssueCreated,
@@ -215,10 +224,22 @@ pub fn create_issue(
             &issue.updated_at,
             &issue.created_by,
         )?;
+        for reference in &references {
+            store.append_issue_event(
+                &issue.id,
+                BeadEventOperationWire::ReferenceAdded,
+                BeadEventPayloadWire::ReferenceAdded {
+                    reference: reference.clone(),
+                },
+                &issue.updated_at,
+                &issue.created_by,
+            )?;
+        }
         store.save()?;
 
         let mut result = outcome("create", true, vec![issue.id.clone()]);
         result.issue = Some(issue);
+        result.references = references;
         result.next_counter = Some(store.config.next_counter);
         Ok(result)
     })
@@ -1277,6 +1298,111 @@ pub fn remove_dependencies(
     })
 }
 
+pub fn add_bead_references(
+    beads_dir: &Path,
+    issue_id: &str,
+    references: &[String],
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if references.is_empty() {
+        return Err(BeadError::validation(
+            "add_bead_references() requires at least one artifact reference",
+        ));
+    }
+    let references = normalize_references(references)?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let added = references
+            .iter()
+            .filter(|reference| !store.issues[index].refs.contains(*reference))
+            .cloned()
+            .collect::<Vec<_>>();
+        if added.is_empty() {
+            let mut result =
+                outcome("ref_add", false, vec![issue_id.to_string()]);
+            result.issue = Some(store.issues[index].clone());
+            return Ok(result);
+        }
+
+        store.issues[index].refs.extend(added.iter().cloned());
+        let issue = store.issues[index].clone();
+        let added_at = now.unwrap_or_else(now_utc);
+        let actor = store.config.owner.clone();
+        for reference in &added {
+            store.append_issue_event(
+                issue_id,
+                BeadEventOperationWire::ReferenceAdded,
+                BeadEventPayloadWire::ReferenceAdded {
+                    reference: reference.clone(),
+                },
+                &added_at,
+                &actor,
+            )?;
+        }
+        store.save()?;
+
+        let mut result = outcome("ref_add", true, vec![issue_id.to_string()]);
+        result.issue = Some(issue);
+        result.references = added;
+        Ok(result)
+    })
+}
+
+pub fn remove_bead_references(
+    beads_dir: &Path,
+    issue_id: &str,
+    references: &[String],
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if references.is_empty() {
+        return Err(BeadError::validation(
+            "remove_bead_references() requires at least one artifact reference",
+        ));
+    }
+    let references = normalize_references(references)?;
+    with_bead_mutation_lock(beads_dir, || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let removed = references
+            .iter()
+            .filter(|reference| store.issues[index].refs.contains(*reference))
+            .cloned()
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            let mut result =
+                outcome("ref_rm", false, vec![issue_id.to_string()]);
+            result.issue = Some(store.issues[index].clone());
+            return Ok(result);
+        }
+
+        let removed_set = removed.iter().collect::<HashSet<_>>();
+        store.issues[index]
+            .refs
+            .retain(|reference| !removed_set.contains(reference));
+        let issue = store.issues[index].clone();
+        let removed_at = now.unwrap_or_else(now_utc);
+        let actor = store.config.owner.clone();
+        for reference in &removed {
+            store.append_issue_event(
+                issue_id,
+                BeadEventOperationWire::ReferenceRemoved,
+                BeadEventPayloadWire::ReferenceRemoved {
+                    reference: reference.clone(),
+                },
+                &removed_at,
+                &actor,
+            )?;
+        }
+        store.save()?;
+
+        let mut result = outcome("ref_rm", true, vec![issue_id.to_string()]);
+        result.issue = Some(issue);
+        result.references = removed;
+        Ok(result)
+    })
+}
+
 pub fn mark_ready_to_work(
     beads_dir: &Path,
     epic_id: &str,
@@ -1493,6 +1619,15 @@ fn normalize_model(value: String) -> Result<String, BeadError> {
     let model = value.trim().to_string();
     validate_model_value(&model)?;
     Ok(model)
+}
+
+fn normalize_references<T: AsRef<str>>(
+    references: &[T],
+) -> Result<Vec<String>, BeadError> {
+    normalize_artifact_ref_list(references).map_err(|error| BeadError {
+        kind: error.kind,
+        message: error.message,
+    })
 }
 
 fn appended_note_text(
@@ -1965,6 +2100,7 @@ fn outcome(
         issues: Vec::new(),
         dependency: None,
         dependencies: Vec::new(),
+        references: Vec::new(),
         next_counter: None,
         rollback_preclaims: Vec::new(),
         reopened_ancestor_ids: Vec::new(),
@@ -1976,6 +2112,144 @@ mod tests {
     use super::*;
     use std::sync::{mpsc, Arc, Barrier};
     use tempfile::tempdir;
+
+    #[test]
+    fn create_add_and_remove_references_use_individual_events_and_noop_cleanly()
+    {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let created = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Referenced plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                refs: vec![
+                    "research:202607/report.md".to_string(),
+                    "research:202607/report.md".to_string(),
+                    "bead:sase-bb.1".to_string(),
+                ],
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let issue = created.issue.unwrap();
+        assert_eq!(
+            issue.refs,
+            vec![
+                "research:202607/report.md".to_string(),
+                "bead:sase-bb.1".to_string(),
+            ]
+        );
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(
+            streams[0]
+                .events
+                .iter()
+                .map(|event| event.operation)
+                .collect::<Vec<_>>(),
+            vec![
+                BeadEventOperationWire::IssueCreated,
+                BeadEventOperationWire::ReferenceAdded,
+                BeadEventOperationWire::ReferenceAdded,
+            ]
+        );
+
+        let added = add_bead_references(
+            &beads_dir,
+            &issue.id,
+            &[
+                "bead:sase-bb.1".to_string(),
+                "agent:bbugyi200.athena.9w".to_string(),
+            ],
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(added.changed);
+        assert_eq!(
+            added.references,
+            vec!["agent:bbugyi200.athena.9w".to_string()]
+        );
+        let event_count =
+            read_event_store(&beads_dir).unwrap().1[0].events.len();
+
+        let duplicate = add_bead_references(
+            &beads_dir,
+            &issue.id,
+            &["agent:bbugyi200.athena.9w".to_string()],
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!duplicate.changed);
+        assert_eq!(
+            read_event_store(&beads_dir).unwrap().1[0].events.len(),
+            event_count
+        );
+
+        let removed = remove_bead_references(
+            &beads_dir,
+            &issue.id,
+            &[
+                "bead:sase-missing".to_string(),
+                "research:202607/report.md".to_string(),
+            ],
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(removed.changed);
+        assert_eq!(
+            removed.references,
+            vec!["research:202607/report.md".to_string()]
+        );
+        assert_eq!(
+            removed.issue.unwrap().refs,
+            vec![
+                "bead:sase-bb.1".to_string(),
+                "agent:bbugyi200.athena.9w".to_string(),
+            ]
+        );
+
+        let absent = remove_bead_references(
+            &beads_dir,
+            &issue.id,
+            &["bead:sase-missing".to_string()],
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!absent.changed);
+    }
+
+    #[test]
+    fn reference_mutations_reject_malformed_entries_without_writing() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = add_bead_references(
+            &beads_dir,
+            &issue.id,
+            &["not-a-reference".to_string()],
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("artifact reference list entry 1"));
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
 
     #[test]
     fn init_store_writes_a_root_level_store_for_a_dot_dirname() {

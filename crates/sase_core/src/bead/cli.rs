@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 use crate::plan::canonicalize_plan_reference;
 
 use super::mutation::{
-    add_dependency, close_issues_with_note, create_issue, open_issue,
-    remove_dependencies, remove_issues, update_issue, BeadCreateRequestWire,
-    BeadMutationOutcomeWire, BeadUpdateFieldsWire,
+    add_bead_references, add_dependency, close_issues_with_note, create_issue,
+    open_issue, remove_bead_references, remove_dependencies, remove_issues,
+    update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
+    BeadUpdateFieldsWire,
 };
 use super::read::read_store_issues;
 use super::search::search_issues_in_issues;
@@ -109,6 +110,7 @@ pub fn execute_bead_cli(
             relativize_design_paths,
         ),
         "open" => handle_open(&argv[1..], write_beads_dir),
+        "ref" => handle_ref(&argv[1..], write_beads_dir),
         "update" => handle_update(&argv[1..], write_beads_dir),
         "close" => handle_close(&argv[1..], write_beads_dir),
         "dep" => handle_dep(&argv[1..], write_beads_dir),
@@ -327,6 +329,13 @@ fn handle_show(
         write!(stdout, "\nPLAN\n  {}\n", display.join("\n  "))
             .expect("writing to String cannot fail");
     }
+    if !issue.refs.is_empty() {
+        stdout.push_str("\nREFS\n");
+        for reference in &issue.refs {
+            writeln!(stdout, "  {reference}")
+                .expect("writing to String cannot fail");
+        }
+    }
 
     Ok(success(stdout))
 }
@@ -498,6 +507,7 @@ struct CreateArgs {
     changespec_name: String,
     changespec_bug_id: String,
     model: String,
+    refs: Vec<String>,
 }
 
 fn handle_create(
@@ -563,6 +573,7 @@ fn handle_create(
         assignee: parsed.assignee,
         changespec_name: parsed.changespec_name,
         changespec_bug_id: parsed.changespec_bug_id,
+        refs: parsed.refs,
         ..BeadCreateRequestWire::default()
     };
     match create_issue(write_beads_dir, request) {
@@ -733,6 +744,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
     let mut changespec_name = String::new();
     let mut changespec_bug_id = String::new();
     let mut model = String::new();
+    let mut refs = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
@@ -745,6 +757,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
                 | "--description"
                 | "-a"
                 | "--assignee"
+                | "-r"
                 | "--tier"
                 | "-c"
                 | "--changespec"
@@ -752,6 +765,8 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
                 | "--bug-id"
                 | "-m"
                 | "--model"
+                | "-R"
+                | "--ref"
         ) {
             idx += 1;
             let Some(value) = args.get(idx) else {
@@ -768,7 +783,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
             "-T" | "--type" => type_arg = Some(value),
             "-d" | "--description" => description = value,
             "-a" | "--assignee" => assignee = value,
-            "--tier" => {
+            "-r" | "--tier" => {
                 tier =
                     Some(parse_tier(&value).ok_or_else(|| {
                         format!("invalid --tier value: {value}")
@@ -777,6 +792,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
             "-c" | "--changespec" => changespec_name = value,
             "-b" | "--bug-id" => changespec_bug_id = value,
             "-m" | "--model" => model = value,
+            "-R" | "--ref" => refs.push(value),
             _ => return Ok(None),
         }
         idx += 1;
@@ -796,6 +812,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
         changespec_name,
         changespec_bug_id,
         model,
+        refs,
     }))
 }
 
@@ -1067,6 +1084,181 @@ fn handle_dep(
         }
         _ => Ok(defer()),
     }
+}
+
+fn handle_ref(
+    args: &[String],
+    write_beads_dir: &Path,
+) -> Result<BeadCliOutcomeWire, BeadError> {
+    let (action, action_args) = match args.first().map(String::as_str) {
+        None => ("list", &[][..]),
+        Some("add" | "list" | "rm") => (args[0].as_str(), &args[1..]),
+        _ => return Ok(defer()),
+    };
+    match action {
+        "add" if action_args.len() >= 2 => {
+            let issue_id = &action_args[0];
+            match add_bead_references(
+                write_beads_dir,
+                issue_id,
+                &action_args[1..],
+                None,
+            ) {
+                Ok(outcome) => {
+                    let mut stdout = String::new();
+                    for reference in &outcome.references {
+                        writeln!(
+                            stdout,
+                            "✓ Added reference to {issue_id}: {reference}"
+                        )
+                        .expect("writing to String cannot fail");
+                    }
+                    if !outcome.changed {
+                        stdout.push_str("No artifact references changed.\n");
+                    }
+                    Ok(success_with_mutation(
+                        stdout,
+                        BeadCliMutationSummaryWire {
+                            operation: "ref_add".to_string(),
+                            changed: outcome.changed,
+                            issue_ids: vec![issue_id.clone()],
+                            status_transitions: Vec::new(),
+                        },
+                    ))
+                }
+                Err(err)
+                    if matches!(
+                        err.kind.as_str(),
+                        "not_found" | "validation"
+                    ) =>
+                {
+                    Ok(error(format!("Error: {}\n", err.message)))
+                }
+                Err(err) => Err(err),
+            }
+        }
+        "rm" if action_args.len() >= 2 => {
+            let issue_id = &action_args[0];
+            match remove_bead_references(
+                write_beads_dir,
+                issue_id,
+                &action_args[1..],
+                None,
+            ) {
+                Ok(outcome) => {
+                    let mut stdout = String::new();
+                    for reference in &outcome.references {
+                        writeln!(
+                            stdout,
+                            "✗ Removed reference from {issue_id}: {reference}"
+                        )
+                        .expect("writing to String cannot fail");
+                    }
+                    if !outcome.changed {
+                        stdout.push_str("No artifact references changed.\n");
+                    }
+                    Ok(success_with_mutation(
+                        stdout,
+                        BeadCliMutationSummaryWire {
+                            operation: "ref_rm".to_string(),
+                            changed: outcome.changed,
+                            issue_ids: vec![issue_id.clone()],
+                            status_transitions: Vec::new(),
+                        },
+                    ))
+                }
+                Err(err)
+                    if matches!(
+                        err.kind.as_str(),
+                        "not_found" | "validation"
+                    ) =>
+                {
+                    Ok(error(format!("Error: {}\n", err.message)))
+                }
+                Err(err) => Err(err),
+            }
+        }
+        "list" => handle_ref_list(action_args, write_beads_dir),
+        _ => Ok(defer()),
+    }
+}
+
+fn handle_ref_list(
+    args: &[String],
+    write_beads_dir: &Path,
+) -> Result<BeadCliOutcomeWire, BeadError> {
+    let mut issue_id = None;
+    let mut json = false;
+    let mut resolve = false;
+    for arg in args {
+        match arg.as_str() {
+            "-j" | "--json" => json = true,
+            "-r" | "--resolve" => resolve = true,
+            _ if !arg.starts_with('-') && issue_id.is_none() => {
+                issue_id = Some(arg.as_str());
+            }
+            _ => return Ok(defer()),
+        }
+    }
+    if resolve {
+        return Ok(defer());
+    }
+
+    let issues = read_store_issues(write_beads_dir)?;
+    let selected = if let Some(issue_id) = issue_id {
+        let Some(issue) = find_issue(&issues, issue_id) else {
+            return Ok(error(format!("Error: issue not found: {issue_id}\n")));
+        };
+        vec![issue]
+    } else {
+        issues
+            .iter()
+            .filter(|issue| !issue.refs.is_empty())
+            .collect()
+    };
+
+    if json {
+        #[derive(Serialize)]
+        struct ReferenceListEntry<'a> {
+            issue_id: &'a str,
+            refs: &'a [String],
+        }
+        #[derive(Serialize)]
+        struct ReferenceListEnvelope<'a> {
+            count: usize,
+            results: Vec<ReferenceListEntry<'a>>,
+        }
+        let count = selected.iter().map(|issue| issue.refs.len()).sum();
+        let mut stdout =
+            serde_json::to_string_pretty(&ReferenceListEnvelope {
+                count,
+                results: selected
+                    .iter()
+                    .map(|issue| ReferenceListEntry {
+                        issue_id: &issue.id,
+                        refs: &issue.refs,
+                    })
+                    .collect(),
+            })?;
+        stdout.push('\n');
+        return Ok(success(stdout));
+    }
+
+    let mut stdout = String::new();
+    for issue in selected {
+        for reference in &issue.refs {
+            if issue_id.is_some() {
+                writeln!(stdout, "{reference}")
+            } else {
+                writeln!(stdout, "{}  {reference}", issue.id)
+            }
+            .expect("writing to String cannot fail");
+        }
+    }
+    if stdout.is_empty() {
+        stdout.push_str("No artifact references found.\n");
+    }
+    Ok(success(stdout))
 }
 
 fn active_blocker_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
@@ -1661,6 +1853,7 @@ fn search_field_display_value(
         "description" => Some(issue.description.clone()),
         "notes" => Some(issue.notes.clone()),
         "design" => Some(issue.design.clone()),
+        "refs" => Some(issue.refs.join("\n")),
         "owner" => Some(issue.owner.clone()),
         "assignee" => Some(issue.assignee.clone()),
         "model" => Some(issue.model.clone()),
@@ -2580,6 +2773,84 @@ mod tests {
     }
 
     #[test]
+    fn create_show_and_ref_verbs_honor_the_reference_contract() {
+        let store = seed_issues(Vec::new());
+        let plan_path = store.beads_dir.parent().unwrap().join("plan.md");
+        fs::write(&plan_path, "# Plan\n").unwrap();
+        let created = execute_search(
+            &store.beads_dir,
+            &[
+                "create",
+                "--title",
+                "Referenced plan",
+                "--type",
+                &format!("plan({})", plan_path.display()),
+                "--ref",
+                "research:202607/report.md",
+                "-R",
+                "bead:sase-bb.1",
+            ],
+        );
+        assert_eq!(created.exit_code, 0);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(
+            issue.refs,
+            vec!["research:202607/report.md", "bead:sase-bb.1"]
+        );
+
+        let shown =
+            execute_search(&store.beads_dir, &["show", issue.id.as_str()]);
+        assert!(shown.stdout.contains(concat!(
+            "\nREFS\n",
+            "  research:202607/report.md\n",
+            "  bead:sase-bb.1\n",
+        )));
+
+        let listed = execute_search(
+            &store.beads_dir,
+            &["ref", "list", issue.id.as_str()],
+        );
+        assert_eq!(
+            listed.stdout,
+            "research:202607/report.md\nbead:sase-bb.1\n"
+        );
+        let bare = execute_search(&store.beads_dir, &["ref"]);
+        assert!(bare
+            .stdout
+            .contains(&format!("{}  research:202607/report.md", issue.id)));
+        let json = execute_search(
+            &store.beads_dir,
+            &["ref", "list", issue.id.as_str(), "--json"],
+        );
+        let parsed: Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(parsed["count"], 2);
+        assert_eq!(parsed["results"][0]["issue_id"], issue.id);
+
+        let added = execute_search(
+            &store.beads_dir,
+            &["ref", "add", issue.id.as_str(), "agent:bbugyi200.athena.9w"],
+        );
+        assert_eq!(added.exit_code, 0);
+        assert_eq!(added.mutation_summary.unwrap().operation, "ref_add");
+        let removed = execute_search(
+            &store.beads_dir,
+            &["ref", "rm", issue.id.as_str(), "research:202607/report.md"],
+        );
+        assert_eq!(removed.exit_code, 0);
+        assert_eq!(removed.mutation_summary.unwrap().operation, "ref_rm");
+        assert_eq!(
+            read_store_issues(&store.beads_dir).unwrap()[0].refs,
+            vec!["bead:sase-bb.1", "agent:bbugyi200.athena.9w"]
+        );
+
+        let resolve = execute_search(
+            &store.beads_dir,
+            &["ref", "list", issue.id.as_str(), "--resolve"],
+        );
+        assert!(!resolve.handled);
+    }
+
+    #[test]
     fn dependency_remove_is_handled_with_a_batch_mutation_summary() {
         let mut source = plan_issue(
             "beads-1",
@@ -3183,6 +3454,7 @@ mod tests {
             description: description.to_string(),
             notes: String::new(),
             design: String::new(),
+            refs: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,

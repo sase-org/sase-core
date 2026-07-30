@@ -121,6 +121,8 @@ pub enum BeadEventOperationWire {
     IssueRemoved,
     DependencyAdded,
     DependencyRemoved,
+    ReferenceAdded,
+    ReferenceRemoved,
     ReadyMarked,
     ReadyUnmarked,
     EpicWorkPreclaimed,
@@ -152,6 +154,12 @@ pub enum BeadEventPayloadWire {
     },
     DependencyRemoved {
         dependency: DependencyWire,
+    },
+    ReferenceAdded {
+        reference: String,
+    },
+    ReferenceRemoved {
+        reference: String,
     },
     ReadyMarked,
     ReadyUnmarked,
@@ -227,6 +235,14 @@ impl BeadEventPayloadWire {
                 }
                 Ok(())
             }
+            (
+                BeadEventOperationWire::ReferenceAdded,
+                BeadEventPayloadWire::ReferenceAdded { .. },
+            )
+            | (
+                BeadEventOperationWire::ReferenceRemoved,
+                BeadEventPayloadWire::ReferenceRemoved { .. },
+            ) => Ok(()),
             (
                 BeadEventOperationWire::EpicWorkPreclaimed,
                 BeadEventPayloadWire::EpicWorkPreclaimed { agent_name },
@@ -353,6 +369,24 @@ pub fn import_issues_to_event_streams(
             .entry(stream_id)
             .or_default()
             .push(PendingEvent::dependency_added(dependency));
+    }
+
+    for issue in &issues {
+        let stream_id = root_by_issue
+            .get(&issue.id)
+            .ok_or_else(|| {
+                BeadError::validation(format!(
+                    "cannot determine event stream for references on {}",
+                    issue.id
+                ))
+            })?
+            .clone();
+        for reference in &issue.refs {
+            streams
+                .entry(stream_id.clone())
+                .or_default()
+                .push(PendingEvent::reference_added(issue, reference.clone()));
+        }
     }
 
     streams
@@ -649,6 +683,8 @@ fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
         BeadEventOperationWire::IssueCreated => 0,
         BeadEventOperationWire::DependencyAdded => 2,
         BeadEventOperationWire::DependencyRemoved => 3,
+        BeadEventOperationWire::ReferenceAdded => 4,
+        BeadEventOperationWire::ReferenceRemoved => 5,
         _ => 1,
     }
 }
@@ -668,6 +704,7 @@ pub(super) fn apply_event(
             }
             let mut issue = issue.clone();
             issue.dependencies.clear();
+            issue.refs.clear();
             issues.insert(issue.id.clone(), issue);
         }
         BeadEventPayloadWire::IssueUpdated { fields } => {
@@ -734,6 +771,19 @@ pub(super) fn apply_event(
                 issue.dependencies.retain(|existing| {
                     existing.depends_on_id != dependency.depends_on_id
                 });
+                issue.validate()?;
+            }
+        }
+        BeadEventPayloadWire::ReferenceAdded { reference } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            if !issue.refs.contains(reference) {
+                issue.refs.push(reference.clone());
+            }
+            issue.validate()?;
+        }
+        BeadEventPayloadWire::ReferenceRemoved { reference } => {
+            if let Some(issue) = issues.get_mut(&event.issue_id) {
+                issue.refs.retain(|existing| existing != reference);
                 issue.validate()?;
             }
         }
@@ -865,6 +915,7 @@ impl PendingEvent {
     fn created(issue: &IssueWire) -> Self {
         let mut issue = issue.clone();
         issue.dependencies.clear();
+        issue.refs.clear();
         Self {
             timestamp: event_timestamp(&issue.created_at, &issue.updated_at),
             actor: issue.created_by.clone(),
@@ -881,6 +932,16 @@ impl PendingEvent {
             operation: BeadEventOperationWire::DependencyAdded,
             issue_id: dependency.issue_id.clone(),
             payload: BeadEventPayloadWire::DependencyAdded { dependency },
+        }
+    }
+
+    fn reference_added(issue: &IssueWire, reference: String) -> Self {
+        Self {
+            timestamp: event_timestamp(&issue.created_at, &issue.updated_at),
+            actor: issue.created_by.clone(),
+            operation: BeadEventOperationWire::ReferenceAdded,
+            issue_id: issue.id.clone(),
+            payload: BeadEventPayloadWire::ReferenceAdded { reference },
         }
     }
 
@@ -917,5 +978,121 @@ fn event_timestamp(primary: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         "1970-01-01T00:00:00Z".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issue_with_refs(refs: Vec<String>) -> IssueWire {
+        IssueWire {
+            id: "sase-1".to_string(),
+            title: "Plan".to_string(),
+            status: StatusWire::Open,
+            issue_type: IssueTypeWire::Plan,
+            tier: Some(BeadTierWire::Epic),
+            parent_id: None,
+            owner: "owner@example.com".to_string(),
+            assignee: String::new(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by: "owner@example.com".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            resolution: None,
+            description: String::new(),
+            notes: String::new(),
+            design: String::new(),
+            refs,
+            model: String::new(),
+            size: None,
+            is_ready_to_work: false,
+            changespec_name: String::new(),
+            changespec_bug_id: String::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    fn reference_event(
+        event_id: &str,
+        operation: BeadEventOperationWire,
+        reference: &str,
+    ) -> BeadEventRecordWire {
+        let payload = match operation {
+            BeadEventOperationWire::ReferenceAdded => {
+                BeadEventPayloadWire::ReferenceAdded {
+                    reference: reference.to_string(),
+                }
+            }
+            BeadEventOperationWire::ReferenceRemoved => {
+                BeadEventPayloadWire::ReferenceRemoved {
+                    reference: reference.to_string(),
+                }
+            }
+            _ => panic!("reference_event requires a reference operation"),
+        };
+        BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: event_id.to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "owner@example.com".to_string(),
+            operation,
+            issue_id: "sase-1".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn refs_import_as_individual_events_and_replay_idempotently() {
+        let issue = issue_with_refs(vec![
+            "research:202607/report.md".to_string(),
+            "bead:sase-bb.1".to_string(),
+        ]);
+        let mut streams =
+            import_issues_to_event_streams(std::slice::from_ref(&issue))
+                .unwrap();
+        assert_eq!(
+            streams[0]
+                .events
+                .iter()
+                .map(|event| event.operation)
+                .collect::<Vec<_>>(),
+            vec![
+                BeadEventOperationWire::IssueCreated,
+                BeadEventOperationWire::ReferenceAdded,
+                BeadEventOperationWire::ReferenceAdded,
+            ]
+        );
+        let BeadEventPayloadWire::IssueCreated { issue: created } =
+            &streams[0].events[0].payload
+        else {
+            panic!("first event should create the issue");
+        };
+        assert!(created.refs.is_empty());
+
+        streams[0].events.extend([
+            reference_event(
+                "duplicate-add",
+                BeadEventOperationWire::ReferenceAdded,
+                "research:202607/report.md",
+            ),
+            reference_event(
+                "absent-remove",
+                BeadEventOperationWire::ReferenceRemoved,
+                "bead:sase-missing",
+            ),
+        ]);
+        assert_eq!(reduce_event_streams(&streams).unwrap(), vec![issue]);
+
+        streams[0].events.push(reference_event(
+            "real-remove",
+            BeadEventOperationWire::ReferenceRemoved,
+            "research:202607/report.md",
+        ));
+        assert_eq!(
+            reduce_event_streams(&streams).unwrap()[0].refs,
+            vec!["bead:sase-bb.1"]
+        );
     }
 }

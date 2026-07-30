@@ -1491,6 +1491,7 @@ fn issue(
         description: String::new(),
         notes: String::new(),
         design: String::new(),
+        refs: Vec::new(),
         model: String::new(),
         size: None,
         is_ready_to_work: false,

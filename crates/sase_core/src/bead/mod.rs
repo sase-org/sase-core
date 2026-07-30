@@ -41,27 +41,28 @@ pub use jsonl::{
     BeadEventManifestRepairStatusWire, JsonlLoadOutcome,
 };
 pub use mutation::{
-    add_dependency, append_issue_note, claim_for_agent_launch,
-    claim_for_agent_wait, close_issues, close_issues_with_note, create_issue,
-    export_jsonl, init_store, mark_ready_to_work, open_issue,
-    preclaim_epic_work_plan, release_agent_claim, remove_dependencies,
+    add_bead_references, add_dependency, append_issue_note,
+    claim_for_agent_launch, claim_for_agent_wait, close_issues,
+    close_issues_with_note, create_issue, export_jsonl, init_store,
+    mark_ready_to_work, open_issue, preclaim_epic_work_plan,
+    release_agent_claim, remove_bead_references, remove_dependencies,
     remove_issue, remove_issues, sync_is_clean, unmark_ready_to_work,
     update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
     BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
-    blocked_issues, doctor, doctor_with_plan_roots, get_epic_children,
-    list_issues, read_event_store_issues, read_legacy_jsonl_issues,
-    read_store_issues, ready_issues, show_issue, stats,
-    BEAD_READ_WIRE_SCHEMA_VERSION,
+    blocked_issues, doctor, doctor_with_contexts, doctor_with_plan_roots,
+    get_epic_children, list_issues, read_event_store_issues,
+    read_legacy_jsonl_issues, read_store_issues, ready_issues,
+    reference_diagnostics, show_issue, stats, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
     issue_type_migration_sql, missing_changespec_metadata_columns,
     model_migration_sql, needs_is_ready_to_work_migration,
-    needs_issue_type_migration, needs_model_migration,
+    needs_issue_type_migration, needs_model_migration, needs_refs_migration,
     needs_resolution_migration, needs_size_check_relax_migration,
-    needs_size_migration, resolution_migration_sql,
+    needs_size_migration, refs_migration_sql, resolution_migration_sql,
     size_check_relax_migration_sql, size_migration_sql, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};

@@ -25,6 +25,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     description TEXT,
     notes       TEXT,
     design      TEXT,
+    refs        TEXT NOT NULL DEFAULT '',
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -133,6 +134,17 @@ pub fn needs_model_migration(create_table_sql: Option<&str>) -> bool {
 
 pub fn model_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN model TEXT NOT NULL DEFAULT ''"
+}
+
+pub fn needs_refs_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("refs"),
+    }
+}
+
+pub fn refs_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN refs TEXT NOT NULL DEFAULT ''"
 }
 
 pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
@@ -316,6 +328,7 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("CHECK(status IN"));
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("model       TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("refs        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("size        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xsmall'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xlarge'"));
@@ -438,6 +451,9 @@ mod tests {
         assert!(!needs_model_migration(None));
         assert!(needs_model_migration(Some("CREATE TABLE issues(id TEXT)")));
         assert!(!needs_model_migration(Some("model TEXT")));
+        assert!(!needs_refs_migration(None));
+        assert!(needs_refs_migration(Some("CREATE TABLE issues(id TEXT)")));
+        assert!(!needs_refs_migration(Some("refs TEXT")));
 
         assert!(!needs_size_migration(None));
         assert!(needs_size_migration(Some("CREATE TABLE issues(id TEXT)")));
@@ -470,6 +486,50 @@ mod tests {
             resolution_migration_sql(),
             "ALTER TABLE issues ADD COLUMN resolution TEXT CHECK(resolution IN ('done','canceled','superseded'))"
         );
+    }
+
+    #[test]
+    fn refs_migration_preserves_existing_rows_and_defaults_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        let legacy_schema = BEAD_SQLITE_SCHEMA
+            .replace("    refs        TEXT NOT NULL DEFAULT '',\n", "");
+        conn.execute_batch(&legacy_schema).unwrap();
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, tier, created_at, updated_at
+             ) VALUES (
+                'plan-1', 'Plan', 'open', 'plan', 'epic', 'now', 'now'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let create_table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(needs_refs_migration(Some(&create_table_sql)));
+        conn.execute_batch(refs_migration_sql()).unwrap();
+
+        let refs: String = conn
+            .query_row("SELECT refs FROM issues WHERE id='plan-1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(refs, "");
+        let migrated_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!needs_refs_migration(Some(&migrated_sql)));
     }
 
     #[test]

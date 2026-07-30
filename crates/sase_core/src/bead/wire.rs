@@ -240,6 +240,8 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub design: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -357,6 +359,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            refs: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,

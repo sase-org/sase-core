@@ -437,6 +437,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            refs: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -550,5 +551,22 @@ mod tests {
 
         assert_eq!(outcome.issues.len(), 0);
         assert_eq!(outcome.invalid_record_lines, 1);
+    }
+
+    #[test]
+    fn refs_round_trip_and_empty_refs_do_not_change_jsonl_shape() {
+        let without_refs = export_issues_to_jsonl(&[plan("epic")]).unwrap();
+        assert!(!without_refs.contains("\"refs\""));
+
+        let mut with_refs = plan("epic");
+        with_refs.refs = vec![
+            "research:202607/report.md".to_string(),
+            "bead:sase-bb.1".to_string(),
+        ];
+        let jsonl = export_issues_to_jsonl(&[with_refs.clone()]).unwrap();
+        assert!(jsonl.contains(
+            "\"refs\":[\"research:202607/report.md\",\"bead:sase-bb.1\"]"
+        ));
+        assert_eq!(parse_issues_jsonl(&jsonl).issues, vec![with_refs]);
     }
 }

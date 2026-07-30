@@ -15,6 +15,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "description",
     "notes",
     "design",
+    "refs",
     "owner",
     "assignee",
     "model",
@@ -109,6 +110,7 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("description", issue.description.as_str()),
         field("notes", issue.notes.as_str()),
         field("design", issue.design.as_str()),
+        field("refs", issue.refs.join("\n")),
         field("owner", issue.owner.as_str()),
         field("assignee", issue.assignee.as_str()),
         field("model", issue.model.as_str()),
@@ -193,6 +195,13 @@ mod tests {
                 "design",
                 phase_issue_with(|issue| {
                     issue.design = "plans/needle.md".to_string();
+                }),
+                "needle",
+            ),
+            (
+                "refs",
+                phase_issue_with(|issue| {
+                    issue.refs = vec!["research:202607/needle.md".to_string()];
                 }),
                 "needle",
             ),
@@ -522,6 +531,7 @@ mod tests {
             description: String::new(),
             notes: String::new(),
             design: String::new(),
+            refs: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
