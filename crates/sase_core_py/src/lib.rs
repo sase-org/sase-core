@@ -421,7 +421,7 @@ use sase_core::bead::{
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
     close_issues_with_note as core_bead_close_issues_with_note,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
-    doctor_with_plan_roots as core_bead_doctor_with_plan_roots,
+    doctor_with_contexts as core_bead_doctor_with_contexts,
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     get_epic_children as core_bead_get_epic_children,
@@ -3463,24 +3463,29 @@ fn py_bead_stats<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (beads_dir, plan_roots=None))]
+#[pyo3(signature = (beads_dir, plan_roots=None, reference_context=None))]
 #[pyo3(name = "bead_doctor")]
-fn py_bead_doctor(
+fn py_bead_doctor<'py>(
     beads_dir: &str,
     plan_roots: Option<Vec<String>>,
+    reference_context: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Vec<String>> {
     let beads_dir = PathBuf::from(beads_dir);
-    let result = match plan_roots {
-        None => core_bead_doctor(&beads_dir),
-        Some(roots) if roots.is_empty() => {
-            core_bead_doctor_with_plan_roots(&beads_dir, None)
-        }
-        Some(roots) => {
-            let roots =
-                roots.into_iter().map(PathBuf::from).collect::<Vec<_>>();
-            core_bead_doctor_with_plan_roots(&beads_dir, Some(&roots))
-        }
-    };
+    if plan_roots.is_none() && reference_context.is_none() {
+        return core_bead_doctor(&beads_dir).map_err(bead_error_to_pyerr);
+    }
+    let roots = plan_roots.and_then(|roots| {
+        (!roots.is_empty())
+            .then(|| roots.into_iter().map(PathBuf::from).collect::<Vec<_>>())
+    });
+    let reference_context = reference_context
+        .map(artifact_ref_context_from_pydict)
+        .transpose()?;
+    let result = core_bead_doctor_with_contexts(
+        &beads_dir,
+        roots.as_deref(),
+        reference_context.as_ref(),
+    );
     result.map_err(bead_error_to_pyerr)
 }
 
@@ -6852,7 +6857,7 @@ mod tests {
     }
 
     #[test]
-    fn bead_doctor_binding_keeps_roots_optional_and_marks_unavailable() {
+    fn bead_doctor_binding_keeps_contexts_optional_and_marks_unavailable() {
         pyo3::prepare_freethreaded_python();
         let temp = tempfile::tempdir().unwrap();
         let beads_dir = temp.path().join("beads");
@@ -6878,6 +6883,19 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 unavailable,
+                vec![
+                    "NOTE: bead design reference validation skipped: plan roots unavailable",
+                    "NOTE: bead artifact reference validation skipped: reference context unavailable"
+                ]
+            );
+
+            let available: Vec<String> = doctor
+                .call1((path, Vec::<String>::new(), PyDict::new_bound(py)))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(
+                available,
                 vec![
                     "NOTE: bead design reference validation skipped: plan roots unavailable"
                 ]

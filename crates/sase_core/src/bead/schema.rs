@@ -197,6 +197,7 @@ CREATE TABLE _issues_new (
     description TEXT,
     notes       TEXT,
     design      TEXT,
+    refs        TEXT NOT NULL DEFAULT '',
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -222,13 +223,13 @@ CREATE TABLE _issues_new (
 INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, model, size, is_ready_to_work,
+    description, notes, design, refs, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, model, size, is_ready_to_work,
+    description, notes, design, refs, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 FROM issues;
 DROP TABLE issues;
@@ -614,7 +615,9 @@ mod tests {
         conn.execute_batch(&legacy_schema).unwrap();
         insert_plan_and_phase(&conn, "phase-medium", "medium").unwrap();
         conn.execute(
-            "UPDATE issues SET status='claimed' WHERE id='phase-medium'",
+            "UPDATE issues
+             SET status='claimed', refs='research:202607/report.md'
+             WHERE id='phase-medium'",
             [],
         )
         .unwrap();
@@ -665,6 +668,14 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(claimed_ids, ["phase-medium", "phase-xlarge"]);
+        let refs: String = conn
+            .query_row(
+                "SELECT refs FROM issues WHERE id='phase-medium'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(refs, "research:202607/report.md");
         let dependency_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dependencies", [], |row| {
                 row.get(0)
