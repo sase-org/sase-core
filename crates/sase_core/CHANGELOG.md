@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.16](https://github.com/sase-org/sase-core/compare/v0.12.15...v0.12.16) - 2026-07-30
+
+### Added
+
+- *(agent-scan)* preserve swarm xprompt kind
+
 ## [0.12.15](https://github.com/sase-org/sase-core/compare/v0.12.14...v0.12.15) - 2026-07-29
 
 ### Added
