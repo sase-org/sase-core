@@ -2,7 +2,8 @@ use std::fs;
 
 use sase_core::{
     export_issues_to_jsonl, import_issues_from_jsonl, load_config_from_str,
-    parse_issues_jsonl, BeadConfigWire, IssueTypeWire,
+    parse_issues_jsonl, BeadConfigWire, IssueTypeWire, PhaseSizeWire,
+    StatusWire,
 };
 use tempfile::tempdir;
 
@@ -104,4 +105,18 @@ fn import_from_file_uses_same_parser() {
     fs::write(&path, CURRENT_SCHEMA).unwrap();
     let outcome = import_issues_from_jsonl(&path).unwrap();
     assert_eq!(outcome.issues.len(), 2);
+}
+
+#[test]
+fn task_and_ready_values_round_trip_with_python_wire_spelling() {
+    let content = r#"{"id":"gold-task","title":"Follow-up","status":"ready","issue_type":"task","parent_id":null,"owner":"","assignee":"","created_at":"2026-01-01T00:00:00Z","created_by":"","updated_at":"2026-01-01T00:00:00Z","closed_at":null,"close_reason":null,"description":"","notes":"","design":"","model":"","size":"medium","is_ready_to_work":false,"changespec_name":"","changespec_bug_id":"","dependencies":[]}
+"#;
+
+    let outcome = parse_issues_jsonl(content);
+
+    assert_eq!(outcome.loaded_rows, 1);
+    assert_eq!(outcome.issues[0].issue_type, IssueTypeWire::Task);
+    assert_eq!(outcome.issues[0].status, StatusWire::Ready);
+    assert_eq!(outcome.issues[0].size, Some(PhaseSizeWire::Medium));
+    assert_eq!(export_issues_to_jsonl(&outcome.issues).unwrap(), content);
 }

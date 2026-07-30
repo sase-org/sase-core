@@ -1962,6 +1962,7 @@ fn issue(
         tier: match issue_type {
             IssueTypeWire::Plan => Some(BeadTierWire::Epic),
             IssueTypeWire::Phase => None,
+            IssueTypeWire::Task => None,
         },
         parent_id: parent_id.map(str::to_string),
         owner: "owner@example.com".to_string(),

@@ -9,6 +9,7 @@ pub enum StatusWire {
     #[default]
     Open,
     Claimed,
+    Ready,
     InProgress,
     Closed,
 }
@@ -19,6 +20,7 @@ pub enum IssueTypeWire {
     Plan,
     #[default]
     Phase,
+    Task,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -287,22 +289,39 @@ impl IssueWire {
                 "Phase issues cannot carry plan tier metadata",
             ));
         }
-        if self.issue_type == IssueTypeWire::Phase && self.is_ready_to_work {
+        if self.issue_type == IssueTypeWire::Task && self.parent_id.is_some() {
+            return Err(BeadError::validation(
+                "Task issues cannot have a parent_id",
+            ));
+        }
+        if self.issue_type == IssueTypeWire::Task && self.tier.is_some() {
+            return Err(BeadError::validation(
+                "Task issues cannot carry plan tier metadata",
+            ));
+        }
+        if self.issue_type != IssueTypeWire::Plan && self.is_ready_to_work {
             return Err(BeadError::validation(
                 "Only plan issues can be marked is_ready_to_work",
             ));
         }
         if self.issue_type == IssueTypeWire::Plan && self.size.is_some() {
             return Err(BeadError::validation(
-                "Only phase issues can carry size metadata",
+                "Only phase and task issues can carry size metadata",
             ));
         }
-        if self.issue_type == IssueTypeWire::Phase
+        if self.issue_type != IssueTypeWire::Plan
             && (!self.changespec_name.is_empty()
                 || !self.changespec_bug_id.is_empty())
         {
             return Err(BeadError::validation(
-                "Phase issues cannot carry ChangeSpec metadata",
+                "Only plan issues can carry ChangeSpec metadata",
+            ));
+        }
+        if self.status == StatusWire::Ready
+            && self.issue_type != IssueTypeWire::Task
+        {
+            return Err(BeadError::validation(
+                "Only task issues can have ready status",
             ));
         }
         if !self.changespec_bug_id.is_empty() && self.changespec_name.is_empty()
@@ -384,11 +403,7 @@ mod tests {
 
         issue.is_ready_to_work = false;
         issue.changespec_name = "feature_epic".to_string();
-        assert!(issue
-            .validate()
-            .unwrap_err()
-            .message
-            .contains("cannot carry"));
+        assert!(issue.validate().unwrap_err().message.contains("Only plan"));
     }
 
     #[test]
@@ -466,7 +481,54 @@ mod tests {
         issue.issue_type = IssueTypeWire::Plan;
         issue.parent_id = None;
         let error = issue.validate().unwrap_err();
-        assert_eq!(error.message, "Only phase issues can carry size metadata");
+        assert_eq!(
+            error.message,
+            "Only phase and task issues can carry size metadata"
+        );
+    }
+
+    #[test]
+    fn task_validation_allows_size_and_ready_but_rejects_plan_fields() {
+        let mut issue = phase(None);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.status = StatusWire::Ready;
+        issue.size = Some(PhaseSizeWire::Medium);
+        issue.validate().unwrap();
+
+        issue.parent_id = Some("test-0".to_string());
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Task issues cannot have a parent_id"
+        );
+        issue.parent_id = None;
+        issue.tier = Some(BeadTierWire::Plan);
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Task issues cannot carry plan tier metadata"
+        );
+        issue.tier = None;
+        issue.is_ready_to_work = true;
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only plan issues can be marked is_ready_to_work"
+        );
+        issue.is_ready_to_work = false;
+        issue.changespec_name = "not_allowed".to_string();
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only plan issues can carry ChangeSpec metadata"
+        );
+    }
+
+    #[test]
+    fn ready_status_requires_task_type() {
+        let mut issue = phase(Some("test-0"));
+        issue.status = StatusWire::Ready;
+
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only task issues can have ready status"
+        );
     }
 
     #[test]

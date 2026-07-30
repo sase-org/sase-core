@@ -314,6 +314,7 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
     let kind_order = match issue.issue_type {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
+        IssueTypeWire::Task => 2,
     };
     (kind_order, issue.id.as_str())
 }

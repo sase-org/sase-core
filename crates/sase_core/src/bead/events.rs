@@ -932,6 +932,7 @@ fn event_issue_key(issue: &IssueWire) -> (u8, String) {
     let kind_order = match issue.issue_type {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
+        IssueTypeWire::Task => 2,
     };
     (kind_order, issue.id.clone())
 }
@@ -941,7 +942,10 @@ fn root_issue_ids(issues: &[IssueWire]) -> BTreeMap<String, String> {
     let ids: BTreeSet<&str> =
         issues.iter().map(|issue| issue.id.as_str()).collect();
     for issue in issues {
-        let root = if issue.issue_type == IssueTypeWire::Plan {
+        let root = if matches!(
+            issue.issue_type,
+            IssueTypeWire::Plan | IssueTypeWire::Task
+        ) {
             issue.id.clone()
         } else {
             issue

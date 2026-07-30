@@ -41,8 +41,9 @@
 
 use sase_core::{
     AgentCleanupTargetWire, AgentMetaWire, ChangeSpecWire, CommentWire,
-    CommitWire, DeltaWire, HookStatusLineWire, HookWire, MentorStatusLineWire,
-    MentorWire, SourceSpanWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    CommitWire, DeltaWire, HookStatusLineWire, HookWire, IssueTypeWire,
+    MentorStatusLineWire, MentorWire, SourceSpanWire, StatusWire,
+    TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -216,6 +217,19 @@ fn rust_changespec() -> ChangeSpecWire {
 fn rust_json_equals_python_fixture() {
     let rust_value: Value = serde_json::to_value(rust_changespec()).unwrap();
     let python_value: Value = serde_json::from_str(PYTHON_FIXTURE).unwrap();
+    assert_eq!(rust_value, python_value);
+}
+
+#[test]
+fn bead_task_and_ready_enum_values_match_python_wire_values() {
+    let rust_value = serde_json::json!({
+        "issue_type": IssueTypeWire::Task,
+        "status": StatusWire::Ready,
+    });
+    let python_value: Value =
+        serde_json::from_str(r#"{"issue_type":"task","status":"ready"}"#)
+            .unwrap();
+
     assert_eq!(rust_value, python_value);
 }
 

@@ -405,29 +405,39 @@ fn handle_ready(
         .map(|issue| (issue.id.clone(), issue.status.clone()))
         .collect();
     issues.retain(|issue| {
-        issue.status == StatusWire::Open
-            && is_ready_surface_issue(issue)
+        issue.status == StatusWire::Ready
+            && issue.issue_type == IssueTypeWire::Task
             && !has_active_blocker(issue, &status_by_id)
     });
     sort_by_created_at(&mut issues);
 
     let mut stdout = String::new();
     if issues.is_empty() {
-        stdout.push_str("No issues ready (all blocked or none open).\n");
+        stdout.push_str(
+            "No ready task beads (epic work is preassigned at launch).\n",
+        );
     } else {
         for issue in &issues {
             let parent = issue
                 .parent_id
                 .as_ref()
                 .map_or(String::new(), |parent_id| format!(" ← {parent_id}"));
-            writeln!(stdout, "○ {} · {}{}", issue.id, issue.title, parent)
-                .expect("writing to String cannot fail");
+            writeln!(
+                stdout,
+                "{} {} · {}{}",
+                status_icon(&issue.status),
+                issue.id,
+                issue.title,
+                parent
+            )
+            .expect("writing to String cannot fail");
         }
         write!(
             stdout,
-            "\n{}\nReady: {} issues with no active blockers\n",
+            "\n{}\nReady: {} task bead{} with no active blockers\n",
             "-".repeat(60),
-            issues.len()
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
         )
         .expect("writing to String cannot fail");
     }
@@ -483,14 +493,16 @@ fn handle_stats(
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
     let stats = stats_for_issues(&issues);
     let stdout = format!(
-        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n",
+        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  Ready:       {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n  Tasks:       {}\n",
         stats.get("total").copied().unwrap_or(0),
         stats.get("open").copied().unwrap_or(0),
         stats.get("claimed").copied().unwrap_or(0),
+        stats.get("ready").copied().unwrap_or(0),
         stats.get("in_progress").copied().unwrap_or(0),
         stats.get("closed").copied().unwrap_or(0),
         stats.get("plan").copied().unwrap_or(0),
         stats.get("phase").copied().unwrap_or(0),
+        stats.get("task").copied().unwrap_or(0),
     );
     Ok(success(stdout))
 }
@@ -819,14 +831,17 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
 fn parse_create_type(
     value: &str,
 ) -> Result<(IssueTypeWire, Option<String>, Option<String>), String> {
+    if value == "task" {
+        return Ok((IssueTypeWire::Task, None, None));
+    }
     let Some((kind, rest)) = value.split_once('(') else {
         return Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
         ));
     };
     let Some(inner) = rest.strip_suffix(')') else {
         return Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
         ));
     };
     let parts = inner
@@ -859,7 +874,7 @@ fn parse_create_type(
             parts.len()
         )),
         _ => Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), or phase(<parent_id>)"
+            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
         )),
     }
 }
@@ -1046,9 +1061,8 @@ fn handle_dep(
                 .iter()
                 .find(|issue| issue.id == *issue_id)
                 .is_some_and(|issue| {
-                    issue.status == StatusWire::Open
-                        && (issue.issue_type == IssueTypeWire::Phase
-                            || issue.tier == Some(BeadTierWire::Epic))
+                    issue.status == StatusWire::Ready
+                        && issue.issue_type == IssueTypeWire::Task
                         && active_blockers.is_empty()
                 });
             if source_is_ready {
@@ -1279,6 +1293,7 @@ fn active_blocker_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
                         status,
                         StatusWire::Open
                             | StatusWire::Claimed
+                            | StatusWire::Ready
                             | StatusWire::InProgress
                     )
                 })
@@ -1410,6 +1425,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
     if statuses.is_empty() {
         statuses.push(StatusWire::Open);
         statuses.push(StatusWire::Claimed);
+        statuses.push(StatusWire::Ready);
         statuses.push(StatusWire::InProgress);
     }
     Some(ListFilters {
@@ -1930,6 +1946,7 @@ const ANSI_BOLD_BLUE: &str = "\x1b[1;34m";
 const ANSI_HIGHLIGHT: &str = "\x1b[30;43m";
 const ANSI_HIGHLIGHT_RESET: &str = "\x1b[39;49m";
 const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_BRIGHT_CYAN: &str = "\x1b[96m";
 const ANSI_MAGENTA: &str = "\x1b[35m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_CYAN: &str = "\x1b[36m";
@@ -1942,6 +1959,7 @@ fn color_status_icon(status: &StatusWire, color: bool) -> String {
     let code = match status {
         StatusWire::Open => ANSI_CYAN,
         StatusWire::Claimed => ANSI_MAGENTA,
+        StatusWire::Ready => ANSI_BRIGHT_CYAN,
         StatusWire::InProgress => ANSI_YELLOW,
         StatusWire::Closed => ANSI_GREEN,
     };
@@ -2077,6 +2095,7 @@ fn has_active_blocker(
                     *status,
                     StatusWire::Open
                         | StatusWire::Claimed
+                        | StatusWire::Ready
                         | StatusWire::InProgress
                 )
             })
@@ -2128,6 +2147,7 @@ fn parse_status(value: &str) -> Option<StatusWire> {
     match value {
         "open" => Some(StatusWire::Open),
         "claimed" => Some(StatusWire::Claimed),
+        "ready" => Some(StatusWire::Ready),
         "in_progress" => Some(StatusWire::InProgress),
         "closed" => Some(StatusWire::Closed),
         _ => None,
@@ -2138,6 +2158,7 @@ fn parse_issue_type(value: &str) -> Option<IssueTypeWire> {
     match value {
         "plan" => Some(IssueTypeWire::Plan),
         "phase" => Some(IssueTypeWire::Phase),
+        "task" => Some(IssueTypeWire::Task),
         _ => None,
     }
 }
@@ -2150,15 +2171,11 @@ fn parse_tier(value: &str) -> Option<BeadTierWire> {
     }
 }
 
-fn is_ready_surface_issue(issue: &IssueWire) -> bool {
-    issue.issue_type == IssueTypeWire::Phase
-        || issue.tier == Some(BeadTierWire::Epic)
-}
-
 fn status_icon(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "○",
         StatusWire::Claimed => "◎",
+        StatusWire::Ready => "◇",
         StatusWire::InProgress => "◐",
         StatusWire::Closed => "✓",
     }
@@ -2168,6 +2185,7 @@ fn status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
+        StatusWire::Ready => "ready",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -2177,6 +2195,7 @@ fn status_upper(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "OPEN",
         StatusWire::Claimed => "CLAIMED",
+        StatusWire::Ready => "READY",
         StatusWire::InProgress => "IN_PROGRESS",
         StatusWire::Closed => "CLOSED",
     }
@@ -2186,6 +2205,7 @@ fn issue_type_value(issue_type: &IssueTypeWire) -> &'static str {
     match issue_type {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
+        IssueTypeWire::Task => "task",
     }
 }
 
@@ -2463,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn stats_prints_claimed_between_open_and_in_progress() {
+    fn stats_prints_ready_and_task_rows() {
         let store = seed_issues(vec![
             phase_issue(
                 "beads-1.1",
@@ -2486,6 +2506,13 @@ mod tests {
                 StatusWire::InProgress,
                 "2026-01-01T00:03:00Z",
             ),
+            task_issue(
+                "beads-2",
+                "Ready task",
+                "",
+                StatusWire::Ready,
+                "2026-01-01T00:04:00Z",
+            ),
         ]);
 
         let stats = execute_search(&store.beads_dir, &["stats"]);
@@ -2493,14 +2520,84 @@ mod tests {
             stats.stdout,
             concat!(
                 "Issue Statistics\n",
-                "  Total:       3\n",
+                "  Total:       4\n",
                 "  Open:        1\n",
                 "  Claimed:     1\n",
+                "  Ready:       1\n",
                 "  In Progress: 1\n",
                 "  Closed:      0\n",
                 "  Plans:       0\n",
                 "  Phases:      3\n",
+                "  Tasks:       1\n",
             )
+        );
+    }
+
+    #[test]
+    fn ready_lists_only_unblocked_ready_tasks_with_ready_glyph() {
+        let blocker = task_issue(
+            "beads-1",
+            "Blocking task",
+            "",
+            StatusWire::Ready,
+            "2026-01-01T00:01:00Z",
+        );
+        let mut blocked = task_issue(
+            "beads-2",
+            "Blocked task",
+            "",
+            StatusWire::Ready,
+            "2026-01-01T00:02:00Z",
+        );
+        blocked.dependencies.push(DependencyWire {
+            issue_id: blocked.id.clone(),
+            depends_on_id: blocker.id.clone(),
+            created_at: "2026-01-01T00:02:00Z".to_string(),
+            created_by: String::new(),
+        });
+        let store = seed_issues(vec![
+            blocker,
+            blocked,
+            task_issue(
+                "beads-3",
+                "Draft task",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:03:00Z",
+            ),
+        ]);
+
+        let ready = execute_search(&store.beads_dir, &["ready"]);
+        assert_eq!(
+            ready.stdout,
+            concat!(
+                "◇ beads-1 · Blocking task\n",
+                "\n",
+                "------------------------------------------------------------\n",
+                "Ready: 1 task bead with no active blockers\n",
+            )
+        );
+
+        let list = execute_search(&store.beads_dir, &["list"]);
+        assert!(list.stdout.contains("◇ beads-1 · Blocking task"));
+        assert!(list.stdout.contains("◇ beads-2 · Blocked task"));
+        assert!(list.stdout.contains("○ beads-3 · Draft task"));
+        let colored = execute_search(
+            &store.beads_dir,
+            &["search", "blocking", "--color", "always"],
+        );
+        assert!(colored.stdout.contains("\x1b[96m◇\x1b[0m"));
+    }
+
+    #[test]
+    fn ready_empty_state_explains_epic_preassignment() {
+        let store = seed_issues(Vec::new());
+
+        let ready = execute_search(&store.beads_dir, &["ready"]);
+
+        assert_eq!(
+            ready.stdout,
+            "No ready task beads (epic work is preassigned at launch).\n"
         );
     }
 
@@ -2773,6 +2870,23 @@ mod tests {
     }
 
     #[test]
+    fn create_accepts_bare_task_constructor() {
+        let store = seed_issues(Vec::new());
+
+        let created = execute_search(
+            &store.beads_dir,
+            &["create", "--title", "Follow-up", "--type", "task"],
+        );
+
+        assert_eq!(created.exit_code, 0);
+        assert_eq!(created.stdout, "Created task: beads-1 — Follow-up\n");
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.issue_type, IssueTypeWire::Task);
+        assert_eq!(issue.parent_id, None);
+        assert_eq!(issue.tier, None);
+    }
+
+    #[test]
     fn create_show_and_ref_verbs_honor_the_reference_contract() {
         let store = seed_issues(Vec::new());
         let plan_path = store.beads_dir.parent().unwrap().join("plan.md");
@@ -2901,7 +3015,7 @@ mod tests {
             concat!(
                 "✗ Removed dependency: beads-1 no longer depends on beads-2\n",
                 "✗ Removed dependency: beads-1 no longer depends on beads-3\n",
-                "○ beads-1 is now ready (no active blockers).\n",
+                "○ beads-1 has no active blockers.\n",
             )
         );
         let summary = outcome.mutation_summary.unwrap();
@@ -3474,6 +3588,19 @@ mod tests {
         let mut issue = phase_issue(id, title, description, status, created_at);
         issue.issue_type = IssueTypeWire::Plan;
         issue.tier = Some(BeadTierWire::Epic);
+        issue.parent_id = None;
+        issue
+    }
+
+    fn task_issue(
+        id: &str,
+        title: &str,
+        description: &str,
+        status: StatusWire,
+        created_at: &str,
+    ) -> IssueWire {
+        let mut issue = phase_issue(id, title, description, status, created_at);
+        issue.issue_type = IssueTypeWire::Task;
         issue.parent_id = None;
         issue
     }

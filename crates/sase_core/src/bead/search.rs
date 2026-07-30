@@ -132,6 +132,7 @@ fn status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
+        StatusWire::Ready => "ready",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -141,6 +142,7 @@ fn issue_type_value(issue_type: &IssueTypeWire) -> &'static str {
     match issue_type {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
+        IssueTypeWire::Task => "task",
     }
 }
 
@@ -250,10 +252,10 @@ mod tests {
             ),
             (
                 "status",
-                phase_issue_with(|issue| issue.status = StatusWire::Closed),
-                "closed",
+                task_issue_with(|issue| issue.status = StatusWire::Ready),
+                "ready",
             ),
-            ("type", phase_issue_with(|_| {}), "phase"),
+            ("type", task_issue_with(|_| {}), "task"),
             ("tier", plan_issue_with(|_| {}), "epic"),
         ];
 
@@ -549,6 +551,15 @@ mod tests {
         issue.title = "Neutral item".to_string();
         issue.issue_type = IssueTypeWire::Plan;
         issue.tier = Some(BeadTierWire::Epic);
+        issue.parent_id = None;
+        update(&mut issue);
+        issue
+    }
+
+    fn task_issue_with(update: impl FnOnce(&mut IssueWire)) -> IssueWire {
+        let mut issue = phase_issue_with(|_| {});
+        issue.id = "beads-2".to_string();
+        issue.issue_type = IssueTypeWire::Task;
         issue.parent_id = None;
         update(&mut issue);
         issue

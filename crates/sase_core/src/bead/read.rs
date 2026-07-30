@@ -667,15 +667,12 @@ fn ready_issues_in_issues(
         .collect();
     Ok(issues
         .into_iter()
-        .filter(|issue| issue.status == StatusWire::Open)
-        .filter(is_ready_surface_issue)
+        .filter(|issue| {
+            issue.status == StatusWire::Ready
+                && issue.issue_type == IssueTypeWire::Task
+        })
         .filter(|issue| !has_active_blocker(issue, &status_by_id))
         .collect())
-}
-
-fn is_ready_surface_issue(issue: &IssueWire) -> bool {
-    issue.issue_type == IssueTypeWire::Phase
-        || issue.tier == Some(BeadTierWire::Epic)
 }
 
 fn blocked_issues_in_issues(
@@ -713,6 +710,7 @@ fn has_active_blocker(
                     *status,
                     StatusWire::Open
                         | StatusWire::Claimed
+                        | StatusWire::Ready
                         | StatusWire::InProgress
                 )
             })
@@ -755,6 +753,7 @@ fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
     match value {
         "open" => Ok(StatusWire::Open),
         "claimed" => Ok(StatusWire::Claimed),
+        "ready" => Ok(StatusWire::Ready),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(
@@ -767,6 +766,7 @@ fn parse_issue_type(value: &str) -> Result<IssueTypeWire, BeadError> {
     match value {
         "plan" => Ok(IssueTypeWire::Plan),
         "phase" => Ok(IssueTypeWire::Phase),
+        "task" => Ok(IssueTypeWire::Task),
         _ => Err(BeadError::validation(format!(
             "invalid bead issue_type: {value}"
         ))),
@@ -797,6 +797,7 @@ fn status_as_str(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
+        StatusWire::Ready => "ready",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -806,6 +807,7 @@ fn issue_type_as_str(issue_type: &IssueTypeWire) -> &'static str {
     match issue_type {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
+        IssueTypeWire::Task => "task",
     }
 }
 
@@ -846,6 +848,13 @@ mod tests {
         }
     }
 
+    fn task(id: &str, status: StatusWire) -> IssueWire {
+        let mut issue = phase(id, status);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.parent_id = None;
+        issue
+    }
+
     #[test]
     fn claimed_dependency_is_an_active_blocker() {
         let blocker = phase("blocker", StatusWire::Claimed);
@@ -865,6 +874,34 @@ mod tests {
                 .map(|issue| issue.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["dependent"]
+        );
+    }
+
+    #[test]
+    fn ready_query_returns_only_unblocked_ready_tasks() {
+        let blocker = task("blocker", StatusWire::Ready);
+        let mut blocked = task("blocked", StatusWire::Ready);
+        blocked.dependencies.push(DependencyWire {
+            issue_id: blocked.id.clone(),
+            depends_on_id: blocker.id.clone(),
+            created_at: String::new(),
+            created_by: String::new(),
+        });
+        let open_task = task("draft", StatusWire::Open);
+        let ready_task = task("ready", StatusWire::Ready);
+        let phase = phase("phase", StatusWire::Open);
+
+        let ready = ready_issues_in_issues(vec![
+            blocker, blocked, open_task, ready_task, phase,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            ready
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["blocker", "ready"]
         );
     }
 

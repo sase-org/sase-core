@@ -64,8 +64,9 @@ pub use schema::{
     model_migration_sql, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration, needs_refs_migration,
     needs_resolution_migration, needs_size_check_relax_migration,
-    needs_size_migration, refs_migration_sql, resolution_migration_sql,
-    size_check_relax_migration_sql, size_migration_sql, BEAD_SQLITE_SCHEMA,
+    needs_size_migration, needs_task_ready_migration, refs_migration_sql,
+    resolution_migration_sql, size_check_relax_migration_sql,
+    size_migration_sql, task_ready_migration_sql, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{

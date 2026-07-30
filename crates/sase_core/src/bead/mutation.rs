@@ -1679,6 +1679,7 @@ fn default_create_tier(
             Some(request.tier.clone().unwrap_or(BeadTierWire::Epic))
         }
         IssueTypeWire::Phase => request.tier.clone(),
+        IssueTypeWire::Task => request.tier.clone(),
     }
 }
 
@@ -1938,6 +1939,7 @@ fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
     match value {
         "open" => Ok(StatusWire::Open),
         "claimed" => Ok(StatusWire::Claimed),
+        "ready" => Ok(StatusWire::Ready),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(
@@ -1950,6 +1952,7 @@ fn mutation_status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
+        StatusWire::Ready => "ready",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -2399,7 +2402,103 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(error.message, "Only phase issues can carry size metadata");
+        assert_eq!(
+            error.message,
+            "Only phase and task issues can carry size metadata"
+        );
+    }
+
+    #[test]
+    fn task_create_and_ready_updates_round_trip_through_events() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Discovered follow-up".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Medium),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(task.issue_type, IssueTypeWire::Task);
+        assert_eq!(task.status, StatusWire::Open);
+        assert_eq!(task.parent_id, None);
+        assert_eq!(task.tier, None);
+
+        let ready = update_issue(
+            &beads_dir,
+            &task.id,
+            BeadUpdateFieldsWire {
+                status: Some("ready".to_string()),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(ready.status, StatusWire::Ready);
+        assert_eq!(
+            MutableStore::load(&beads_dir)
+                .unwrap()
+                .get_issue(&task.id)
+                .unwrap()
+                .status,
+            StatusWire::Ready
+        );
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert!(streams.iter().flat_map(|stream| &stream.events).any(
+            |event| {
+                matches!(
+                    &event.payload,
+                    BeadEventPayloadWire::IssueUpdated { fields }
+                        if fields.status == Some(StatusWire::Ready)
+                )
+            }
+        ));
+
+        let plan = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(plan.id),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let error = update_issue(
+            &beads_dir,
+            &phase.id,
+            BeadUpdateFieldsWire {
+                status: Some("ready".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Only task issues can have ready status");
     }
 
     #[test]

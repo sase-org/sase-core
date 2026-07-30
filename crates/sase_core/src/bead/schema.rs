@@ -6,9 +6,9 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'open'
-                  CHECK(status IN ('open', 'claimed', 'in_progress', 'closed')),
+                  CHECK(status IN ('open', 'claimed', 'ready', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
-                  CHECK(issue_type IN ('plan', 'phase')),
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
     tier        TEXT
                   CHECK(tier IN ('plan', 'epic')),
     parent_id   TEXT
@@ -30,7 +30,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     size        TEXT
                   CHECK(
                     size IS NULL OR
-                    (issue_type = 'phase' AND
+                    (issue_type IN ('phase', 'task') AND
                      size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
                   ),
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
@@ -38,10 +38,13 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     changespec_bug_id TEXT NOT NULL DEFAULT '',
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
-        (issue_type = 'plan')
+        (issue_type = 'plan') OR
+        (issue_type = 'task' AND parent_id IS NULL)
     ),
     CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
+    CHECK(status != 'ready' OR issue_type = 'task'),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -78,9 +81,9 @@ pub fn issue_type_migration_sql() -> &'static str {
 CREATE TABLE _issues_new (
   id TEXT PRIMARY KEY, title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open'
-    CHECK(status IN ('open','claimed','in_progress','closed')),
+    CHECK(status IN ('open','claimed','ready','in_progress','closed')),
   issue_type TEXT NOT NULL DEFAULT 'phase'
-    CHECK(issue_type IN ('plan','phase')),
+    CHECK(issue_type IN ('plan','phase','task')),
   tier TEXT CHECK(tier IN ('plan','epic')),
   parent_id TEXT, owner TEXT, assignee TEXT,
   created_at TEXT NOT NULL, created_by TEXT,
@@ -88,8 +91,10 @@ CREATE TABLE _issues_new (
   close_reason TEXT, description TEXT, notes TEXT, design TEXT,
   model TEXT NOT NULL DEFAULT '',
   CHECK((issue_type='phase' AND parent_id IS NOT NULL)
-    OR (issue_type='plan')),
-  CHECK(issue_type='plan' OR tier IS NULL)
+    OR (issue_type='plan')
+    OR (issue_type='task' AND parent_id IS NULL)),
+  CHECK(issue_type='plan' OR tier IS NULL),
+  CHECK(status!='ready' OR issue_type='task')
 );
 INSERT INTO _issues_new
 SELECT id, title, status,
@@ -155,7 +160,92 @@ pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
 }
 
 pub fn size_migration_sql() -> &'static str {
-    "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type='phase' AND size IN ('xsmall','small','medium','large','xlarge')))"
+    "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type IN ('phase','task') AND size IN ('xsmall','small','medium','large','xlarge')))"
+}
+
+pub fn needs_task_ready_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => {
+            !sql.contains("'task'")
+                || !sql.contains("'ready'")
+                || !(sql.contains("status != 'ready'")
+                    || sql.contains("status!='ready'"))
+        }
+    }
+}
+
+pub fn task_ready_migration_sql() -> &'static str {
+    r#"PRAGMA foreign_keys=OFF;
+DROP TABLE IF EXISTS _issues_new;
+CREATE TABLE _issues_new (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open'
+                  CHECK(status IN ('open', 'claimed', 'ready', 'in_progress', 'closed')),
+    issue_type  TEXT NOT NULL DEFAULT 'phase'
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
+    tier        TEXT
+                  CHECK(tier IN ('plan', 'epic')),
+    parent_id   TEXT
+                  REFERENCES issues(id) ON DELETE CASCADE,
+    owner       TEXT,
+    assignee    TEXT,
+    created_at  TEXT NOT NULL,
+    created_by  TEXT,
+    updated_at  TEXT NOT NULL,
+    closed_at   TEXT,
+    close_reason TEXT,
+    resolution  TEXT
+                  CHECK(resolution IN ('done', 'canceled', 'superseded')),
+    description TEXT,
+    notes       TEXT,
+    design      TEXT,
+    refs        TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT '',
+    size        TEXT
+                  CHECK(
+                    size IS NULL OR
+                    (issue_type IN ('phase', 'task') AND
+                     size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
+                  ),
+    is_ready_to_work INTEGER NOT NULL DEFAULT 0,
+    changespec_name TEXT NOT NULL DEFAULT '',
+    changespec_bug_id TEXT NOT NULL DEFAULT '',
+    CHECK(
+        (issue_type = 'phase' AND parent_id IS NOT NULL) OR
+        (issue_type = 'plan') OR
+        (issue_type = 'task' AND parent_id IS NULL)
+    ),
+    CHECK(issue_type = 'plan' OR tier IS NULL),
+    CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
+    CHECK(status != 'ready' OR issue_type = 'task'),
+    CHECK(
+        issue_type = 'plan' OR
+        (changespec_name = '' AND changespec_bug_id = '')
+    ),
+    CHECK(changespec_name != '' OR changespec_bug_id = '')
+);
+INSERT INTO _issues_new (
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, model, size, is_ready_to_work,
+    changespec_name, changespec_bug_id
+)
+SELECT
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, model, size, is_ready_to_work,
+    changespec_name, changespec_bug_id
+FROM issues;
+DROP TABLE issues;
+ALTER TABLE _issues_new RENAME TO issues;
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
+CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+PRAGMA foreign_keys=ON;"#
 }
 
 pub fn needs_size_check_relax_migration(
@@ -178,9 +268,9 @@ CREATE TABLE _issues_new (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'open'
-                  CHECK(status IN ('open', 'claimed', 'in_progress', 'closed')),
+                  CHECK(status IN ('open', 'claimed', 'ready', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
-                  CHECK(issue_type IN ('plan', 'phase')),
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
     tier        TEXT
                   CHECK(tier IN ('plan', 'epic')),
     parent_id   TEXT
@@ -202,7 +292,7 @@ CREATE TABLE _issues_new (
     size        TEXT
                   CHECK(
                     size IS NULL OR
-                    (issue_type = 'phase' AND
+                    (issue_type IN ('phase', 'task') AND
                      size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
                   ),
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
@@ -210,10 +300,13 @@ CREATE TABLE _issues_new (
     changespec_bug_id TEXT NOT NULL DEFAULT '',
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
-        (issue_type = 'plan')
+        (issue_type = 'plan') OR
+        (issue_type = 'task' AND parent_id IS NULL)
     ),
     CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
+    CHECK(status != 'ready' OR issue_type = 'task'),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -334,6 +427,10 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("'xsmall'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xlarge'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("issue_type = 'phase'"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("'task'"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("'ready'"));
+        assert!(BEAD_SQLITE_SCHEMA
+            .contains("status != 'ready' OR issue_type = 'task'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("changespec_name TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("resolution  TEXT"));
@@ -364,6 +461,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "claimed");
+    }
+
+    #[test]
+    fn fresh_schema_enforces_task_and_ready_constraints() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(BEAD_SQLITE_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, size
+             ) VALUES (
+                'task-ready', 'Ready task', 'ready', 'task',
+                'now', 'now', 'medium'
+             )",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, parent_id,
+                    created_at, updated_at
+                 ) VALUES (
+                    'task-child', 'Nested task', 'open', 'task', 'task-ready',
+                    'now', 'now'
+                 )",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, tier,
+                    created_at, updated_at
+                 ) VALUES (
+                    'task-tier', 'Tiered task', 'open', 'task', 'epic',
+                    'now', 'now'
+                 )",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, tier,
+                    created_at, updated_at
+                 ) VALUES (
+                    'plan-ready', 'Ready plan', 'ready', 'plan', 'epic',
+                    'now', 'now'
+                 )",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -461,7 +611,7 @@ mod tests {
         assert!(!needs_size_migration(Some("size TEXT")));
         assert_eq!(
             size_migration_sql(),
-            "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type='phase' AND size IN ('xsmall','small','medium','large','xlarge')))"
+            "ALTER TABLE issues ADD COLUMN size TEXT CHECK(size IS NULL OR (issue_type IN ('phase','task') AND size IN ('xsmall','small','medium','large','xlarge')))"
         );
         assert!(!needs_size_check_relax_migration(None));
         assert!(!needs_size_check_relax_migration(Some(
@@ -472,6 +622,15 @@ mod tests {
         )));
         assert!(!needs_size_check_relax_migration(Some(
             "size TEXT CHECK(size IN ('xsmall','small','medium','large','xlarge'))"
+        )));
+        assert!(!needs_task_ready_migration(None));
+        assert!(needs_task_ready_migration(Some(
+            "CHECK(issue_type IN ('plan','phase'))"
+        )));
+        assert!(!needs_task_ready_migration(Some(
+            "CHECK(issue_type IN ('plan','phase','task')); \
+             CHECK(status IN ('open','ready','closed')); \
+             CHECK(status!='ready' OR issue_type='task')"
         )));
 
         assert!(!needs_tier_migration(None));
@@ -602,6 +761,81 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(sizes, ["xlarge", "xsmall"]);
+    }
+
+    #[test]
+    fn task_ready_migration_preserves_rows_and_dependencies() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let legacy_schema = BEAD_SQLITE_SCHEMA
+            .replace(", 'ready'", "")
+            .replace(", 'task'", "")
+            .replace("issue_type IN ('phase', 'task')", "issue_type = 'phase'")
+            .replace(
+                " OR\n        (issue_type = 'task' AND parent_id IS NULL)",
+                "",
+            )
+            .replace(
+                "    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),\n",
+                "",
+            )
+            .replace(
+                "    CHECK(status != 'ready' OR issue_type = 'task'),\n",
+                "",
+            );
+        conn.execute_batch(&legacy_schema).unwrap();
+        insert_plan_and_phase(&conn, "phase-medium", "medium").unwrap();
+        conn.execute(
+            "INSERT INTO dependencies (
+                issue_id, depends_on_id, created_at, created_by
+             ) VALUES ('phase-medium', 'plan-1', 'now', '')",
+            [],
+        )
+        .unwrap();
+
+        let create_table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(needs_task_ready_migration(Some(&create_table_sql)));
+
+        conn.execute_batch(task_ready_migration_sql()).unwrap();
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, size
+             ) VALUES (
+                'task-ready', 'Ready task', 'ready', 'task',
+                'now', 'now', 'xlarge'
+             )",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE issues SET status='ready' WHERE id='phase-medium'",
+                [],
+            )
+            .is_err());
+        let dependency_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dependencies", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(dependency_count, 1);
+        let migrated_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!needs_task_ready_migration(Some(&migrated_sql)));
     }
 
     #[test]

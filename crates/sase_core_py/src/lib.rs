@@ -196,6 +196,8 @@
 //! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
+//! - `bead_needs_task_ready_migration(create_table_sql: str | None) -> bool`
+//! - `bead_task_ready_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -432,6 +434,7 @@ use sase_core::bead::{
     merge_bead_event_streams as core_merge_bead_event_streams,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
+    needs_task_ready_migration as core_bead_needs_task_ready_migration,
     open_issue as core_bead_open_issue,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     read_event_store_issues as core_bead_read_event_store_issues,
@@ -449,6 +452,7 @@ use sase_core::bead::{
     show_issue as core_bead_show_issue,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
+    task_ready_migration_sql as core_bead_task_ready_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
@@ -2642,6 +2646,21 @@ fn py_bead_needs_size_check_relax_migration(
 #[pyo3(name = "bead_size_check_relax_migration_sql")]
 fn py_bead_size_check_relax_migration_sql() -> &'static str {
     core_bead_size_check_relax_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_needs_task_ready_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_task_ready_migration(create_table_sql: Option<&str>) -> bool {
+    core_bead_needs_task_ready_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_task_ready_migration_sql")]
+fn py_bead_task_ready_migration_sql() -> &'static str {
+    core_bead_task_ready_migration_sql()
 }
 
 #[pyfunction]
@@ -6659,6 +6678,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_bead_size_check_relax_migration_sql,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_needs_task_ready_migration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_task_ready_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_resolution_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
@@ -9442,6 +9463,8 @@ mod tests {
                 "bead_resolution_migration_sql",
                 "bead_needs_size_check_relax_migration",
                 "bead_size_check_relax_migration_sql",
+                "bead_needs_task_ready_migration",
+                "bead_task_ready_migration_sql",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -9457,6 +9480,18 @@ mod tests {
             assert_eq!(
                 py_bead_size_check_relax_migration_sql(),
                 core_bead_size_check_relax_migration_sql()
+            );
+            assert!(py_bead_needs_task_ready_migration(Some(
+                "CHECK(issue_type IN ('plan','phase'))"
+            )));
+            assert!(!py_bead_needs_task_ready_migration(Some(
+                "CHECK(issue_type IN ('plan','phase','task')); \
+                 CHECK(status IN ('open','ready','closed')); \
+                 CHECK(status!='ready' OR issue_type='task')"
+            )));
+            assert_eq!(
+                py_bead_task_ready_migration_sql(),
+                core_bead_task_ready_migration_sql()
             );
             assert!(py_bead_needs_resolution_migration(Some(
                 "CREATE TABLE issues(id TEXT)"

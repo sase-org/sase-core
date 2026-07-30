@@ -28,6 +28,8 @@ fn read_queries_match_python_contract_ordering() {
             issue("beads-1.1", "First", "phase", Some("beads-1"), "open", "2026-01-01T00:01:00Z", ""),
             issue("beads-1.2", "Second", "phase", Some("beads-1"), "open", "2026-01-01T00:02:00Z", r#","dependencies":[{"issue_id":"beads-1.2","depends_on_id":"beads-1.1","created_at":"2026-01-01T00:02:00Z","created_by":""}]"#),
             issue("beads-2", "Closed", "plan", None, "closed", "2026-01-01T00:03:00Z", ""),
+            issue("beads-3", "Ready task", "task", None, "ready", "2026-01-01T00:04:00Z", ""),
+            issue("beads-4", "Blocked task", "task", None, "ready", "2026-01-01T00:05:00Z", r#","dependencies":[{"issue_id":"beads-4","depends_on_id":"beads-3","created_at":"2026-01-01T00:05:00Z","created_by":""}]"#),
         ]
         .join("\n")
             + "\n",
@@ -40,7 +42,14 @@ fn read_queries_match_python_contract_ordering() {
     );
     assert_eq!(
         ids(bead_list_issues(&beads_dir, None, None, None).unwrap()),
-        vec!["beads-1", "beads-1.1", "beads-1.2", "beads-2"]
+        vec![
+            "beads-1",
+            "beads-1.1",
+            "beads-1.2",
+            "beads-2",
+            "beads-3",
+            "beads-4"
+        ]
     );
     assert_eq!(
         ids(bead_list_issues(
@@ -52,19 +61,19 @@ fn read_queries_match_python_contract_ordering() {
         .unwrap()),
         vec!["beads-1", "beads-1.1", "beads-1.2"]
     );
-    assert_eq!(
-        ids(bead_ready_issues(&beads_dir).unwrap()),
-        vec!["beads-1", "beads-1.1"]
-    );
+    assert_eq!(ids(bead_ready_issues(&beads_dir).unwrap()), vec!["beads-3"]);
     assert_eq!(
         ids(bead_blocked_issues(&beads_dir).unwrap()),
-        vec!["beads-1.2"]
+        vec!["beads-1.2", "beads-4"]
     );
     assert_eq!(
         ids(bead_get_epic_children(&beads_dir, "beads-1").unwrap()),
         vec!["beads-1.1", "beads-1.2"]
     );
-    assert_eq!(bead_stats(&beads_dir).unwrap()["total"], 4);
+    let stats = bead_stats(&beads_dir).unwrap();
+    assert_eq!(stats["total"], 6);
+    assert_eq!(stats["ready"], 2);
+    assert_eq!(stats["task"], 2);
     assert_eq!(
         bead_doctor(&beads_dir).unwrap(),
         vec!["OK: no issues found"]
