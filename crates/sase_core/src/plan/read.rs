@@ -3,8 +3,8 @@
 //! Repo plans live canonically under `<sdd_root>/plans/<YYYYMM>/*.md`, with
 //! their tale/epic classification stored in `tier` frontmatter. Callers may
 //! instead provide explicit `(root, kind)` document corpora, each supporting
-//! flat and sharded layouts. Local plans live under `<local_dir>/*.md` (flat)
-//! and `<local_dir>/<YYYYMM>/*.md` (sharded).
+//! flat, sharded, and one-level bundle layouts. Local plans live under
+//! `<local_dir>/*.md` (flat) and `<local_dir>/<YYYYMM>/*.md` (sharded).
 //! Discovery is deliberately resilient: missing root directories yield no
 //! plans (not an error), unreadable/non-UTF-8 files are skipped, and malformed
 //! or absent frontmatter degrades to a body-derived title and a file-mtime
@@ -52,7 +52,8 @@ const CANONICAL_DT_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 /// Results are returned in a deterministic order: repo plans first (in the
 /// supplied corpus order, or grouped by the [`REPO_PLAN_KINDS`] order when
 /// corpora are omitted), followed by local plans. Explicit corpora and local
-/// plans each yield flat files before sharded files.
+/// plans each yield flat files before sharded files; explicit corpora then
+/// include one level of bundle files below shards.
 pub fn read_plans(
     repo_sdd_root: Option<&Path>,
     local_plans_dir: Option<&Path>,
@@ -94,9 +95,17 @@ fn read_document_corpus(
     for file in sorted_markdown_files(root)? {
         push_repo_plan(root, kind, kinds, &file, out);
     }
-    for shard in sorted_subdirs(root)? {
-        for file in sorted_markdown_files(&shard)? {
+    let shards = sorted_document_subdirs(root)?;
+    for shard in &shards {
+        for file in sorted_markdown_files(shard)? {
             push_repo_plan(root, kind, kinds, &file, out);
+        }
+    }
+    for shard in &shards {
+        for bundle in sorted_document_subdirs(shard)? {
+            for file in sorted_markdown_files(&bundle)? {
+                push_repo_plan(root, kind, kinds, &file, out);
+            }
         }
     }
     Ok(())
@@ -468,6 +477,20 @@ fn sorted_subdirs(dir: &Path) -> Result<Vec<PathBuf>, PlanError> {
         .collect())
 }
 
+fn sorted_document_subdirs(dir: &Path) -> Result<Vec<PathBuf>, PlanError> {
+    Ok(sorted_subdirs(dir)?
+        .into_iter()
+        .filter(|path| !is_excluded_document_subdir(path))
+        .collect())
+}
+
+fn is_excluded_document_subdir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.starts_with('.') || matches!(name, "prompts" | "specs")
+}
+
 fn sorted_markdown_files(dir: &Path) -> Result<Vec<PathBuf>, PlanError> {
     Ok(read_dir_sorted(dir)?
         .into_iter()
@@ -576,6 +599,82 @@ mod tests {
         );
         assert!(plans.iter().all(|plan| plan.source == REPO_SOURCE));
         assert!(plans.iter().all(|plan| plan.name != "legacy"));
+    }
+
+    #[test]
+    fn explicit_document_corpora_include_one_bundle_level_shallow_first() {
+        let temp = tempdir().unwrap();
+        let docs = temp.path().join("docs");
+        write(&docs.join("root.md"), "# Root\n");
+        write(&docs.join("202606").join("shard.md"), "# Shard 202606\n");
+        write(&docs.join("202607").join("shard.md"), "# Shard 202607\n");
+        write(
+            &docs.join("202606").join("bundle_b").join("b.md"),
+            "# Bundle B\n",
+        );
+        write(
+            &docs.join("202607").join("bundle_a").join("a.md"),
+            "# Bundle A\n",
+        );
+        let corpora = vec![(docs, "docs".to_string())];
+
+        let plans = read_plans(None, None, None, Some(&corpora)).unwrap();
+
+        let discovered: Vec<&str> =
+            plans.iter().map(|plan| plan.relpath.as_str()).collect();
+        assert_eq!(
+            discovered,
+            [
+                "root.md",
+                "202606/shard.md",
+                "202607/shard.md",
+                "202606/bundle_b/b.md",
+                "202607/bundle_a/a.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_document_corpora_skip_prompt_specs_dotdirs_and_deeper_files() {
+        let temp = tempdir().unwrap();
+        let docs = temp.path().join("docs");
+        write(
+            &docs.join("202607").join("bundle").join("visible.md"),
+            "# Visible\n",
+        );
+        write(
+            &docs.join(".root_hidden").join("hidden.md"),
+            "# Root hidden\n",
+        );
+        write(&docs.join("prompts").join("prompt.md"), "# Root prompt\n");
+        write(&docs.join("specs").join("spec.md"), "# Root spec\n");
+        write(
+            &docs.join("202607").join(".bundle_hidden").join("hidden.md"),
+            "# Bundle hidden\n",
+        );
+        write(
+            &docs.join("202607").join("prompts").join("prompt.md"),
+            "# Prompt\n",
+        );
+        write(
+            &docs.join("202607").join("specs").join("spec.md"),
+            "# Spec\n",
+        );
+        write(
+            &docs
+                .join("202607")
+                .join("bundle")
+                .join("deeper")
+                .join("too_deep.md"),
+            "# Too deep\n",
+        );
+        let corpora = vec![(docs, "docs".to_string())];
+
+        let plans = read_plans(None, None, None, Some(&corpora)).unwrap();
+
+        let discovered: Vec<&str> =
+            plans.iter().map(|plan| plan.relpath.as_str()).collect();
+        assert_eq!(discovered, ["202607/bundle/visible.md"]);
     }
 
     #[test]
