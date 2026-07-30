@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1](https://github.com/sase-org/sase-core/compare/v0.13.0...v0.13.1) - 2026-07-30
+
+### Added
+
+- add artifact consumption ledger queries
+
 ## [0.13.0](https://github.com/sase-org/sase-core/compare/v0.12.19...v0.13.0) - 2026-07-30
 
 ### Added
