@@ -13,11 +13,12 @@ pub mod wire;
 mod xprompt_args;
 
 pub use at_reference::{
-    build_at_reference_menu, detect_at_reference_context,
-    AtReferenceContextWire, AtReferenceGroup, AtReferenceInventoryWire,
-    AtReferenceKindRowWire, AtReferenceMenuWire, AtReferencePathQueryWire,
-    AtReferencePathRowWire, AtReferencePayloadRowWire, AtReferenceRowWire,
-    AtReferenceStage, AT_REFERENCE_MAX_GROUP_ROWS,
+    build_at_reference_menu, build_at_reference_menu_with_payload_index,
+    detect_at_reference_context, AtReferenceContextWire, AtReferenceGroup,
+    AtReferenceInventoryWire, AtReferenceKindRowWire, AtReferenceMenuWire,
+    AtReferencePathQueryWire, AtReferencePathRowWire, AtReferencePayloadIndex,
+    AtReferencePayloadRowWire, AtReferenceRowWire, AtReferenceStage,
+    AT_REFERENCE_MAX_GROUP_ROWS,
 };
 pub use completion::{
     apply_vcs_project_selection, apply_vcs_ref_selection,

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{prompt_literal_zone_ranges, scan_artifact_refs};
 
+use super::fuzzy::{
+    compare_fuzzy_prepared, compare_prepared_text, fuzzy_match_prepared,
+    FuzzyQuery, FuzzyText,
+};
 use super::token::DocumentSnapshot;
 use super::wire::EditorPosition;
 use super::{compare_fuzzy, fuzzy_match, FuzzyMatch};
@@ -79,6 +83,42 @@ pub struct AtReferenceInventoryWire {
     pub payloads: Vec<AtReferencePayloadRowWire>,
     #[serde(default)]
     pub truncated_payloads: usize,
+}
+
+/// Payload rows and their reusable native fuzzy-match metadata.
+#[derive(Clone, Debug)]
+pub struct AtReferencePayloadIndex {
+    rows: Vec<IndexedPayloadRow>,
+}
+
+#[derive(Clone, Debug)]
+struct IndexedPayloadRow {
+    row: AtReferencePayloadRowWire,
+    payload: FuzzyText,
+    title: FuzzyText,
+}
+
+impl AtReferencePayloadIndex {
+    pub fn new(rows: Vec<AtReferencePayloadRowWire>) -> Self {
+        Self {
+            rows: rows
+                .into_iter()
+                .map(|row| IndexedPayloadRow {
+                    payload: FuzzyText::new(&row.payload),
+                    title: FuzzyText::new(&row.label),
+                    row,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,9 +224,31 @@ pub fn build_at_reference_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
 ) -> AtReferenceMenuWire {
+    build_at_reference_menu_inner(context, inventory, None)
+}
+
+/// Build an at-reference menu using a reusable payload index.
+///
+/// The index replaces `inventory.payloads`; kinds, paths, and truncation
+/// metadata continue to come from the inventory wire.
+pub fn build_at_reference_menu_with_payload_index(
+    context: &AtReferenceContextWire,
+    inventory: &AtReferenceInventoryWire,
+    payload_index: &AtReferencePayloadIndex,
+) -> AtReferenceMenuWire {
+    build_at_reference_menu_inner(context, inventory, Some(payload_index))
+}
+
+fn build_at_reference_menu_inner(
+    context: &AtReferenceContextWire,
+    inventory: &AtReferenceInventoryWire,
+    payload_index: Option<&AtReferencePayloadIndex>,
+) -> AtReferenceMenuWire {
     match context.stage {
         AtReferenceStage::Kind => build_kind_menu(context, inventory),
-        AtReferenceStage::Payload => build_payload_menu(context, inventory),
+        AtReferenceStage::Payload => {
+            build_payload_menu(context, inventory, payload_index)
+        }
     }
 }
 
@@ -398,6 +460,8 @@ struct MatchedPayload<'a> {
     payload_match: Option<FuzzyMatch>,
     title_match: Option<FuzzyMatch>,
     payload_is_best: bool,
+    prepared_payload: Option<&'a FuzzyText>,
+    prepared_title: Option<&'a FuzzyText>,
 }
 
 impl MatchedPayload<'_> {
@@ -414,53 +478,65 @@ impl MatchedPayload<'_> {
             )
         }
     }
+
+    fn best_prepared_match(&self) -> Option<(&FuzzyMatch, &str, &FuzzyText)> {
+        if self.payload_is_best {
+            Some((
+                self.payload_match.as_ref()?,
+                &self.row.payload,
+                self.prepared_payload?,
+            ))
+        } else {
+            Some((
+                self.title_match.as_ref()?,
+                &self.row.label,
+                self.prepared_title?,
+            ))
+        }
+    }
 }
 
 fn build_payload_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
+    payload_index: Option<&AtReferencePayloadIndex>,
 ) -> AtReferenceMenuWire {
     let kind = context.kind.as_deref().unwrap_or_default();
-    let mut matches = inventory
-        .payloads
-        .iter()
-        .filter_map(|row| {
-            let payload_match = fuzzy_match(&context.query, &row.payload);
-            let title_match = fuzzy_match(&context.query, &row.label);
-            if payload_match.is_none() && title_match.is_none() {
-                return None;
-            }
-            let payload_is_best = match (&payload_match, &title_match) {
-                (Some(payload_match), Some(title_match)) => {
-                    compare_fuzzy(
-                        (payload_match, &row.payload),
-                        (title_match, &row.label),
-                    ) != Ordering::Greater
-                }
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => unreachable!(),
-            };
-            Some(MatchedPayload {
-                row,
-                payload_match,
-                title_match,
-                payload_is_best,
+    let query = FuzzyQuery::new(&context.query);
+    let mut matches = if let Some(payload_index) = payload_index {
+        payload_index
+            .rows
+            .iter()
+            .filter_map(|indexed| {
+                matched_payload(
+                    &indexed.row,
+                    fuzzy_match_prepared(&query, &indexed.payload),
+                    fuzzy_match_prepared(&query, &indexed.title),
+                    Some(&indexed.payload),
+                    Some(&indexed.title),
+                )
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    } else {
+        inventory
+            .payloads
+            .iter()
+            .filter_map(|row| {
+                matched_payload(
+                    row,
+                    fuzzy_match(&context.query, &row.payload),
+                    fuzzy_match(&context.query, &row.label),
+                    None,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     if !context.query.is_empty() {
         matches.sort_by(|left, right| {
-            compare_fuzzy(left.best_match(), right.best_match())
-                .then_with(|| {
-                    compare_case_insensitive(
-                        &left.row.payload,
-                        &right.row.payload,
-                    )
-                })
-                .then_with(|| {
-                    compare_case_insensitive(&left.row.label, &right.row.label)
-                })
+            compare_payload_matches(left, right)
+                .then_with(|| compare_payload_text(left, right, true))
+                .then_with(|| compare_payload_text(left, right, false))
         });
     }
     let payload_count = matches.len();
@@ -505,6 +581,76 @@ fn build_payload_menu(
         file_count: 0,
         payload_count,
         truncated_payloads: inventory.truncated_payloads,
+    }
+}
+
+fn matched_payload<'a>(
+    row: &'a AtReferencePayloadRowWire,
+    payload_match: Option<FuzzyMatch>,
+    title_match: Option<FuzzyMatch>,
+    prepared_payload: Option<&'a FuzzyText>,
+    prepared_title: Option<&'a FuzzyText>,
+) -> Option<MatchedPayload<'a>> {
+    if payload_match.is_none() && title_match.is_none() {
+        return None;
+    }
+    let payload_is_best = match (&payload_match, &title_match) {
+        (Some(payload_match), Some(title_match)) => {
+            compare_fuzzy(
+                (payload_match, &row.payload),
+                (title_match, &row.label),
+            ) != Ordering::Greater
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => unreachable!(),
+    };
+    Some(MatchedPayload {
+        row,
+        payload_match,
+        title_match,
+        payload_is_best,
+        prepared_payload,
+        prepared_title,
+    })
+}
+
+fn compare_payload_matches(
+    left: &MatchedPayload<'_>,
+    right: &MatchedPayload<'_>,
+) -> Ordering {
+    match (left.best_prepared_match(), right.best_prepared_match()) {
+        (Some(left), Some(right)) => compare_fuzzy_prepared(left, right),
+        _ => compare_fuzzy(left.best_match(), right.best_match()),
+    }
+}
+
+fn compare_payload_text(
+    left: &MatchedPayload<'_>,
+    right: &MatchedPayload<'_>,
+    payload: bool,
+) -> Ordering {
+    let (left_text, right_text, left_prepared, right_prepared) = if payload {
+        (
+            left.row.payload.as_str(),
+            right.row.payload.as_str(),
+            left.prepared_payload,
+            right.prepared_payload,
+        )
+    } else {
+        (
+            left.row.label.as_str(),
+            right.row.label.as_str(),
+            left.prepared_title,
+            right.prepared_title,
+        )
+    };
+    match (left_prepared, right_prepared) {
+        (Some(left_prepared), Some(right_prepared)) => compare_prepared_text(
+            (left_text, left_prepared),
+            (right_text, right_prepared),
+        ),
+        _ => compare_case_insensitive(left_text, right_text),
     }
 }
 
@@ -959,6 +1105,48 @@ mod tests {
         assert_eq!(row.match_tier, 2);
         assert_eq!(slice_runs(&row.label, &row.label_match), vec!["site"]);
         assert_eq!(slice_runs(&row.title, &row.title_match), vec!["Site"]);
+    }
+
+    #[test]
+    fn indexed_payload_menu_matches_the_wire_inventory_path() {
+        let payloads = vec![
+            payload(
+                "202607/sase_sites_hub_and_pages.md",
+                "SASE Sites",
+                "research",
+                "3d",
+            ),
+            payload("other.md", "No match", "research", "now"),
+        ];
+        let context = context("@research:site", 14).unwrap();
+        let expected = build_at_reference_menu(
+            &context,
+            &AtReferenceInventoryWire {
+                payloads: payloads.clone(),
+                truncated_payloads: 7,
+                ..Default::default()
+            },
+        );
+        let index = AtReferencePayloadIndex::new(payloads);
+        assert_eq!(index.len(), 2);
+        assert!(!index.is_empty());
+
+        let indexed = build_at_reference_menu_with_payload_index(
+            &context,
+            &AtReferenceInventoryWire {
+                payloads: vec![payload(
+                    "ignored.md",
+                    "Ignored",
+                    "research",
+                    "",
+                )],
+                truncated_payloads: 7,
+                ..Default::default()
+            },
+            &index,
+        );
+
+        assert_eq!(indexed, expected);
     }
 
     #[test]

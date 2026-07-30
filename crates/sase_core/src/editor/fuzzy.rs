@@ -1,3 +1,4 @@
+use std::char::ToLowercase;
 use std::cmp::Ordering;
 
 const SCORE_MATCH: i32 = 16;
@@ -19,11 +20,64 @@ pub struct FuzzyMatch {
     pub runs: Vec<(u32, u32)>,
 }
 
+/// Query characters normalized once for matching against many indexed texts.
+#[derive(Clone, Debug)]
+pub(crate) struct FuzzyQuery {
+    folded_chars: Vec<ToLowercase>,
+}
+
+impl FuzzyQuery {
+    pub(crate) fn new(query: &str) -> Self {
+        Self {
+            folded_chars: query.chars().map(char::to_lowercase).collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.folded_chars.is_empty()
+    }
+}
+
+/// Text metadata reused across repeated fuzzy matches.
+#[derive(Clone, Debug)]
+pub(crate) struct FuzzyText {
+    chars: Vec<char>,
+    folded_chars: Vec<ToLowercase>,
+    lowercase: String,
+    basename_start: usize,
+}
+
+impl FuzzyText {
+    pub(crate) fn new(text: &str) -> Self {
+        let chars = text.chars().collect::<Vec<_>>();
+        let folded_chars =
+            chars.iter().copied().map(char::to_lowercase).collect();
+        let lowercase = text.to_lowercase();
+        let basename_start = basename_start(&chars);
+        Self {
+            chars,
+            folded_chars,
+            lowercase,
+            basename_start,
+        }
+    }
+}
+
 /// Match `query` against `text` case-insensitively.
 ///
 /// The alignment is first found from left to right, tightened from right to
 /// left, and retried inside the basename when that produces a better score.
 pub fn fuzzy_match(query: &str, text: &str) -> Option<FuzzyMatch> {
+    let query = FuzzyQuery::new(query);
+    let text = FuzzyText::new(text);
+    fuzzy_match_prepared(&query, &text)
+}
+
+/// Match a prepared query against text metadata built outside the hot path.
+pub(crate) fn fuzzy_match_prepared(
+    query: &FuzzyQuery,
+    text: &FuzzyText,
+) -> Option<FuzzyMatch> {
     if query.is_empty() {
         return Some(FuzzyMatch {
             tier: 0,
@@ -32,25 +86,26 @@ pub fn fuzzy_match(query: &str, text: &str) -> Option<FuzzyMatch> {
         });
     }
 
-    let query_chars = query.chars().collect::<Vec<_>>();
-    let text_chars = text.chars().collect::<Vec<_>>();
-    let basename_start = basename_start(&text_chars);
+    let mut positions = tight_alignment(
+        &query.folded_chars,
+        &text.folded_chars,
+        0,
+        text.chars.len(),
+    )?;
+    let mut score =
+        score_positions(&text.chars, &positions, text.basename_start);
 
-    let mut positions =
-        tight_alignment(&query_chars, &text_chars, 0, text_chars.len())?;
-    let mut score = score_positions(&text_chars, &positions, basename_start);
-
-    if positions[0] < basename_start {
+    if positions[0] < text.basename_start {
         if let Some(basename_positions) = tight_alignment(
-            &query_chars,
-            &text_chars,
-            basename_start,
-            text_chars.len(),
+            &query.folded_chars,
+            &text.folded_chars,
+            text.basename_start,
+            text.chars.len(),
         ) {
             let basename_score = score_positions(
-                &text_chars,
+                &text.chars,
                 &basename_positions,
-                basename_start,
+                text.basename_start,
             );
             if basename_score > score {
                 positions = basename_positions;
@@ -59,14 +114,18 @@ pub fn fuzzy_match(query: &str, text: &str) -> Option<FuzzyMatch> {
         }
     }
 
-    let tier = if starts_with_case_insensitive(&text_chars, &query_chars) {
+    let tier = if starts_with_case_insensitive(
+        &text.folded_chars,
+        &query.folded_chars,
+    ) {
         0
     } else if starts_with_case_insensitive(
-        &text_chars[basename_start..],
-        &query_chars,
+        &text.folded_chars[text.basename_start..],
+        &query.folded_chars,
     ) {
         1
-    } else if contains_case_insensitive(&text_chars, &query_chars) {
+    } else if contains_case_insensitive(&text.folded_chars, &query.folded_chars)
+    {
         2
     } else {
         3
@@ -93,9 +152,33 @@ pub fn compare_fuzzy(
         .then_with(|| left.1.cmp(right.1))
 }
 
+/// Compare fuzzy matches using text metadata built outside the hot path.
+pub(crate) fn compare_fuzzy_prepared(
+    left: (&FuzzyMatch, &str, &FuzzyText),
+    right: (&FuzzyMatch, &str, &FuzzyText),
+) -> Ordering {
+    left.0
+        .tier
+        .cmp(&right.0.tier)
+        .then_with(|| right.0.score.cmp(&left.0.score))
+        .then_with(|| left.2.chars.len().cmp(&right.2.chars.len()))
+        .then_with(|| left.2.lowercase.cmp(&right.2.lowercase))
+        .then_with(|| left.1.cmp(right.1))
+}
+
+pub(crate) fn compare_prepared_text(
+    left: (&str, &FuzzyText),
+    right: (&str, &FuzzyText),
+) -> Ordering {
+    left.1
+        .lowercase
+        .cmp(&right.1.lowercase)
+        .then_with(|| left.0.cmp(right.0))
+}
+
 fn tight_alignment(
-    query: &[char],
-    text: &[char],
+    query: &[ToLowercase],
+    text: &[ToLowercase],
     start: usize,
     end: usize,
 ) -> Option<Vec<usize>> {
@@ -103,7 +186,7 @@ fn tight_alignment(
     let mut earliest_end = None;
     for (text_index, text_char) in text.iter().enumerate().take(end).skip(start)
     {
-        if chars_equal_case_insensitive(*text_char, query[query_index]) {
+        if folded_chars_equal(text_char, &query[query_index]) {
             query_index += 1;
             if query_index == query.len() {
                 earliest_end = Some(text_index);
@@ -116,10 +199,7 @@ fn tight_alignment(
     let mut positions = vec![0; query.len()];
     let mut query_index = query.len();
     for text_index in (start..=earliest_end).rev() {
-        if chars_equal_case_insensitive(
-            text[text_index],
-            query[query_index - 1],
-        ) {
+        if folded_chars_equal(&text[text_index], &query[query_index - 1]) {
             query_index -= 1;
             positions[query_index] = text_index;
             if query_index == 0 {
@@ -178,37 +258,40 @@ fn basename_start(text: &[char]) -> usize {
         .map_or(0, |position| position + 1)
 }
 
-fn starts_with_case_insensitive(text: &[char], query: &[char]) -> bool {
+fn starts_with_case_insensitive(
+    text: &[ToLowercase],
+    query: &[ToLowercase],
+) -> bool {
     text.len() >= query.len()
         && text
             .iter()
             .zip(query)
-            .all(|(left, right)| chars_equal_case_insensitive(*left, *right))
+            .all(|(left, right)| folded_chars_equal(left, right))
 }
 
-fn contains_case_insensitive(text: &[char], query: &[char]) -> bool {
+fn contains_case_insensitive(
+    text: &[ToLowercase],
+    query: &[ToLowercase],
+) -> bool {
     let mut prefix_lengths = vec![0; query.len()];
     let mut matched = 0;
     for index in 1..query.len() {
-        while matched > 0
-            && !chars_equal_case_insensitive(query[index], query[matched])
+        while matched > 0 && !folded_chars_equal(&query[index], &query[matched])
         {
             matched = prefix_lengths[matched - 1];
         }
-        if chars_equal_case_insensitive(query[index], query[matched]) {
+        if folded_chars_equal(&query[index], &query[matched]) {
             matched += 1;
         }
         prefix_lengths[index] = matched;
     }
 
     matched = 0;
-    for &character in text {
-        while matched > 0
-            && !chars_equal_case_insensitive(character, query[matched])
-        {
+    for character in text {
+        while matched > 0 && !folded_chars_equal(character, &query[matched]) {
             matched = prefix_lengths[matched - 1];
         }
-        if chars_equal_case_insensitive(character, query[matched]) {
+        if folded_chars_equal(character, &query[matched]) {
             matched += 1;
             if matched == query.len() {
                 return true;
@@ -218,8 +301,8 @@ fn contains_case_insensitive(text: &[char], query: &[char]) -> bool {
     false
 }
 
-fn chars_equal_case_insensitive(left: char, right: char) -> bool {
-    left.to_lowercase().eq(right.to_lowercase())
+fn folded_chars_equal(left: &ToLowercase, right: &ToLowercase) -> bool {
+    left.clone().eq(right.clone())
 }
 
 fn positions_to_runs(positions: &[usize]) -> Vec<(u32, u32)> {

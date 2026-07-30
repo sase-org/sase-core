@@ -162,7 +162,10 @@
 //! - `sdd_plan_header_block_remove_section(document: str, kind: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `at_reference_context(text: str, line: int, character: int, known_kinds:
 //!   Sequence[str] | None = None) -> dict | None`
-//! - `at_reference_menu(context: dict, inventory: dict) -> dict`
+//! - `AtReferenceInventory(payloads: Sequence[dict])`
+//! - `at_reference_menu(context: dict, inventory: dict, payload_index:
+//!   AtReferenceInventory | None = None) -> dict`
+//! - `fuzzy_match(query: str, text: str) -> dict | None`
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
@@ -555,6 +558,37 @@ impl PyQueryCorpusHandle {
 #[derive(Debug)]
 struct PyQueryProgramHandle {
     program: CoreQueryProgram,
+}
+
+/// Immutable native payload rows and fuzzy-match metadata.
+#[pyclass(name = "AtReferenceInventory", module = "sase_core_rs", frozen)]
+#[derive(Clone, Debug)]
+struct PyAtReferenceInventory {
+    payloads: sase_core::AtReferencePayloadIndex,
+}
+
+#[pymethods]
+impl PyAtReferenceInventory {
+    #[new]
+    #[pyo3(signature = (*, payloads))]
+    fn new(payloads: &Bound<'_, PyList>) -> PyResult<Self> {
+        let payloads = serde_json::from_value::<
+            Vec<sase_core::AtReferencePayloadRowWire>,
+        >(py_to_json_value(payloads.as_any())?)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "payloads are not valid AtReferencePayloadRowWire dicts: \
+                     {error}"
+            ))
+        })?;
+        Ok(Self {
+            payloads: sase_core::AtReferencePayloadIndex::new(payloads),
+        })
+    }
+
+    fn __len__(&self) -> usize {
+        self.payloads.len()
+    }
 }
 
 #[pyfunction]
@@ -4701,12 +4735,17 @@ fn py_at_reference_context(
 
 /// Return grouped `@` reference menu rows for a detected context and caller
 /// supplied inventory.
+///
+/// `payload_index`, when supplied, replaces `inventory["payloads"]` without
+/// converting those rows through Python objects on each call.
 #[pyfunction]
 #[pyo3(name = "at_reference_menu")]
+#[pyo3(signature = (context, inventory, payload_index = None))]
 fn py_at_reference_menu(
     py: Python<'_>,
     context: Bound<'_, PyDict>,
     inventory: Bound<'_, PyDict>,
+    payload_index: Option<PyRef<'_, PyAtReferenceInventory>>,
 ) -> PyResult<PyObject> {
     let context = serde_json::from_value::<sase_core::AtReferenceContextWire>(
         py_to_json_value(context.as_any())?,
@@ -4725,11 +4764,40 @@ fn py_at_reference_menu(
                 "inventory is not a valid AtReferenceInventoryWire dict: {error}"
             ))
         })?;
-    let menu = sase_core::editor_build_at_reference_menu(&context, &inventory);
+    let menu = if let Some(payload_index) = payload_index {
+        sase_core::editor_build_at_reference_menu_with_payload_index(
+            &context,
+            &inventory,
+            &payload_index.payloads,
+        )
+    } else {
+        sase_core::editor_build_at_reference_menu(&context, &inventory)
+    };
     let value = serde_json::to_value(&menu).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Fuzzy-match a query against text using the shared editor matcher.
+#[pyfunction]
+#[pyo3(name = "fuzzy_match")]
+fn py_fuzzy_match(
+    py: Python<'_>,
+    query: &str,
+    text: &str,
+) -> PyResult<PyObject> {
+    let Some(match_result) = sase_core::editor_fuzzy_match(query, text) else {
+        return Ok(py.None());
+    };
+    json_value_to_py(
+        py,
+        &serde_json::json!({
+            "tier": match_result.tier,
+            "score": match_result.score,
+            "runs": match_result.runs,
+        }),
+    )
 }
 
 // --- Placeholder completion and highlighting surface ---------------------
@@ -6346,8 +6414,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_frontmatter_input_type_schema, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
+    m.add_class::<PyAtReferenceInventory>()?;
     m.add_function(wrap_pyfunction!(py_at_reference_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_at_reference_menu, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fuzzy_match, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
@@ -8050,6 +8120,12 @@ mod tests {
                     wrap_pyfunction!(py_at_reference_menu, &module).unwrap(),
                 )
                 .unwrap();
+            module.add_class::<PyAtReferenceInventory>().unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_fuzzy_match, &module).unwrap(),
+                )
+                .unwrap();
 
             let context = module
                 .getattr("at_reference_context")
@@ -8124,6 +8200,157 @@ mod tests {
             assert_eq!(payload_context_value["stage"], json!("payload"));
             assert_eq!(payload_context_value["query"], json!("sa"));
             assert_eq!(payload_context_value["kind"], json!("bug"));
+
+            let payloads = json_value_to_py(
+                py,
+                &json!([{
+                    "payload": "202607/sase_sites_hub_and_pages.md",
+                    "label": "SASE Sites Hub and Pages",
+                    "detail": "research",
+                    "age": "3d",
+                }]),
+            )
+            .unwrap();
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("payloads", payloads).unwrap();
+            let payload_index = module
+                .getattr("AtReferenceInventory")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
+            assert_eq!(payload_index.len().unwrap(), 1);
+            assert!(payload_index.setattr("payloads", py.None()).is_err());
+
+            let indexed_context = module
+                .getattr("at_reference_context")
+                .unwrap()
+                .call1(("see @research:site", 0_u32, 18_u32))
+                .unwrap();
+            let indexed_inventory = json_value_to_py(
+                py,
+                &json!({
+                    "kinds": [],
+                    "paths": [],
+                    "payloads": [{
+                        "payload": "ignored.md",
+                        "label": "Ignored",
+                        "detail": "",
+                        "age": "",
+                    }],
+                    "truncated_payloads": 4,
+                }),
+            )
+            .unwrap();
+            let indexed_menu = module
+                .getattr("at_reference_menu")
+                .unwrap()
+                .call1((
+                    &indexed_context,
+                    indexed_inventory.bind(py),
+                    &payload_index,
+                ))
+                .unwrap();
+            let indexed_menu = py_to_json_value(&indexed_menu).unwrap();
+            assert_eq!(indexed_menu["payload_count"], json!(1));
+            assert_eq!(indexed_menu["truncated_payloads"], json!(4));
+            assert_eq!(
+                indexed_menu["rows"][0]["label"],
+                json!("202607/sase_sites_hub_and_pages.md")
+            );
+            assert_eq!(
+                indexed_menu["rows"][0]["label_match"],
+                json!([[12, 16]])
+            );
+
+            let fuzzy = module
+                .getattr("fuzzy_match")
+                .unwrap()
+                .call1(("rés", "café/東京Résumé.md"))
+                .unwrap();
+            let fuzzy = py_to_json_value(&fuzzy).unwrap();
+            assert_eq!(fuzzy["tier"], json!(2));
+            assert_eq!(fuzzy["runs"], json!([[7, 10]]));
+            let no_match = module
+                .getattr("fuzzy_match")
+                .unwrap()
+                .call1(("missing", "text"))
+                .unwrap();
+            assert!(no_match.is_none());
+        });
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "the 8 ms performance gate is calibrated for release builds"
+    )]
+    fn indexed_at_reference_binding_stays_below_eight_ms_for_5000_rows() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module.add_class::<PyAtReferenceInventory>().unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_at_reference_menu, &module).unwrap(),
+                )
+                .unwrap();
+
+            let payloads = (0..5_000)
+                .map(|index| {
+                    json!({
+                        "payload": format!(
+                            "202607/bundle_{index:04}/artifact_{index:04}.md"
+                        ),
+                        "label": format!("Artifact title {index:04}"),
+                        "detail": "plans",
+                        "age": "now",
+                    })
+                })
+                .collect::<Vec<_>>();
+            let payloads = json_value_to_py(py, &json!(payloads)).unwrap();
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("payloads", payloads).unwrap();
+            let payload_index = module
+                .getattr("AtReferenceInventory")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
+            let context = json_value_to_py(
+                py,
+                &json!({
+                    "stage": "payload",
+                    "candidate_span": [0, 12],
+                    "replacement_span": [1, 12],
+                    "query_span": [7, 12],
+                    "query": "artifact",
+                    "kind": "plans",
+                    "path_query": null,
+                }),
+            )
+            .unwrap();
+            let inventory = json_value_to_py(
+                py,
+                &json!({
+                    "kinds": [],
+                    "paths": [],
+                    "payloads": [],
+                    "truncated_payloads": 0,
+                }),
+            )
+            .unwrap();
+            let menu = module.getattr("at_reference_menu").unwrap();
+            menu.call1((&context, &inventory, &payload_index)).unwrap();
+
+            const SAMPLES: u32 = 40;
+            let started = Instant::now();
+            for _ in 0..SAMPLES {
+                menu.call1((&context, &inventory, &payload_index)).unwrap();
+            }
+            let mean = started.elapsed() / SAMPLES;
+            assert!(
+                mean < Duration::from_millis(8),
+                "indexed 5000-row binding mean {mean:?} exceeded 8 ms"
+            );
         });
     }
 
