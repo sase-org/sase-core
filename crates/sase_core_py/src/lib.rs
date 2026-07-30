@@ -164,7 +164,7 @@
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `AtReferenceInventory(payloads: Sequence[dict])`
 //! - `at_reference_menu(context: dict, inventory: dict, payload_index:
-//!   AtReferenceInventory | None = None) -> dict`
+//!   AtReferenceInventory | None = None, options: dict | None = None) -> dict`
 //! - `fuzzy_match(query: str, text: str) -> dict | None`
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
@@ -4740,12 +4740,13 @@ fn py_at_reference_context(
 /// converting those rows through Python objects on each call.
 #[pyfunction]
 #[pyo3(name = "at_reference_menu")]
-#[pyo3(signature = (context, inventory, payload_index = None))]
+#[pyo3(signature = (context, inventory, payload_index = None, options = None))]
 fn py_at_reference_menu(
     py: Python<'_>,
     context: Bound<'_, PyDict>,
     inventory: Bound<'_, PyDict>,
     payload_index: Option<PyRef<'_, PyAtReferenceInventory>>,
+    options: Option<Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let context = serde_json::from_value::<sase_core::AtReferenceContextWire>(
         py_to_json_value(context.as_any())?,
@@ -4764,15 +4765,27 @@ fn py_at_reference_menu(
                 "inventory is not a valid AtReferenceInventoryWire dict: {error}"
             ))
         })?;
-    let menu = if let Some(payload_index) = payload_index {
-        sase_core::editor_build_at_reference_menu_with_payload_index(
-            &context,
-            &inventory,
-            &payload_index.payloads,
-        )
-    } else {
-        sase_core::editor_build_at_reference_menu(&context, &inventory)
-    };
+    let options = options
+        .map(|options| {
+            serde_json::from_value::<sase_core::AtReferenceMenuOptionsWire>(
+                py_to_json_value(options.as_any())?,
+            )
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "options is not a valid AtReferenceMenuOptionsWire dict: {error}"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let menu = sase_core::editor_build_at_reference_menu_with_options(
+        &context,
+        &inventory,
+        payload_index
+            .as_ref()
+            .map(|payload_index| &payload_index.payloads),
+        options,
+    );
     let value = serde_json::to_value(&menu).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -8179,16 +8192,36 @@ mod tests {
                 .unwrap();
             let menu_value = py_to_json_value(&menu).unwrap();
             assert_eq!(menu_value["artifact_count"], json!(2));
-            assert_eq!(menu_value["file_count"], json!(2));
+            assert_eq!(menu_value["file_count"], json!(0));
+            assert_eq!(menu_value["files_suppressed"], json!(true));
             assert_eq!(menu_value["shared_extension"], json!(""));
             assert_eq!(menu_value["rows"][0]["group"], json!("artifact"));
             assert_eq!(menu_value["rows"][0]["label"], json!("file"));
             assert_eq!(menu_value["rows"][0]["insertion"], json!("@file:"));
             assert_eq!(menu_value["rows"][1]["label"], json!("fixture"));
-            assert_eq!(menu_value["rows"][2]["group"], json!("file"));
-            assert_eq!(menu_value["rows"][2]["label"], json!("fixtures/"));
-            assert_eq!(menu_value["rows"][2]["insertion"], json!("@fixtures/"));
-            assert_eq!(menu_value["rows"][3]["label"], json!("final.md"));
+
+            let options =
+                json_value_to_py(py, &json!({"include_files": true})).unwrap();
+            let revealed_menu = module
+                .getattr("at_reference_menu")
+                .unwrap()
+                .call1((
+                    &context,
+                    inventory.bind(py),
+                    py.None(),
+                    options.bind(py),
+                ))
+                .unwrap();
+            let revealed_value = py_to_json_value(&revealed_menu).unwrap();
+            assert_eq!(revealed_value["file_count"], json!(2));
+            assert_eq!(revealed_value["files_suppressed"], json!(false));
+            assert_eq!(revealed_value["rows"][2]["group"], json!("file"));
+            assert_eq!(revealed_value["rows"][2]["label"], json!("fixtures/"));
+            assert_eq!(
+                revealed_value["rows"][2]["insertion"],
+                json!("@fixtures/")
+            );
+            assert_eq!(revealed_value["rows"][3]["label"], json!("final.md"));
 
             let payload_context = module
                 .getattr("at_reference_context")

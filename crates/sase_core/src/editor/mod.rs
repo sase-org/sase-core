@@ -13,9 +13,10 @@ pub mod wire;
 mod xprompt_args;
 
 pub use at_reference::{
-    build_at_reference_menu, build_at_reference_menu_with_payload_index,
-    detect_at_reference_context, AtReferenceContextWire, AtReferenceGroup,
-    AtReferenceInventoryWire, AtReferenceKindRowWire, AtReferenceMenuWire,
+    build_at_reference_menu, build_at_reference_menu_with_options,
+    build_at_reference_menu_with_payload_index, detect_at_reference_context,
+    AtReferenceContextWire, AtReferenceGroup, AtReferenceInventoryWire,
+    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferenceMenuWire,
     AtReferencePathQueryWire, AtReferencePathRowWire, AtReferencePayloadIndex,
     AtReferencePayloadRowWire, AtReferenceRowWire, AtReferenceStage,
     AT_REFERENCE_MAX_GROUP_ROWS,

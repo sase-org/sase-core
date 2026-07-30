@@ -85,6 +85,17 @@ pub struct AtReferenceInventoryWire {
     pub truncated_payloads: usize,
 }
 
+/// Caller policy for one at-reference menu build.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct AtReferenceMenuOptionsWire {
+    /// Include Kind-stage local path rows even when an artifact kind
+    /// prefix-matches the query. Set by an explicit user request.
+    pub include_files: bool,
+}
+
 /// Payload rows and their reusable native fuzzy-match metadata.
 #[derive(Clone, Debug)]
 pub struct AtReferencePayloadIndex {
@@ -143,6 +154,9 @@ pub struct AtReferenceMenuWire {
     pub file_count: usize,
     pub payload_count: usize,
     pub truncated_payloads: usize,
+    /// Kind-stage path rows existed but were withheld by the gate.
+    #[serde(default)]
+    pub files_suppressed: bool,
 }
 
 pub fn detect_at_reference_context(
@@ -224,7 +238,12 @@ pub fn build_at_reference_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
 ) -> AtReferenceMenuWire {
-    build_at_reference_menu_inner(context, inventory, None)
+    build_at_reference_menu_inner(
+        context,
+        inventory,
+        None,
+        AtReferenceMenuOptionsWire::default(),
+    )
 }
 
 /// Build an at-reference menu using a reusable payload index.
@@ -236,16 +255,32 @@ pub fn build_at_reference_menu_with_payload_index(
     inventory: &AtReferenceInventoryWire,
     payload_index: &AtReferencePayloadIndex,
 ) -> AtReferenceMenuWire {
-    build_at_reference_menu_inner(context, inventory, Some(payload_index))
+    build_at_reference_menu_inner(
+        context,
+        inventory,
+        Some(payload_index),
+        AtReferenceMenuOptionsWire::default(),
+    )
+}
+
+/// Build an at-reference menu with explicit caller policy.
+pub fn build_at_reference_menu_with_options(
+    context: &AtReferenceContextWire,
+    inventory: &AtReferenceInventoryWire,
+    payload_index: Option<&AtReferencePayloadIndex>,
+    options: AtReferenceMenuOptionsWire,
+) -> AtReferenceMenuWire {
+    build_at_reference_menu_inner(context, inventory, payload_index, options)
 }
 
 fn build_at_reference_menu_inner(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
     payload_index: Option<&AtReferencePayloadIndex>,
+    options: AtReferenceMenuOptionsWire,
 ) -> AtReferenceMenuWire {
     match context.stage {
-        AtReferenceStage::Kind => build_kind_menu(context, inventory),
+        AtReferenceStage::Kind => build_kind_menu(context, inventory, options),
         AtReferenceStage::Payload => {
             build_payload_menu(context, inventory, payload_index)
         }
@@ -337,6 +372,7 @@ fn split_path_query(query: &str) -> AtReferencePathQueryWire {
 fn build_kind_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
+    options: AtReferenceMenuOptionsWire,
 ) -> AtReferenceMenuWire {
     let mut kinds = inventory
         .kinds
@@ -354,6 +390,9 @@ fn build_kind_menu(
 
     let mut seen_kinds = BTreeSet::new();
     kinds.retain(|(row, _)| seen_kinds.insert(row.kind.clone()));
+    let kind_prefix_hit =
+        kinds.iter().any(|(_, match_result)| match_result.tier == 0);
+    let gate_files = kind_prefix_hit && !options.include_files;
     let artifact_count = kinds.len();
     let artifact_extension = shared_match_extension(
         &kinds,
@@ -404,39 +443,44 @@ fn build_kind_menu(
             }
         })
     });
-    let file_count = paths.len();
+    let files_suppressed = gate_files && !paths.is_empty();
+    let file_count = if gate_files { 0 } else { paths.len() };
     let file_extension = shared_match_extension(
         &paths,
         &path_query.partial,
         |(row, match_result)| (&row.name, match_result.tier),
     );
-    let file_rows = paths
-        .into_iter()
-        .take(AT_REFERENCE_MAX_GROUP_ROWS)
-        .map(|(row, match_result)| {
-            let label = if row.is_dir {
-                format!("{}/", row.name.trim_end_matches('/'))
-            } else {
-                row.name.clone()
-            };
-            AtReferenceRowWire {
-                group: AtReferenceGroup::File,
-                insertion: format!("@{}{}", path_query.directory, label),
-                label,
-                title: String::new(),
-                is_dir: row.is_dir,
-                detail: if row.is_dir {
-                    "directory".to_string()
+    let file_rows = if gate_files {
+        Vec::new()
+    } else {
+        paths
+            .into_iter()
+            .take(AT_REFERENCE_MAX_GROUP_ROWS)
+            .map(|(row, match_result)| {
+                let label = if row.is_dir {
+                    format!("{}/", row.name.trim_end_matches('/'))
                 } else {
-                    "file".to_string()
-                },
-                builtin: false,
-                label_match: match_result.runs,
-                title_match: Vec::new(),
-                match_tier: match_result.tier,
-            }
-        })
-        .collect::<Vec<_>>();
+                    row.name.clone()
+                };
+                AtReferenceRowWire {
+                    group: AtReferenceGroup::File,
+                    insertion: format!("@{}{}", path_query.directory, label),
+                    label,
+                    title: String::new(),
+                    is_dir: row.is_dir,
+                    detail: if row.is_dir {
+                        "directory".to_string()
+                    } else {
+                        "file".to_string()
+                    },
+                    builtin: false,
+                    label_match: match_result.runs,
+                    title_match: Vec::new(),
+                    match_tier: match_result.tier,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
 
     let shared_extension = if artifact_count == 0 {
         file_extension
@@ -452,6 +496,7 @@ fn build_kind_menu(
         file_count,
         payload_count: 0,
         truncated_payloads: inventory.truncated_payloads,
+        files_suppressed,
     }
 }
 
@@ -581,6 +626,7 @@ fn build_payload_menu(
         file_count: 0,
         payload_count,
         truncated_payloads: inventory.truncated_payloads,
+        files_suppressed: false,
     }
 }
 
@@ -889,25 +935,30 @@ mod tests {
     #[test]
     fn bare_menu_groups_builtins_then_sorted_kinds_and_visible_paths() {
         let detected = context("@", 1).unwrap();
-        let menu = build_at_reference_menu(
+        let inventory = AtReferenceInventoryWire {
+            kinds: vec![
+                kind("zeta", false),
+                kind("file", true),
+                kind("chat", true),
+                kind("commit", true),
+                kind("bug", true),
+                kind("Alpha", false),
+            ],
+            paths: vec![
+                path("z.txt", false),
+                path(".git", true),
+                path("src", true),
+                path("A.txt", false),
+            ],
+            payloads: vec![],
+            ..Default::default()
+        };
+        let menu = build_at_reference_menu_with_options(
             &detected,
-            &AtReferenceInventoryWire {
-                kinds: vec![
-                    kind("zeta", false),
-                    kind("file", true),
-                    kind("chat", true),
-                    kind("commit", true),
-                    kind("bug", true),
-                    kind("Alpha", false),
-                ],
-                paths: vec![
-                    path("z.txt", false),
-                    path(".git", true),
-                    path("src", true),
-                    path("A.txt", false),
-                ],
-                payloads: vec![],
-                ..Default::default()
+            &inventory,
+            None,
+            AtReferenceMenuOptionsWire {
+                include_files: true,
             },
         );
         assert_eq!(
@@ -922,27 +973,60 @@ mod tests {
         );
         assert_eq!(menu.artifact_count, 6);
         assert_eq!(menu.file_count, 3);
+        assert!(!menu.files_suppressed);
+
+        let gated = build_at_reference_menu(&detected, &inventory);
+        assert_eq!(
+            gated
+                .rows
+                .iter()
+                .map(|row| row.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@commit:", "@chat:", "@bug:", "@file:", "@Alpha:", "@zeta:"]
+        );
+        assert_eq!(gated.artifact_count, 6);
+        assert_eq!(gated.file_count, 0);
+        assert!(gated.files_suppressed);
     }
 
     #[test]
     fn kind_and_file_groups_filter_independently() {
         let detected = context("@pl", 3).unwrap();
-        let menu = build_at_reference_menu(
-            &detected,
-            &AtReferenceInventoryWire {
-                kinds: vec![kind("plan", false), kind("chat", true)],
-                paths: vec![path("plans", true), path("src", true)],
-                payloads: vec![],
-                ..Default::default()
-            },
-        );
+        let inventory = AtReferenceInventoryWire {
+            kinds: vec![kind("plan", false), kind("chat", true)],
+            paths: vec![path("plans", true), path("src", true)],
+            payloads: vec![],
+            ..Default::default()
+        };
+        let menu = build_at_reference_menu(&detected, &inventory);
         assert_eq!(
             menu.rows
                 .iter()
                 .map(|row| row.insertion.as_str())
                 .collect::<Vec<_>>(),
+            vec!["@plan:"]
+        );
+        assert_eq!(menu.file_count, 0);
+        assert!(menu.files_suppressed);
+
+        let revealed = build_at_reference_menu_with_options(
+            &detected,
+            &inventory,
+            None,
+            AtReferenceMenuOptionsWire {
+                include_files: true,
+            },
+        );
+        assert_eq!(
+            revealed
+                .rows
+                .iter()
+                .map(|row| row.insertion.as_str())
+                .collect::<Vec<_>>(),
             vec!["@plan:", "@plans/"]
         );
+        assert_eq!(revealed.file_count, 1);
+        assert!(!revealed.files_suppressed);
 
         let path_context = context("@src/", 5).unwrap();
         let path_menu = build_at_reference_menu(
@@ -956,6 +1040,51 @@ mod tests {
         );
         assert_eq!(path_menu.rows[0].insertion, "@src/lib.rs");
         assert_eq!(path_menu.rows[0].group, AtReferenceGroup::File);
+        assert!(!path_menu.files_suppressed);
+    }
+
+    #[test]
+    fn fuzzy_kind_matches_do_not_gate_file_rows() {
+        let inventory = AtReferenceInventoryWire {
+            kinds: vec![kind("research", false)],
+            paths: vec![path("rsch-notes", false), path("src", true)],
+            ..Default::default()
+        };
+
+        let subsequence =
+            build_at_reference_menu(&context("@rsch", 5).unwrap(), &inventory);
+        assert_eq!(
+            subsequence
+                .rows
+                .iter()
+                .map(|row| row.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@research:", "@rsch-notes"]
+        );
+        assert!(!subsequence.files_suppressed);
+
+        let short =
+            build_at_reference_menu(&context("@sr", 3).unwrap(), &inventory);
+        assert!(short
+            .rows
+            .iter()
+            .any(|row| row.group == AtReferenceGroup::File));
+        assert!(!short.files_suppressed);
+    }
+
+    #[test]
+    fn gated_menu_without_matching_paths_does_not_offer_an_empty_reveal() {
+        let menu = build_at_reference_menu(
+            &context("@pl", 3).unwrap(),
+            &AtReferenceInventoryWire {
+                kinds: vec![kind("plan", false)],
+                paths: vec![path("src", true)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(menu.artifact_count, 1);
+        assert_eq!(menu.file_count, 0);
+        assert!(!menu.files_suppressed);
     }
 
     #[test]
@@ -988,8 +1117,14 @@ mod tests {
             payloads: vec![],
             ..Default::default()
         };
-        let menu =
-            build_at_reference_menu(&context("@", 1).unwrap(), &inventory);
+        let menu = build_at_reference_menu_with_options(
+            &context("@", 1).unwrap(),
+            &inventory,
+            None,
+            AtReferenceMenuOptionsWire {
+                include_files: true,
+            },
+        );
         assert_eq!(menu.artifact_count, 205);
         assert_eq!(menu.file_count, 207);
         assert_eq!(menu.rows.len(), AT_REFERENCE_MAX_GROUP_ROWS * 2);
@@ -1006,6 +1141,8 @@ mod tests {
         let menu =
             build_at_reference_menu(&context("@p", 2).unwrap(), &inventory);
         assert_eq!(menu.shared_extension, "la");
+        assert_eq!(menu.file_count, 0);
+        assert!(menu.files_suppressed);
 
         let files_only = build_at_reference_menu(
             &context("@src/f", 6).unwrap(),

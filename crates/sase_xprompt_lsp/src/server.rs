@@ -10,24 +10,24 @@ use lsp_types::{
     ClientCapabilities, CodeAction, CodeActionKind, CodeActionOptions,
     CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     CodeActionResponse, Command, CompletionItem, CompletionOptions,
-    CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentChanges, ExecuteCommandOptions,
-    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, LSPAny, Location, MessageType, OneOf,
-    OptionalVersionedTextDocumentIdentifier, Position, Range, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
-    ServerInfo, TextDocumentEdit, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Uri, WorkDoneProgressOptions,
-    WorkspaceEdit,
+    CompletionParams, CompletionResponse, CompletionTriggerKind,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentChanges,
+    ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, LSPAny, Location,
+    MessageType, OneOf, OptionalVersionedTextDocumentIdentifier, Position,
+    Range, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    TextDocumentEdit, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, Uri, WorkDoneProgressOptions, WorkspaceEdit,
 };
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
     editor_build_agent_completion_candidates,
     editor_build_artifact_ref_payload_completion_candidates,
-    editor_build_at_reference_menu,
+    editor_build_at_reference_menu_with_options,
     editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
@@ -46,11 +46,11 @@ use sase_core::{
     editor_extract_token_at_position, editor_hover_at_position,
     ArtifactRefCompletionMode, ArtifactRefCompletionTrigger,
     ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
-    AtReferenceKindRowWire, AtReferencePathRowWire, AtReferencePayloadRowWire,
-    AtReferenceStage, CompletionCandidate, CompletionContextKind,
-    CompletionList, DocumentSnapshot, EditorRange, EditorSnippetEntryWire,
-    HelperHostBridge, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    AtReferencePayloadRowWire, AtReferenceStage, CompletionCandidate,
+    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
+    EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -202,6 +202,16 @@ impl XpromptLspServer {
         text: String,
         position: Position,
     ) -> Option<CompletionResponse> {
+        self.completion_for_text_with_trigger(text, position, None)
+            .await
+    }
+
+    pub async fn completion_for_text_with_trigger(
+        &self,
+        text: String,
+        position: Position,
+        trigger: Option<CompletionTriggerKind>,
+    ) -> Option<CompletionResponse> {
         let config = self.current_config();
         let document = DocumentSnapshot::new(text);
         let editor_position = to_editor_position(position);
@@ -259,6 +269,10 @@ impl XpromptLspServer {
                 artifact_context,
                 &config,
                 &document,
+                AtReferenceMenuOptionsWire {
+                    include_files: trigger
+                        == Some(CompletionTriggerKind::INVOKED),
+                },
             ));
         }
 
@@ -367,6 +381,7 @@ impl XpromptLspServer {
         artifact_context: Option<&ArtifactRefContextWire>,
         config: &ServerConfig,
         document: &DocumentSnapshot,
+        options: AtReferenceMenuOptionsWire,
     ) -> CompletionResponse {
         let Some(replacement_range) = document.byte_range_to_range(
             context.candidate_span.0,
@@ -381,7 +396,9 @@ impl XpromptLspServer {
             ..Default::default()
         };
         at_reference_completion_response(
-            editor_build_at_reference_menu(context, &inventory),
+            editor_build_at_reference_menu_with_options(
+                context, &inventory, None, options,
+            ),
             context,
             replacement_range,
         )
@@ -1199,9 +1216,10 @@ impl LanguageServer for XpromptLspServer {
             return Ok(None);
         }
         Ok(self
-            .completion_for_text(
+            .completion_for_text_with_trigger(
                 document.text,
                 params.text_document_position.position,
+                params.context.map(|context| context.trigger_kind),
             )
             .await)
     }
@@ -5225,32 +5243,16 @@ mod tests {
                 "@agent:",
                 "@designs:",
                 "@plan:",
-                "@plans/",
-                "@src/",
-                "@Justfile",
             ]
         );
         assert!(!bare_labels.contains(&"@.hidden"));
-        assert!(bare_items[..8].iter().all(|item| {
+        assert!(bare_items.iter().all(|item| {
             item.kind == Some(lsp_types::CompletionItemKind::ENUM_MEMBER)
                 && item
                     .sort_text
                     .as_deref()
                     .is_some_and(|sort| sort.starts_with("0:"))
         }));
-        assert!(bare_items[8..].iter().all(|item| {
-            item.sort_text
-                .as_deref()
-                .is_some_and(|sort| sort.starts_with("1:"))
-        }));
-        assert_eq!(
-            bare_items[8].kind,
-            Some(lsp_types::CompletionItemKind::FOLDER)
-        );
-        assert_eq!(
-            bare_items[10].kind,
-            Some(lsp_types::CompletionItemKind::FILE)
-        );
         for item in &bare_items {
             assert_eq!(item.filter_text.as_deref(), Some("@"));
             let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
@@ -5265,7 +5267,11 @@ mod tests {
 
         let narrowed_items = completion_items(
             server
-                .completion_for_text("@p".to_string(), Position::new(0, 2))
+                .completion_for_text_with_trigger(
+                    "@p".to_string(),
+                    Position::new(0, 2),
+                    Some(CompletionTriggerKind::TRIGGER_CHARACTER),
+                )
                 .await
                 .unwrap(),
         );
@@ -5274,30 +5280,61 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["@plan:", "@plans/"]
+            vec!["@plan:"]
         );
 
-        let path_items = completion_items(
+        let invoked_items = completion_items(
             server
-                .completion_for_text("@src/".to_string(), Position::new(0, 5))
+                .completion_for_text_with_trigger(
+                    "@p".to_string(),
+                    Position::new(0, 2),
+                    Some(CompletionTriggerKind::INVOKED),
+                )
                 .await
                 .unwrap(),
         );
-        assert_eq!(path_items.len(), 1);
-        assert_eq!(path_items[0].label, "@src/main.rs");
         assert_eq!(
-            path_items[0].kind,
-            Some(lsp_types::CompletionItemKind::FILE)
+            invoked_items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@plan:", "@plans/"]
         );
-        let Some(CompletionTextEdit::Edit(path_edit)) =
-            path_items[0].text_edit.as_ref()
-        else {
-            panic!("expected local path text edit");
-        };
         assert_eq!(
-            path_edit.range,
-            Range::new(Position::new(0, 0), Position::new(0, 5))
+            invoked_items[1].kind,
+            Some(lsp_types::CompletionItemKind::FOLDER)
         );
+
+        for trigger in [
+            CompletionTriggerKind::TRIGGER_CHARACTER,
+            CompletionTriggerKind::INVOKED,
+        ] {
+            let path_items = completion_items(
+                server
+                    .completion_for_text_with_trigger(
+                        "@src/".to_string(),
+                        Position::new(0, 5),
+                        Some(trigger),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(path_items.len(), 1);
+            assert_eq!(path_items[0].label, "@src/main.rs");
+            assert_eq!(
+                path_items[0].kind,
+                Some(lsp_types::CompletionItemKind::FILE)
+            );
+            let Some(CompletionTextEdit::Edit(path_edit)) =
+                path_items[0].text_edit.as_ref()
+            else {
+                panic!("expected local path text edit");
+            };
+            assert_eq!(
+                path_edit.range,
+                Range::new(Position::new(0, 0), Position::new(0, 5))
+            );
+        }
 
         let payload_items = completion_items(
             server
