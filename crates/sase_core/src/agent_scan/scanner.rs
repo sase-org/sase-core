@@ -41,6 +41,9 @@ use crate::project_spec::{
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 const USED_XPROMPTS_FILE: &str = "xprompts.json";
+const MAX_OUTPUT_VARIABLE_DEPTH: usize = 8;
+const MAX_OUTPUT_VARIABLE_NODES: usize = 1_024;
+const MAX_OUTPUT_VARIABLE_ENCODED_BYTES: usize = 65_536;
 
 #[derive(Debug)]
 struct ArtifactCandidate {
@@ -872,28 +875,68 @@ fn coerce_output_variable_map(
     };
     let mut out: BTreeMap<String, OutputVariableValue> = BTreeMap::new();
     for (key, value) in map {
-        let value = match value {
-            Value::String(text) => {
-                Some(OutputVariableValue::Text(text.clone()))
-            }
-            Value::Array(items) => items
-                .iter()
-                .map(|item| match item {
-                    Value::String(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(OutputVariableValue::List),
-            _ => None,
-        };
-        if let Some(value) = value {
-            out.insert(key.clone(), value);
+        if output_variable_value_within_caps(value) {
+            out.insert(key.clone(), canonicalize_output_variable_value(value));
         }
     }
     if out.is_empty() {
         None
     } else {
         Some(out)
+    }
+}
+
+fn output_variable_value_within_caps(value: &Value) -> bool {
+    if serde_json::to_vec(value).map_or(true, |encoded| {
+        encoded.len() > MAX_OUTPUT_VARIABLE_ENCODED_BYTES
+    }) {
+        return false;
+    }
+
+    let mut node_count = 0usize;
+    let mut pending = vec![(value, 0usize)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > MAX_OUTPUT_VARIABLE_DEPTH {
+            return false;
+        }
+        node_count += 1;
+        if node_count > MAX_OUTPUT_VARIABLE_NODES {
+            return false;
+        }
+        match node {
+            Value::Array(items) => {
+                pending.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            Value::Object(items) => {
+                pending.extend(items.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn canonicalize_output_variable_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(canonicalize_output_variable_value)
+                .collect(),
+        ),
+        Value::Object(items) => {
+            let mut sorted_items: Vec<_> = items.iter().collect();
+            sorted_items.sort_by_key(|(key, _)| *key);
+            Value::Object(
+                sorted_items
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (key.clone(), canonicalize_output_variable_value(value))
+                    })
+                    .collect(),
+            )
+        }
+        _ => value.clone(),
     }
 }
 

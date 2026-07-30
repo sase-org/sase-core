@@ -173,13 +173,12 @@ pub struct DoneMarkerWire {
     pub imported_transaction_key: Option<String>,
 }
 
-/// Scalar-or-list value stored under `agent_meta.json::output_variables`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OutputVariableValue {
-    Text(String),
-    List(Vec<String>),
-}
+/// Bounded JSON value stored under `agent_meta.json::output_variables`.
+///
+/// The artifact scanner applies the reliability caps before a value reaches
+/// this wire type. Keeping the public alias preserves the established export
+/// name while allowing every JSON scalar and container shape.
+pub type OutputVariableValue = Value;
 
 /// Compact projection of `agent_meta.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

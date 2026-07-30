@@ -21,7 +21,7 @@ use sase_core::agent_scan::{
     replace_agent_artifact_index_dismissed_agents, scan_agent_artifact_dirs,
     scan_agent_artifacts, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    OutputVariableValue, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -1042,9 +1042,21 @@ fn scanner_keeps_parent_epic_and_authored_plan_references_separate() {
 }
 
 #[test]
-fn running_record_carries_string_and_list_output_variables() {
+fn running_record_carries_bounded_json_output_variables() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
+    let mut depth_eight = json!("leaf");
+    for _ in 0..8 {
+        depth_eight = json!([depth_eight]);
+    }
+    let mut too_deep = json!("leaf");
+    for _ in 0..9 {
+        too_deep = json!([too_deep]);
+    }
+    let max_nodes = Value::Array(vec![Value::Null; 1_023]);
+    let too_many_nodes = Value::Array(vec![Value::Null; 1_024]);
+    let max_encoded = Value::String("x".repeat(65_534));
+    let too_large_encoded = Value::String("x".repeat(65_535));
     write_json(
         &root
             .join("myproj")
@@ -1060,9 +1072,24 @@ fn running_record_carries_string_and_list_output_variables() {
                 "targets": ["alpha", "beta"],
                 "empty": [],
                 "attempts": 2,
-                "mixed": [1, "beta"],
-                "nested_array": [["ignored"]],
-                "nested": {"ignored": true}
+                "duration_s": 42.5,
+                "passed": true,
+                "missing": null,
+                "mixed": [1, "beta", false, null],
+                "nested_array": [["kept"], {"z": 2, "a": 1}],
+                "nested": {
+                    "findings": [
+                        {"file": "src/a.py", "severity": "high"},
+                        {"file": "src/b.py", "severity": "low"}
+                    ],
+                    "metrics": {"passed": true, "suites": ["unit", "integration"]}
+                },
+                "depth_eight": depth_eight,
+                "too_deep": too_deep,
+                "max_nodes": max_nodes,
+                "too_many_nodes": too_many_nodes,
+                "max_encoded": max_encoded,
+                "too_large_encoded": too_large_encoded
             },
         }),
     );
@@ -1074,27 +1101,45 @@ fn running_record_carries_string_and_list_output_variables() {
 
     assert_eq!(
         meta.output_variables.get("result_path"),
-        Some(&OutputVariableValue::Text("/tmp/result.md".to_string()))
+        Some(&json!("/tmp/result.md"))
     );
-    assert_eq!(
-        meta.output_variables.get("status"),
-        Some(&OutputVariableValue::Text("ok".to_string()))
-    );
+    assert_eq!(meta.output_variables.get("status"), Some(&json!("ok")));
     assert_eq!(
         meta.output_variables.get("targets"),
-        Some(&OutputVariableValue::List(vec![
-            "alpha".to_string(),
-            "beta".to_string(),
-        ]))
+        Some(&json!(["alpha", "beta"]))
+    );
+    assert_eq!(meta.output_variables.get("empty"), Some(&json!([])));
+    assert_eq!(meta.output_variables.get("attempts"), Some(&json!(2)));
+    assert_eq!(meta.output_variables.get("duration_s"), Some(&json!(42.5)));
+    assert_eq!(meta.output_variables.get("passed"), Some(&json!(true)));
+    assert_eq!(meta.output_variables.get("missing"), Some(&Value::Null));
+    assert_eq!(
+        meta.output_variables.get("mixed"),
+        Some(&json!([1, "beta", false, null]))
     );
     assert_eq!(
-        meta.output_variables.get("empty"),
-        Some(&OutputVariableValue::List(Vec::new()))
+        meta.output_variables.get("nested_array"),
+        Some(&json!([["kept"], {"a": 1, "z": 2}]))
     );
-    assert!(!meta.output_variables.contains_key("attempts"));
-    assert!(!meta.output_variables.contains_key("mixed"));
-    assert!(!meta.output_variables.contains_key("nested_array"));
-    assert!(!meta.output_variables.contains_key("nested"));
+    assert_eq!(
+        meta.output_variables.get("nested"),
+        Some(&json!({
+            "findings": [
+                {"file": "src/a.py", "severity": "high"},
+                {"file": "src/b.py", "severity": "low"}
+            ],
+            "metrics": {"passed": true, "suites": ["unit", "integration"]}
+        }))
+    );
+    assert!(meta.output_variables.contains_key("depth_eight"));
+    assert!(meta.output_variables.contains_key("max_nodes"));
+    assert!(meta.output_variables.contains_key("max_encoded"));
+    assert!(!meta.output_variables.contains_key("too_deep"));
+    assert!(!meta.output_variables.contains_key("too_many_nodes"));
+    assert!(!meta.output_variables.contains_key("too_large_encoded"));
+
+    let serialized = serde_json::to_string(meta).unwrap();
+    assert!(serialized.contains(r#""nested_array":[["kept"],{"a":1,"z":2}]"#));
 }
 
 #[test]
