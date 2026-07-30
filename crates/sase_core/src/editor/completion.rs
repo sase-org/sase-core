@@ -380,7 +380,6 @@ pub fn build_artifact_ref_payload_completion_candidates(
                 &mut seen,
                 kind,
                 Path::new(root),
-                &query,
                 replacement_range,
             );
         }
@@ -389,7 +388,6 @@ pub fn build_artifact_ref_payload_completion_candidates(
             &mut candidates,
             &mut seen,
             context,
-            &query,
             replacement_range,
         );
     } else if kind == "agent" {
@@ -419,7 +417,6 @@ pub fn build_artifact_ref_payload_completion_candidates(
                 &mut seen,
                 kind,
                 Path::new(&root.root),
-                &query,
                 replacement_range,
             );
             if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
@@ -479,20 +476,25 @@ fn known_artifact_ref_kinds(context: &ArtifactRefContextWire) -> Vec<String> {
     kinds
 }
 
+/// Collect every discoverable relative path under `root` as a payload
+/// candidate.
+///
+/// The query is deliberately not applied here: `bounded_relative_files` already
+/// caps the walk at [`ARTIFACT_REF_MAX_RESULTS`] files regardless of the query,
+/// so filtering here would only hide rows from the shared fuzzy menu that ranks
+/// these candidates downstream.
 fn append_artifact_path_candidates(
     candidates: &mut Vec<CompletionCandidate>,
     seen: &mut BTreeSet<String>,
     kind: &str,
     root: &Path,
-    query: &str,
     replacement_range: Option<EditorRange>,
 ) {
     for path in bounded_relative_files(root) {
         if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
             break;
         }
-        if !path.to_lowercase().starts_with(query) || !seen.insert(path.clone())
-        {
+        if !seen.insert(path.clone()) {
             continue;
         }
         candidates.push(artifact_ref_candidate(
@@ -505,11 +507,13 @@ fn append_artifact_path_candidates(
     }
 }
 
+/// Collect bead ids from every bead store's `pages` tree, leaving the match to
+/// the shared fuzzy menu for the same reason as
+/// [`append_artifact_path_candidates`].
 fn append_bead_page_candidates(
     candidates: &mut Vec<CompletionCandidate>,
     seen: &mut BTreeSet<String>,
     context: &ArtifactRefContextWire,
-    query: &str,
     replacement_range: Option<EditorRange>,
 ) {
     for store in &context.bead_stores {
@@ -521,8 +525,7 @@ fn append_bead_page_candidates(
             let Some(id) = bead_id_from_page_relative_path(&path) else {
                 continue;
             };
-            if !id.to_lowercase().starts_with(query) || !seen.insert(id.clone())
-            {
+            if !seen.insert(id.clone()) {
                 continue;
             }
             candidates.push(artifact_ref_candidate(

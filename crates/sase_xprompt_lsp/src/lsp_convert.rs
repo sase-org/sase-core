@@ -5,9 +5,10 @@ use lsp_types::{
     Range, TextEdit,
 };
 use sase_core::{
-    AtReferenceGroup, AtReferenceMenuWire, AtReferenceRowWire,
-    CompletionCandidate, CompletionList, DiagnosticSeverity, EditorDiagnostic,
-    EditorPosition, EditorRange, EditorTextEdit, HoverPayload, VcsRepoEntry,
+    AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
+    AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
+    DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
+    EditorTextEdit, HoverPayload, VcsRepoEntry,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -36,23 +37,52 @@ pub fn completion_response(
     )
 }
 
+/// Render the `@` reference menu as an *incomplete* list whose items all filter
+/// on the reference text the user actually typed.
+///
+/// The rows are ranked server-side by the shared fuzzy matcher, and a client
+/// that prefix-filters the inserted reference (`@research:202607/…`) against the
+/// typed query (`@research:site`) would throw every fuzzy row away. Setting
+/// `filterText` to the typed text keeps every row alive in prefix *and* fuzzy
+/// clients, and `isIncomplete` makes them re-request per keystroke instead of
+/// re-filtering (and re-sorting) a stale list, so `sortText` decides the order.
 pub fn at_reference_completion_response(
     menu: AtReferenceMenuWire,
+    context: &AtReferenceContextWire,
     replacement_range: EditorRange,
 ) -> CompletionResponse {
-    CompletionResponse::Array(
-        menu.rows
+    let filter_text = at_reference_filter_text(context);
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: menu
+            .rows
             .into_iter()
             .enumerate()
             .map(|(index, row)| {
-                at_reference_completion_item(row, replacement_range, index)
+                at_reference_completion_item(
+                    row,
+                    &filter_text,
+                    replacement_range,
+                    index,
+                )
             })
             .collect(),
-    )
+    })
+}
+
+/// Reconstruct the reference text as typed, which is what clients filter on.
+fn at_reference_filter_text(context: &AtReferenceContextWire) -> String {
+    match (context.stage, context.kind.as_deref()) {
+        (AtReferenceStage::Payload, Some(kind)) => {
+            format!("@{kind}:{}", context.query)
+        }
+        _ => format!("@{}", context.query),
+    }
 }
 
 fn at_reference_completion_item(
     row: AtReferenceRowWire,
+    filter_text: &str,
     replacement_range: EditorRange,
     index: usize,
 ) -> CompletionItem {
@@ -66,15 +96,27 @@ fn at_reference_completion_item(
         AtReferenceGroup::File => (1, CompletionItemKind::FILE, "file"),
         AtReferenceGroup::Payload => (0, CompletionItemKind::FILE, "file"),
     };
+    // Providers that have no separate title echo the primary text back as one;
+    // repeating it beside the label and in the preview is pure noise.
+    let title = if row.title == row.label {
+        ""
+    } else {
+        row.title.as_str()
+    };
     CompletionItem {
         label: row.insertion.clone(),
         label_details: Some(CompletionItemLabelDetails {
-            detail: None,
+            detail: (!title.is_empty()).then(|| format!(" · {title}")),
             description: Some(description.to_string()),
         }),
         kind: Some(kind),
+        documentation: at_reference_documentation(
+            &row.label,
+            &row.label_match,
+            title,
+        ),
         detail: (!row.detail.is_empty()).then_some(row.detail),
-        filter_text: Some(row.insertion.clone()),
+        filter_text: Some(filter_text.to_string()),
         sort_text: Some(format!("{group}:{index:04}")),
         text_edit: Some(CompletionTextEdit::Edit(TextEdit {
             range: to_lsp_range(replacement_range),
@@ -83,6 +125,51 @@ fn at_reference_completion_item(
         tags: None::<Vec<CompletionItemTag>>,
         ..Default::default()
     }
+}
+
+/// Show *why* a fuzzy row is in the list: the matched payload with its matched
+/// runs bolded, and the title underneath. Editors cannot highlight inside a
+/// completion label, so the preview window carries the match affordance the ACE
+/// prompt input paints inline.
+fn at_reference_documentation(
+    label: &str,
+    label_match: &[(u32, u32)],
+    title: &str,
+) -> Option<Documentation> {
+    if label.is_empty() {
+        return None;
+    }
+    let mut value = bold_match_runs(label, label_match);
+    if !title.is_empty() {
+        value.push('\n');
+        value.push('\n');
+        value.push_str(title);
+    }
+    Some(markdown_doc(value))
+}
+
+/// Wrap each half-open char range of `runs` in `**`, leaving `text` otherwise
+/// verbatim. Runs are already ordered and non-overlapping.
+fn bold_match_runs(text: &str, runs: &[(u32, u32)]) -> String {
+    if runs.is_empty() {
+        return text.to_string();
+    }
+    let mut rendered = String::with_capacity(text.len() + runs.len() * 4);
+    let mut runs = runs.iter().peekable();
+    for (index, ch) in text.chars().enumerate() {
+        let index = index as u32;
+        if runs.peek().is_some_and(|(start, _)| *start == index) {
+            rendered.push_str("**");
+        }
+        rendered.push(ch);
+        if let Some((_, end)) = runs.peek().copied() {
+            if *end == index + 1 {
+                rendered.push_str("**");
+                runs.next();
+            }
+        }
+    }
+    rendered
 }
 
 /// Render `%model` rows with model/alias kinds and stable catalog ordering.
@@ -832,6 +919,128 @@ mod tests {
                 .and_then(|details| details.description.as_deref()),
             Some("agent · RUNNING · sase")
         );
+    }
+
+    #[test]
+    fn at_reference_items_filter_on_the_typed_text_and_preview_the_match() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 13,
+            },
+        };
+        let context = AtReferenceContextWire {
+            stage: AtReferenceStage::Payload,
+            candidate_span: (0, 13),
+            replacement_span: (0, 13),
+            query_span: (9, 13),
+            query: "site".to_string(),
+            kind: Some("research".to_string()),
+            path_query: None,
+        };
+        let menu = AtReferenceMenuWire {
+            rows: vec![AtReferenceRowWire {
+                group: AtReferenceGroup::Payload,
+                label: "202607/sase_sites.md".to_string(),
+                title: "SASE Sites Hub".to_string(),
+                insertion: "@research:202607/sase_sites.md".to_string(),
+                is_dir: false,
+                detail: "research · 3d".to_string(),
+                builtin: false,
+                label_match: vec![(12, 16)],
+                title_match: vec![(5, 9)],
+                match_tier: 2,
+            }],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        // `isIncomplete` keeps clients re-requesting per keystroke instead of
+        // re-filtering and re-sorting a stale, server-ranked list.
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.label, "@research:202607/sase_sites.md");
+        assert_eq!(item.filter_text.as_deref(), Some("@research:site"));
+        assert_eq!(item.sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · SASE Sites Hub")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.kind, MarkupKind::Markdown);
+        assert_eq!(
+            documentation.value,
+            "202607/sase_**site**s.md\n\nSASE Sites Hub"
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected a reference text edit");
+        };
+        assert_eq!(edit.new_text, "@research:202607/sase_sites.md");
+    }
+
+    #[test]
+    fn at_reference_kind_stage_items_filter_on_the_bare_typed_word() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 5,
+            },
+        };
+        let context = AtReferenceContextWire {
+            stage: AtReferenceStage::Kind,
+            candidate_span: (0, 5),
+            replacement_span: (0, 5),
+            query_span: (1, 5),
+            query: "rsch".to_string(),
+            kind: None,
+            path_query: None,
+        };
+        let menu = AtReferenceMenuWire {
+            rows: vec![AtReferenceRowWire {
+                group: AtReferenceGroup::Artifact,
+                label: "research".to_string(),
+                title: String::new(),
+                insertion: "@research:".to_string(),
+                is_dir: false,
+                detail: String::new(),
+                builtin: true,
+                label_match: vec![(0, 1), (2, 3), (4, 6)],
+                title_match: Vec::new(),
+                match_tier: 3,
+            }],
+            ..Default::default()
+        };
+
+        let items =
+            match at_reference_completion_response(menu, &context, range) {
+                CompletionResponse::List(list) => list.items,
+                CompletionResponse::Array(items) => items,
+            };
+        assert_eq!(items[0].filter_text.as_deref(), Some("@rsch"));
+        let Some(Documentation::MarkupContent(documentation)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.value, "**r**e**s**e**ar**ch");
     }
 
     #[test]

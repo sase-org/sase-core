@@ -382,6 +382,7 @@ impl XpromptLspServer {
         };
         at_reference_completion_response(
             editor_build_at_reference_menu(context, &inventory),
+            context,
             replacement_range,
         )
     }
@@ -5096,6 +5097,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fuzzy_at_reference_payloads_survive_client_filtering() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        let bundle = temp
+            .path()
+            .join("sase/designs/202607/sase_sites_hub_and_pages");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(
+            bundle.join("sase_sites_hub_and_pages.md"),
+            "---\ntitle: SASE Sites Hub and Pages\n---\n",
+        )
+        .unwrap();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().artifact_ref_catalog =
+            Some(artifact_path);
+
+        let text = "@designs:site";
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::List(list) = &response else {
+            panic!("expected an incomplete list: {response:?}");
+        };
+        assert!(list.is_incomplete);
+
+        let payload = "202607/sase_sites_hub_and_pages/\
+                       sase_sites_hub_and_pages.md";
+        let items = completion_items(response);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("@designs:{payload}").as_str()]
+        );
+        // Every item filters on the typed text, so a client that prefix-filters
+        // `filterText` against the typed word keeps the server-ranked rows.
+        assert!(items
+            .iter()
+            .all(|item| item.filter_text.as_deref() == Some(text)));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected an artifact payload text edit");
+        };
+        assert_eq!(edit.new_text, format!("@designs:{payload}"));
+        let Some(lsp_types::Documentation::MarkupContent(documentation)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        // The matched run is bolded in the basename the query was aimed at, and
+        // the document path is not repeated as a title.
+        assert_eq!(
+            documentation.value,
+            "202607/sase_sites_hub_and_pages/sase_**site**s_hub_and_pages.md"
+        );
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn completes_grouped_at_references_from_the_client_root() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -5173,7 +5252,7 @@ mod tests {
             Some(lsp_types::CompletionItemKind::FILE)
         );
         for item in &bare_items {
-            assert_eq!(item.filter_text.as_deref(), Some(item.label.as_str()));
+            assert_eq!(item.filter_text.as_deref(), Some("@"));
             let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
             else {
                 panic!("expected @ reference text edit");
