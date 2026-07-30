@@ -126,6 +126,14 @@ pub struct BeadMutationOutcomeWire {
     #[serde(default)]
     pub issue_ids: Vec<String>,
     #[serde(default)]
+    pub closed_ids: Vec<String>,
+    #[serde(default)]
+    pub already_closed_ids: Vec<String>,
+    #[serde(default)]
+    pub noted_ids: Vec<String>,
+    #[serde(default)]
+    pub cascade_closed_ids: Vec<String>,
+    #[serde(default)]
     pub message: String,
     #[serde(default)]
     pub issue: Option<IssueWire>,
@@ -793,7 +801,8 @@ pub fn close_issues_with_note(
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
         let now = now.unwrap_or_else(now_utc);
-        let resolution = resolution.unwrap_or(BeadResolutionWire::Done);
+        let effective_resolution =
+            resolution.clone().unwrap_or(BeadResolutionWire::Done);
         if force {
             if reason
                 .as_deref()
@@ -805,7 +814,7 @@ pub fn close_issues_with_note(
                     "forced close requires a non-empty --reason",
                 ));
             }
-            if resolution == BeadResolutionWire::Done {
+            if effective_resolution == BeadResolutionWire::Done {
                 return Err(BeadError::validation(
                     "forced close requires --resolution canceled or superseded; 'done' is not allowed",
                 ));
@@ -814,10 +823,21 @@ pub fn close_issues_with_note(
         let mut standard_close_ids = BTreeSet::new();
         let mut requested_ids = BTreeSet::new();
         let mut unresolved_by_request = Vec::new();
+        let mut already_closed_ids = Vec::new();
 
         for issue_id in issue_ids {
             let issue = store.get_issue(issue_id)?;
-            requested_ids.insert(issue.id.clone());
+            if !requested_ids.insert(issue.id.clone()) {
+                continue;
+            }
+            if issue.status == StatusWire::Closed {
+                reject_conflicting_close(
+                    issue,
+                    resolution.as_ref(),
+                    reason.as_deref(),
+                )?;
+                already_closed_ids.push(issue.id.clone());
+            }
             standard_close_ids.insert(issue.id.clone());
             let unresolved = unresolved_descendants(&store.issues, issue_id);
             if !force && !unresolved.is_empty() {
@@ -868,7 +888,7 @@ pub fn close_issues_with_note(
                         child_id,
                         &now,
                         forced_reason.clone(),
-                        resolution.clone(),
+                        effective_resolution.clone(),
                         Vec::new(),
                         &mut batch,
                     )? {
@@ -881,7 +901,7 @@ pub fn close_issues_with_note(
                 &issue_id,
                 &now,
                 reason.clone(),
-                resolution.clone(),
+                effective_resolution.clone(),
                 forced_descendant_ids,
                 &mut batch,
             )? {
@@ -902,14 +922,20 @@ pub fn close_issues_with_note(
             )?;
         }
 
-        let changed = !batch.closed_ids.is_empty() || !noted_ids.is_empty();
+        let closed_ids = batch.closed_ids;
+        let cascade_closed_ids = closed_ids
+            .iter()
+            .filter(|issue_id| !requested_ids.contains(*issue_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed = !closed_ids.is_empty() || !noted_ids.is_empty();
         if changed {
             store.save()?;
         }
-        let mut affected_ids = batch.closed_ids;
-        for issue_id in noted_ids {
-            if !affected_ids.contains(&issue_id) {
-                affected_ids.push(issue_id);
+        let mut affected_ids = closed_ids.clone();
+        for issue_id in &noted_ids {
+            if !affected_ids.contains(issue_id) {
+                affected_ids.push(issue_id.clone());
             }
         }
         let mut result = outcome("close", changed, affected_ids);
@@ -918,8 +944,52 @@ pub fn close_issues_with_note(
                 "all requested issues were already closed".to_string();
         }
         result.issues = batch.returned;
+        result.closed_ids = closed_ids;
+        result.already_closed_ids = already_closed_ids;
+        result.noted_ids = noted_ids;
+        result.cascade_closed_ids = cascade_closed_ids;
         Ok(result)
     })
+}
+
+fn reject_conflicting_close(
+    issue: &IssueWire,
+    requested_resolution: Option<&BeadResolutionWire>,
+    requested_reason: Option<&str>,
+) -> Result<(), BeadError> {
+    let resolution_conflicts = requested_resolution
+        .is_some_and(|requested| issue.resolution.as_ref() != Some(requested));
+    let requested_reason =
+        requested_reason.filter(|value| !value.trim().is_empty());
+    let reason_conflicts = requested_reason.is_some_and(|requested| {
+        issue.close_reason.as_deref() != Some(requested)
+    });
+    if !resolution_conflicts && !reason_conflicts {
+        return Ok(());
+    }
+
+    let recorded_resolution = issue
+        .resolution
+        .as_ref()
+        .map(BeadResolutionWire::as_str)
+        .unwrap_or("(unrecorded)");
+    let requested_resolution = requested_resolution
+        .map(BeadResolutionWire::as_str)
+        .unwrap_or("(unspecified)");
+    let recorded_reason = issue.close_reason.as_deref().unwrap_or("(none)");
+    let requested_reason = requested_reason.unwrap_or("(unspecified)");
+    let closed_at = issue.closed_at.as_deref().unwrap_or("(unknown)");
+    Err(BeadError::validation(format!(
+        "close request conflicts with already-closed bead {} (closed at {}, resolution {}, reason {:?}); requested resolution {}, reason {:?}. Reopen it with `sase bead open {}` before closing it again, or append evidence without re-closing it with `sase bead note {} '…'`",
+        issue.id,
+        closed_at,
+        recorded_resolution,
+        recorded_reason,
+        requested_resolution,
+        requested_reason,
+        issue.id,
+        issue.id,
+    )))
 }
 
 #[derive(Default)]
@@ -2095,6 +2165,10 @@ fn outcome(
         operation: operation.to_string(),
         changed,
         issue_ids,
+        closed_ids: Vec::new(),
+        already_closed_ids: Vec::new(),
+        noted_ids: Vec::new(),
+        cascade_closed_ids: Vec::new(),
         message: String::new(),
         issue: None,
         issues: Vec::new(),
@@ -2461,6 +2535,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.issue_ids, vec!["sase-1.1", "sase-1"]);
+        assert_eq!(result.closed_ids, vec!["sase-1.1", "sase-1"]);
+        assert_eq!(result.cascade_closed_ids, vec!["sase-1.1"]);
+        assert!(result.already_closed_ids.is_empty());
+        assert!(result.noted_ids.is_empty());
         let exported =
             fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
         assert!(exported
@@ -2585,6 +2663,171 @@ mod tests {
             original
         );
         assert!(!beads_dir.join("events").exists());
+    }
+
+    #[test]
+    fn repeat_close_is_write_free_and_classified_as_already_closed() {
+        let (_temp, beads_dir, issue_id) =
+            closed_issue_fixture(BeadResolutionWire::Done, Some("verified"));
+        let before = persisted_claim_state(&beads_dir);
+
+        let result = close_issues(
+            &beads_dir,
+            std::slice::from_ref(&issue_id),
+            None,
+            None,
+            false,
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(!result.changed);
+        assert!(result.issue_ids.is_empty());
+        assert!(result.closed_ids.is_empty());
+        assert_eq!(result.already_closed_ids, vec![issue_id.clone()]);
+        assert!(result.noted_ids.is_empty());
+        assert!(result.cascade_closed_ids.is_empty());
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(
+            result.issues[0].closed_at.as_deref(),
+            Some("2026-01-02T00:00:00Z")
+        );
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn repeat_close_with_note_writes_only_the_note() {
+        let (_temp, beads_dir, issue_id) =
+            closed_issue_fixture(BeadResolutionWire::Done, Some("verified"));
+
+        let result = close_issues_with_note(
+            &beads_dir,
+            std::slice::from_ref(&issue_id),
+            None,
+            None,
+            false,
+            Some("extra evidence".to_string()),
+            Some("agent-1".to_string()),
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert_eq!(result.issue_ids, vec![issue_id.clone()]);
+        assert!(result.closed_ids.is_empty());
+        assert_eq!(result.already_closed_ids, vec![issue_id.clone()]);
+        assert_eq!(result.noted_ids, vec![issue_id.clone()]);
+        assert!(result.cascade_closed_ids.is_empty());
+        let issue = MutableStore::load(&beads_dir)
+            .unwrap()
+            .get_issue(&issue_id)
+            .unwrap()
+            .clone();
+        assert_eq!(issue.closed_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+        assert_eq!(issue.close_reason.as_deref(), Some("verified"));
+        assert!(issue.notes.contains("extra evidence"));
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(
+            streams
+                .iter()
+                .flat_map(|stream| &stream.events)
+                .filter(|event| {
+                    event.issue_id == issue_id
+                        && event.operation
+                            == BeadEventOperationWire::IssueClosed
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicting_resolution_aborts_mixed_batch_before_writing() {
+        let (_temp, beads_dir, closed_id) =
+            closed_issue_fixture(BeadResolutionWire::Done, Some("verified"));
+        let open_id = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Still open".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-02T01:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap()
+        .id;
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = close_issues_with_note(
+            &beads_dir,
+            &[open_id, closed_id.clone()],
+            None,
+            Some(BeadResolutionWire::Canceled),
+            false,
+            Some("must not land".to_string()),
+            Some("agent-1".to_string()),
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains(&closed_id));
+        assert!(error.message.contains("closed at 2026-01-02T00:00:00Z"));
+        assert!(error.message.contains("resolution done"));
+        assert!(error.message.contains("requested resolution canceled"));
+        assert!(error.message.contains("sase bead open"));
+        assert!(error.message.contains("sase bead note"));
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn conflicting_reason_aborts_before_writing() {
+        let (_temp, beads_dir, issue_id) = closed_issue_fixture(
+            BeadResolutionWire::Done,
+            Some("original reason"),
+        );
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = close_issues(
+            &beads_dir,
+            std::slice::from_ref(&issue_id),
+            Some("different reason".to_string()),
+            None,
+            false,
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("\"original reason\""));
+        assert!(error.message.contains("\"different reason\""));
+        assert!(error.message.contains("requested resolution (unspecified)"));
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn absent_resolution_does_not_conflict_with_recorded_canceled_close() {
+        let (_temp, beads_dir, issue_id) = closed_issue_fixture(
+            BeadResolutionWire::Canceled,
+            Some("canceled intentionally"),
+        );
+        let before = persisted_claim_state(&beads_dir);
+
+        let result = close_issues(
+            &beads_dir,
+            std::slice::from_ref(&issue_id),
+            None,
+            None,
+            false,
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(!result.changed);
+        assert_eq!(result.already_closed_ids, vec![issue_id]);
+        assert_eq!(persisted_claim_state(&beads_dir), before);
     }
 
     #[test]
@@ -3003,6 +3246,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.issue_ids, vec!["sase-1.1.1", "sase-1.1"]);
+        assert_eq!(result.closed_ids, vec!["sase-1.1.1", "sase-1.1"]);
+        assert_eq!(result.cascade_closed_ids, vec!["sase-1.1"]);
         let store = MutableStore::load(&beads_dir).unwrap();
         assert_eq!(
             store.get_issue("sase-1.1").unwrap().close_reason.as_deref(),
@@ -3235,7 +3480,7 @@ mod tests {
         let result = close_issues(
             &beads_dir,
             &["sase-1.1.1".to_string(), "sase-1.1".to_string()],
-            Some("explicit".to_string()),
+            None,
             None,
             false,
             Some("2026-01-02T00:00:00Z".to_string()),
@@ -3256,7 +3501,7 @@ mod tests {
         assert!(matches!(
             &parent_close_events[0].payload,
             BeadEventPayloadWire::IssueClosed { close_reason, .. }
-                if close_reason.as_deref() == Some("explicit")
+                if close_reason.is_none()
         ));
     }
 
@@ -5282,6 +5527,41 @@ mod tests {
         format!(
             r#"{{"id":"{id}","title":"{title}","status":"{status}","issue_type":"{issue_type}","parent_id":{parent},"owner":"","assignee":"","created_at":"{timestamp}","created_by":"","updated_at":"{timestamp}","closed_at":null,"close_reason":null,"description":"","notes":"","design":"","is_ready_to_work":false,"changespec_name":"","changespec_bug_id":"","dependencies":[]}}"#
         )
+    }
+
+    fn closed_issue_fixture(
+        resolution: BeadResolutionWire,
+        reason: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue_id = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Closed issue".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap()
+        .id;
+        close_issues(
+            &beads_dir,
+            std::slice::from_ref(&issue_id),
+            reason.map(str::to_string),
+            Some(resolution),
+            false,
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        (temp, beads_dir, issue_id)
     }
 
     fn claim_mutation_fixture() -> (tempfile::TempDir, PathBuf, String) {
