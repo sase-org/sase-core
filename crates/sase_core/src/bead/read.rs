@@ -2,11 +2,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use super::events::reduce_event_streams;
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+
+use super::events::{
+    apply_event, merge_stream_events, reduce_event_streams,
+    validated_event_streams, BeadEventOperationWire, BeadEventStreamWire,
+};
 use super::jsonl::{
     event_manifest_path, event_store_present, event_streams_dir,
-    export_issues_to_jsonl, import_issues_from_jsonl, read_event_store,
+    import_issues_from_jsonl, read_event_store,
 };
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
@@ -15,6 +22,25 @@ use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
 
 pub const BEAD_READ_WIRE_SCHEMA_VERSION: u64 = 1;
+const REDUNDANT_CLOSE_RECENT_WINDOW_DAYS: i64 = 7;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadProjectionDriftWire {
+    pub issue_id: String,
+    pub changed_fields: Vec<String>,
+    pub current: Option<IssueWire>,
+    pub reduced: Option<IssueWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadDoctorReportWire {
+    pub messages: Vec<String>,
+    pub projection_drift: Vec<BeadProjectionDriftWire>,
+    pub redundant_close_events: usize,
+    pub redundant_close_issues: usize,
+    pub redundant_close_events_recent: usize,
+    pub redundant_close_recent_window_days: i64,
+}
 
 pub fn read_store_issues(
     beads_dir: &Path,
@@ -85,22 +111,24 @@ pub fn get_epic_children(
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
-    doctor_impl(
+    Ok(doctor_report_impl(
         beads_dir,
         PlanRootMode::NotRequested,
         ReferenceContextMode::NotRequested,
-    )
+    )?
+    .messages)
 }
 
 pub fn doctor_with_plan_roots(
     beads_dir: &Path,
     plan_roots: Option<&[PathBuf]>,
 ) -> Result<Vec<String>, BeadError> {
-    doctor_impl(
+    Ok(doctor_report_impl(
         beads_dir,
         plan_roots.map_or(PlanRootMode::Unavailable, PlanRootMode::Available),
         ReferenceContextMode::NotRequested,
-    )
+    )?
+    .messages)
 }
 
 pub fn doctor_with_contexts(
@@ -108,7 +136,28 @@ pub fn doctor_with_contexts(
     plan_roots: Option<&[PathBuf]>,
     reference_context: Option<&ArtifactRefContextWire>,
 ) -> Result<Vec<String>, BeadError> {
-    doctor_impl(
+    Ok(
+        doctor_report_with_contexts(beads_dir, plan_roots, reference_context)?
+            .messages,
+    )
+}
+
+pub fn doctor_report(
+    beads_dir: &Path,
+) -> Result<BeadDoctorReportWire, BeadError> {
+    doctor_report_impl(
+        beads_dir,
+        PlanRootMode::NotRequested,
+        ReferenceContextMode::NotRequested,
+    )
+}
+
+pub fn doctor_report_with_contexts(
+    beads_dir: &Path,
+    plan_roots: Option<&[PathBuf]>,
+    reference_context: Option<&ArtifactRefContextWire>,
+) -> Result<BeadDoctorReportWire, BeadError> {
+    doctor_report_impl(
         beads_dir,
         plan_roots.map_or(PlanRootMode::Unavailable, PlanRootMode::Available),
         reference_context.map_or(
@@ -130,11 +179,11 @@ enum ReferenceContextMode<'a> {
     Available(&'a ArtifactRefContextWire),
 }
 
-fn doctor_impl(
+fn doctor_report_impl(
     beads_dir: &Path,
     plan_root_mode: PlanRootMode<'_>,
     reference_context_mode: ReferenceContextMode<'_>,
-) -> Result<Vec<String>, BeadError> {
+) -> Result<BeadDoctorReportWire, BeadError> {
     if !beads_dir.is_dir() {
         return Err(BeadError::io(format!(
             "No beads directory found at {}",
@@ -166,17 +215,30 @@ fn doctor_impl(
         messages.push("WARNING: beads.db missing".to_string());
     }
 
-    let issues = match read_store_issues(beads_dir) {
-        Ok(issues) => issues,
-        Err(err) if event_store_is_present => {
-            messages.push(format!(
-                "ERROR: invalid bead event store: {}",
-                err.message
-            ));
-            return Ok(messages);
+    let (issues, streams) = if event_store_is_present {
+        match read_event_store(beads_dir) {
+            Ok((_manifest, streams)) => {
+                (reduce_event_streams(&streams)?, Some(streams))
+            }
+            Err(err) => {
+                messages.push(format!(
+                    "ERROR: invalid bead event store: {}",
+                    err.message
+                ));
+                return Ok(empty_doctor_report(messages));
+            }
         }
-        Err(err) => return Err(err),
+    } else {
+        match read_legacy_jsonl_issues(beads_dir) {
+            Ok(issues) => (issues, None),
+            Err(err) => return Err(err),
+        }
     };
+    let (redundant_close_events, redundant_close_issues, redundant_recent) =
+        match streams.as_deref() {
+            Some(streams) => redundant_close_census(streams)?,
+            None => (0, 0, 0),
+        };
     let orphan_ids = orphan_phase_ids(&issues);
     if !orphan_ids.is_empty() {
         messages.push(format!(
@@ -212,6 +274,7 @@ fn doctor_impl(
         }
     }
 
+    let mut projection_drift = Vec::new();
     if event_store_is_present && legacy_path.exists() {
         let legacy_issues = read_legacy_jsonl_issues(beads_dir)?;
         let legacy_orphan_ids = orphan_phase_ids(&legacy_issues);
@@ -228,20 +291,145 @@ fn doctor_impl(
                 legacy_orphan_plan_ids.join(", ")
             ));
         }
-        if export_issues_to_jsonl(&issues)?
-            != export_issues_to_jsonl(&legacy_issues)?
-        {
-            messages.push(
-                "WARNING: issues.jsonl projection drift from bead events"
-                    .to_string(),
-            );
+        projection_drift = compute_projection_drift(&legacy_issues, &issues)?;
+        if !projection_drift.is_empty() {
+            messages.push(format!(
+                "WARNING: issues.jsonl is {} row(s) stale versus the canonical \
+                 event streams; run 'sase bead doctor --fix-projection'",
+                projection_drift.len()
+            ));
         }
+    }
+    if redundant_close_events > 0 {
+        messages.push(format!(
+            "NOTE: {redundant_close_events} redundant close event(s) across \
+             {redundant_close_issues} bead(s); {redundant_recent} in the last \
+             {REDUNDANT_CLOSE_RECENT_WINDOW_DAYS} days"
+        ));
     }
 
     if messages.is_empty() {
         messages.push("OK: no issues found".to_string());
     }
-    Ok(messages)
+    Ok(BeadDoctorReportWire {
+        messages,
+        projection_drift,
+        redundant_close_events,
+        redundant_close_issues,
+        redundant_close_events_recent: redundant_recent,
+        redundant_close_recent_window_days: REDUNDANT_CLOSE_RECENT_WINDOW_DAYS,
+    })
+}
+
+fn empty_doctor_report(messages: Vec<String>) -> BeadDoctorReportWire {
+    BeadDoctorReportWire {
+        messages,
+        projection_drift: Vec::new(),
+        redundant_close_events: 0,
+        redundant_close_issues: 0,
+        redundant_close_events_recent: 0,
+        redundant_close_recent_window_days: REDUNDANT_CLOSE_RECENT_WINDOW_DAYS,
+    }
+}
+
+fn redundant_close_census(
+    streams: &[BeadEventStreamWire],
+) -> Result<(usize, usize, usize), BeadError> {
+    let streams = validated_event_streams(streams)?;
+    let mut issues = BTreeMap::new();
+    let mut issue_ids = BTreeSet::new();
+    let mut event_count = 0;
+    let mut recent_count = 0;
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let cutoff = now - Duration::days(REDUNDANT_CLOSE_RECENT_WINDOW_DAYS);
+
+    for event in merge_stream_events(&streams) {
+        if event.operation == BeadEventOperationWire::IssueClosed
+            && issues
+                .get(&event.issue_id)
+                .is_some_and(|issue: &IssueWire| {
+                    issue.status == StatusWire::Closed
+                        && issue.closed_at.is_some()
+                })
+        {
+            event_count += 1;
+            issue_ids.insert(event.issue_id.clone());
+            if DateTime::parse_from_rfc3339(&event.timestamp)
+                .map(|timestamp| {
+                    let timestamp = timestamp.with_timezone(&Utc);
+                    timestamp >= cutoff && timestamp <= now
+                })
+                .unwrap_or(false)
+            {
+                recent_count += 1;
+            }
+        }
+        apply_event(&mut issues, event)?;
+    }
+    Ok((event_count, issue_ids.len(), recent_count))
+}
+
+fn compute_projection_drift(
+    current: &[IssueWire],
+    reduced: &[IssueWire],
+) -> Result<Vec<BeadProjectionDriftWire>, BeadError> {
+    let current_by_id = current
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<BTreeMap<_, _>>();
+    let reduced_by_id = reduced
+        .iter()
+        .map(|issue| (issue.id.as_str(), issue))
+        .collect::<BTreeMap<_, _>>();
+    let ids = current_by_id
+        .keys()
+        .chain(reduced_by_id.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut drift = Vec::new();
+
+    for issue_id in ids {
+        let current_issue = current_by_id.get(issue_id).copied();
+        let reduced_issue = reduced_by_id.get(issue_id).copied();
+        if current_issue == reduced_issue {
+            continue;
+        }
+        let changed_fields = match (current_issue, reduced_issue) {
+            (Some(current), Some(reduced)) => {
+                changed_issue_fields(current, reduced)?
+            }
+            _ => vec!["row".to_string()],
+        };
+        drift.push(BeadProjectionDriftWire {
+            issue_id: issue_id.to_string(),
+            changed_fields,
+            current: current_issue.cloned(),
+            reduced: reduced_issue.cloned(),
+        });
+    }
+    Ok(drift)
+}
+
+fn changed_issue_fields(
+    current: &IssueWire,
+    reduced: &IssueWire,
+) -> Result<Vec<String>, BeadError> {
+    let current = serde_json::to_value(current)?;
+    let reduced = serde_json::to_value(reduced)?;
+    let current = current.as_object().ok_or_else(|| {
+        BeadError::json("serialized current issue is not an object")
+    })?;
+    let reduced = reduced.as_object().ok_or_else(|| {
+        BeadError::json("serialized reduced issue is not an object")
+    })?;
+    Ok(current
+        .keys()
+        .chain(reduced.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|field| current.get(*field) != reduced.get(*field))
+        .cloned()
+        .collect())
 }
 
 pub fn reference_diagnostics(

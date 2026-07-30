@@ -421,6 +421,8 @@ use sase_core::bead::{
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
     close_issues_with_note as core_bead_close_issues_with_note,
     create_issue as core_bead_create_issue, doctor as core_bead_doctor,
+    doctor_report as core_bead_doctor_report,
+    doctor_report_with_contexts as core_bead_doctor_report_with_contexts,
     doctor_with_contexts as core_bead_doctor_with_contexts,
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
@@ -3487,6 +3489,41 @@ fn py_bead_doctor<'py>(
         reference_context.as_ref(),
     );
     result.map_err(bead_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(signature = (beads_dir, plan_roots=None, reference_context=None))]
+#[pyo3(name = "bead_doctor_report")]
+fn py_bead_doctor_report<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    plan_roots: Option<Vec<String>>,
+    reference_context: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    if plan_roots.is_none() && reference_context.is_none() {
+        return bead_result_to_py(
+            py,
+            py.allow_threads(|| core_bead_doctor_report(&beads_dir)),
+        );
+    }
+    let roots = plan_roots.and_then(|roots| {
+        (!roots.is_empty())
+            .then(|| roots.into_iter().map(PathBuf::from).collect::<Vec<_>>())
+    });
+    let reference_context = reference_context
+        .map(artifact_ref_context_from_pydict)
+        .transpose()?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_doctor_report_with_contexts(
+                &beads_dir,
+                roots.as_deref(),
+                reference_context.as_ref(),
+            )
+        }),
+    )
 }
 
 #[pyfunction]
@@ -6699,6 +6736,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_doctor, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_doctor_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_get_epic_children, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;

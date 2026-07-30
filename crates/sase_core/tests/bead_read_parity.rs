@@ -1,12 +1,16 @@
 use std::fs;
+use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, SecondsFormat, Utc};
+use sase_core::bead::BeadResolutionWire;
 use sase_core::{
-    bead_blocked_issues, bead_doctor, bead_doctor_with_plan_roots,
-    bead_get_epic_children, bead_list_issues, bead_ready_issues,
-    bead_show_issue, bead_stats, import_issues_from_jsonl,
+    bead_blocked_issues, bead_doctor, bead_doctor_report,
+    bead_doctor_with_plan_roots, bead_get_epic_children, bead_list_issues,
+    bead_ready_issues, bead_show_issue, bead_stats, import_issues_from_jsonl,
     import_issues_to_event_streams, repair_event_store_manifest,
-    BeadEventManifestRepairStatusWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire,
+    BeadEventManifestRepairStatusWire, BeadEventOperationWire,
+    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
+    BeadEventStreamWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -107,8 +111,72 @@ fn event_store_wins_over_stale_legacy_projection() {
         "Canonical Epic"
     );
     assert!(bead_doctor(&beads_dir).unwrap().contains(
-        &"WARNING: issues.jsonl projection drift from bead events".to_string()
+        &"WARNING: issues.jsonl is 1 row(s) stale versus the canonical event streams; run 'sase bead doctor --fix-projection'".to_string()
     ));
+}
+
+#[test]
+fn doctor_reports_projection_fields_and_redundant_close_census() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+    let canonical = import_issues_from_jsonl_content(
+        &(issue(
+            "beads-1",
+            "Epic",
+            "plan",
+            None,
+            "open",
+            "2026-01-01T00:00:00Z",
+            "",
+        ) + "\n"),
+    )
+    .unwrap();
+    let mut streams = import_issues_to_event_streams(&canonical).unwrap();
+    let now: DateTime<Utc> = SystemTime::now().into();
+    let first_close = (now - Duration::from_secs(120))
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    let second_close = (now - Duration::from_secs(60))
+        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    streams[0].events.extend([
+        close_event("close-1", &first_close, Some("shipped")),
+        close_event("close-2", &second_close, None),
+    ]);
+    write_streams(&beads_dir, &streams).unwrap();
+
+    let mut stale = canonical[0].clone();
+    stale.status = sase_core::StatusWire::Closed;
+    stale.closed_at = Some(second_close.clone());
+    stale.close_reason = None;
+    stale.resolution = Some(BeadResolutionWire::Done);
+    stale.updated_at = second_close;
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        sase_core::export_issues_to_jsonl(&[stale]).unwrap(),
+    )
+    .unwrap();
+
+    let report = bead_doctor_report(&beads_dir).unwrap();
+
+    assert_eq!(report.projection_drift.len(), 1);
+    assert_eq!(report.projection_drift[0].issue_id, "beads-1");
+    assert_eq!(
+        report.projection_drift[0].changed_fields,
+        vec!["close_reason", "closed_at", "updated_at"]
+    );
+    assert_eq!(report.redundant_close_events, 1);
+    assert_eq!(report.redundant_close_issues, 1);
+    assert_eq!(report.redundant_close_events_recent, 1);
+    assert!(report.messages.iter().any(|message| {
+        message.contains("issues.jsonl is 1 row(s) stale")
+            && message.contains("--fix-projection")
+    }));
+    assert!(report.messages.iter().any(|message| {
+        message.contains("1 redundant close event(s) across 1 bead(s)")
+            && message.contains("1 in the last 7 days")
+    }));
 }
 
 #[test]
@@ -505,10 +573,17 @@ fn write_event_store(
     issues: &[sase_core::IssueWire],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let streams = import_issues_to_event_streams(issues)?;
+    write_streams(beads_dir, &streams)
+}
+
+fn write_streams(
+    beads_dir: &std::path::Path,
+    streams: &[BeadEventStreamWire],
+) -> Result<(), Box<dyn std::error::Error>> {
     let events_dir = beads_dir.join("events");
     let streams_dir = events_dir.join("streams");
     fs::create_dir_all(&streams_dir)?;
-    let manifest = BeadEventStoreManifestWire::from_streams(&streams);
+    let manifest = BeadEventStoreManifestWire::from_streams(streams);
     fs::write(
         events_dir.join("manifest.json"),
         serde_json::to_string(&manifest)?,
@@ -520,6 +595,26 @@ fn write_event_store(
         )?;
     }
     Ok(())
+}
+
+fn close_event(
+    event_id: &str,
+    timestamp: &str,
+    close_reason: Option<&str>,
+) -> BeadEventRecordWire {
+    BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: event_id.to_string(),
+        timestamp: timestamp.to_string(),
+        actor: "test".to_string(),
+        operation: BeadEventOperationWire::IssueClosed,
+        issue_id: "beads-1".to_string(),
+        payload: BeadEventPayloadWire::IssueClosed {
+            close_reason: close_reason.map(str::to_string),
+            resolution: Some(BeadResolutionWire::Done),
+            forced_descendant_ids: Vec::new(),
+        },
+    }
 }
 
 fn serialize_stream(
