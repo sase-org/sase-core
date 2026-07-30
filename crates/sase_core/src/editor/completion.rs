@@ -384,6 +384,22 @@ pub fn build_artifact_ref_payload_completion_candidates(
                 replacement_range,
             );
         }
+    } else if kind == "bead" {
+        append_bead_page_candidates(
+            &mut candidates,
+            &mut seen,
+            context,
+            &query,
+            replacement_range,
+        );
+    } else if kind == "agent" {
+        append_agent_page_candidates(
+            &mut candidates,
+            &mut seen,
+            context,
+            &query,
+            replacement_range,
+        );
     } else if kind == "file" {
         append_artifact_index_candidates(
             &mut candidates,
@@ -487,6 +503,105 @@ fn append_artifact_path_candidates(
             "artifact_payload",
         ));
     }
+}
+
+fn append_bead_page_candidates(
+    candidates: &mut Vec<CompletionCandidate>,
+    seen: &mut BTreeSet<String>,
+    context: &ArtifactRefContextWire,
+    query: &str,
+    replacement_range: Option<EditorRange>,
+) {
+    for store in &context.bead_stores {
+        let pages_root = Path::new(&store.root).join("pages");
+        for path in bounded_relative_files(&pages_root) {
+            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+                break;
+            }
+            let Some(id) = bead_id_from_page_relative_path(&path) else {
+                continue;
+            };
+            if !id.to_lowercase().starts_with(query) || !seen.insert(id.clone())
+            {
+                continue;
+            }
+            candidates.push(artifact_ref_candidate(
+                id.clone(),
+                id,
+                format!("bead · {}", store.project),
+                replacement_range,
+                "artifact_payload",
+            ));
+        }
+        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+            break;
+        }
+    }
+}
+
+fn append_agent_page_candidates(
+    candidates: &mut Vec<CompletionCandidate>,
+    seen: &mut BTreeSet<String>,
+    context: &ArtifactRefContextWire,
+    query: &str,
+    replacement_range: Option<EditorRange>,
+) {
+    for root in &context.agent_roots {
+        let agents_root = Path::new(&root.root).join("agents");
+        if !agents_root.is_dir() {
+            continue;
+        }
+        let Ok(read_dir) = fs::read_dir(&agents_root) else {
+            continue;
+        };
+        let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() || !entry.path().join("README.md").is_file()
+            {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.is_empty()
+                || !name.to_lowercase().starts_with(query)
+                || !seen.insert(name.clone())
+            {
+                continue;
+            }
+            candidates.push(artifact_ref_candidate(
+                name.clone(),
+                name,
+                format!("agent · {}", root.project),
+                replacement_range,
+                "artifact_payload",
+            ));
+        }
+        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
+            break;
+        }
+    }
+}
+
+fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
+    let mut parts = path.split('/');
+    let lineage = parts.next()?;
+    let file_name = parts.next()?;
+    if parts.next().is_some() || lineage.is_empty() {
+        return None;
+    }
+    if file_name == "README.md" {
+        return Some(lineage.to_string());
+    }
+    file_name
+        .strip_suffix(".md")
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 fn append_artifact_index_candidates(
@@ -2378,6 +2493,7 @@ mod tests {
     use crate::editor::directive::directive_argument_candidates;
     use crate::effort::EFFORT_LEVELS_ORDERED;
     use crate::{
+        ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire,
         ArtifactRefDocumentRootWire, EditorXpromptCatalogEntryWire,
         MobileXpromptInputWire,
     };
@@ -2538,6 +2654,28 @@ mod tests {
     }
 
     #[test]
+    fn artifact_kind_candidates_list_builtins_in_documented_order() {
+        let context = ArtifactRefContextWire::default();
+        let completion = artifact_completion_context("@", 1, &context);
+        let list = build_artifact_ref_kind_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            Some(completion.replacement_range),
+            &context,
+        );
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["commit:", "chat:", "bug:", "file:", "bead:", "agent:"]
+        );
+        assert!(list.candidates.iter().all(|candidate| {
+            candidate.detail.as_deref() == Some("builtin artifact kind")
+        }));
+    }
+
+    #[test]
     fn builds_dynamic_kind_and_payload_candidates() {
         let temp = tempfile::tempdir().unwrap();
         let designs = temp.path().join("designs");
@@ -2573,6 +2711,99 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("designs"));
+    }
+
+    #[test]
+    fn builds_bead_payload_candidates_from_published_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let bead_root = temp.path().join("beads");
+        fs::create_dir_all(bead_root.join("pages/sase-9z")).unwrap();
+        fs::write(bead_root.join("pages/sase-9z/README.md"), "root").unwrap();
+        fs::write(bead_root.join("pages/sase-9z/sase-9z.1.md"), "phase")
+            .unwrap();
+        fs::write(bead_root.join("pages/sase-9z/notes.txt"), "ignore").unwrap();
+        let context = ArtifactRefContextWire {
+            bead_stores: vec![ArtifactRefBeadStoreWire {
+                project: "sase".to_string(),
+                prefix: "sase".to_string(),
+                root: bead_root.to_string_lossy().into_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let completion =
+            artifact_completion_context("@bead:sase-9z", 13, &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            Some(completion.replacement_range),
+            &context,
+        );
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-9z", "sase-9z.1"]
+        );
+        assert!(list
+            .candidates
+            .iter()
+            .all(
+                |candidate| candidate.detail.as_deref() == Some("bead · sase")
+            ));
+    }
+
+    #[test]
+    fn builds_agent_payload_candidates_from_published_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_root = temp.path().join("agents-sidecar");
+        fs::create_dir_all(agent_root.join("agents/bbugyi200.athena.9w--code"))
+            .unwrap();
+        fs::create_dir_all(agent_root.join("agents/bbugyi200.athena.9w"))
+            .unwrap();
+        fs::create_dir_all(agent_root.join("agents/bbugyi200.athena.skip"))
+            .unwrap();
+        fs::write(
+            agent_root.join("agents/bbugyi200.athena.9w--code/README.md"),
+            "member",
+        )
+        .unwrap();
+        fs::write(
+            agent_root.join("agents/bbugyi200.athena.9w/README.md"),
+            "agent",
+        )
+        .unwrap();
+        let context = ArtifactRefContextWire {
+            agent_roots: vec![ArtifactRefAgentRootWire {
+                project: "sase".to_string(),
+                root: agent_root.to_string_lossy().into_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let text = "@agent:bbugyi200.athena.9w";
+        let completion =
+            artifact_completion_context(text, text.len(), &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            Some(completion.replacement_range),
+            &context,
+        );
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bbugyi200.athena.9w", "bbugyi200.athena.9w--code"]
+        );
+        assert!(list
+            .candidates
+            .iter()
+            .all(
+                |candidate| candidate.detail.as_deref() == Some("agent · sase")
+            ));
     }
 
     #[test]

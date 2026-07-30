@@ -679,7 +679,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::ArtifactRefDocumentRootWire;
+    use crate::{ArtifactRefBeadStoreWire, ArtifactRefDocumentRootWire};
 
     fn catalog() -> Vec<XpromptAssistEntry> {
         vec![
@@ -908,12 +908,39 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let context = artifact_context(temp.path());
         let document = DocumentSnapshot::new(
-            "`@designs:missing.md`\n```\n@designs:fenced.md\n```\n@user:handle",
+            "`@designs:missing.md` `@bead:sase-9z`\n```\n@designs:fenced.md\n```\n@user:handle",
         );
 
         let diagnostics = analyze_artifact_refs(&document, &context);
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn artifact_diagnostics_report_unresolved_bead_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut context = artifact_context(temp.path());
+        context.bead_stores.push(ArtifactRefBeadStoreWire {
+            project: "sase".to_string(),
+            prefix: "sase".to_string(),
+            root: temp.path().join("beads").to_string_lossy().into_owned(),
+        });
+        let text = "@bead:sase-9z";
+        let document = DocumentSnapshot::new(text);
+
+        let diagnostics = analyze_artifact_refs(&document, &context);
+
+        assert_eq!(
+            diagnostic_count(&diagnostics, "unresolved_artifact_ref"),
+            1
+        );
+        assert_eq!(
+            diagnostic_text(
+                text,
+                diagnostic(&diagnostics, "unresolved_artifact_ref")
+            ),
+            "@bead:sase-9z"
+        );
     }
 
     #[test]
