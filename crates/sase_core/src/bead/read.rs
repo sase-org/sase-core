@@ -229,10 +229,7 @@ fn doctor_report_impl(
             }
         }
     } else {
-        match read_legacy_jsonl_issues(beads_dir) {
-            Ok(issues) => (issues, None),
-            Err(err) => return Err(err),
-        }
+        (read_legacy_jsonl_issues(beads_dir)?, None)
     };
     let (redundant_close_events, redundant_close_issues, redundant_recent) =
         match streams.as_deref() {

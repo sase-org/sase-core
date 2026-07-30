@@ -591,7 +591,7 @@ fn write_streams(
     for stream in streams {
         fs::write(
             streams_dir.join(format!("{}.jsonl", stream.stream_id)),
-            serialize_stream(&stream)?,
+            serialize_stream(stream)?,
         )?;
     }
     Ok(())
