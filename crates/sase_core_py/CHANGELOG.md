@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/sase-org/sase-core/compare/v0.16.0...v0.17.0) - 2026-07-30
+
+### Added
+
+- *(bead)* [**breaking**] add task beads and ready workflow
+
 ## [0.15.0](https://github.com/sase-org/sase-core/compare/v0.14.2...v0.15.0) - 2026-07-30
 
 ### Added
