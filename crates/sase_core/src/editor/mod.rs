@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod directive;
 pub mod file;
 mod frontmatter;
+pub mod fuzzy;
 pub mod hover;
 pub mod placeholder;
 pub mod token;
@@ -52,6 +53,7 @@ pub use frontmatter::{
     validate as validate_frontmatter,
     validate_field as validate_frontmatter_field,
 };
+pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::hover_at_position;
 pub use placeholder::{
     build_placeholder_completion_candidates,
