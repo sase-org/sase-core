@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/sase-org/sase-core/compare/v0.12.19...v0.13.0) - 2026-07-30
+
+### Added
+
+- [**breaking**] materialize VCS-backed artifact files
+
 ## [0.12.19](https://github.com/sase-org/sase-core/compare/v0.12.18...v0.12.19) - 2026-07-30
 
 ### Added
