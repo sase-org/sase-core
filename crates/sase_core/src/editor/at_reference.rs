@@ -10,8 +10,12 @@ use super::wire::EditorPosition;
 
 const ARTIFACT_REF_PREFIX_LOOKBACK: usize = 128;
 pub const AT_REFERENCE_MAX_GROUP_ROWS: usize = 200;
+/// Builtin artifact reference kinds, in menu-ranking order.
+///
+/// New kinds are appended so existing rows keep their position. This is the
+/// single source of truth; nothing else may hardcode the list.
 pub const BUILTIN_ARTIFACT_REF_KINDS: &[&str] =
-    &["commit", "chat", "bug", "file"];
+    &["commit", "chat", "bug", "file", "bead", "agent"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 1;
-pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -42,6 +42,8 @@ pub enum ArtifactRefKindWire {
     Chat,
     Bug,
     File,
+    Bead,
+    Agent,
     Document { role: String },
 }
 
@@ -52,6 +54,8 @@ impl ArtifactRefKindWire {
             Self::Chat => "chat",
             Self::Bug => "bug",
             Self::File => "file",
+            Self::Bead => "bead",
+            Self::Agent => "agent",
             Self::Document { role } => role,
         }
     }
@@ -90,6 +94,12 @@ pub enum ArtifactRefPayloadWire {
     File {
         source: ArtifactFileSourceWire,
         digest: String,
+    },
+    Bead {
+        id: String,
+    },
+    Agent {
+        name: String,
     },
     Document {
         path: String,

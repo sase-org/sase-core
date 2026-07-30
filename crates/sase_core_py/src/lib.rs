@@ -7730,7 +7730,7 @@ mod tests {
             let parsed =
                 py_artifact_ref_parse(py, "plans:202607/plan.md#L2").unwrap();
             let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed_value["schema_version"], json!(1));
+            assert_eq!(parsed_value["schema_version"], json!(2));
             assert_eq!(parsed_value["kind"]["type"], json!("document"));
             assert_eq!(parsed_value["fragment"]["type"], json!("lines"));
             assert_eq!(
@@ -7756,7 +7756,7 @@ mod tests {
             let resolved =
                 py_artifact_ref_resolve(py, parsed.bind(py), context).unwrap();
             let resolved = py_to_json_value(resolved.bind(py)).unwrap();
-            assert_eq!(resolved["schema_version"], json!(1));
+            assert_eq!(resolved["schema_version"], json!(2));
             assert_eq!(resolved["status"], json!("exact"));
             assert_eq!(
                 resolved["resolved_path"],
@@ -7768,7 +7768,7 @@ mod tests {
             let scanned = py_to_json_value(scanned.bind(py)).unwrap();
             assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
-            assert_eq!(py_artifact_ref_wire_schema_version(), 1);
+            assert_eq!(py_artifact_ref_wire_schema_version(), 2);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
         });
     }

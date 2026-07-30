@@ -567,6 +567,19 @@ fn parse_normalized_family_name(
     })
 }
 
+/// Validate a name used as an `agent:` artifact reference payload.
+///
+/// Reference payloads accept any valid historical semantic name — local
+/// (`9w`), global (`bbugyi200.athena.9w`), and legacy machine-qualified
+/// (`athena.sase-7r.land--code`) spellings all name an agent whose page may
+/// exist on disk. Resolution canonicalizes; parsing only rejects spellings no
+/// agent could ever have.
+pub fn validate_agent_reference_name(
+    name: &str,
+) -> Result<(), AgentIdentityError> {
+    validate_historical_semantic_name(name)
+}
+
 fn validate_semantic_name(name: &str) -> Result<(), AgentIdentityError> {
     validate_historical_semantic_name(name)?;
     validate_new_family_name(name)

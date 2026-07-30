@@ -5141,6 +5141,8 @@ mod tests {
                 "@chat:",
                 "@bug:",
                 "@file:",
+                "@bead:",
+                "@agent:",
                 "@designs:",
                 "@plan:",
                 "@plans/",
@@ -5149,24 +5151,24 @@ mod tests {
             ]
         );
         assert!(!bare_labels.contains(&"@.hidden"));
-        assert!(bare_items[..6].iter().all(|item| {
+        assert!(bare_items[..8].iter().all(|item| {
             item.kind == Some(lsp_types::CompletionItemKind::ENUM_MEMBER)
                 && item
                     .sort_text
                     .as_deref()
                     .is_some_and(|sort| sort.starts_with("0:"))
         }));
-        assert!(bare_items[6..].iter().all(|item| {
+        assert!(bare_items[8..].iter().all(|item| {
             item.sort_text
                 .as_deref()
                 .is_some_and(|sort| sort.starts_with("1:"))
         }));
         assert_eq!(
-            bare_items[6].kind,
+            bare_items[8].kind,
             Some(lsp_types::CompletionItemKind::FOLDER)
         );
         assert_eq!(
-            bare_items[8].kind,
+            bare_items[10].kind,
             Some(lsp_types::CompletionItemKind::FILE)
         );
         for item in &bare_items {

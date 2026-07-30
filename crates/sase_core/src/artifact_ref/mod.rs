@@ -5,6 +5,7 @@ mod wire;
 
 use std::path::{Path, PathBuf};
 
+use crate::agent_identity::validate_agent_reference_name;
 use crate::artifact_file::read_artifact_file_index;
 use crate::reference_path::{
     path_to_relative_payload, resolve_ordered_root_file,
@@ -51,10 +52,7 @@ pub fn parse_artifact_ref(
     let payload = parse_payload(&kind, payload_text)?;
     let fragment = match fragment_text {
         Some(fragment) => {
-            if matches!(
-                kind,
-                ArtifactRefKindWire::Commit | ArtifactRefKindWire::Bug
-            ) {
+            if kind_rejects_fragments(&kind) {
                 return Err(ArtifactRefError::validation(format!(
                     "{} references do not support fragments",
                     kind.label()
@@ -113,6 +111,17 @@ pub fn render_artifact_ref(
             validate_digest(digest)?;
             format!("{}:{digest}", source.label())
         }
+        (ArtifactRefKindWire::Bead, ArtifactRefPayloadWire::Bead { id }) => {
+            validate_bead_id(id)?;
+            id.clone()
+        }
+        (
+            ArtifactRefKindWire::Agent,
+            ArtifactRefPayloadWire::Agent { name },
+        ) => {
+            validate_agent_payload_name(name)?;
+            name.clone()
+        }
         (
             ArtifactRefKindWire::Document { .. },
             ArtifactRefPayloadWire::Document { path },
@@ -129,10 +138,7 @@ pub fn render_artifact_ref(
 
     let fragment = match &reference.fragment {
         Some(fragment) => {
-            if matches!(
-                reference.kind,
-                ArtifactRefKindWire::Commit | ArtifactRefKindWire::Bug
-            ) {
+            if kind_rejects_fragments(&reference.kind) {
                 return Err(ArtifactRefError::validation(format!(
                     "{kind} references do not support fragments"
                 )));
@@ -238,6 +244,8 @@ fn classify_kind(kind: &str) -> ArtifactRefKindWire {
         "chat" => ArtifactRefKindWire::Chat,
         "bug" => ArtifactRefKindWire::Bug,
         "file" => ArtifactRefKindWire::File,
+        "bead" => ArtifactRefKindWire::Bead,
+        "agent" => ArtifactRefKindWire::Agent,
         role => ArtifactRefKindWire::Document {
             role: role.to_string(),
         },
@@ -323,6 +331,18 @@ fn parse_payload(
             Ok(ArtifactRefPayloadWire::File {
                 source,
                 digest: digest.to_string(),
+            })
+        }
+        ArtifactRefKindWire::Bead => {
+            validate_bead_id(payload)?;
+            Ok(ArtifactRefPayloadWire::Bead {
+                id: payload.to_string(),
+            })
+        }
+        ArtifactRefKindWire::Agent => {
+            validate_agent_payload_name(payload)?;
+            Ok(ArtifactRefPayloadWire::Agent {
+                name: payload.to_string(),
             })
         }
         ArtifactRefKindWire::Document { .. } => {
@@ -581,6 +601,53 @@ fn validate_kind(kind: &str) -> Result<(), ArtifactRefError> {
     Ok(())
 }
 
+/// Kinds whose payload names a logical entity rather than a stable document.
+///
+/// Their Markdown renderings are regenerated wholesale, so a line anchor would
+/// silently drift to unrelated content after the next refresh.
+fn kind_rejects_fragments(kind: &ArtifactRefKindWire) -> bool {
+    matches!(
+        kind,
+        ArtifactRefKindWire::Commit
+            | ArtifactRefKindWire::Bug
+            | ArtifactRefKindWire::Bead
+            | ArtifactRefKindWire::Agent
+    )
+}
+
+/// Validate a bead id lexically, with no bead-store reads.
+///
+/// Stricter than the bead-page path rules on purpose: a reference payload must
+/// be path-safe by construction, since resolution turns it straight into a
+/// page path.
+fn validate_bead_id(id: &str) -> Result<(), ArtifactRefError> {
+    if id.is_empty() {
+        return Err(ArtifactRefError::validation("bead id must not be empty"));
+    }
+    for segment in id.split('.') {
+        if segment.is_empty() {
+            return Err(ArtifactRefError::validation(
+                "bead id must not contain an empty '.' segment",
+            ));
+        }
+        if !segment.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+        }) {
+            return Err(ArtifactRefError::validation(
+                "bead id segment must contain only letters, digits, '-' and '_'",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an `agent:` payload against the historical semantic-name rules.
+fn validate_agent_payload_name(name: &str) -> Result<(), ArtifactRefError> {
+    validate_agent_reference_name(name).map_err(|error| {
+        ArtifactRefError::validation(format!("invalid agent name: {error}"))
+    })
+}
+
 fn validate_path_payload(
     label: &str,
     path: &str,
@@ -754,6 +821,14 @@ mod tests {
                 "commit:sase@0123456789abcdef0123456789abcdef01234567",
             ),
             ("bug:sase#123", "bug:sase#123"),
+            ("bead:sase-9z", "bead:sase-9z"),
+            ("bead:sase-9z.1", "bead:sase-9z.1"),
+            ("bead:sase-ag.land", "bead:sase-ag.land"),
+            ("agent:bbugyi200.athena.9w", "agent:bbugyi200.athena.9w"),
+            (
+                "agent:bbugyi200.athena.9w--code",
+                "agent:bbugyi200.athena.9w--code",
+            ),
         ] {
             let parsed = parse_artifact_ref(value).unwrap();
             assert_eq!(parsed.rendered, expected);
@@ -783,9 +858,25 @@ mod tests {
             "plans:x.md#L3-L2",
             "plans:x.md#page=0",
             "plans:x.md#t=nope",
+            "bead:",
+            "bead:sase-9z.",
+            "bead:.sase-9z",
+            "bead:sase-9z..1",
+            "bead:sase/9z",
+            "bead:sase 9z",
+            "bead:sase-9z#L1",
+            "agent:",
+            "agent:a/b",
+            "agent:.9w",
+            "agent:9w#L1",
         ] {
             assert!(parse_artifact_ref(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn parsed_references_carry_the_current_wire_schema() {
+        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 2);
     }
 
     #[test]

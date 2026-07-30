@@ -8,6 +8,7 @@ use crate::{
     scan_artifact_refs, ArtifactRefContextWire, ArtifactRefKindWire,
 };
 
+use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
 use super::token::DocumentSnapshot;
@@ -113,9 +114,9 @@ pub fn analyze_artifact_refs(
 fn known_artifact_ref_kinds(
     context: &ArtifactRefContextWire,
 ) -> HashSet<String> {
-    ["commit", "chat", "bug", "file"]
-        .into_iter()
-        .map(str::to_string)
+    BUILTIN_ARTIFACT_REF_KINDS
+        .iter()
+        .map(|kind| (*kind).to_string())
         .chain(context.document_roots.iter().map(|root| root.kind.clone()))
         .collect()
 }
