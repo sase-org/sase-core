@@ -173,6 +173,14 @@ pub struct DoneMarkerWire {
     pub imported_transaction_key: Option<String>,
 }
 
+/// Scalar-or-list value stored under `agent_meta.json::output_variables`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OutputVariableValue {
+    Text(String),
+    List(Vec<String>),
+}
+
 /// Compact projection of `agent_meta.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetaWire {
@@ -239,7 +247,7 @@ pub struct AgentMetaWire {
     #[serde(default, alias = "tag")]
     pub tribe: Option<String>,
     #[serde(default)]
-    pub output_variables: BTreeMap<String, String>,
+    pub output_variables: BTreeMap<String, OutputVariableValue>,
     #[serde(default)]
     pub output_path: Option<String>,
     #[serde(default)]

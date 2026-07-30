@@ -29,7 +29,7 @@ use super::layout::{
 use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire,
+    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, OutputVariableValue,
     PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
     RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -863,6 +863,40 @@ fn coerce_str_str_map(
     }
 }
 
+fn coerce_output_variable_map(
+    value: Option<&Value>,
+) -> Option<BTreeMap<String, OutputVariableValue>> {
+    let map = match value {
+        Some(Value::Object(m)) => m,
+        _ => return None,
+    };
+    let mut out: BTreeMap<String, OutputVariableValue> = BTreeMap::new();
+    for (key, value) in map {
+        let value = match value {
+            Value::String(text) => {
+                Some(OutputVariableValue::Text(text.clone()))
+            }
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(OutputVariableValue::List),
+            _ => None,
+        };
+        if let Some(value) = value {
+            out.insert(key.clone(), value);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// Python `bool(x)` semantics: anything truthy → true.
 fn coerce_bool_truthy(value: Option<&Value>) -> bool {
     match value {
@@ -955,8 +989,10 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tribe: coerce_str(data.get("tribe"))
             .or_else(|| coerce_str(data.get("tag"))),
-        output_variables: coerce_str_str_map(data.get("output_variables"))
-            .unwrap_or_default(),
+        output_variables: coerce_output_variable_map(
+            data.get("output_variables"),
+        )
+        .unwrap_or_default(),
         output_path: coerce_str(data.get("output_path")),
         pid: coerce_int(data.get("pid")),
         model: coerce_str(data.get("model")),

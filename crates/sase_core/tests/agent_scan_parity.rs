@@ -21,7 +21,7 @@ use sase_core::agent_scan::{
     replace_agent_artifact_index_dismissed_agents, scan_agent_artifact_dirs,
     scan_agent_artifacts, write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    OutputVariableValue, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -1042,7 +1042,7 @@ fn scanner_keeps_parent_epic_and_authored_plan_references_separate() {
 }
 
 #[test]
-fn running_record_carries_string_output_variables() {
+fn running_record_carries_string_and_list_output_variables() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
     write_json(
@@ -1057,7 +1057,11 @@ fn running_record_carries_string_output_variables() {
             "output_variables": {
                 "result_path": "/tmp/result.md",
                 "status": "ok",
+                "targets": ["alpha", "beta"],
+                "empty": [],
                 "attempts": 2,
+                "mixed": [1, "beta"],
+                "nested_array": [["ignored"]],
                 "nested": {"ignored": true}
             },
         }),
@@ -1069,14 +1073,27 @@ fn running_record_carries_string_output_variables() {
     let meta = rec.agent_meta.as_ref().unwrap();
 
     assert_eq!(
-        meta.output_variables.get("result_path").map(String::as_str),
-        Some("/tmp/result.md")
+        meta.output_variables.get("result_path"),
+        Some(&OutputVariableValue::Text("/tmp/result.md".to_string()))
     );
     assert_eq!(
-        meta.output_variables.get("status").map(String::as_str),
-        Some("ok")
+        meta.output_variables.get("status"),
+        Some(&OutputVariableValue::Text("ok".to_string()))
+    );
+    assert_eq!(
+        meta.output_variables.get("targets"),
+        Some(&OutputVariableValue::List(vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+        ]))
+    );
+    assert_eq!(
+        meta.output_variables.get("empty"),
+        Some(&OutputVariableValue::List(Vec::new()))
     );
     assert!(!meta.output_variables.contains_key("attempts"));
+    assert!(!meta.output_variables.contains_key("mixed"));
+    assert!(!meta.output_variables.contains_key("nested_array"));
     assert!(!meta.output_variables.contains_key("nested"));
 }
 
