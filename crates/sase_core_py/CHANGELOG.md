@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.18](https://github.com/sase-org/sase-core/compare/v0.12.17...v0.12.18) - 2026-07-30
+
+### Added
+
+- *(editor)* add indexed at-reference payload binding
+
 ## [0.12.17](https://github.com/sase-org/sase-core/compare/v0.12.16...v0.12.17) - 2026-07-30
 
 ### Added
