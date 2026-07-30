@@ -18,6 +18,7 @@ use super::at_reference::{
     AtReferencePayloadRowWire, AtReferenceStage,
 };
 use super::directive::canonical_directive_name;
+use super::fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
@@ -542,6 +543,12 @@ fn append_bead_page_candidates(
     }
 }
 
+/// Collect published agent pages whose global name fuzzy-matches `query`.
+///
+/// Agent payloads are global names like `bbugyi200.athena.sase-b3.5`, so a
+/// prefix test would make a fragment such as `sase-b3` unreachable. The whole
+/// `agents` tree is enumerated — a query matching nothing already walked it —
+/// and the cap is applied to the ranked matches rather than to walk order.
 fn append_agent_page_candidates(
     candidates: &mut Vec<CompletionCandidate>,
     seen: &mut BTreeSet<String>,
@@ -549,6 +556,7 @@ fn append_agent_page_candidates(
     query: &str,
     replacement_range: Option<EditorRange>,
 ) {
+    let mut matched = Vec::new();
     for root in &context.agent_roots {
         let agents_root = Path::new(&root.root).join("agents");
         if !agents_root.is_dir() {
@@ -560,9 +568,6 @@ fn append_agent_page_candidates(
         let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-                break;
-            }
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -571,24 +576,23 @@ fn append_agent_page_candidates(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.is_empty()
-                || !name.to_lowercase().starts_with(query)
-                || !seen.insert(name.clone())
-            {
+            if name.is_empty() {
                 continue;
             }
-            candidates.push(artifact_ref_candidate(
-                name.clone(),
-                name,
-                format!("agent · {}", root.project),
-                replacement_range,
-                "artifact_payload",
-            ));
-        }
-        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-            break;
+            let Some(fuzzy) = fuzzy_match(query, &name) else {
+                continue;
+            };
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            matched.push((fuzzy, name, format!("agent · {}", root.project)));
         }
     }
+    append_ranked_artifact_ref_candidates(
+        candidates,
+        matched,
+        replacement_range,
+    );
 }
 
 fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
@@ -607,6 +611,11 @@ fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Collect indexed artifact files whose id fuzzy-matches `query`.
+///
+/// Indexed payloads are `<source>:<hex>` ids, so a prefix test reached them
+/// only by typing a digest prefix. Every index row is matched and ranked before
+/// the cap, for the same reason as [`append_agent_page_candidates`].
 fn append_artifact_index_candidates(
     candidates: &mut Vec<CompletionCandidate>,
     seen: &mut BTreeSet<String>,
@@ -622,17 +631,42 @@ fn append_artifact_index_candidates(
         return;
     };
     entries.sort();
+    let mut matched = Vec::new();
     for (id, path) in entries {
-        if candidates.len() >= ARTIFACT_REF_MAX_RESULTS {
-            break;
-        }
-        if !id.to_lowercase().starts_with(query) || !seen.insert(id.clone()) {
+        let Some(fuzzy) = fuzzy_match(query, &id) else {
+            continue;
+        };
+        if !seen.insert(id.clone()) {
             continue;
         }
+        matched.push((fuzzy, id, format!("file · {path}")));
+    }
+    append_ranked_artifact_ref_candidates(
+        candidates,
+        matched,
+        replacement_range,
+    );
+}
+
+/// Rank fuzzy-matched payloads and append the strongest ones to `candidates`.
+///
+/// Ranking runs before the cap so prefix reach cannot regress: a prefix match
+/// is tier 0 and tier is [`compare_fuzzy`]'s primary key, so every row a prefix
+/// query reaches sorts ahead of every weaker fuzzy row and survives the cap.
+fn append_ranked_artifact_ref_candidates(
+    candidates: &mut Vec<CompletionCandidate>,
+    mut matched: Vec<(FuzzyMatch, String, String)>,
+    replacement_range: Option<EditorRange>,
+) {
+    matched.sort_by(|left, right| {
+        compare_fuzzy((&left.0, left.1.as_str()), (&right.0, right.1.as_str()))
+    });
+    let remaining = ARTIFACT_REF_MAX_RESULTS.saturating_sub(candidates.len());
+    for (_, payload, detail) in matched.into_iter().take(remaining) {
         candidates.push(artifact_ref_candidate(
-            id.clone(),
-            id,
-            format!("file · {path}"),
+            payload.clone(),
+            payload,
+            detail,
             replacement_range,
             "artifact_payload",
         ));
@@ -2807,6 +2841,101 @@ mod tests {
             .all(
                 |candidate| candidate.detail.as_deref() == Some("agent · sase")
             ));
+    }
+
+    #[test]
+    fn agent_and_indexed_file_payloads_match_mid_name_fragments() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_root = temp.path().join("agents-sidecar");
+        for name in [
+            "bbugyi200.athena.sase-b3.5",
+            "bbugyi200.athena.9w--code",
+            "bbugyi200.athena.other",
+        ] {
+            fs::create_dir_all(agent_root.join("agents").join(name)).unwrap();
+            fs::write(
+                agent_root.join("agents").join(name).join("README.md"),
+                "agent",
+            )
+            .unwrap();
+        }
+        let context = ArtifactRefContextWire {
+            agent_roots: vec![ArtifactRefAgentRootWire {
+                project: "sase".to_string(),
+                root: agent_root.to_string_lossy().into_owned(),
+            }],
+            artifact_index_path: Some(
+                temp.path()
+                    .join("artifact-index.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        };
+        fs::write(
+            temp.path().join("artifact-index.jsonl"),
+            "{\"schema_version\":1,\"artifact\":{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/tmp/panel.png\"}}\n",
+        )
+        .unwrap();
+
+        for (text, expected) in [
+            ("@agent:sase-b3", "bbugyi200.athena.sase-b3.5"),
+            ("@file:931185", "default:52895d68931185056fd0e49f"),
+        ] {
+            let completion =
+                artifact_completion_context(text, text.len(), &context);
+            let list = build_artifact_ref_payload_completion_candidates(
+                completion.artifact_ref.as_ref().unwrap(),
+                None,
+                &context,
+            );
+            assert_eq!(
+                list.candidates
+                    .iter()
+                    .map(|candidate| candidate.insertion.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_prefix_query_survives_a_corpus_of_fuzzy_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_root = temp.path().join("agents-sidecar");
+        // Every name below fuzzy-matches "zq", but only the last one — sorted
+        // last in walk order — matches it as a prefix.
+        for index in 0..ARTIFACT_REF_MAX_RESULTS + 5 {
+            let name = format!("aaz{index:04}q");
+            fs::create_dir_all(agent_root.join("agents").join(&name)).unwrap();
+            fs::write(
+                agent_root.join("agents").join(&name).join("README.md"),
+                "agent",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(agent_root.join("agents/zq-target")).unwrap();
+        fs::write(agent_root.join("agents/zq-target/README.md"), "agent")
+            .unwrap();
+        let context = ArtifactRefContextWire {
+            agent_roots: vec![ArtifactRefAgentRootWire {
+                project: "sase".to_string(),
+                root: agent_root.to_string_lossy().into_owned(),
+            }],
+            ..Default::default()
+        };
+
+        let text = "@agent:zq";
+        let completion =
+            artifact_completion_context(text, text.len(), &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            None,
+            &context,
+        );
+
+        assert_eq!(list.candidates[0].insertion, "zq-target");
     }
 
     #[test]
