@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::artifact_ref::read_artifact_index_entries;
+use crate::artifact_file::read_artifact_file_index;
+use crate::plan::read::split_frontmatter;
 use crate::{
     ArtifactRefContextWire, EditorSnippetEntryWire,
     EditorXpromptCatalogEntryWire,
@@ -445,7 +446,7 @@ pub fn build_artifact_ref_payload_completion_candidates(
         .into_iter()
         .map(|row| {
             artifact_ref_candidate(
-                row.label,
+                row.title,
                 row.insertion
                     .strip_prefix(&prefix)
                     .unwrap_or(&row.insertion)
@@ -499,7 +500,7 @@ fn append_artifact_path_candidates(
             continue;
         }
         candidates.push(artifact_ref_candidate(
-            path.clone(),
+            artifact_path_title(kind, root, &path),
             path,
             format!("{kind} · {}", root.display()),
             replacement_range,
@@ -529,8 +530,9 @@ fn append_bead_page_candidates(
             if !seen.insert(id.clone()) {
                 continue;
             }
+            let page_path = pages_root.join(&path);
             candidates.push(artifact_ref_candidate(
-                id.clone(),
+                bead_page_title(&page_path, &id),
                 id,
                 format!("bead · {}", store.project),
                 replacement_range,
@@ -579,20 +581,23 @@ fn append_agent_page_candidates(
             if name.is_empty() {
                 continue;
             }
-            let Some(fuzzy) = fuzzy_match(query, &name) else {
+            let title = agent_short_name(&name);
+            let Some(candidate) = matched_artifact_ref_candidate(
+                title,
+                name.clone(),
+                format!("agent · {}", root.project),
+                replacement_range,
+                query,
+            ) else {
                 continue;
             };
-            if !seen.insert(name.clone()) {
+            if !seen.insert(name) {
                 continue;
             }
-            matched.push((fuzzy, name, format!("agent · {}", root.project)));
+            matched.push(candidate);
         }
     }
-    append_ranked_artifact_ref_candidates(
-        candidates,
-        matched,
-        replacement_range,
-    );
+    append_ranked_artifact_ref_matches(candidates, matched, !query.is_empty());
 }
 
 fn bead_id_from_page_relative_path(path: &str) -> Option<String> {
@@ -626,51 +631,149 @@ fn append_artifact_index_candidates(
     let Some(index_path) = context.artifact_index_path.as_deref() else {
         return;
     };
-    let Ok(mut entries) = read_artifact_index_entries(Path::new(index_path))
+    let Ok(mut entries) = read_artifact_file_index(Path::new(index_path))
     else {
         return;
     };
-    entries.sort();
+    entries.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
     let mut matched = Vec::new();
-    for (id, path) in entries {
-        let Some(fuzzy) = fuzzy_match(query, &id) else {
+    for entry in entries {
+        let id = entry.id;
+        let title = path_basename(&entry.path).unwrap_or_else(|| id.clone());
+        let Some(candidate) = matched_artifact_ref_candidate(
+            title,
+            id.clone(),
+            format!("file · {}", entry.path),
+            replacement_range,
+            query,
+        ) else {
             continue;
         };
-        if !seen.insert(id.clone()) {
-            continue;
+        if seen.insert(id) {
+            matched.push(candidate);
         }
-        matched.push((fuzzy, id, format!("file · {path}")));
     }
-    append_ranked_artifact_ref_candidates(
-        candidates,
-        matched,
-        replacement_range,
-    );
+    append_ranked_artifact_ref_matches(candidates, matched, !query.is_empty());
 }
 
-/// Rank fuzzy-matched payloads and append the strongest ones to `candidates`.
-///
-/// Ranking runs before the cap so prefix reach cannot regress: a prefix match
-/// is tier 0 and tier is [`compare_fuzzy`]'s primary key, so every row a prefix
-/// query reaches sorts ahead of every weaker fuzzy row and survives the cap.
-fn append_ranked_artifact_ref_candidates(
-    candidates: &mut Vec<CompletionCandidate>,
-    mut matched: Vec<(FuzzyMatch, String, String)>,
+struct MatchedArtifactRefCandidate {
+    candidate: CompletionCandidate,
+    match_result: FuzzyMatch,
+    matched_text: String,
+}
+
+fn matched_artifact_ref_candidate(
+    title: String,
+    insertion: String,
+    detail: String,
     replacement_range: Option<EditorRange>,
-) {
-    matched.sort_by(|left, right| {
-        compare_fuzzy((&left.0, left.1.as_str()), (&right.0, right.1.as_str()))
-    });
-    let remaining = ARTIFACT_REF_MAX_RESULTS.saturating_sub(candidates.len());
-    for (_, payload, detail) in matched.into_iter().take(remaining) {
-        candidates.push(artifact_ref_candidate(
-            payload.clone(),
-            payload,
+    query: &str,
+) -> Option<MatchedArtifactRefCandidate> {
+    let payload_match = fuzzy_match(query, &insertion);
+    let title_match = fuzzy_match(query, &title);
+    let (match_result, matched_text) = match (payload_match, title_match) {
+        (Some(payload_match), Some(title_match)) => {
+            if compare_fuzzy(
+                (&payload_match, &insertion),
+                (&title_match, &title),
+            ) == std::cmp::Ordering::Greater
+            {
+                (title_match, title.clone())
+            } else {
+                (payload_match, insertion.clone())
+            }
+        }
+        (Some(payload_match), None) => (payload_match, insertion.clone()),
+        (None, Some(title_match)) => (title_match, title.clone()),
+        (None, None) => return None,
+    };
+    Some(MatchedArtifactRefCandidate {
+        candidate: artifact_ref_candidate(
+            title,
+            insertion,
             detail,
             replacement_range,
             "artifact_payload",
-        ));
+        ),
+        match_result,
+        matched_text,
+    })
+}
+
+fn append_ranked_artifact_ref_matches(
+    candidates: &mut Vec<CompletionCandidate>,
+    mut matched: Vec<MatchedArtifactRefCandidate>,
+    sort: bool,
+) {
+    if sort {
+        matched.sort_by(|left, right| {
+            compare_fuzzy(
+                (&left.match_result, &left.matched_text),
+                (&right.match_result, &right.matched_text),
+            )
+            .then_with(|| {
+                left.candidate.insertion.cmp(&right.candidate.insertion)
+            })
+        });
     }
+    candidates.extend(
+        matched
+            .into_iter()
+            .take(ARTIFACT_REF_MAX_RESULTS.saturating_sub(candidates.len()))
+            .map(|matched| matched.candidate),
+    );
+}
+
+fn artifact_path_title(kind: &str, root: &Path, payload: &str) -> String {
+    if kind == "chat" {
+        return path_basename(payload).unwrap_or_else(|| payload.to_string());
+    }
+    document_frontmatter_title(&root.join(payload))
+        .or_else(|| path_basename(payload))
+        .unwrap_or_else(|| payload.to_string())
+}
+
+fn document_frontmatter_title(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let (frontmatter, _) = split_frontmatter(&content);
+    let frontmatter = frontmatter?;
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter).ok()?;
+    let mapping = value.as_mapping()?;
+    let title = mapping.get(serde_yaml::Value::String("title".to_string()))?;
+    nonempty_title(title.as_str()?)
+}
+
+fn bead_page_title(path: &Path, id: &str) -> String {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| bead_page_title_from_content(&content))
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn bead_page_title_from_content(content: &str) -> Option<String> {
+    let heading = content.lines().next()?.strip_prefix("# Bead: ")?;
+    let (_, title) = heading.split_once(" \u{2014} ")?;
+    nonempty_title(title)
+}
+
+fn agent_short_name(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .and_then(nonempty_title)
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn path_basename(path: &str) -> Option<String> {
+    path.rsplit(['/', '\\']).next().and_then(nonempty_title)
+}
+
+fn nonempty_title(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn bounded_relative_files(root: &Path) -> Vec<String> {
@@ -2717,7 +2820,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let designs = temp.path().join("designs");
         fs::create_dir_all(designs.join("202607")).unwrap();
-        fs::write(designs.join("202607/Guide.md"), "guide").unwrap();
+        fs::write(
+            designs.join("202607/Guide.md"),
+            "---\ntitle: Product Guide\n---\nguide",
+        )
+        .unwrap();
         fs::write(designs.join("202607/other.md"), "other").unwrap();
         let context = artifact_context(temp.path());
 
@@ -2730,7 +2837,7 @@ mod tests {
         assert_eq!(kind_list.candidates.len(), 1);
         assert_eq!(kind_list.candidates[0].insertion, "designs:");
 
-        let payload_text = "@designs:202607/g";
+        let payload_text = "@designs:product";
         let payload_context = artifact_completion_context(
             payload_text,
             payload_text.len(),
@@ -2743,11 +2850,27 @@ mod tests {
         );
         assert_eq!(payload_list.candidates.len(), 1);
         assert_eq!(payload_list.candidates[0].insertion, "202607/Guide.md");
+        assert_eq!(payload_list.candidates[0].name, "Product Guide");
         assert!(payload_list.candidates[0]
             .detail
             .as_deref()
             .unwrap()
             .contains("designs"));
+
+        let fallback_text = "@designs:other";
+        let fallback_context = artifact_completion_context(
+            fallback_text,
+            fallback_text.len(),
+            &context,
+        );
+        let fallback_list = build_artifact_ref_payload_completion_candidates(
+            fallback_context.artifact_ref.as_ref().unwrap(),
+            Some(fallback_context.replacement_range),
+            &context,
+        );
+        assert_eq!(fallback_list.candidates.len(), 1);
+        assert_eq!(fallback_list.candidates[0].insertion, "202607/other.md");
+        assert_eq!(fallback_list.candidates[0].name, "other.md");
     }
 
     #[test]
@@ -2755,9 +2878,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let bead_root = temp.path().join("beads");
         fs::create_dir_all(bead_root.join("pages/sase-9z")).unwrap();
-        fs::write(bead_root.join("pages/sase-9z/README.md"), "root").unwrap();
-        fs::write(bead_root.join("pages/sase-9z/sase-9z.1.md"), "phase")
-            .unwrap();
+        fs::write(
+            bead_root.join("pages/sase-9z/README.md"),
+            "# Bead: sase-9z \u{2014} Root bead\n",
+        )
+        .unwrap();
+        fs::write(
+            bead_root.join("pages/sase-9z/sase-9z.1.md"),
+            "# Bead: sase-9z.1 \u{2014} Phase bead\n",
+        )
+        .unwrap();
         fs::write(bead_root.join("pages/sase-9z/notes.txt"), "ignore").unwrap();
         let context = ArtifactRefContextWire {
             bead_stores: vec![ArtifactRefBeadStoreWire {
@@ -2782,6 +2912,13 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec!["sase-9z", "sase-9z.1"]
+        );
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Root bead", "Phase bead"]
         );
         assert!(list
             .candidates
@@ -2834,6 +2971,13 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec!["bbugyi200.athena.9w", "bbugyi200.athena.9w--code"]
+        );
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["9w", "9w--code"]
         );
         assert!(list
             .candidates
@@ -2988,13 +3132,22 @@ mod tests {
         fs::write(temp.path().join("chats/202607/agent.md"), "chat").unwrap();
         fs::write(
             temp.path().join("artifact-index.jsonl"),
-            "{\"schema_version\":1,\"artifact\":{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/tmp/image.png\"}}\n",
+            "{\"schema_version\":1,\"artifact\":{\"id\":\"default:52895d68931185056fd0e49f\",\"path\":\"/tmp/panel-screenshot.png\"}}\n",
         )
         .unwrap();
 
-        for (text, expected) in [
-            ("@chat:202607/a", "202607/agent.md"),
-            ("@file:default:", "default:52895d68931185056fd0e49f"),
+        for (text, expected, expected_title) in [
+            ("@chat:202607/a", "202607/agent.md", "agent.md"),
+            (
+                "@file:default:",
+                "default:52895d68931185056fd0e49f",
+                "panel-screenshot.png",
+            ),
+            (
+                "@file:panel",
+                "default:52895d68931185056fd0e49f",
+                "panel-screenshot.png",
+            ),
         ] {
             let completion =
                 artifact_completion_context(text, text.len(), &context);
@@ -3005,6 +3158,7 @@ mod tests {
             );
             assert_eq!(list.candidates.len(), 1, "{text}");
             assert_eq!(list.candidates[0].insertion, expected, "{text}");
+            assert_eq!(list.candidates[0].name, expected_title, "{text}");
         }
 
         for text in ["@commit:sase@0123456", "@bug:sase#1", "@unknown:value"] {

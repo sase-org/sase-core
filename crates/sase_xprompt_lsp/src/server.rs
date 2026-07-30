@@ -5160,17 +5160,17 @@ mod tests {
             panic!("expected markdown documentation");
         };
         // The matched run is bolded in the basename the query was aimed at, and
-        // the document path is not repeated as a title.
+        // the document frontmatter title is carried into the preview.
         assert_eq!(
             documentation.value,
-            "202607/sase_sites_hub_and_pages/sase_**site**s_hub_and_pages.md"
+            "202607/sase_sites_hub_and_pages/sase_**site**s_hub_and_pages.md\n\nSASE Sites Hub and Pages"
         );
         assert_eq!(
             items[0]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.detail.as_deref()),
-            None
+            Some(" · SASE Sites Hub and Pages")
         );
     }
 
