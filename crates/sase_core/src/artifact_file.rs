@@ -2,6 +2,7 @@
 
 mod vcs;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -9,6 +10,9 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::artifact_consumption::{
+    consumed_artifact_file_refs, read_artifact_consumption_log,
+};
 use crate::plan::search::{current_date, parse_since_date_bound};
 
 pub use vcs::{
@@ -18,7 +22,7 @@ pub use vcs::{
 
 pub const ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_FILE_INDEX_MAX_SCHEMA_VERSION: u64 = 2;
-pub const ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION: u64 = 3;
 
 #[derive(Debug, Error)]
 pub enum ArtifactFileQueryError {
@@ -88,6 +92,10 @@ pub struct ArtifactFileQueryFiltersWire {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub unused_only: bool,
+    #[serde(default)]
+    pub consumption_log_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +198,18 @@ fn query_artifact_files_at(
         .filter(|query| !query.is_empty())
         .map(str::to_lowercase);
     let kinds = filters.kinds.as_deref().filter(|kinds| !kinds.is_empty());
+    let consumed_refs = filters.unused_only.then(|| {
+        filters
+            .consumption_log_path
+            .as_deref()
+            .map(Path::new)
+            .map(read_artifact_consumption_log)
+            .transpose()
+            .unwrap_or_default()
+            .map_or_else(BTreeSet::new, |events| {
+                consumed_artifact_file_refs(&events)
+            })
+    });
 
     let mut rows =
         read_artifact_file_index(index_path)?
@@ -230,6 +250,12 @@ fn query_artifact_files_at(
                     .flatten()
                     .any(|value| value.to_lowercase().contains(query))
                 })
+            })
+            .filter(|row| match &consumed_refs {
+                Some(consumed_refs) => {
+                    !consumed_refs.contains(&format!("file:{}", row.id))
+                }
+                None => true,
             })
             .collect::<Vec<_>>();
 
@@ -468,6 +494,7 @@ mod tests {
                     since: Some("2026-07".to_string()),
                     explicit_only: true,
                     limit: Some(1),
+                    ..Default::default()
                 },
                 vec!["first"],
             ),
@@ -528,6 +555,80 @@ mod tests {
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["new", "old"]
         );
+        drop(temp);
+    }
+
+    #[test]
+    fn unused_filter_runs_before_limit_and_tolerates_missing_ledgers() {
+        let (temp, index) = write_index(&[
+            row(1, "oldest", Some("2026-07-01T00:00:00Z")),
+            row(1, "older", Some("2026-07-02T00:00:00Z")),
+            row(1, "used", Some("2026-07-03T00:00:00Z")),
+            row(1, "newest-used", Some("2026-07-04T00:00:00Z")),
+        ]);
+        let consumption_log = temp.path().join("consumption.jsonl");
+        fs::write(
+            &consumption_log,
+            concat!(
+                "{\"schema_version\":1,\"consumption\":{",
+                "\"id\":\"one\",\"timestamp\":\"2026-07-30T10:00:00Z\",",
+                "\"ref\":\"file:used\",\"ref_kind\":\"file\",",
+                "\"fragment\":null,\"role\":\"image\",",
+                "\"artifact_id\":\"used\",\"resolved_path\":\"/stored/used.png\",",
+                "\"resolution_status\":\"exact\",\"agent_name\":\"agent.one\",",
+                "\"agent_source\":\"SASE_AGENT_NAME\",",
+                "\"artifacts_dir\":null,\"project\":\"sase\"}}\n",
+                "{\"schema_version\":1,\"consumption\":{",
+                "\"id\":\"two\",\"timestamp\":\"2026-07-30T10:01:00Z\",",
+                "\"ref\":\"file:newest-used\",\"ref_kind\":\"file\",",
+                "\"fragment\":null,\"role\":\"image\",",
+                "\"artifact_id\":\"newest-used\",",
+                "\"resolved_path\":\"/stored/newest-used.png\",",
+                "\"resolution_status\":\"exact\",\"agent_name\":\"agent.one\",",
+                "\"agent_source\":\"SASE_AGENT_NAME\",",
+                "\"artifacts_dir\":null,\"project\":\"sase\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let rows = query_artifact_files(
+            Path::new(&index),
+            &ArtifactFileQueryFiltersWire {
+                unused_only: true,
+                consumption_log_path: Some(
+                    consumption_log.to_string_lossy().into_owned(),
+                ),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["older", "oldest"]
+        );
+
+        for consumption_log_path in [
+            None,
+            Some(
+                temp.path()
+                    .join("missing-consumption.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            Some(temp.path().to_string_lossy().into_owned()),
+        ] {
+            let rows = query_artifact_files(
+                Path::new(&index),
+                &ArtifactFileQueryFiltersWire {
+                    unused_only: true,
+                    consumption_log_path,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 4);
+        }
         drop(temp);
     }
 

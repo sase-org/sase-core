@@ -149,6 +149,9 @@
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
+//! - `artifact_consumption_summary(log_path: str, refs: list[str] | None = None) -> dict`
+//! - `artifact_consumption_wire_schema_version() -> int`
+//! - `artifact_ref_render(reference: dict) -> str`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
@@ -213,7 +216,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{
+    PyOSError, PyRuntimeError, PyTimeoutError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 use sase_core::agent_archive::{
@@ -328,6 +333,11 @@ use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
     AgentRunStatsRequestWire,
+};
+use sase_core::artifact_consumption::{
+    read_artifact_consumption_log as core_read_artifact_consumption_log,
+    summarize_artifact_consumption as core_summarize_artifact_consumption,
+    ARTIFACT_CONSUMPTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_file::{
     materialize_vcs_artifact_file as core_materialize_vcs_artifact_file,
@@ -2960,6 +2970,37 @@ fn py_artifact_ref_wire_schema_version() -> u64 {
         ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION
     );
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION
+}
+
+/// Summarize the tolerant artifact-consumption ledger by canonical reference.
+#[pyfunction]
+#[pyo3(
+    name = "artifact_consumption_summary",
+    signature = (log_path, refs = None)
+)]
+fn py_artifact_consumption_summary<'py>(
+    py: Python<'py>,
+    log_path: &str,
+    refs: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let log_path = PathBuf::from(log_path);
+    let events = py
+        .allow_threads(|| core_read_artifact_consumption_log(&log_path))
+        .map_err(|error| PyOSError::new_err(error.to_string()))?;
+    let summary = core_summarize_artifact_consumption(&events, refs.as_deref());
+    let value = serde_json::to_value(summary).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-consumption summary serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the artifact-consumption summary wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_consumption_wire_schema_version")]
+fn py_artifact_consumption_wire_schema_version() -> u64 {
+    ARTIFACT_CONSUMPTION_WIRE_SCHEMA_VERSION
 }
 
 /// Query the tolerant artifact-file index using a frontend-neutral filter dict.
@@ -6377,6 +6418,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_resolve, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_consumption_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_consumption_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_files_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_file_materialize_vcs, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -7850,6 +7896,19 @@ mod tests {
                 py_artifact_ref_render(parsed.bind(py)).unwrap(),
                 "plans:202607/plan.md#L2"
             );
+            let mut fragment_free_value = parsed_value.clone();
+            fragment_free_value["fragment"] = serde_json::Value::Null;
+            let fragment_free =
+                json_value_to_py(py, &fragment_free_value).unwrap();
+            assert_eq!(
+                py_artifact_ref_render(fragment_free.bind(py)).unwrap(),
+                "plans:202607/plan.md"
+            );
+            let bug = py_artifact_ref_parse(py, "bug:sase#123").unwrap();
+            assert_eq!(
+                py_artifact_ref_render(bug.bind(py)).unwrap(),
+                "bug:sase#123"
+            );
 
             let context_value = json!({
                 "document_roots": [{
@@ -7883,6 +7942,65 @@ mod tests {
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
             assert_eq!(py_artifact_ref_wire_schema_version(), 3);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
+        });
+    }
+
+    #[test]
+    fn artifact_consumption_binding_returns_summary_and_handshake() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("consumption.jsonl");
+        fs::write(
+            &log,
+            concat!(
+                "{\"schema_version\":1,\"consumption\":{",
+                "\"id\":\"one\",\"timestamp\":\"2026-07-30T10:00:00Z\",",
+                "\"ref\":\"file:default:abc\",\"ref_kind\":\"file\",",
+                "\"fragment\":null,\"role\":\"image\",",
+                "\"artifact_id\":\"default:abc\",\"resolved_path\":\"/one\",",
+                "\"resolution_status\":\"exact\",\"agent_name\":\"agent.two\",",
+                "\"agent_source\":\"SASE_AGENT_NAME\",",
+                "\"artifacts_dir\":null,\"project\":\"sase\"}}\n",
+                "{\"schema_version\":1,\"consumption\":{",
+                "\"id\":\"two\",\"timestamp\":\"2026-07-30T11:00:00Z\",",
+                "\"ref\":\"file:default:abc\",\"ref_kind\":\"file\",",
+                "\"fragment\":null,\"role\":\"report\",",
+                "\"artifact_id\":\"default:abc\",\"resolved_path\":\"/two\",",
+                "\"resolution_status\":\"exact\",\"agent_name\":\"agent.one\",",
+                "\"agent_source\":\"SASE_AGENT_NAME\",",
+                "\"artifacts_dir\":null,\"project\":\"sase\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("artifact_consumption_summary").is_ok());
+            assert!(module
+                .getattr("artifact_consumption_wire_schema_version")
+                .is_ok());
+
+            let result = py_artifact_consumption_summary(
+                py,
+                log.to_str().unwrap(),
+                Some(vec![
+                    "file:default:abc".to_string(),
+                    "file:default:never".to_string(),
+                ]),
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            let summary = &value["file:default:abc"];
+            assert_eq!(summary["consumption_count"], json!(2));
+            assert_eq!(summary["distinct_agent_count"], json!(2));
+            assert_eq!(
+                summary["agent_names"],
+                json!(["agent.one", "agent.two"])
+            );
+            assert_eq!(summary["roles"], json!(["image", "report"]));
+            assert!(value.get("file:default:never").is_none());
+            assert_eq!(py_artifact_consumption_wire_schema_version(), 1);
         });
     }
 
@@ -7927,7 +8045,7 @@ mod tests {
             assert_eq!(value[0]["sha256"], json!("abc"));
             assert_eq!(value[0]["size_bytes"], json!(3));
             assert_eq!(value[0]["mime_type"], json!("image/png"));
-            assert_eq!(py_artifact_file_query_wire_schema_version(), 2);
+            assert_eq!(py_artifact_file_query_wire_schema_version(), 3);
 
             let request = PyDict::new_bound(py);
             request
