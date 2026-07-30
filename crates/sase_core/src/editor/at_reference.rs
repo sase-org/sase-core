@@ -7,6 +7,7 @@ use crate::{prompt_literal_zone_ranges, scan_artifact_refs};
 
 use super::token::DocumentSnapshot;
 use super::wire::EditorPosition;
+use super::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 
 const ARTIFACT_REF_PREFIX_LOOKBACK: usize = 128;
 pub const AT_REFERENCE_MAX_GROUP_ROWS: usize = 200;
@@ -76,16 +77,22 @@ pub struct AtReferenceInventoryWire {
     pub kinds: Vec<AtReferenceKindRowWire>,
     pub paths: Vec<AtReferencePathRowWire>,
     pub payloads: Vec<AtReferencePayloadRowWire>,
+    #[serde(default)]
+    pub truncated_payloads: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtReferenceRowWire {
     pub group: AtReferenceGroup,
     pub label: String,
+    pub title: String,
     pub insertion: String,
     pub is_dir: bool,
     pub detail: String,
     pub builtin: bool,
+    pub label_match: Vec<(u32, u32)>,
+    pub title_match: Vec<(u32, u32)>,
+    pub match_tier: u8,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +101,8 @@ pub struct AtReferenceMenuWire {
     pub shared_extension: String,
     pub artifact_count: usize,
     pub file_count: usize,
+    pub payload_count: usize,
+    pub truncated_payloads: usize,
 }
 
 pub fn detect_at_reference_context(
@@ -267,27 +276,42 @@ fn build_kind_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
 ) -> AtReferenceMenuWire {
-    let query = context.query.to_lowercase();
     let mut kinds = inventory
         .kinds
         .iter()
-        .filter(|row| row.kind.to_lowercase().starts_with(&query))
+        .filter_map(|row| {
+            fuzzy_match(&context.query, &row.kind)
+                .map(|match_result| (row, match_result))
+        })
         .collect::<Vec<_>>();
-    kinds.sort_by(|left, right| compare_kind_rows(left, right));
+    if context.query.is_empty() {
+        kinds.sort_by(|left, right| compare_kind_rows(left.0, right.0));
+    } else {
+        kinds.sort_by(compare_kind_matches);
+    }
 
     let mut seen_kinds = BTreeSet::new();
-    kinds.retain(|row| seen_kinds.insert(row.kind.clone()));
+    kinds.retain(|(row, _)| seen_kinds.insert(row.kind.clone()));
     let artifact_count = kinds.len();
+    let artifact_extension = shared_match_extension(
+        &kinds,
+        &context.query,
+        |(row, match_result)| (&row.kind, match_result.tier),
+    );
     let artifact_rows = kinds
         .into_iter()
         .take(AT_REFERENCE_MAX_GROUP_ROWS)
-        .map(|row| AtReferenceRowWire {
+        .map(|(row, match_result)| AtReferenceRowWire {
             group: AtReferenceGroup::Artifact,
             label: row.kind.clone(),
+            title: String::new(),
             insertion: format!("@{}:", row.kind),
             is_dir: false,
             detail: row.detail.clone(),
             builtin: row.builtin,
+            label_match: match_result.runs,
+            title_match: Vec::new(),
+            match_tier: match_result.tier,
         })
         .collect::<Vec<_>>();
 
@@ -295,26 +319,39 @@ fn build_kind_menu(
         .path_query
         .clone()
         .unwrap_or_else(|| split_path_query(&context.query));
-    let partial_lower = path_query.partial.to_lowercase();
     let mut paths = inventory
         .paths
         .iter()
-        .filter(|row| {
-            (path_query.show_hidden || !row.name.starts_with('.'))
-                && row.name.to_lowercase().starts_with(&partial_lower)
+        .filter_map(|row| {
+            if !path_query.show_hidden && row.name.starts_with('.') {
+                return None;
+            }
+            fuzzy_match(&path_query.partial, &row.name)
+                .map(|match_result| (row, match_result))
         })
         .collect::<Vec<_>>();
-    paths.sort_by(|left, right| {
-        right
-            .is_dir
-            .cmp(&left.is_dir)
-            .then_with(|| compare_case_insensitive(&left.name, &right.name))
+    paths.sort_by(|(left_row, left_match), (right_row, right_match)| {
+        right_row.is_dir.cmp(&left_row.is_dir).then_with(|| {
+            if path_query.partial.is_empty() {
+                compare_case_insensitive(&left_row.name, &right_row.name)
+            } else {
+                compare_fuzzy(
+                    (left_match, &left_row.name),
+                    (right_match, &right_row.name),
+                )
+            }
+        })
     });
     let file_count = paths.len();
+    let file_extension = shared_match_extension(
+        &paths,
+        &path_query.partial,
+        |(row, match_result)| (&row.name, match_result.tier),
+    );
     let file_rows = paths
         .into_iter()
         .take(AT_REFERENCE_MAX_GROUP_ROWS)
-        .map(|row| {
+        .map(|(row, match_result)| {
             let label = if row.is_dir {
                 format!("{}/", row.name.trim_end_matches('/'))
             } else {
@@ -324,6 +361,7 @@ fn build_kind_menu(
                 group: AtReferenceGroup::File,
                 insertion: format!("@{}{}", path_query.directory, label),
                 label,
+                title: String::new(),
                 is_dir: row.is_dir,
                 detail: if row.is_dir {
                     "directory".to_string()
@@ -331,14 +369,17 @@ fn build_kind_menu(
                     "file".to_string()
                 },
                 builtin: false,
+                label_match: match_result.runs,
+                title_match: Vec::new(),
+                match_tier: match_result.tier,
             }
         })
         .collect::<Vec<_>>();
 
-    let shared_extension = if artifact_rows.is_empty() {
-        shared_row_extension(&file_rows, &path_query.partial)
+    let shared_extension = if artifact_count == 0 {
+        file_extension
     } else {
-        shared_row_extension(&artifact_rows, &context.query)
+        artifact_extension
     };
     let mut rows = artifact_rows;
     rows.extend(file_rows);
@@ -347,6 +388,31 @@ fn build_kind_menu(
         shared_extension,
         artifact_count,
         file_count,
+        payload_count: 0,
+        truncated_payloads: inventory.truncated_payloads,
+    }
+}
+
+struct MatchedPayload<'a> {
+    row: &'a AtReferencePayloadRowWire,
+    payload_match: Option<FuzzyMatch>,
+    title_match: Option<FuzzyMatch>,
+    payload_is_best: bool,
+}
+
+impl MatchedPayload<'_> {
+    fn best_match(&self) -> (&FuzzyMatch, &str) {
+        if self.payload_is_best {
+            (
+                self.payload_match.as_ref().expect("payload match"),
+                &self.row.payload,
+            )
+        } else {
+            (
+                self.title_match.as_ref().expect("title match"),
+                &self.row.label,
+            )
+        }
     }
 }
 
@@ -354,17 +420,60 @@ fn build_payload_menu(
     context: &AtReferenceContextWire,
     inventory: &AtReferenceInventoryWire,
 ) -> AtReferenceMenuWire {
-    let query = context.query.to_lowercase();
     let kind = context.kind.as_deref().unwrap_or_default();
-    let rows = inventory
+    let mut matches = inventory
         .payloads
         .iter()
-        .filter(|row| {
-            row.payload.to_lowercase().starts_with(&query)
-                || row.label.to_lowercase().starts_with(&query)
+        .filter_map(|row| {
+            let payload_match = fuzzy_match(&context.query, &row.payload);
+            let title_match = fuzzy_match(&context.query, &row.label);
+            if payload_match.is_none() && title_match.is_none() {
+                return None;
+            }
+            let payload_is_best = match (&payload_match, &title_match) {
+                (Some(payload_match), Some(title_match)) => {
+                    compare_fuzzy(
+                        (payload_match, &row.payload),
+                        (title_match, &row.label),
+                    ) != Ordering::Greater
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => unreachable!(),
+            };
+            Some(MatchedPayload {
+                row,
+                payload_match,
+                title_match,
+                payload_is_best,
+            })
         })
+        .collect::<Vec<_>>();
+    if !context.query.is_empty() {
+        matches.sort_by(|left, right| {
+            compare_fuzzy(left.best_match(), right.best_match())
+                .then_with(|| {
+                    compare_case_insensitive(
+                        &left.row.payload,
+                        &right.row.payload,
+                    )
+                })
+                .then_with(|| {
+                    compare_case_insensitive(&left.row.label, &right.row.label)
+                })
+        });
+    }
+    let payload_count = matches.len();
+    let shared_extension =
+        shared_match_extension(&matches, &context.query, |matched| {
+            (matched.row.payload.as_str(), matched.best_match().0.tier)
+        });
+    let rows = matches
+        .into_iter()
         .take(AT_REFERENCE_MAX_GROUP_ROWS)
-        .map(|row| {
+        .map(|matched| {
+            let match_tier = matched.best_match().0.tier;
+            let row = matched.row;
             let detail = match (row.detail.is_empty(), row.age.is_empty()) {
                 (false, false) => format!("{} · {}", row.detail, row.age),
                 (false, true) => row.detail.clone(),
@@ -373,32 +482,58 @@ fn build_payload_menu(
             };
             AtReferenceRowWire {
                 group: AtReferenceGroup::Payload,
-                label: row.label.clone(),
+                label: row.payload.clone(),
+                title: row.label.clone(),
                 insertion: format!("@{kind}:{}", row.payload),
                 is_dir: false,
                 detail,
                 builtin: false,
+                label_match: matched
+                    .payload_match
+                    .map_or_else(Vec::new, |match_result| match_result.runs),
+                title_match: matched
+                    .title_match
+                    .map_or_else(Vec::new, |match_result| match_result.runs),
+                match_tier,
             }
         })
         .collect::<Vec<_>>();
     AtReferenceMenuWire {
-        shared_extension: shared_row_extension(&rows, &context.query),
+        shared_extension,
         rows,
         artifact_count: 0,
         file_count: 0,
+        payload_count,
+        truncated_payloads: inventory.truncated_payloads,
     }
+}
+
+fn compare_kind_matches(
+    left: &(&AtReferenceKindRowWire, FuzzyMatch),
+    right: &(&AtReferenceKindRowWire, FuzzyMatch),
+) -> Ordering {
+    left.1
+        .tier
+        .cmp(&right.1.tier)
+        .then_with(|| right.1.score.cmp(&left.1.score))
+        .then_with(|| {
+            match (builtin_kind_rank(left.0), builtin_kind_rank(right.0)) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                _ => Ordering::Equal,
+            }
+        })
+        .then_with(|| {
+            compare_fuzzy((&left.1, &left.0.kind), (&right.1, &right.0.kind))
+        })
+        .then_with(|| compare_kind_rows(left.0, right.0))
 }
 
 fn compare_kind_rows(
     left: &AtReferenceKindRowWire,
     right: &AtReferenceKindRowWire,
 ) -> Ordering {
-    let left_rank = BUILTIN_ARTIFACT_REF_KINDS
-        .iter()
-        .position(|kind| *kind == left.kind);
-    let right_rank = BUILTIN_ARTIFACT_REF_KINDS
-        .iter()
-        .position(|kind| *kind == right.kind);
+    let left_rank = builtin_kind_rank(left);
+    let right_rank = builtin_kind_rank(right);
     match (left_rank, right_rank) {
         (Some(left), Some(right)) => left.cmp(&right),
         (Some(_), None) => Ordering::Less,
@@ -407,19 +542,37 @@ fn compare_kind_rows(
     }
 }
 
+fn builtin_kind_rank(row: &AtReferenceKindRowWire) -> Option<usize> {
+    BUILTIN_ARTIFACT_REF_KINDS
+        .iter()
+        .position(|kind| *kind == row.kind)
+}
+
 fn compare_case_insensitive(left: &str, right: &str) -> Ordering {
     left.to_lowercase()
         .cmp(&right.to_lowercase())
         .then_with(|| left.cmp(right))
 }
 
-fn shared_row_extension(rows: &[AtReferenceRowWire], query: &str) -> String {
+fn shared_match_extension<'a, T>(
+    rows: &'a [T],
+    query: &str,
+    label_and_tier: impl Fn(&'a T) -> (&'a str, u8),
+) -> String {
     if rows.len() < 2 {
         return String::new();
     }
-    let mut prefix = rows[0].label.clone();
+    let (first_label, first_tier) = label_and_tier(&rows[0]);
+    if first_tier != 0 {
+        return String::new();
+    }
+    let mut prefix = first_label.to_string();
     for row in &rows[1..] {
-        prefix = common_prefix_case_insensitive(&prefix, &row.label);
+        let (label, match_tier) = label_and_tier(row);
+        if match_tier != 0 {
+            return String::new();
+        }
+        prefix = common_prefix_case_insensitive(&prefix, label);
     }
     if prefix.len() > query.len() && prefix.is_char_boundary(query.len()) {
         prefix[query.len()..].to_string()
@@ -479,6 +632,48 @@ mod tests {
             name: name.to_string(),
             is_dir,
         }
+    }
+
+    fn payload(
+        payload: &str,
+        title: &str,
+        detail: &str,
+        age: &str,
+    ) -> AtReferencePayloadRowWire {
+        AtReferencePayloadRowWire {
+            payload: payload.to_string(),
+            label: title.to_string(),
+            detail: detail.to_string(),
+            age: age.to_string(),
+        }
+    }
+
+    fn row(label: &str, match_tier: u8) -> AtReferenceRowWire {
+        AtReferenceRowWire {
+            group: AtReferenceGroup::Artifact,
+            label: label.to_string(),
+            title: String::new(),
+            insertion: format!("@{label}:"),
+            is_dir: false,
+            detail: String::new(),
+            builtin: false,
+            label_match: Vec::new(),
+            title_match: Vec::new(),
+            match_tier,
+        }
+    }
+
+    fn slice_runs<'a>(text: &'a str, runs: &[(u32, u32)]) -> Vec<&'a str> {
+        let byte_offsets = text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        runs.iter()
+            .map(|&(start, end)| {
+                &text[byte_offsets[start as usize]..byte_offsets[end as usize]]
+            })
+            .collect()
     }
 
     #[test]
@@ -566,6 +761,7 @@ mod tests {
                     path("A.txt", false),
                 ],
                 payloads: vec![],
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -591,6 +787,7 @@ mod tests {
                 kinds: vec![kind("plan", false), kind("chat", true)],
                 paths: vec![path("plans", true), path("src", true)],
                 payloads: vec![],
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -608,6 +805,7 @@ mod tests {
                 kinds: vec![kind("plan", false)],
                 paths: vec![path("lib.rs", false)],
                 payloads: vec![],
+                ..Default::default()
             },
         );
         assert_eq!(path_menu.rows[0].insertion, "@src/lib.rs");
@@ -620,6 +818,7 @@ mod tests {
             kinds: vec![],
             paths: vec![path(".git", true), path("src", true)],
             payloads: vec![],
+            ..Default::default()
         };
         let hidden =
             build_at_reference_menu(&context("@", 1).unwrap(), &inventory);
@@ -641,6 +840,7 @@ mod tests {
                 .map(|index| path(&format!("file{index:03}"), false))
                 .collect(),
             payloads: vec![],
+            ..Default::default()
         };
         let menu =
             build_at_reference_menu(&context("@", 1).unwrap(), &inventory);
@@ -655,6 +855,7 @@ mod tests {
             kinds: vec![kind("plan", false), kind("placeholder", false)],
             paths: vec![path("pluto", true), path("plugin", true)],
             payloads: vec![],
+            ..Default::default()
         };
         let menu =
             build_at_reference_menu(&context("@p", 2).unwrap(), &inventory);
@@ -666,39 +867,133 @@ mod tests {
                 kinds: inventory.kinds,
                 paths: vec![path("foo", false), path("format", false)],
                 payloads: vec![],
+                ..Default::default()
             },
         );
         assert_eq!(files_only.shared_extension, "o");
     }
 
     #[test]
-    fn payload_menu_preserves_order_and_matches_payload_or_label() {
-        let detected = context("@plan:a", 7).unwrap();
+    fn fuzzy_kind_menu_keeps_builtin_ties_and_reports_runs() {
+        let inventory = AtReferenceInventoryWire {
+            kinds: vec![
+                kind("chat", true),
+                kind("research", false),
+                kind("commit", true),
+            ],
+            ..Default::default()
+        };
+        let menu =
+            build_at_reference_menu(&context("@c", 2).unwrap(), &inventory);
+        assert_eq!(
+            menu.rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["commit", "chat", "research"]
+        );
+        assert!(menu
+            .rows
+            .iter()
+            .take(2)
+            .all(|row| row.match_tier == 0 && row.label_match == vec![(0, 1)]));
+
+        let fuzzy =
+            build_at_reference_menu(&context("@rsch", 5).unwrap(), &inventory);
+        assert_eq!(fuzzy.rows[0].label, "research");
+        assert_eq!(fuzzy.rows[0].match_tier, 3);
+        assert_eq!(
+            slice_runs("research", &fuzzy.rows[0].label_match),
+            vec!["r", "s", "ch"]
+        );
+    }
+
+    #[test]
+    fn path_menu_fuzzy_matches_only_the_trailing_partial() {
+        let menu = build_at_reference_menu(
+            &context("@src/fcb", 8).unwrap(),
+            &AtReferenceInventoryWire {
+                paths: vec![
+                    path("_file_completion_base.py", false),
+                    path("fixtures", true),
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(menu.file_count, 1);
+        assert_eq!(menu.rows[0].insertion, "@src/_file_completion_base.py");
+        assert_eq!(menu.rows[0].match_tier, 3);
+        assert_eq!(
+            slice_runs("_file_completion_base.py", &menu.rows[0].label_match),
+            vec!["f", "c", "b"]
+        );
+    }
+
+    #[test]
+    fn payload_menu_is_path_first_and_ranks_both_match_fields() {
+        let bundled =
+            "202607/sase_sites_hub_and_pages/sase_sites_hub_and_pages.md";
+        let menu = build_at_reference_menu(
+            &context("@research:site", 14).unwrap(),
+            &AtReferenceInventoryWire {
+                payloads: vec![
+                    payload(
+                        bundled,
+                        "SASE Sites Hub and Pages",
+                        "research",
+                        "3d",
+                    ),
+                    payload("site_notes.md", "Notes", "research", "1d"),
+                    payload("other.md", "No match", "research", "now"),
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(menu.payload_count, 2);
+        assert_eq!(menu.rows[0].label, "site_notes.md");
+
+        let row = menu.rows.iter().find(|row| row.label == bundled).unwrap();
+        assert_eq!(row.title, "SASE Sites Hub and Pages");
+        assert_eq!(row.insertion, format!("@research:{bundled}"));
+        assert_eq!(row.detail, "research · 3d");
+        assert_eq!(row.match_tier, 2);
+        assert_eq!(slice_runs(&row.label, &row.label_match), vec!["site"]);
+        assert_eq!(slice_runs(&row.title, &row.title_match), vec!["Site"]);
+    }
+
+    #[test]
+    fn payload_menu_includes_title_only_matches() {
+        let menu = build_at_reference_menu(
+            &context("@plan:needle", 12).unwrap(),
+            &AtReferenceInventoryWire {
+                payloads: vec![payload(
+                    "202607/other.md",
+                    "Needle in a haystack",
+                    "plan",
+                    "",
+                )],
+                ..Default::default()
+            },
+        );
+        assert_eq!(menu.rows[0].label, "202607/other.md");
+        assert_eq!(menu.rows[0].title, "Needle in a haystack");
+        assert!(menu.rows[0].label_match.is_empty());
+        assert_eq!(menu.rows[0].title_match, vec![(0, 6)]);
+        assert_eq!(menu.rows[0].match_tier, 0);
+    }
+
+    #[test]
+    fn payload_menu_preserves_empty_query_provider_order() {
+        let detected = context("@plan:", 6).unwrap();
         let menu = build_at_reference_menu(
             &detected,
             &AtReferenceInventoryWire {
-                kinds: vec![],
-                paths: vec![],
                 payloads: vec![
-                    AtReferencePayloadRowWire {
-                        payload: "zulu".to_string(),
-                        label: "Alpha label".to_string(),
-                        detail: "plan".to_string(),
-                        age: "2h".to_string(),
-                    },
-                    AtReferencePayloadRowWire {
-                        payload: "able".to_string(),
-                        label: "Second".to_string(),
-                        detail: String::new(),
-                        age: String::new(),
-                    },
-                    AtReferencePayloadRowWire {
-                        payload: "nope".to_string(),
-                        label: "No match".to_string(),
-                        detail: String::new(),
-                        age: String::new(),
-                    },
+                    payload("zulu", "Alpha label", "plan", "2h"),
+                    payload("able", "Second", "", ""),
+                    payload("nope", "No match", "", ""),
                 ],
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -706,8 +1001,46 @@ mod tests {
                 .iter()
                 .map(|row| row.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["@plan:zulu", "@plan:able"]
+            vec!["@plan:zulu", "@plan:able", "@plan:nope"]
         );
+        assert_eq!(menu.rows[0].label, "zulu");
+        assert_eq!(menu.rows[0].title, "Alpha label");
         assert_eq!(menu.rows[0].detail, "plan · 2h");
+    }
+
+    #[test]
+    fn payload_caps_report_matches_and_caller_truncation() {
+        let inventory = AtReferenceInventoryWire {
+            payloads: (0..205)
+                .map(|index| payload(&format!("item{index:03}"), "", "", ""))
+                .collect(),
+            truncated_payloads: 17,
+            ..Default::default()
+        };
+        let menu =
+            build_at_reference_menu(&context("@plan:", 6).unwrap(), &inventory);
+        assert_eq!(menu.payload_count, 205);
+        assert_eq!(menu.truncated_payloads, 17);
+        assert_eq!(menu.rows.len(), AT_REFERENCE_MAX_GROUP_ROWS);
+    }
+
+    #[test]
+    fn shared_extension_requires_an_all_prefix_leading_group() {
+        assert_eq!(
+            shared_match_extension(
+                &[row("plan", 0), row("plans", 0)],
+                "pl",
+                |row| (row.label.as_str(), row.match_tier),
+            ),
+            "an"
+        );
+        assert_eq!(
+            shared_match_extension(
+                &[row("plan", 0), row("plans", 3)],
+                "pl",
+                |row| (row.label.as_str(), row.match_tier),
+            ),
+            ""
+        );
     }
 }

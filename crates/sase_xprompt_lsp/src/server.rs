@@ -378,6 +378,7 @@ impl XpromptLspServer {
             kinds: at_reference_kind_inventory(artifact_context),
             paths: at_reference_path_inventory(context, config),
             payloads: at_reference_payload_inventory(context, artifact_context),
+            ..Default::default()
         };
         at_reference_completion_response(
             editor_build_at_reference_menu(context, &inventory),
