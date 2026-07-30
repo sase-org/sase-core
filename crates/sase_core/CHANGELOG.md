@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2](https://github.com/sase-org/sase-core/compare/v0.14.1...v0.14.2) - 2026-07-30
+
+### Fixed
+
+- *(bead)* verify repeated closes before mutation
+- *(bead)* preserve the first close in event reduction
+
 ## [0.14.1](https://github.com/sase-org/sase-core/compare/v0.14.0...v0.14.1) - 2026-07-30
 
 ### Fixed
