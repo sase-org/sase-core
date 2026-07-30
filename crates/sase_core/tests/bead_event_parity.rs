@@ -1,3 +1,4 @@
+use sase_core::bead::BeadResolutionWire;
 use sase_core::{
     export_issues_to_jsonl, import_issues_to_event_streams,
     merge_bead_event_streams, parse_issues_jsonl, reduce_event_streams,
@@ -269,6 +270,278 @@ fn reducer_handles_current_mutation_operation_variants() {
     assert_eq!(phase_one.status, StatusWire::InProgress);
     assert_eq!(phase_one.assignee, "agent-1");
     assert!(reduced.iter().all(|issue| issue.id != "gold-1.2"));
+}
+
+#[test]
+fn redundant_close_keeps_the_first_close_projection() {
+    let stream = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            event(
+                "gold-1",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "gold-1",
+                        "Epic",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:00:00Z",
+                    ),
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: Some("shipped".to_string()),
+                    resolution: Some(BeadResolutionWire::Done),
+                    forced_descendant_ids: Vec::new(),
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: None,
+                    resolution: Some(BeadResolutionWire::Canceled),
+                    forced_descendant_ids: Vec::new(),
+                },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+    let issue = &reduced[0];
+
+    assert_eq!(issue.status, StatusWire::Closed);
+    assert_eq!(issue.closed_at.as_deref(), Some("2026-01-01T00:01:00Z"));
+    assert_eq!(issue.close_reason.as_deref(), Some("shipped"));
+    assert_eq!(issue.resolution, Some(BeadResolutionWire::Done));
+    assert_eq!(issue.updated_at, "2026-01-01T00:01:00Z");
+}
+
+#[test]
+fn every_transition_out_of_closed_starts_a_new_close_interval() {
+    let transitions = [
+        (
+            "issue_opened",
+            BeadEventOperationWire::IssueOpened,
+            BeadEventPayloadWire::IssueOpened,
+            StatusWire::Open,
+        ),
+        (
+            "issue_updated",
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: BeadIssueUpdateEventFieldsWire {
+                    status: Some(StatusWire::InProgress),
+                    closed_at: Some(Some("2025-12-31T23:59:00Z".to_string())),
+                    close_reason: Some(Some("stale".to_string())),
+                    resolution: Some(Some(BeadResolutionWire::Canceled)),
+                    ..Default::default()
+                },
+            },
+            StatusWire::InProgress,
+        ),
+        (
+            "epic_work_preclaimed",
+            BeadEventOperationWire::EpicWorkPreclaimed,
+            BeadEventPayloadWire::EpicWorkPreclaimed {
+                agent_name: "phase-agent".to_string(),
+            },
+            StatusWire::InProgress,
+        ),
+    ];
+
+    for (name, operation, payload, open_status) in transitions {
+        let mut stream = BeadEventStreamWire {
+            stream_id: "gold-1".to_string(),
+            root_issue_id: "gold-1".to_string(),
+            events: vec![
+                event(
+                    "gold-1",
+                    "2026-01-01T00:00:00Z",
+                    BeadEventOperationWire::IssueCreated,
+                    BeadEventPayloadWire::IssueCreated {
+                        issue: issue(
+                            "gold-1",
+                            "Epic",
+                            IssueTypeWire::Plan,
+                            None,
+                            "2026-01-01T00:00:00Z",
+                        ),
+                    },
+                ),
+                event(
+                    "gold-1",
+                    "2026-01-01T00:01:00Z",
+                    BeadEventOperationWire::IssueClosed,
+                    BeadEventPayloadWire::IssueClosed {
+                        close_reason: Some("first interval".to_string()),
+                        resolution: Some(BeadResolutionWire::Done),
+                        forced_descendant_ids: Vec::new(),
+                    },
+                ),
+                event("gold-1", "2026-01-01T00:02:00Z", operation, payload),
+            ],
+        };
+
+        let open = reduce_event_streams(std::slice::from_ref(&stream))
+            .unwrap()
+            .remove(0);
+        assert_eq!(open.status, open_status, "{name}");
+        assert_eq!(open.closed_at, None, "{name}");
+        assert_eq!(open.close_reason, None, "{name}");
+        assert_eq!(open.resolution, None, "{name}");
+
+        stream.events.push(event(
+            "gold-1",
+            "2026-01-01T00:03:00Z",
+            BeadEventOperationWire::IssueClosed,
+            BeadEventPayloadWire::IssueClosed {
+                close_reason: Some("second interval".to_string()),
+                resolution: Some(BeadResolutionWire::Superseded),
+                forced_descendant_ids: Vec::new(),
+            },
+        ));
+        let reclosed = reduce_event_streams(&[stream]).unwrap().remove(0);
+        assert_eq!(reclosed.status, StatusWire::Closed, "{name}");
+        assert_eq!(
+            reclosed.closed_at.as_deref(),
+            Some("2026-01-01T00:03:00Z"),
+            "{name}"
+        );
+        assert_eq!(
+            reclosed.close_reason.as_deref(),
+            Some("second interval"),
+            "{name}"
+        );
+        assert_eq!(
+            reclosed.resolution,
+            Some(BeadResolutionWire::Superseded),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn close_event_stamps_an_issue_updated_to_closed_without_a_timestamp() {
+    let stream = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            event(
+                "gold-1",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: issue(
+                        "gold-1",
+                        "Epic",
+                        IssueTypeWire::Plan,
+                        None,
+                        "2026-01-01T00:00:00Z",
+                    ),
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueUpdated,
+                BeadEventPayloadWire::IssueUpdated {
+                    fields: BeadIssueUpdateEventFieldsWire {
+                        status: Some(StatusWire::Closed),
+                        ..Default::default()
+                    },
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: Some("stamped".to_string()),
+                    resolution: Some(BeadResolutionWire::Done),
+                    forced_descendant_ids: Vec::new(),
+                },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+    let issue = &reduced[0];
+
+    assert_eq!(issue.closed_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+    assert_eq!(issue.close_reason.as_deref(), Some("stamped"));
+    assert_eq!(issue.resolution, Some(BeadResolutionWire::Done));
+}
+
+#[test]
+fn concurrent_close_projection_is_independent_of_branch_order() {
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![event(
+            "gold-1",
+            "2026-01-01T00:00:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated {
+                issue: issue(
+                    "gold-1",
+                    "Epic",
+                    IssueTypeWire::Plan,
+                    None,
+                    "2026-01-01T00:00:00Z",
+                ),
+            },
+        )],
+    };
+    let mut close_a = base.clone();
+    close_a.events.push(event(
+        "gold-1",
+        "2026-01-01T00:01:00Z",
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: Some("first".to_string()),
+            resolution: Some(BeadResolutionWire::Done),
+            forced_descendant_ids: Vec::new(),
+        },
+    ));
+    let mut close_b = base.clone();
+    close_b.events.push(event(
+        "gold-1",
+        "2026-01-01T00:02:00Z",
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: None,
+            resolution: Some(BeadResolutionWire::Canceled),
+            forced_descendant_ids: Vec::new(),
+        },
+    ));
+
+    let a_then_b = merge_bead_event_streams(&base, &close_a, &close_b).unwrap();
+    let b_then_a = merge_bead_event_streams(&base, &close_b, &close_a).unwrap();
+    assert_eq!(a_then_b, b_then_a);
+
+    let a_then_b_projection =
+        reduce_event_streams(&[a_then_b]).unwrap().remove(0);
+    let b_then_a_projection =
+        reduce_event_streams(&[b_then_a]).unwrap().remove(0);
+    assert_eq!(a_then_b_projection, b_then_a_projection);
+    assert_eq!(
+        a_then_b_projection.closed_at.as_deref(),
+        Some("2026-01-01T00:01:00Z")
+    );
+    assert_eq!(a_then_b_projection.close_reason.as_deref(), Some("first"));
+    assert_eq!(
+        a_then_b_projection.resolution,
+        Some(BeadResolutionWire::Done)
+    );
 }
 
 #[test]

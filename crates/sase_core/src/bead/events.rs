@@ -716,7 +716,7 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::IssueOpened => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Open;
-            issue.resolution = None;
+            clear_close_metadata(issue);
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -726,12 +726,14 @@ pub(super) fn apply_event(
             ..
         } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
-            issue.status = StatusWire::Closed;
-            issue.closed_at = Some(event.timestamp.clone());
-            issue.close_reason = close_reason.clone();
-            issue.resolution = resolution.clone();
-            issue.updated_at = event.timestamp.clone();
-            issue.validate()?;
+            if issue.status != StatusWire::Closed || issue.closed_at.is_none() {
+                issue.status = StatusWire::Closed;
+                issue.closed_at = Some(event.timestamp.clone());
+                issue.close_reason = close_reason.clone();
+                issue.resolution = resolution.clone();
+                issue.updated_at = event.timestamp.clone();
+                issue.validate()?;
+            }
         }
         BeadEventPayloadWire::IssueRemoved {
             cascade_removed_issue_ids,
@@ -802,6 +804,7 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::EpicWorkPreclaimed { agent_name } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::InProgress;
+            clear_close_metadata(issue);
             issue.assignee = agent_name.clone();
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
@@ -819,9 +822,6 @@ fn apply_update_event_fields(
     }
     if let Some(value) = &fields.status {
         issue.status = value.clone();
-        if issue.status != StatusWire::Closed {
-            issue.resolution = None;
-        }
     }
     if let Some(value) = &fields.assignee {
         issue.assignee = value.clone();
@@ -862,6 +862,19 @@ fn apply_update_event_fields(
     if let Some(value) = fields.is_ready_to_work {
         issue.is_ready_to_work = value;
     }
+    if fields
+        .status
+        .as_ref()
+        .is_some_and(|status| *status != StatusWire::Closed)
+    {
+        clear_close_metadata(issue);
+    }
+}
+
+fn clear_close_metadata(issue: &mut IssueWire) {
+    issue.closed_at = None;
+    issue.close_reason = None;
+    issue.resolution = None;
 }
 
 fn existing_issue_mut<'a>(
@@ -1041,6 +1054,43 @@ mod tests {
             issue_id: "sase-1".to_string(),
             payload,
         }
+    }
+
+    #[test]
+    fn redundant_close_is_an_exact_no_op() {
+        let mut issues = BTreeMap::from([(
+            "sase-1".to_string(),
+            issue_with_refs(Vec::new()),
+        )]);
+        let first_close = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "first-close".to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "owner@example.com".to_string(),
+            operation: BeadEventOperationWire::IssueClosed,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::IssueClosed {
+                close_reason: Some("shipped".to_string()),
+                resolution: Some(BeadResolutionWire::Done),
+                forced_descendant_ids: Vec::new(),
+            },
+        };
+        let redundant_close = BeadEventRecordWire {
+            event_id: "redundant-close".to_string(),
+            timestamp: "2026-01-01T00:02:00Z".to_string(),
+            payload: BeadEventPayloadWire::IssueClosed {
+                close_reason: None,
+                resolution: Some(BeadResolutionWire::Canceled),
+                forced_descendant_ids: Vec::new(),
+            },
+            ..first_close.clone()
+        };
+
+        apply_event(&mut issues, &first_close).unwrap();
+        let first_projection = issues["sase-1"].clone();
+        apply_event(&mut issues, &redundant_close).unwrap();
+
+        assert_eq!(issues["sase-1"], first_projection);
     }
 
     #[test]
