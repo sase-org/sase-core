@@ -2320,7 +2320,8 @@ mod tests {
             &artifact_dir.join("xprompts.json"),
             json!([
                 {"name": "gh", "kind": "workflow", "tags": ["vcs"]},
-                {"name": "gh", "kind": "workflow", "tags": ["vcs"]}
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]},
+                {"name": "research_swarm", "kind": "swarm", "tags": ["research"]}
             ]),
         );
 
@@ -2332,9 +2333,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(refreshed.records.len(), 1);
-        assert_eq!(refreshed.records[0].used_xprompts.len(), 1);
+        assert_eq!(refreshed.records[0].used_xprompts.len(), 2);
         assert_eq!(refreshed.records[0].used_xprompts[0].name, "gh");
         assert_eq!(refreshed.records[0].used_xprompts[0].references, 2);
+        assert_eq!(
+            refreshed.records[0].used_xprompts[1].name,
+            "research_swarm"
+        );
+        assert_eq!(refreshed.records[0].used_xprompts[1].kind, "swarm");
+        assert_eq!(refreshed.records[0].used_xprompts[1].references, 1);
 
         let conn = Connection::open(&index).unwrap();
         let (signature, record_json): (Option<String>, String) = conn

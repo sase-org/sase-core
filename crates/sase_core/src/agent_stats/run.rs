@@ -2000,6 +2000,73 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_swarm_xprompt_kind_through_stats_wire() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+
+        let start = "2026-07-10T01:00:00Z";
+        let artifact_dir = add_project_run(
+            &projects,
+            "alpha-project",
+            "20260710010000",
+            json!({
+                "name": "swarm-child",
+                "run_started_at": start,
+                "llm_provider": "codex",
+                "model": "gpt-5",
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": finish_at(start, 45.0)
+            })),
+            false,
+        );
+        write_json(
+            &artifact_dir.join("xprompts.json"),
+            json!([
+                {"name": "research_swarm", "kind": "swarm", "tags": ["research", "fanout"]},
+                {"name": "research_swarm", "kind": "swarm", "tags": ["research", "fanout"]},
+                {"name": "gh", "kind": "workflow", "tags": ["vcs"]}
+            ]),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let mut focused_request = request();
+        focused_request.xprompt_focus = Some("research_swarm".to_string());
+        let result = query_run_stats(&index, focused_request).unwrap();
+        let xprompts = result.xprompts.unwrap();
+        let row = xprompts
+            .rows
+            .iter()
+            .find(|row| row.name == "research_swarm")
+            .unwrap();
+        assert_eq!(row.kind, "swarm");
+        assert_eq!(row.tags, vec!["fanout", "research"]);
+        assert_eq!(row.runs, 1);
+        assert_eq!(row.references, 2);
+        assert_eq!(
+            row.partners
+                .iter()
+                .map(|partner| (partner.name.as_str(), partner.count))
+                .collect::<Vec<_>>(),
+            vec![("gh", 1)]
+        );
+
+        let focus = xprompts.focus.unwrap();
+        assert!(focus.found);
+        assert_eq!(focus.kind, "swarm");
+        assert_eq!(focus.runs, 1);
+        assert_eq!(focus.references, 2);
+    }
+
+    #[test]
     fn attributes_project_and_changespec_work_with_filters_and_statuses() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");

@@ -710,6 +710,7 @@ fn load_used_xprompts(
         let kind = match object.get("kind").and_then(Value::as_str) {
             Some("workflow") => "workflow",
             Some("part") => "part",
+            Some("swarm") => "swarm",
             _ => "unknown",
         };
         let tags = object

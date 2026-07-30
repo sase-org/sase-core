@@ -680,6 +680,57 @@ fn launch_xprompts_project_to_deduplicated_deterministic_records() {
 }
 
 #[test]
+fn launch_xprompts_preserves_swarm_kind() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let artifact_dir = root
+        .join("proj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260729120500");
+    write_json(
+        &artifact_dir.join("agent_meta.json"),
+        &json!({"name": "swarm-user"}),
+    );
+    write_json(
+        &artifact_dir.join("xprompts.json"),
+        &json!([
+            {
+                "name": "research_swarm",
+                "kind": "swarm",
+                "tags": ["research", "fanout", "research"],
+            },
+            {
+                "name": "mystery",
+                "kind": "surprise",
+                "tags": ["unknown-kind"],
+            },
+            {
+                "name": "research_swarm",
+                "kind": "part",
+                "tags": ["ignored-from-duplicate"],
+            },
+        ]),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    assert_eq!(snapshot.records.len(), 1);
+    let used = &snapshot.records[0].used_xprompts;
+    assert_eq!(
+        used.iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mystery", "research_swarm"]
+    );
+    assert_eq!(used[0].kind, "unknown");
+    assert_eq!(used[0].references, 1);
+    assert_eq!(used[1].kind, "swarm");
+    assert_eq!(used[1].tags, vec!["fanout", "research"]);
+    assert_eq!(used[1].references, 2);
+}
+
+#[test]
 fn absent_and_invalid_xprompts_are_soft_scan_errors() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("projects");
