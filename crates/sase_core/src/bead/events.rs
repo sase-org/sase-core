@@ -116,6 +116,7 @@ impl BeadEventRecordWire {
 pub enum BeadEventOperationWire {
     IssueCreated,
     IssueUpdated,
+    NoteAppended,
     IssueOpened,
     IssueClosed,
     IssueRemoved,
@@ -136,6 +137,9 @@ pub enum BeadEventPayloadWire {
     },
     IssueUpdated {
         fields: BeadIssueUpdateEventFieldsWire,
+    },
+    NoteAppended {
+        entry: String,
     },
     IssueOpened,
     IssueClosed {
@@ -191,6 +195,17 @@ impl BeadEventPayloadWire {
                 BeadEventOperationWire::IssueUpdated,
                 BeadEventPayloadWire::IssueUpdated { fields },
             ) => fields.validate(),
+            (
+                BeadEventOperationWire::NoteAppended,
+                BeadEventPayloadWire::NoteAppended { entry },
+            ) => {
+                if entry.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "note_appended entry cannot be empty or blank",
+                    ));
+                }
+                Ok(())
+            }
             (
                 BeadEventOperationWire::IssueOpened,
                 BeadEventPayloadWire::IssueOpened,
@@ -713,6 +728,17 @@ pub(super) fn apply_event(
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
+        BeadEventPayloadWire::NoteAppended { entry } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            issue.notes = appended_note_text(
+                &issue.notes,
+                &event.timestamp,
+                &event.actor,
+                entry,
+            );
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
         BeadEventPayloadWire::IssueOpened => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Open;
@@ -875,6 +901,20 @@ fn clear_close_metadata(issue: &mut IssueWire) {
     issue.closed_at = None;
     issue.close_reason = None;
     issue.resolution = None;
+}
+
+pub(super) fn appended_note_text(
+    existing: &str,
+    timestamp: &str,
+    actor: &str,
+    entry: &str,
+) -> String {
+    let appended = format!("[{timestamp} · {actor}] {}", entry.trim());
+    if existing.trim().is_empty() {
+        appended
+    } else {
+        format!("{}\n\n{appended}", existing.trim_end())
+    }
 }
 
 fn existing_issue_mut<'a>(
@@ -1091,6 +1131,44 @@ mod tests {
         apply_event(&mut issues, &redundant_close).unwrap();
 
         assert_eq!(issues["sase-1"], first_projection);
+    }
+
+    #[test]
+    fn note_append_validation_and_rendering_are_owned_by_the_event() {
+        let mut issues = BTreeMap::from([(
+            "sase-1".to_string(),
+            issue_with_refs(Vec::new()),
+        )]);
+        let note = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "note".to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "agent-1".to_string(),
+            operation: BeadEventOperationWire::NoteAppended,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: " verified ".to_string(),
+            },
+        };
+
+        apply_event(&mut issues, &note).unwrap();
+
+        assert_eq!(
+            issues["sase-1"].notes,
+            "[2026-01-01T00:01:00Z · agent-1] verified"
+        );
+        assert_eq!(issues["sase-1"].updated_at, "2026-01-01T00:01:00Z");
+
+        let blank = BeadEventRecordWire {
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: " \t ".to_string(),
+            },
+            ..note
+        };
+        assert_eq!(
+            blank.validate().unwrap_err().message,
+            "note_appended entry cannot be empty or blank"
+        );
     }
 
     #[test]

@@ -342,14 +342,34 @@ fn read_event_stream_file(
         if line.trim().is_empty() {
             continue;
         }
-        let event: BeadEventRecordWire =
-            serde_json::from_str(line).map_err(|err| {
+        let event: BeadEventRecordWire = serde_json::from_str(line).map_err(
+            |err| {
+                if let Ok(value) =
+                    serde_json::from_str::<serde_json::Value>(line)
+                {
+                    if let Some(operation) =
+                        value.get("operation").and_then(|value| value.as_str())
+                    {
+                        if serde_json::from_value::<
+                            super::events::BeadEventOperationWire,
+                        >(serde_json::Value::String(operation.to_string()))
+                        .is_err()
+                        {
+                            return BeadError::validation(format!(
+                                "unknown bead event operation `{operation}` in {} line {}; run `just install` to update sase-core",
+                                path.display(),
+                                index + 1
+                            ));
+                        }
+                    }
+                }
                 BeadError::validation(format!(
                     "invalid bead event stream {} line {}: {err}",
                     path.display(),
                     index + 1
                 ))
-            })?;
+            },
+        )?;
         events.push(event);
     }
     let stream = BeadEventStreamWire {
@@ -417,6 +437,7 @@ pub(crate) fn apply_missing_tiers(issues: &mut [IssueWire]) {
 mod tests {
     use super::*;
     use crate::bead::wire::{DependencyWire, StatusWire};
+    use tempfile::tempdir;
 
     fn plan(id: &str) -> IssueWire {
         IssueWire {
@@ -568,5 +589,22 @@ mod tests {
             "\"refs\":[\"research:202607/report.md\",\"bead:sase-bb.1\"]"
         ));
         assert_eq!(parse_issues_jsonl(&jsonl).issues, vec![with_refs]);
+    }
+
+    #[test]
+    fn unknown_event_operation_names_the_upgrade_remedy() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("gold-1.jsonl");
+        fs::write(
+            &path,
+            r#"{"schema_version":1,"event_id":"future","timestamp":"2026-01-01T00:00:00Z","actor":"agent","operation":"future_operation","issue_id":"gold-1","payload":{"kind":"future_operation"}}"#,
+        )
+        .unwrap();
+
+        let error = read_event_stream_file(&path).unwrap_err();
+
+        assert!(error.message.contains("future_operation"));
+        assert!(error.message.contains(path.to_string_lossy().as_ref()));
+        assert!(error.message.contains("just install"));
     }
 }

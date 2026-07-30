@@ -3102,7 +3102,7 @@ mod tests {
             operations,
             vec![
                 super::super::events::BeadEventOperationWire::IssueClosed,
-                super::super::events::BeadEventOperationWire::IssueUpdated,
+                super::super::events::BeadEventOperationWire::NoteAppended,
             ]
         );
     }

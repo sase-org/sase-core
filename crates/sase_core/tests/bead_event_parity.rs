@@ -273,6 +273,217 @@ fn reducer_handles_current_mutation_operation_variants() {
 }
 
 #[test]
+fn note_appended_matches_legacy_note_rendering_and_composes() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let created = event(
+        "gold-1",
+        "2026-01-01T00:00:00Z",
+        BeadEventOperationWire::IssueCreated,
+        BeadEventPayloadWire::IssueCreated { issue: root },
+    );
+    let rendered = "[2026-01-01T00:01:00Z · owner@example.com] first note";
+    let legacy = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            created.clone(),
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueUpdated,
+                BeadEventPayloadWire::IssueUpdated {
+                    fields: BeadIssueUpdateEventFieldsWire {
+                        notes: Some(rendered.to_string()),
+                        ..Default::default()
+                    },
+                },
+            ),
+        ],
+    };
+    let mut appended = BeadEventStreamWire {
+        events: vec![
+            created,
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::NoteAppended,
+                BeadEventPayloadWire::NoteAppended {
+                    entry: "first note".to_string(),
+                },
+            ),
+        ],
+        ..legacy.clone()
+    };
+
+    assert_eq!(
+        reduce_event_streams(std::slice::from_ref(&appended)).unwrap(),
+        reduce_event_streams(&[legacy]).unwrap()
+    );
+
+    appended.events.push(event(
+        "gold-1",
+        "2026-01-01T00:02:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "second note".to_string(),
+        },
+    ));
+    assert_eq!(
+        reduce_event_streams(&[appended]).unwrap()[0].notes,
+        format!(
+            "{rendered}\n\n[2026-01-01T00:02:00Z · owner@example.com] second note"
+        )
+    );
+}
+
+#[test]
+fn note_appended_composes_after_a_legacy_note_snapshot() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let stream = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            event(
+                "gold-1",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: root },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueUpdated,
+                BeadEventPayloadWire::IssueUpdated {
+                    fields: BeadIssueUpdateEventFieldsWire {
+                        notes: Some("Legacy snapshot".to_string()),
+                        ..Default::default()
+                    },
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::NoteAppended,
+                BeadEventPayloadWire::NoteAppended {
+                    entry: "new entry".to_string(),
+                },
+            ),
+        ],
+    };
+
+    assert_eq!(
+        reduce_event_streams(&[stream]).unwrap()[0].notes,
+        "Legacy snapshot\n\n[2026-01-01T00:02:00Z · owner@example.com] new entry"
+    );
+}
+
+#[test]
+fn concurrent_note_appends_merge_without_losing_text() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![numbered_event(
+            "gold-1",
+            1,
+            "2026-01-01T00:00:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated { issue: root },
+        )],
+    };
+    let mut ours = base.clone();
+    ours.events.push(numbered_event(
+        "gold-1",
+        2,
+        "2026-01-01T00:02:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "later branch".to_string(),
+        },
+    ));
+    let mut theirs = base.clone();
+    theirs.events.push(numbered_event(
+        "gold-1",
+        2,
+        "2026-01-01T00:01:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "earlier branch".to_string(),
+        },
+    ));
+
+    let merged = merge_bead_event_streams(&base, &ours, &theirs).unwrap();
+    let reduced = reduce_event_streams(&[merged]).unwrap();
+
+    assert_eq!(
+        reduced[0].notes,
+        "[2026-01-01T00:01:00Z · owner@example.com] earlier branch\n\n[2026-01-01T00:02:00Z · owner@example.com] later branch"
+    );
+}
+
+#[test]
+fn byte_identical_concurrent_note_append_merges_once() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![numbered_event(
+            "gold-1",
+            1,
+            "2026-01-01T00:00:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated { issue: root },
+        )],
+    };
+    let append = numbered_event(
+        "gold-1",
+        2,
+        "2026-01-01T00:01:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "same entry".to_string(),
+        },
+    );
+    let mut ours = base.clone();
+    ours.events.push(append.clone());
+    let mut theirs = base.clone();
+    theirs.events.push(append);
+
+    let merged = merge_bead_event_streams(&base, &ours, &theirs).unwrap();
+    let reduced = reduce_event_streams(std::slice::from_ref(&merged)).unwrap();
+
+    assert_eq!(merged.events.len(), 2);
+    assert_eq!(
+        reduced[0].notes,
+        "[2026-01-01T00:01:00Z · owner@example.com] same entry"
+    );
+}
+
+#[test]
 fn redundant_close_keeps_the_first_close_projection() {
     let stream = BeadEventStreamWire {
         stream_id: "gold-1".to_string(),

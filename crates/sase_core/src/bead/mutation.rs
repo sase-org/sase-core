@@ -16,9 +16,9 @@ use crate::artifact_ref::normalize_artifact_ref_list;
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
-    import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
-    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
-    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
+    appended_note_text, import_issues_to_event_streams, mint_bead_event_id,
+    reduce_event_streams, BeadEventOperationWire, BeadEventPayloadWire,
+    BeadEventRecordWire, BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
     BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::jsonl::{
@@ -362,12 +362,9 @@ fn append_note_to_store(
     issue.validate()?;
     store.append_issue_event(
         &issue_id,
-        BeadEventOperationWire::IssueUpdated,
-        BeadEventPayloadWire::IssueUpdated {
-            fields: BeadIssueUpdateEventFieldsWire {
-                notes: Some(new_notes),
-                ..Default::default()
-            },
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: entry.to_string(),
         },
         now,
         author,
@@ -1698,20 +1695,6 @@ fn normalize_references<T: AsRef<str>>(
         kind: error.kind,
         message: error.message,
     })
-}
-
-fn appended_note_text(
-    existing: &str,
-    timestamp: &str,
-    author: &str,
-    entry: &str,
-) -> String {
-    let appended = format!("[{timestamp} · {author}] {}", entry.trim());
-    if existing.trim().is_empty() {
-        appended
-    } else {
-        format!("{}\n\n{appended}", existing.trim_end())
-    }
 }
 
 fn tier_label(tier: Option<&BeadTierWire>) -> &'static str {
@@ -4022,15 +4005,15 @@ mod tests {
             .flat_map(|stream| &stream.events)
             .filter(|event| {
                 event.issue_id == issue.id
-                    && event.operation == BeadEventOperationWire::IssueUpdated
+                    && event.operation == BeadEventOperationWire::NoteAppended
             })
             .collect();
         assert_eq!(note_events.len(), 2);
         assert_eq!(note_events[0].actor, "agent-1");
         assert!(matches!(
             &note_events[1].payload,
-            BeadEventPayloadWire::IssueUpdated { fields }
-                if fields.notes.as_deref() == Some(second.notes.as_str())
+            BeadEventPayloadWire::NoteAppended { entry }
+                if entry == "second note"
         ));
 
         let reduced = reduce_event_streams(&streams).unwrap();
@@ -4188,7 +4171,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     BeadEventOperationWire::IssueClosed,
-                    BeadEventOperationWire::IssueUpdated,
+                    BeadEventOperationWire::NoteAppended,
                 ]
             );
             assert_eq!(stream.events[stream.events.len() - 2].actor, "agent-1");
