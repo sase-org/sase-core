@@ -98,8 +98,16 @@ pub enum NotificationStateUpdateWire {
         id: String,
         muted: bool,
     },
+    MarkManyMuted {
+        ids: Vec<String>,
+        muted: bool,
+    },
     MarkSnoozed {
         id: String,
+        until: String,
+    },
+    MarkManySnoozed {
+        ids: Vec<String>,
         until: String,
     },
     ExpireSnoozes {

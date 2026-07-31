@@ -415,6 +415,141 @@ fn notification_mute_and_snooze_follow_python_semantics() {
 }
 
 #[test]
+fn notification_bulk_mute_deduplicates_ids_and_reports_counts() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut already_muted = notification("b");
+    already_muted.muted = true;
+    rewrite_notifications(
+        &path,
+        &[
+            notification("a"),
+            already_muted,
+            notification("c"),
+            notification("d"),
+        ],
+    )
+    .unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkManyMuted {
+            ids: vec![
+                "a".to_string(),
+                "missing".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+            ],
+            muted: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "a")
+            .unwrap()
+            .muted
+    );
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "b")
+            .unwrap()
+            .muted
+    );
+    assert!(
+        !outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "c")
+            .unwrap()
+            .muted
+    );
+}
+
+#[test]
+fn notification_bulk_unmute_cancels_snoozes_and_reports_counts() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut snoozed = notification("a");
+    snoozed.muted = true;
+    snoozed.snooze_until = Some("2026-05-01T03:00:00+00:00".to_string());
+    let mut muted = notification("b");
+    muted.muted = true;
+    let unmuted = notification("c");
+    rewrite_notifications(&path, &[snoozed, muted, unmuted]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkManyMuted {
+            ids: vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "missing".to_string(),
+                "a".to_string(),
+            ],
+            muted: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 3);
+    assert_eq!(outcome.changed_count, 2);
+    for id in ["a", "b", "c"] {
+        let row = outcome.notifications.iter().find(|n| n.id == id).unwrap();
+        assert!(!row.muted);
+        assert_eq!(row.snooze_until, None);
+    }
+}
+
+#[test]
+fn notification_bulk_snooze_uses_one_deadline_and_reports_counts() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let deadline = "2026-05-01T03:00:00+00:00".to_string();
+    let mut already_snoozed = notification("b");
+    already_snoozed.muted = true;
+    already_snoozed.snooze_until = Some(deadline.clone());
+    rewrite_notifications(
+        &path,
+        &[notification("a"), already_snoozed, notification("c")],
+    )
+    .unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkManySnoozed {
+            ids: vec![
+                "a".to_string(),
+                "missing".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+            ],
+            until: deadline.clone(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 1);
+    for id in ["a", "b"] {
+        let row = outcome.notifications.iter().find(|n| n.id == id).unwrap();
+        assert!(row.muted);
+        assert_eq!(row.snooze_until.as_deref(), Some(deadline.as_str()));
+    }
+    let untouched = outcome.notifications.iter().find(|n| n.id == "c").unwrap();
+    assert!(!untouched.muted);
+    assert_eq!(untouched.snooze_until, None);
+}
+
+#[test]
 fn notification_expire_snoozes_handles_aware_and_naive_timestamps() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());

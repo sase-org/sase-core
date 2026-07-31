@@ -322,6 +322,24 @@ fn apply_notification_state_update_with_options(
                     }
                 }
             }
+            NotificationStateUpdateWire::MarkManyMuted { ids, muted } => {
+                let ids: BTreeSet<&str> =
+                    ids.iter().map(String::as_str).collect();
+                for n in &mut rows {
+                    if ids.contains(n.id.as_str()) {
+                        matched_count += 1;
+                        if n.muted != *muted
+                            || (!*muted && n.snooze_until.is_some())
+                        {
+                            n.muted = *muted;
+                            if !*muted {
+                                n.snooze_until = None;
+                            }
+                            changed_count += 1;
+                        }
+                    }
+                }
+            }
             NotificationStateUpdateWire::MarkSnoozed { id, until } => {
                 for n in &mut rows {
                     if n.id == *id {
@@ -334,6 +352,22 @@ fn apply_notification_state_update_with_options(
                             changed_count += 1;
                         }
                         break;
+                    }
+                }
+            }
+            NotificationStateUpdateWire::MarkManySnoozed { ids, until } => {
+                let ids: BTreeSet<&str> =
+                    ids.iter().map(String::as_str).collect();
+                for n in &mut rows {
+                    if ids.contains(n.id.as_str()) {
+                        matched_count += 1;
+                        if !n.muted
+                            || n.snooze_until.as_deref() != Some(until.as_str())
+                        {
+                            n.muted = true;
+                            n.snooze_until = Some(until.clone());
+                            changed_count += 1;
+                        }
                     }
                 }
             }
