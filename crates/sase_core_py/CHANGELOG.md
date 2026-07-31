@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.4](https://github.com/sase-org/sase-core/compare/v0.17.3...v0.17.4) - 2026-07-31
+
+### Added
+
+- *(bead)* support atomic multi-ID `update_issues` mutation
+
 ## [0.17.3](https://github.com/sase-org/sase-core/compare/v0.17.2...v0.17.3) - 2026-07-31
 
 ### Added
