@@ -63,6 +63,8 @@ pub struct BeadCreateRequestWire {
     #[serde(default)]
     pub assignee: String,
     #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default)]
     pub changespec_name: String,
     #[serde(default)]
     pub changespec_bug_id: String,
@@ -181,6 +183,24 @@ pub fn create_issue(
         let references = normalize_references(&request.refs)?;
         let now = request.now.unwrap_or_else(now_utc);
         let owner = store.config.owner.clone();
+        let created_by = request
+            .created_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                (request.issue_type == IssueTypeWire::Phase)
+                    .then_some(request.parent_id.as_deref())
+                    .flatten()
+                    .and_then(|parent_id| {
+                        store.issues.iter().find(|issue| issue.id == parent_id)
+                    })
+                    .map(|parent| parent.created_by.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| owner.clone());
         let issue_id = match request.parent_id.as_deref() {
             Some(parent_id) => next_child_id(parent_id, &store.issues),
             None => {
@@ -204,7 +224,7 @@ pub fn create_issue(
             owner: owner.clone(),
             assignee: request.assignee,
             created_at: now.clone(),
-            created_by: owner,
+            created_by,
             updated_at: now,
             closed_at: None,
             close_reason: None,
@@ -2322,6 +2342,189 @@ mod tests {
         assert!(root.join("config.json").is_file());
         assert!(root.join("issues.jsonl").is_file());
         assert!(root.join("beads.db").is_file());
+    }
+
+    #[test]
+    fn create_uses_explicit_creator_for_issue_and_reference_events() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Attributed task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                refs: vec!["bead:sase-parent".to_string()],
+                created_by: Some("  bbugyi200.athena.q8  ".to_string()),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(issue.owner, "owner@example.com");
+        assert_eq!(issue.created_by, "bbugyi200.athena.q8");
+        let (_, streams) = read_event_store(&beads_dir).unwrap();
+        let stream = streams
+            .iter()
+            .find(|stream| stream.events[0].issue_id == issue.id)
+            .unwrap();
+        assert_eq!(stream.events.len(), 2);
+        assert_eq!(
+            stream
+                .events
+                .iter()
+                .map(|event| event.operation)
+                .collect::<Vec<_>>(),
+            [
+                BeadEventOperationWire::IssueCreated,
+                BeadEventOperationWire::ReferenceAdded,
+            ]
+        );
+        assert!(stream
+            .events
+            .iter()
+            .all(|event| event.actor == "bbugyi200.athena.q8"));
+    }
+
+    #[test]
+    fn create_resolves_creator_from_phase_parent_then_store_owner() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+
+        let blank = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Blank explicit creator".to_string(),
+                issue_type: IssueTypeWire::Task,
+                created_by: Some("   ".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(blank.created_by, "owner@example.com");
+        let absent = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Absent explicit creator".to_string(),
+                issue_type: IssueTypeWire::Task,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(absent.created_by, "owner@example.com");
+
+        let parent = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Attributed epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                created_by: Some("bbugyi200.athena.q8--plan".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let inherited = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Inherited phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(parent.id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(inherited.created_by, "bbugyi200.athena.q8--plan");
+        let overridden = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Explicit phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(parent.id.clone()),
+                created_by: Some("bbugyi200.athena.other".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(overridden.created_by, "bbugyi200.athena.other");
+
+        let child_plan = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Child plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                parent_id: Some(parent.id),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(child_plan.created_by, "owner@example.com");
+        let missing_parent = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Missing-parent phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some("sase-missing".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(missing_parent.created_by, "owner@example.com");
+    }
+
+    #[test]
+    fn phase_with_blank_parent_creator_falls_back_to_store_owner() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let parent = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Legacy unattributed epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert!(parent.created_by.is_empty());
+        let mut config =
+            load_config(&beads_dir, default_config("sase", "")).unwrap();
+        config.owner = "owner@example.com".to_string();
+        save_config(&beads_dir, &config).unwrap();
+
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Fallback phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(parent.id),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(phase.created_by, "owner@example.com");
     }
 
     #[test]

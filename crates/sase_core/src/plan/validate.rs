@@ -22,6 +22,7 @@ const SYSTEM_FIELDS: &[&str] = &[
     "status",
     "prompt",
     "bead",
+    "proposed_by",
     "parent",
     "bead_id",
 ];
@@ -123,6 +124,7 @@ pub struct ValidatedPlanWire {
     pub bug_id: Option<i64>,
     pub parent_bead: Option<String>,
     pub bead: Option<String>,
+    pub proposed_by: Option<String>,
     pub parent: Option<String>,
 }
 
@@ -299,6 +301,13 @@ pub fn plan_frontmatter_schema(
             json!("sase-88.1"),
         ),
         field_spec(
+            "proposed_by",
+            "non-empty string",
+            false,
+            "Name of the SASE agent that proposed this plan, written by SASE.",
+            json!("bbugyi200.athena.q8--plan"),
+        ),
+        field_spec(
             "parent",
             "non-empty string",
             false,
@@ -397,6 +406,8 @@ impl<'a> Validator<'a> {
         let goal = self.required_non_empty_string(mapping, "goal", &index);
         let model = self.optional_model(mapping, "model", &index);
         let bead = self.optional_non_empty_string(mapping, "bead", &index);
+        let proposed_by =
+            self.optional_non_empty_string(mapping, "proposed_by", &index);
         let parent = self.optional_non_empty_string(mapping, "parent", &index);
         if parent.is_some() {
             self.push(
@@ -452,6 +463,7 @@ impl<'a> Validator<'a> {
             bug_id,
             parent_bead,
             bead,
+            proposed_by,
             parent,
         });
         self.finish(plan)
@@ -1264,6 +1276,7 @@ mod tests {
                 bug_id: None,
                 parent_bead: None,
                 bead: Some("sase-88.1".to_string()),
+                proposed_by: None,
                 parent: Some("sase/repos/plans/202607/parent.md".to_string(),),
             })
         );
@@ -1435,6 +1448,7 @@ mod tests {
                 bug_id: None,
                 parent_bead: None,
                 bead: None,
+                proposed_by: None,
                 parent: None,
             })
         );
@@ -1658,6 +1672,49 @@ mod tests {
     }
 
     #[test]
+    fn managed_plan_proposer_is_optional_normalized_and_type_checked() {
+        for tier in ["tale", "epic"] {
+            let extra = match tier {
+                "tale" => String::new(),
+                "epic" => "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section validates proposal attribution.\n    size: small\n"
+                    .to_string(),
+                _ => unreachable!(),
+            };
+            let without = format!(
+                "---\ntier: {tier}\ntitle: Managed proposer\ngoal: Validate proposal attribution\n{extra}---\nbody\n"
+            );
+            let result = plan_validate(&without, tier).unwrap();
+            assert!(result.ok, "{tier}: {:?}", result.diagnostics);
+            assert_eq!(result.plan.unwrap().proposed_by, None);
+
+            let with = without.replace(
+                "goal: Validate proposal attribution\n",
+                "goal: Validate proposal attribution\nproposed_by: ' bbugyi200.athena.q8--plan '\n",
+            );
+            let result = plan_validate(&with, tier).unwrap();
+            assert!(result.ok, "{tier}: {:?}", result.diagnostics);
+            assert_eq!(
+                result.plan.unwrap().proposed_by.as_deref(),
+                Some("bbugyi200.athena.q8--plan")
+            );
+
+            for (value, code) in [
+                ("'   '", "value-empty"),
+                ("[bbugyi200.athena.q8--plan]", "type-mismatch"),
+            ] {
+                let invalid =
+                    with.replace("' bbugyi200.athena.q8--plan '", value);
+                let result = plan_validate(&invalid, tier).unwrap();
+                assert!(!result.ok, "{tier}: {value}");
+                assert!(result.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.field_path == "proposed_by"
+                        && diagnostic.code == code
+                }));
+            }
+        }
+    }
+
+    #[test]
     fn schema_is_ordered_and_contains_exact_phase_guidance() {
         let tale = plan_frontmatter_schema("tale").unwrap();
         assert_eq!(
@@ -1672,6 +1729,7 @@ mod tests {
                 "create_time",
                 "status",
                 "bead",
+                "proposed_by",
                 "parent",
                 "bead_id"
             ]
@@ -1699,6 +1757,7 @@ mod tests {
                 "create_time",
                 "status",
                 "bead",
+                "proposed_by",
                 "parent",
                 "bead_id"
             ]
@@ -1747,6 +1806,10 @@ mod tests {
             (
                 "bead",
                 "bead id of the agent that proposed this plan, written by SASE",
+            ),
+            (
+                "proposed_by",
+                "Name of the SASE agent that proposed this plan, written by SASE.",
             ),
             (
                 "parent",
