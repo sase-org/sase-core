@@ -448,6 +448,7 @@ use sase_core::bead::{
     remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
     resolution_migration_sql as core_bead_resolution_migration_sql,
+    resolve_issue_id as core_bead_resolve_issue_id,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
@@ -2749,6 +2750,18 @@ fn py_bead_read_legacy_jsonl<'py>(
         py,
         py.allow_threads(|| core_bead_read_legacy_jsonl_issues(&beads_dir)),
     )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_resolve_id")]
+fn py_bead_resolve_id(
+    py: Python<'_>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<String> {
+    let beads_dir = PathBuf::from(beads_dir);
+    py.allow_threads(|| core_bead_resolve_issue_id(&beads_dir, issue_id))
+        .map_err(bead_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -6799,6 +6812,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_doctor, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_doctor_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_get_epic_children, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_resolve_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;

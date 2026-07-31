@@ -21,7 +21,9 @@ use super::mutation::{
     update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
     BeadUpdateFieldsWire,
 };
-use super::read::read_store_issues;
+use super::read::{
+    read_store_issues, resolve_issue_id_in_issues, resolve_issue_ids,
+};
 use super::search::search_issues_in_issues;
 use super::wire::{
     BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
@@ -175,7 +177,11 @@ fn handle_show(
         return Ok(defer());
     }
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
-    let Some(issue) = find_issue(&issues, &args[0]) else {
+    let issue_id = match resolve_cli_issue_id(&issues, &args[0]) {
+        Ok(issue_id) => issue_id,
+        Err(err) => return Ok(issue_resolution_outcome(&args[0], err)),
+    };
+    let Some(issue) = find_issue(&issues, &issue_id) else {
         return Ok(error(format!("Error: issue not found: {}\n", args[0])));
     };
 
@@ -528,7 +534,7 @@ fn handle_create(
     cwd: &Path,
     _relativize_design_paths: bool,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    let parsed = match parse_create_args(args) {
+    let mut parsed = match parse_create_args(args) {
         Ok(Some(parsed)) => parsed,
         Ok(None) => return Ok(defer()),
         Err(message) => return Ok(error(format!("Error: {message}\n"))),
@@ -556,11 +562,10 @@ fn handle_create(
     }
     if let Some(parent_id) = parsed.parent_id.as_deref() {
         let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-        if find_issue(&issues, parent_id).is_none() {
-            return Ok(error(format!(
-                "Error: parent bead not found: {parent_id}\n"
-            )));
-        }
+        parsed.parent_id = match resolve_cli_parent_id(&issues, parent_id) {
+            Ok(parent_id) => Some(parent_id),
+            Err(err) => return Ok(parent_resolution_outcome(parent_id, err)),
+        };
     }
 
     let design = match parsed.plan_path.as_deref() {
@@ -886,10 +891,13 @@ fn handle_open(
     if args.len() != 1 {
         return Ok(defer());
     }
-    let old = read_store_issues(write_beads_dir)
-        .ok()
-        .and_then(|issues| find_issue(&issues, &args[0]).cloned());
-    match open_issue(write_beads_dir, &args[0], None) {
+    let issues = read_store_issues(write_beads_dir).unwrap_or_default();
+    let issue_id = match resolve_cli_issue_id(&issues, &args[0]) {
+        Ok(issue_id) => issue_id,
+        Err(err) => return Ok(issue_resolution_outcome(&args[0], err)),
+    };
+    let old = find_issue(&issues, &issue_id).cloned();
+    match open_issue(write_beads_dir, &issue_id, None) {
         Ok(outcome) => {
             let issue = outcome.issue.as_ref().expect("open outcome has issue");
             let mut stdout =
@@ -921,7 +929,7 @@ fn handle_update(
     if args.is_empty() {
         return Ok(defer());
     }
-    let issue_id = &args[0];
+    let raw_issue_id = &args[0];
     let Some(fields) = parse_update_fields(&args[1..]) else {
         return Ok(defer());
     };
@@ -929,10 +937,13 @@ fn handle_update(
         return Ok(error("No fields to update.\n".to_string()));
     }
 
-    let old = read_store_issues(write_beads_dir)
-        .ok()
-        .and_then(|issues| find_issue(&issues, issue_id).cloned());
-    match update_issue(write_beads_dir, issue_id, fields) {
+    let issues = read_store_issues(write_beads_dir).unwrap_or_default();
+    let issue_id = match resolve_cli_issue_id(&issues, raw_issue_id) {
+        Ok(issue_id) => issue_id,
+        Err(err) => return Ok(issue_resolution_outcome(raw_issue_id, err)),
+    };
+    let old = find_issue(&issues, &issue_id).cloned();
+    match update_issue(write_beads_dir, &issue_id, fields) {
         Ok(outcome) => {
             let issue =
                 outcome.issue.as_ref().expect("update outcome has issue");
@@ -942,7 +953,7 @@ fn handle_update(
             ))
         }
         Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: issue not found: {issue_id}\n")))
+            Ok(error(format!("Error: issue not found: {raw_issue_id}\n")))
         }
         Err(err) => Err(err),
     }
@@ -960,6 +971,14 @@ fn handle_close(
         return Ok(defer());
     }
     let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
+    let ids = match ids
+        .iter()
+        .map(|issue_id| resolve_cli_issue_id(&old_issues, issue_id))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ids) => ids,
+        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+    };
     let note_author = note.as_ref().and_then(|_| close_note_author());
     match close_issues_with_note(
         write_beads_dir,
@@ -1016,8 +1035,13 @@ fn handle_dep(
     }
     match args.first().map(String::as_str) {
         Some("add") if args.len() == 3 => {
-            let issue_id = &args[1];
-            let depends_on_id = &args[2];
+            let issue_ids =
+                match resolve_cli_issue_ids(write_beads_dir, &args[1..]) {
+                    Ok(issue_ids) => issue_ids,
+                    Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+                };
+            let issue_id = &issue_ids[0];
+            let depends_on_id = &issue_ids[1];
             let outcome =
                 add_dependency(write_beads_dir, issue_id, depends_on_id, None)?;
             let dep = outcome
@@ -1038,11 +1062,16 @@ fn handle_dep(
             ))
         }
         Some("rm") if args.len() >= 3 => {
-            let issue_id = &args[1];
+            let issue_ids =
+                match resolve_cli_issue_ids(write_beads_dir, &args[1..]) {
+                    Ok(issue_ids) => issue_ids,
+                    Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+                };
+            let issue_id = &issue_ids[0];
             let outcome = remove_dependencies(
                 write_beads_dir,
                 issue_id,
-                &args[2..],
+                &issue_ids[1..],
                 None,
             )?;
             let mut stdout = String::new();
@@ -1111,10 +1140,16 @@ fn handle_ref(
     };
     match action {
         "add" if action_args.len() >= 2 => {
-            let issue_id = &action_args[0];
+            let issue_id = match resolve_cli_issue_ids(
+                write_beads_dir,
+                &[action_args[0].clone()],
+            ) {
+                Ok(mut issue_ids) => issue_ids.remove(0),
+                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+            };
             match add_bead_references(
                 write_beads_dir,
-                issue_id,
+                &issue_id,
                 &action_args[1..],
                 None,
             ) {
@@ -1152,10 +1187,16 @@ fn handle_ref(
             }
         }
         "rm" if action_args.len() >= 2 => {
-            let issue_id = &action_args[0];
+            let issue_id = match resolve_cli_issue_ids(
+                write_beads_dir,
+                &[action_args[0].clone()],
+            ) {
+                Ok(mut issue_ids) => issue_ids.remove(0),
+                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+            };
             match remove_bead_references(
                 write_beads_dir,
-                issue_id,
+                &issue_id,
                 &action_args[1..],
                 None,
             ) {
@@ -1220,7 +1261,11 @@ fn handle_ref_list(
 
     let issues = read_store_issues(write_beads_dir)?;
     let selected = if let Some(issue_id) = issue_id {
-        let Some(issue) = find_issue(&issues, issue_id) else {
+        let issue_id = match resolve_cli_issue_id(&issues, issue_id) {
+            Ok(issue_id) => issue_id,
+            Err(err) => return Ok(issue_resolution_outcome(issue_id, err)),
+        };
+        let Some(issue) = find_issue(&issues, &issue_id) else {
             return Ok(error(format!("Error: issue not found: {issue_id}\n")));
         };
         vec![issue]
@@ -1309,7 +1354,11 @@ fn handle_rm(
     if args.is_empty() {
         return Ok(defer());
     }
-    match remove_issues(write_beads_dir, args) {
+    let issue_ids = match resolve_cli_issue_ids(write_beads_dir, args) {
+        Ok(issue_ids) => issue_ids,
+        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+    };
+    match remove_issues(write_beads_dir, &issue_ids) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -1321,7 +1370,7 @@ fn handle_rm(
                 BeadCliMutationSummaryWire {
                     operation: "rm".to_string(),
                     changed: outcome.changed,
-                    issue_ids: args.to_vec(),
+                    issue_ids,
                     status_transitions: Vec::new(),
                 },
             ))
@@ -1723,6 +1772,59 @@ fn find_issue<'a>(
     issue_id: &str,
 ) -> Option<&'a IssueWire> {
     issues.iter().find(|issue| issue.id == issue_id)
+}
+
+fn resolve_cli_issue_id(
+    issues: &[IssueWire],
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    resolve_issue_id_in_issues(issues, issue_id)
+}
+
+fn resolve_cli_parent_id(
+    issues: &[IssueWire],
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    resolve_issue_id_in_issues(issues, issue_id)
+}
+
+fn resolve_cli_issue_ids(
+    beads_dir: &Path,
+    issue_ids: &[String],
+) -> Result<Vec<String>, BeadError> {
+    resolve_issue_ids(beads_dir, issue_ids)
+}
+
+fn issue_resolution_outcome(
+    requested_issue_id: &str,
+    err: BeadError,
+) -> BeadCliOutcomeWire {
+    if err.kind == "not_found" {
+        let issue_id = err
+            .message
+            .strip_prefix("Issue not found: ")
+            .unwrap_or(requested_issue_id);
+        error(format!("Error: issue not found: {issue_id}\n"))
+    } else {
+        error(format!("Error: {}\n", err.message))
+    }
+}
+
+fn parent_resolution_outcome(
+    requested_parent_id: &str,
+    err: BeadError,
+) -> BeadCliOutcomeWire {
+    if err.kind == "not_found" {
+        error(format!(
+            "Error: parent bead not found: {requested_parent_id}\n"
+        ))
+    } else {
+        error(format!("Error: {}\n", err.message))
+    }
+}
+
+fn issue_ids_resolution_outcome(err: BeadError) -> BeadCliOutcomeWire {
+    issue_resolution_outcome(&err.message.clone(), err)
 }
 
 fn render_dependency(

@@ -77,6 +77,24 @@ pub fn show_issue(
     show_issue_in_issues(read_store_issues(beads_dir)?, issue_id)
 }
 
+pub fn resolve_issue_id(
+    beads_dir: &Path,
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    resolve_issue_id_in_issues(&read_store_issues(beads_dir)?, issue_id)
+}
+
+pub fn resolve_issue_ids(
+    beads_dir: &Path,
+    issue_ids: &[String],
+) -> Result<Vec<String>, BeadError> {
+    let issues = read_store_issues(beads_dir)?;
+    issue_ids
+        .iter()
+        .map(|issue_id| resolve_issue_id_in_issues(&issues, issue_id))
+        .collect()
+}
+
 pub fn list_issues(
     beads_dir: &Path,
     statuses: Option<&[String]>,
@@ -630,6 +648,39 @@ fn show_issue_in_issues(
         })
 }
 
+pub fn resolve_issue_id_in_issues(
+    issues: &[IssueWire],
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    if issue_id.is_empty() || issue_id.contains('-') {
+        return Ok(issue_id.to_string());
+    }
+    let mut candidates = issues
+        .iter()
+        .filter_map(|issue| {
+            issue.id.rsplit_once('-').and_then(|(_, suffix)| {
+                (suffix == issue_id).then(|| issue.id.clone())
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [resolved] => Ok(resolved.clone()),
+        [] => Err(BeadError {
+            kind: "not_found".to_string(),
+            message: format!("Issue not found: {issue_id}"),
+        }),
+        _ => Err(BeadError {
+            kind: "ambiguous".to_string(),
+            message: format!(
+                "ambiguous bead ID shorthand {issue_id:?}: {}",
+                candidates.join(", ")
+            ),
+        }),
+    }
+}
+
 pub(crate) fn list_issues_in_issues(
     mut issues: Vec<IssueWire>,
     statuses: Option<&[String]>,
@@ -853,6 +904,48 @@ mod tests {
         issue.issue_type = IssueTypeWire::Task;
         issue.parent_id = None;
         issue
+    }
+
+    #[test]
+    fn resolve_issue_id_accepts_full_ids_and_unique_suffixes() {
+        let issues = vec![
+            task("sase-a1", StatusWire::Open),
+            phase("sase-a1.2", StatusWire::Open),
+            task("sase-ai-a1", StatusWire::Open),
+            task("sase-ai-b7", StatusWire::Open),
+        ];
+
+        assert_eq!(
+            resolve_issue_id_in_issues(&issues, "sase-a1").unwrap(),
+            "sase-a1"
+        );
+        assert_eq!(
+            resolve_issue_id_in_issues(&issues, "a1.2").unwrap(),
+            "sase-a1.2"
+        );
+        assert_eq!(
+            resolve_issue_id_in_issues(&issues, "b7").unwrap(),
+            "sase-ai-b7"
+        );
+    }
+
+    #[test]
+    fn resolve_issue_id_reports_unknown_and_ambiguous_suffixes() {
+        let issues = vec![
+            task("sase-a1", StatusWire::Open),
+            task("sase-ai-a1", StatusWire::Open),
+        ];
+
+        let missing = resolve_issue_id_in_issues(&issues, "zz").unwrap_err();
+        assert_eq!(missing.kind, "not_found");
+        assert_eq!(missing.message, "Issue not found: zz");
+
+        let ambiguous = resolve_issue_id_in_issues(&issues, "a1").unwrap_err();
+        assert_eq!(ambiguous.kind, "ambiguous");
+        assert_eq!(
+            ambiguous.message,
+            "ambiguous bead ID shorthand \"a1\": sase-a1, sase-ai-a1"
+        );
     }
 
     #[test]
