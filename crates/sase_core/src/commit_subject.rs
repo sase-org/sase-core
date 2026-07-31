@@ -100,12 +100,12 @@ pub fn parse_commit_subject(
         );
     }
 
-    if !raw_description.starts_with(' ') {
-        return invalid_subject(&subject, "missing_type_separator", None);
-    }
     let description = raw_description.trim();
     if description.is_empty() {
         return invalid_subject(&subject, "empty_description", None);
+    }
+    if !raw_description.starts_with(' ') {
+        return invalid_subject(&subject, "missing_type_separator", None);
     }
 
     let commit_type = commit_type.to_string();
