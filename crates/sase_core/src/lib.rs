@@ -27,6 +27,7 @@ pub mod axe_status;
 pub mod bead;
 pub mod commit_footer;
 pub mod commit_sha;
+pub mod commit_subject;
 pub mod config;
 pub mod content_layout;
 pub mod editor;
@@ -334,6 +335,10 @@ pub use commit_footer::{
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
 pub use commit_sha::commit_shas_equivalent;
+pub use commit_subject::{
+    default_commit_subject_types, parse_commit_subject, CommitSubjectWire,
+    COMMIT_SUBJECT_WIRE_SCHEMA_VERSION,
+};
 pub use config::{
     compose_axe_config, config_field_model, config_inventory, config_plan_edit,
     config_validate, plan_axe_entry_mutation, AxeConfigComposeRequestWire,

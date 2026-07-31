@@ -465,6 +465,11 @@ use sase_core::commit_footer::{
     COMMIT_FOOTER_WIRE_SCHEMA_VERSION,
 };
 use sase_core::commit_sha::commit_shas_equivalent as core_commit_shas_equivalent;
+use sase_core::commit_subject::{
+    default_commit_subject_types as core_default_commit_subject_types,
+    parse_commit_subject as core_parse_commit_subject,
+    COMMIT_SUBJECT_WIRE_SCHEMA_VERSION,
+};
 use sase_core::compose_snippet_catalog as core_compose_snippet_catalog;
 use sase_core::config::{
     compose_axe_config as core_compose_axe_config,
@@ -1216,6 +1221,35 @@ fn py_update_commit_footer(
         &wire_updates,
         &remove_keys,
     ))
+}
+
+/// Return the schema version for commit-subject binding payloads.
+#[pyfunction]
+#[pyo3(name = "commit_subject_wire_schema_version")]
+fn py_commit_subject_wire_schema_version() -> u32 {
+    COMMIT_SUBJECT_WIRE_SCHEMA_VERSION
+}
+
+/// Return the default accepted Conventional Commit types.
+#[pyfunction]
+#[pyo3(name = "default_commit_subject_types")]
+fn py_default_commit_subject_types() -> Vec<String> {
+    core_default_commit_subject_types()
+}
+
+/// Parse a Conventional Commit subject into its structured wire payload.
+#[pyfunction]
+#[pyo3(name = "parse_commit_subject")]
+fn py_parse_commit_subject<'py>(
+    py: Python<'py>,
+    message: &str,
+    allowed_types: Vec<String>,
+) -> PyResult<PyObject> {
+    let subject = core_parse_commit_subject(message, &allowed_types);
+    let value = serde_json::to_value(&subject).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Compile a persistent ChangeSpec corpus from Python wire dicts.
@@ -6577,6 +6611,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_commit_footer_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_commit_footer, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_commit_footer, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_commit_subject_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_default_commit_subject_types, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_commit_subject, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_corpus, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
@@ -7186,6 +7226,43 @@ mod tests {
                 value["tags"][0]["destination"],
                 json!("https://github.com/o/r/blob/main/202607/p.md")
             );
+        });
+    }
+
+    #[test]
+    fn commit_subject_bindings_round_trip_wire_payload() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_commit_subject_wire_schema_version(),
+                COMMIT_SUBJECT_WIRE_SCHEMA_VERSION
+            );
+            let allowed_types = py_default_commit_subject_types();
+            assert_eq!(
+                allowed_types.first().map(String::as_str),
+                Some("build")
+            );
+
+            let parsed = py_parse_commit_subject(
+                py,
+                "feat(binding)!: expose subject parser\n\nBody",
+                allowed_types,
+            )
+            .unwrap();
+            let value = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(value["schema_version"], json!(1));
+            assert_eq!(
+                value["subject"],
+                json!("feat(binding)!: expose subject parser")
+            );
+            assert_eq!(value["valid"], json!(true));
+            assert_eq!(value["exempt"], json!(false));
+            assert_eq!(value["commit_type"], json!("feat"));
+            assert_eq!(value["scope"], json!("binding"));
+            assert_eq!(value["breaking"], json!(true));
+            assert_eq!(value["description"], json!("expose subject parser"));
+            assert_eq!(value["violation"], JsonValue::Null);
+            assert_eq!(value["found_type"], JsonValue::Null);
         });
     }
 
