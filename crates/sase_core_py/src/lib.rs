@@ -194,6 +194,7 @@
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
+//! - `bead_update_many(beads_dir: str, issue_ids: list[str], fields: dict) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
 //! - `bead_needs_task_ready_migration(create_table_sql: str | None) -> bool`
@@ -455,7 +456,8 @@ use sase_core::bead::{
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     task_ready_migration_sql as core_bead_task_ready_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
-    update_issue as core_bead_update_issue, BeadCreateRequestWire, BeadError,
+    update_issue as core_bead_update_issue,
+    update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
     BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
     IssueWire,
@@ -3658,6 +3660,24 @@ fn py_bead_update<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_update_many")]
+fn py_bead_update_many<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_ids: Vec<String>,
+    fields: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let fields = bead_update_fields_from_pydict(fields)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_update_issues(&beads_dir, &issue_ids, fields)
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_append_note")]
 #[pyo3(signature = (beads_dir, issue_id, entry, author=None, now=None))]
 fn py_bead_append_note<'py>(
@@ -6816,6 +6836,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_update_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_append_note, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_wait, m)?)?;
@@ -7123,6 +7144,87 @@ mod tests {
             assert!(preclaimed["changed"].as_bool().unwrap());
             assert_eq!(preclaimed["issue_ids"], json!([phase.id, epic.id]));
             assert_eq!(preclaimed["rollback_preclaims"][1]["bead_id"], epic.id);
+        });
+    }
+
+    #[test]
+    fn bead_update_many_binding_applies_batch_and_reports_unchanged() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let first = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "First task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let second = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Second task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let path = beads_dir.to_str().unwrap();
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_update_many").is_ok());
+
+            let fields = json_value_to_py(
+                py,
+                &json!({
+                    "status": "in_progress",
+                    "now": "2026-01-01T00:02:00Z"
+                }),
+            )
+            .unwrap();
+            let fields = fields.bind(py).downcast::<PyDict>().unwrap();
+
+            let first_call = py_bead_update_many(
+                py,
+                path,
+                vec![first.id.clone(), second.id.clone()],
+                fields,
+            )
+            .unwrap();
+            let first_call = py_to_json_value(first_call.bind(py)).unwrap();
+            assert!(first_call["changed"].as_bool().unwrap());
+            assert_eq!(
+                first_call["issue_ids"],
+                json!([first.id.clone(), second.id.clone()])
+            );
+            assert_eq!(first_call["unchanged_ids"], json!([]));
+            assert_eq!(first_call["issues"][0]["status"], "in_progress");
+            assert_eq!(first_call["issues"][1]["status"], "in_progress");
+
+            let repeat_call = py_bead_update_many(
+                py,
+                path,
+                vec![first.id.clone(), second.id.clone()],
+                fields,
+            )
+            .unwrap();
+            let repeat_call = py_to_json_value(repeat_call.bind(py)).unwrap();
+            assert!(!repeat_call["changed"].as_bool().unwrap());
+            assert_eq!(repeat_call["issue_ids"], json!([]));
+            assert_eq!(
+                repeat_call["unchanged_ids"],
+                json!([first.id, second.id])
+            );
         });
     }
 

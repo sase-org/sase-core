@@ -153,6 +153,8 @@ pub struct BeadMutationOutcomeWire {
     pub rollback_preclaims: Vec<BeadPreclaimRollbackWire>,
     #[serde(default)]
     pub reopened_ancestor_ids: Vec<String>,
+    #[serde(default)]
+    pub unchanged_ids: Vec<String>,
 }
 
 pub fn init_store(
@@ -278,6 +280,28 @@ pub fn update_issue(
     issue_id: &str,
     fields: BeadUpdateFieldsWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let requested = vec![issue_id.to_string()];
+    let mut result = update_issues(beads_dir, &requested, fields)?;
+    let issue = result.issues.pop().expect(
+        "update_issues returns exactly one issue for a single-ID request",
+    );
+    result.issue = Some(issue);
+    result.issue_ids = vec![issue_id.to_string()];
+    result.issues = Vec::new();
+    Ok(result)
+}
+
+/// Apply the same field changes to every named issue as one atomic mutation.
+///
+/// Every ID is resolved and every resulting issue is validated before
+/// anything is written, so an unknown ID or an invalid field value leaves the
+/// store byte-identical. Duplicate IDs (including a shorthand alongside its
+/// resolved full form) collapse to a single update.
+pub fn update_issues(
+    beads_dir: &Path,
+    issue_ids: &[String],
+    fields: BeadUpdateFieldsWire,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
     if fields.is_ready_to_work.is_some() {
         return Err(BeadError::validation(
             "is_ready_to_work cannot be set via update(); use mark_ready_to_work() instead.",
@@ -285,44 +309,80 @@ pub fn update_issue(
     }
     with_bead_mutation_lock(beads_dir, || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+
+        let mut seen = HashSet::new();
+        let targets: Vec<String> = issue_ids
+            .iter()
+            .filter(|issue_id| seen.insert((*issue_id).clone()))
+            .cloned()
+            .collect();
+
+        let indexes = targets
+            .iter()
+            .map(|issue_id| store.issue_index(issue_id))
+            .collect::<Result<Vec<_>, _>>()?;
+
         if fields.status.as_deref() == Some("closed") {
-            reject_unclosed_descendants(&store.issues, issue_id)?;
+            reject_unclosed_descendants_in_batch(&store.issues, &targets)?;
         }
-        let current = store.issues[index].clone();
-        let was_closed = current.status == StatusWire::Closed;
-        let mut issue = current.clone();
+
         let event_fields = event_fields_from_update_fields(&fields)?;
         let now = fields.now.clone().unwrap_or_else(now_utc);
-        apply_update_fields(&mut issue, fields)?;
-        if issue == current {
-            let mut result = outcome("update", false, vec![current.id.clone()]);
-            result.issue = Some(current);
+
+        let mut planned: Vec<(usize, IssueWire, bool)> = Vec::new();
+        let mut unchanged_ids = Vec::new();
+        let mut resulting_issues = Vec::with_capacity(targets.len());
+        for (target_id, index) in targets.iter().zip(indexes.iter().copied()) {
+            let current = store.issues[index].clone();
+            let was_closed = current.status == StatusWire::Closed;
+            let mut issue = current.clone();
+            apply_update_fields(&mut issue, fields.clone())?;
+            if issue == current {
+                unchanged_ids.push(target_id.clone());
+                resulting_issues.push(current);
+                continue;
+            }
+            issue.updated_at = now.clone();
+            issue.validate()?;
+            resulting_issues.push(issue.clone());
+            planned.push((index, issue, was_closed));
+        }
+
+        if planned.is_empty() {
+            let mut result = outcome("update", false, Vec::new());
+            result.unchanged_ids = unchanged_ids;
+            result.issues = resulting_issues;
             return Ok(result);
         }
-        issue.updated_at = now;
-        issue.validate()?;
-        store.issues[index] = issue.clone();
-        store.append_issue_event(
-            issue_id,
-            BeadEventOperationWire::IssueUpdated,
-            BeadEventPayloadWire::IssueUpdated {
-                fields: event_fields,
-            },
-            &issue.updated_at,
-            &issue.created_by,
-        )?;
-        let reopened_ancestors = if was_closed
-            && issue.status != StatusWire::Closed
-        {
-            reopen_closed_ancestors(&mut store, issue_id, &issue.updated_at)?
-        } else {
-            Vec::new()
-        };
+
+        let mut changed_ids = Vec::with_capacity(planned.len());
+        let mut reopened_ancestors: Vec<IssueWire> = Vec::new();
+        for (index, issue, was_closed) in planned {
+            store.issues[index] = issue.clone();
+            changed_ids.push(issue.id.clone());
+            store.append_issue_event(
+                &issue.id,
+                BeadEventOperationWire::IssueUpdated,
+                BeadEventPayloadWire::IssueUpdated {
+                    fields: event_fields.clone(),
+                },
+                &issue.updated_at,
+                &issue.created_by,
+            )?;
+            if was_closed && issue.status != StatusWire::Closed {
+                let newly_reopened = reopen_closed_ancestors(
+                    &mut store,
+                    &issue.id,
+                    &issue.updated_at,
+                )?;
+                reopened_ancestors.extend(newly_reopened);
+            }
+        }
         store.save()?;
 
-        let mut result = outcome("update", true, vec![issue.id.clone()]);
-        result.issue = Some(issue);
+        let mut result = outcome("update", true, changed_ids);
+        result.unchanged_ids = unchanged_ids;
+        result.issues = resulting_issues;
         result.reopened_ancestor_ids = reopened_ancestors
             .iter()
             .map(|ancestor| ancestor.id.clone())
@@ -1101,16 +1161,27 @@ fn unresolved_descendants<'a>(
         .collect()
 }
 
-fn reject_unclosed_descendants(
+/// Reject closing any batch target whose unresolved descendants are not
+/// themselves also being closed by the same batch.
+fn reject_unclosed_descendants_in_batch(
     issues: &[IssueWire],
-    issue_id: &str,
+    targets: &[String],
 ) -> Result<(), BeadError> {
-    let unresolved = unresolved_descendants(issues, issue_id);
-    if unresolved.is_empty() {
-        Ok(())
-    } else {
-        Err(unclosed_descendants_error(issue_id, &unresolved))
+    let target_set: BTreeSet<&str> =
+        targets.iter().map(String::as_str).collect();
+    for issue_id in targets {
+        let unresolved: Vec<&IssueWire> =
+            unresolved_descendants(issues, issue_id)
+                .into_iter()
+                .filter(|descendant| {
+                    !target_set.contains(descendant.id.as_str())
+                })
+                .collect();
+        if !unresolved.is_empty() {
+            return Err(unclosed_descendants_error(issue_id, &unresolved));
+        }
     }
+    Ok(())
 }
 
 fn unclosed_descendants_error(
@@ -2184,6 +2255,7 @@ fn outcome(
         next_counter: None,
         rollback_preclaims: Vec::new(),
         reopened_ancestor_ids: Vec::new(),
+        unchanged_ids: Vec::new(),
     }
 }
 
@@ -3324,6 +3396,418 @@ mod tests {
             store.get_issue("sase-1.1").unwrap().status,
             StatusWire::InProgress
         );
+    }
+
+    #[test]
+    fn update_issues_applies_same_fields_to_every_target_in_one_pass() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "First",
+                    "task",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-2",
+                    "Second",
+                    "task",
+                    None,
+                    "open",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-3",
+                    "Third",
+                    "task",
+                    None,
+                    "open",
+                    "2026-01-01T00:02:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let outcome = update_issues(
+            &beads_dir,
+            &[
+                "sase-1".to_string(),
+                "sase-2".to_string(),
+                "sase-3".to_string(),
+            ],
+            BeadUpdateFieldsWire {
+                status: Some("in_progress".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.issue_ids, vec!["sase-1", "sase-2", "sase-3"]);
+        assert!(outcome.unchanged_ids.is_empty());
+        assert_eq!(outcome.issues.len(), 3);
+        for issue in &outcome.issues {
+            assert_eq!(issue.status, StatusWire::InProgress);
+        }
+
+        let store = MutableStore::load(&beads_dir).unwrap();
+        for issue_id in ["sase-1", "sase-2", "sase-3"] {
+            assert_eq!(
+                store.get_issue(issue_id).unwrap().status,
+                StatusWire::InProgress
+            );
+        }
+    }
+
+    #[test]
+    fn update_issues_mixed_batch_reports_changed_and_unchanged() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "First",
+                    "task",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-2",
+                    "Second",
+                    "task",
+                    None,
+                    "in_progress",
+                    "2026-01-01T00:01:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let outcome = update_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-2".to_string()],
+            BeadUpdateFieldsWire {
+                status: Some("in_progress".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.issue_ids, vec!["sase-1".to_string()]);
+        assert_eq!(outcome.unchanged_ids, vec!["sase-2".to_string()]);
+        assert_eq!(outcome.issues.len(), 2);
+        assert_eq!(outcome.issues[0].id, "sase-1");
+        assert_eq!(outcome.issues[0].updated_at, "2026-01-02T00:00:00Z");
+        assert_eq!(outcome.issues[1].id, "sase-2");
+        assert_eq!(outcome.issues[1].updated_at, "2026-01-01T00:01:00Z");
+    }
+
+    #[test]
+    fn update_issues_unknown_id_leaves_store_untouched() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        let original = issue(
+            "sase-1",
+            "First",
+            "task",
+            None,
+            "open",
+            "2026-01-01T00:00:00Z",
+        ) + "\n";
+        fs::write(beads_dir.join("issues.jsonl"), &original).unwrap();
+
+        let error = update_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-missing".to_string()],
+            BeadUpdateFieldsWire {
+                status: Some("in_progress".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "not_found");
+        assert_eq!(
+            fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn update_issues_invalid_field_value_leaves_every_target_unmodified() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        let original = [
+            issue(
+                "sase-1",
+                "First",
+                "task",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ),
+            issue(
+                "sase-2",
+                "Second",
+                "task",
+                None,
+                "open",
+                "2026-01-01T00:01:00Z",
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(beads_dir.join("issues.jsonl"), &original).unwrap();
+
+        let error = update_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-2".to_string()],
+            BeadUpdateFieldsWire {
+                model: Some("bad\nmodel".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(
+            fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn update_issues_collapses_duplicate_ids_to_one_update() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            issue(
+                "sase-1",
+                "First",
+                "task",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ) + "\n",
+        )
+        .unwrap();
+
+        let outcome = update_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-1".to_string()],
+            BeadUpdateFieldsWire {
+                title: Some("Renamed".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.issue_ids, vec!["sase-1".to_string()]);
+        assert_eq!(outcome.issues.len(), 1);
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let update_events = streams[0]
+            .events
+            .iter()
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::IssueUpdated
+            })
+            .count();
+        assert_eq!(update_events, 1);
+    }
+
+    #[test]
+    fn update_issues_closes_parent_and_child_regardless_of_argument_order() {
+        for order in [
+            vec!["sase-1".to_string(), "sase-1.1".to_string()],
+            vec!["sase-1.1".to_string(), "sase-1".to_string()],
+        ] {
+            let temp = tempdir().unwrap();
+            let beads_dir = temp.path().join("sdd/beads");
+            fs::create_dir_all(&beads_dir).unwrap();
+            save_config(&beads_dir, &default_config("sase", "")).unwrap();
+            fs::write(
+                beads_dir.join("issues.jsonl"),
+                [
+                    issue(
+                        "sase-1",
+                        "Parent",
+                        "plan",
+                        None,
+                        "open",
+                        "2026-01-01T00:00:00Z",
+                    ),
+                    issue(
+                        "sase-1.1",
+                        "Child",
+                        "phase",
+                        Some("sase-1"),
+                        "open",
+                        "2026-01-01T00:01:00Z",
+                    ),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+
+            let outcome = update_issues(
+                &beads_dir,
+                &order,
+                BeadUpdateFieldsWire {
+                    status: Some("closed".to_string()),
+                    now: Some("2026-01-02T00:00:00Z".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert!(outcome.changed);
+            let store = MutableStore::load(&beads_dir).unwrap();
+            assert_eq!(
+                store.get_issue("sase-1").unwrap().status,
+                StatusWire::Closed
+            );
+            assert_eq!(
+                store.get_issue("sase-1.1").unwrap().status,
+                StatusWire::Closed
+            );
+        }
+    }
+
+    #[test]
+    fn update_issues_status_closed_rejects_out_of_batch_descendant() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        let original = [
+            issue(
+                "sase-1",
+                "Parent",
+                "plan",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ),
+            issue(
+                "sase-1.1",
+                "In batch",
+                "phase",
+                Some("sase-1"),
+                "open",
+                "2026-01-01T00:01:00Z",
+            ),
+            issue(
+                "sase-1.2",
+                "Out of batch",
+                "phase",
+                Some("sase-1"),
+                "open",
+                "2026-01-01T00:02:00Z",
+            ),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(beads_dir.join("issues.jsonl"), &original).unwrap();
+
+        let error = update_issues(
+            &beads_dir,
+            &["sase-1".to_string(), "sase-1.1".to_string()],
+            BeadUpdateFieldsWire {
+                status: Some("closed".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("sase-1.2"));
+        assert_eq!(
+            fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn update_issues_reopens_shared_ancestor_only_once() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "Parent",
+                    "plan",
+                    None,
+                    "closed",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-1.1",
+                    "First child",
+                    "phase",
+                    Some("sase-1"),
+                    "closed",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-1.2",
+                    "Second child",
+                    "phase",
+                    Some("sase-1"),
+                    "closed",
+                    "2026-01-01T00:02:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let outcome = update_issues(
+            &beads_dir,
+            &["sase-1.1".to_string(), "sase-1.2".to_string()],
+            BeadUpdateFieldsWire {
+                status: Some("in_progress".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.reopened_ancestor_ids, vec!["sase-1".to_string()]);
+        let store = MutableStore::load(&beads_dir).unwrap();
+        assert_eq!(store.get_issue("sase-1").unwrap().status, StatusWire::Open);
     }
 
     #[test]

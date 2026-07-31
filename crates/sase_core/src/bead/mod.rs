@@ -47,8 +47,9 @@ pub use mutation::{
     mark_ready_to_work, open_issue, preclaim_epic_work_plan,
     release_agent_claim, remove_bead_references, remove_dependencies,
     remove_issue, remove_issues, sync_is_clean, unmark_ready_to_work,
-    update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
-    BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
+    update_issue, update_issues, BeadCreateRequestWire,
+    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
+    BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
     blocked_issues, doctor, doctor_report, doctor_report_with_contexts,

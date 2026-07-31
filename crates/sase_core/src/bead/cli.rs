@@ -18,7 +18,7 @@ use crate::plan::canonicalize_plan_reference;
 use super::mutation::{
     add_bead_references, add_dependency, close_issues_with_note, create_issue,
     open_issue, remove_bead_references, remove_dependencies, remove_issues,
-    update_issue, BeadCreateRequestWire, BeadMutationOutcomeWire,
+    update_issues, BeadCreateRequestWire, BeadMutationOutcomeWire,
     BeadUpdateFieldsWire,
 };
 use super::read::{
@@ -929,31 +929,83 @@ fn handle_update(
     if args.is_empty() {
         return Ok(defer());
     }
-    let raw_issue_id = &args[0];
-    let Some(fields) = parse_update_fields(&args[1..]) else {
+    let Some((raw_ids, fields)) = parse_update_args(args) else {
         return Ok(defer());
     };
+    if raw_ids.is_empty() {
+        return Ok(defer());
+    }
     if fields == BeadUpdateFieldsWire::default() {
         return Ok(error("No fields to update.\n".to_string()));
     }
 
     let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    let issue_id = match resolve_cli_issue_id(&issues, raw_issue_id) {
-        Ok(issue_id) => issue_id,
-        Err(err) => return Ok(issue_resolution_outcome(raw_issue_id, err)),
+    let issue_ids = match raw_ids
+        .iter()
+        .map(|issue_id| resolve_cli_issue_id(&issues, issue_id))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ids) => ids,
+        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
     };
-    let old = find_issue(&issues, &issue_id).cloned();
-    match update_issue(write_beads_dir, &issue_id, fields) {
+
+    match update_issues(write_beads_dir, &issue_ids, fields) {
         Ok(outcome) => {
-            let issue =
-                outcome.issue.as_ref().expect("update outcome has issue");
+            let changed: std::collections::HashSet<&str> =
+                outcome.issue_ids.iter().map(String::as_str).collect();
+            let mut stdout = String::new();
+            for issue in &outcome.issues {
+                if changed.contains(issue.id.as_str()) {
+                    writeln!(
+                        stdout,
+                        "✓ Updated issue: {} — {}",
+                        issue.id, issue.title
+                    )
+                    .expect("writing to String cannot fail");
+                } else {
+                    writeln!(
+                        stdout,
+                        "· Unchanged: {} — {}",
+                        issue.id, issue.title
+                    )
+                    .expect("writing to String cannot fail");
+                }
+            }
+            for ancestor_id in &outcome.reopened_ancestor_ids {
+                if let Some(ancestor) = find_issue(&issues, ancestor_id) {
+                    writeln!(
+                        stdout,
+                        "○ Reopened ancestor: {} — {}",
+                        ancestor.id, ancestor.title
+                    )
+                    .expect("writing to String cannot fail");
+                }
+            }
+            let status_transitions = outcome
+                .issues
+                .iter()
+                .filter_map(|issue| {
+                    let old = find_issue(&issues, &issue.id)?;
+                    (old.status != issue.status).then(|| {
+                        BeadCliStatusTransitionWire {
+                            from_status: status_value(&old.status).to_string(),
+                            to_status: status_value(&issue.status).to_string(),
+                        }
+                    })
+                })
+                .collect();
             Ok(success_with_mutation(
-                format!("✓ Updated issue: {} — {}\n", issue.id, issue.title),
-                mutation_summary("update", &outcome, old.as_ref()),
+                stdout,
+                BeadCliMutationSummaryWire {
+                    operation: "update".to_string(),
+                    changed: outcome.changed,
+                    issue_ids: outcome.issue_ids.clone(),
+                    status_transitions,
+                },
             ))
         }
         Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: issue not found: {raw_issue_id}\n")))
+            Ok(error(format!("Error: {}\n", err.message)))
         }
         Err(err) => Err(err),
     }
@@ -1633,11 +1685,19 @@ fn parse_limit(value: &str) -> Option<usize> {
     value.parse::<usize>().ok()
 }
 
-fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
+fn parse_update_args(
+    args: &[String],
+) -> Option<(Vec<String>, BeadUpdateFieldsWire)> {
+    let mut ids = Vec::new();
     let mut fields = BeadUpdateFieldsWire::default();
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
+        if !arg.starts_with('-') {
+            ids.push(arg.clone());
+            idx += 1;
+            continue;
+        }
         let (name, value) = if matches!(
             arg.as_str(),
             "-s" | "--status"
@@ -1693,7 +1753,7 @@ fn parse_update_fields(args: &[String]) -> Option<BeadUpdateFieldsWire> {
         }
         idx += 1;
     }
-    Some(fields)
+    Some((ids, fields))
 }
 
 type ParsedCloseArgs = (
@@ -3643,6 +3703,87 @@ mod tests {
             plan,
             format!("  plans/legacy.md\n  → {}\n", plan_path.display())
         );
+    }
+
+    #[test]
+    fn update_fast_path_reports_changed_and_unchanged_rows_in_one_commit() {
+        let store = seed_issues(vec![
+            task_issue(
+                "beads-1",
+                "First task",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:00:00Z",
+            ),
+            task_issue(
+                "beads-2",
+                "Second task",
+                "",
+                StatusWire::InProgress,
+                "2026-01-01T00:01:00Z",
+            ),
+        ]);
+        let outcome = execute_bead_cli(
+            &[
+                "update".to_string(),
+                "beads-1".to_string(),
+                "beads-2".to_string(),
+                "-s".to_string(),
+                "in_progress".to_string(),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(
+            outcome.stdout,
+            concat!(
+                "✓ Updated issue: beads-1 — First task\n",
+                "· Unchanged: beads-2 — Second task\n",
+            )
+        );
+        let summary = outcome.mutation_summary.unwrap();
+        assert_eq!(summary.operation, "update");
+        assert!(summary.changed);
+        assert_eq!(summary.issue_ids, vec!["beads-1".to_string()]);
+
+        let issues = read_store_issues(&store.beads_dir).unwrap();
+        let first = issues.iter().find(|issue| issue.id == "beads-1").unwrap();
+        assert_eq!(first.status, StatusWire::InProgress);
+        let second = issues.iter().find(|issue| issue.id == "beads-2").unwrap();
+        assert_eq!(second.status, StatusWire::InProgress);
+    }
+
+    #[test]
+    fn update_fast_path_defers_size_flag_to_python() {
+        let store = seed_issues(vec![task_issue(
+            "beads-1",
+            "First task",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:00:00Z",
+        )]);
+        let outcome = execute_bead_cli(
+            &[
+                "update".to_string(),
+                "beads-1".to_string(),
+                "-z".to_string(),
+                "medium".to_string(),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            Path::new("/repo"),
+            false,
+            &[],
+        )
+        .unwrap();
+
+        assert!(!outcome.handled);
     }
 
     fn phase_issue(
