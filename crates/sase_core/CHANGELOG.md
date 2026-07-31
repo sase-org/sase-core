@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3](https://github.com/sase-org/sase-core/compare/v0.17.2...v0.17.3) - 2026-07-31
+
+### Added
+
+- *(beads)* resolve shorthand bead ids in core
+
 ## [0.17.2](https://github.com/sase-org/sase-core/compare/v0.17.1...v0.17.2) - 2026-07-31
 
 ### Added
