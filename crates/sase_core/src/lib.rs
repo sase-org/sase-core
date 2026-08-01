@@ -40,6 +40,7 @@ pub mod notifications;
 pub mod parser;
 pub mod plan;
 pub mod project_spec;
+pub mod prompt_artifact;
 pub mod prompt_literals;
 pub mod prompt_stash;
 pub mod query;

@@ -162,6 +162,12 @@
 //! - `artifact_ref_list_resolution_wire_schema_version() -> int`
 //! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
 //! - `artifact_ref_wire_schema_version() -> int`
+//! - `prompt_artifact_pool_filename(sha256: str, original_name: str) -> str`
+//! - `prompt_artifact_manifest_parse(data: bytes) -> list[dict]`
+//! - `prompt_artifact_manifest_render_record(record: dict) -> str`
+//! - `prompt_artifact_manifest_select(records: list[dict], agent_artifacts_dir: str) -> list[dict]`
+//! - `prompt_artifact_rewrite_links(prompt: str, records: list[dict], resolver: Callable[[dict], str | None]) -> dict`
+//! - `prompt_artifact_wire_schema_version() -> int`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
@@ -548,6 +554,14 @@ use sase_core::project_spec::{
     apply_project_name_update as core_apply_project_name_update,
     list_project_records as core_list_project_records,
     read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
+};
+use sase_core::prompt_artifact::{
+    artifact_pool_filename as core_artifact_pool_filename,
+    parse_prompt_artifact_manifest as core_parse_prompt_artifact_manifest,
+    render_prompt_artifact_record as core_render_prompt_artifact_record,
+    rewrite_prompt_artifact_links as core_rewrite_prompt_artifact_links,
+    select_manifest_records as core_select_prompt_artifact_manifest_records,
+    PromptArtifactRecord, PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION,
 };
 use sase_core::prompt_stash::{
     append_prompt_stash as core_append_prompt_stash,
@@ -3115,6 +3129,156 @@ fn py_artifact_ref_wire_schema_version() -> u64 {
         ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION
     );
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION
+}
+
+/// Build one content-addressed prompt-artifact pool filename.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_pool_filename")]
+fn py_prompt_artifact_pool_filename(
+    sha256: &str,
+    original_name: &str,
+) -> String {
+    core_artifact_pool_filename(sha256, original_name)
+}
+
+/// Parse valid rows from a tolerant prompt-artifact JSONL manifest.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_manifest_parse")]
+fn py_prompt_artifact_manifest_parse<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyBytes>,
+) -> PyResult<PyObject> {
+    prompt_artifact_result_to_py(
+        py,
+        &core_parse_prompt_artifact_manifest(data.as_bytes()),
+    )
+}
+
+/// Render one prompt-artifact manifest row as compact JSON.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_manifest_render_record")]
+fn py_prompt_artifact_manifest_render_record(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let record = prompt_artifact_record_from_pydict(record)?;
+    core_render_prompt_artifact_record(&record).map_err(|error| {
+        PyValueError::new_err(format!(
+            "invalid prompt artifact manifest record: {error}"
+        ))
+    })
+}
+
+/// Select the newest rows belonging to one agent artifact directory.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_manifest_select")]
+fn py_prompt_artifact_manifest_select<'py>(
+    py: Python<'py>,
+    records: &Bound<'py, PyList>,
+    agent_artifacts_dir: &str,
+) -> PyResult<PyObject> {
+    let records = prompt_artifact_records_from_py_list(records)?;
+    let selected = core_select_prompt_artifact_manifest_records(
+        &records,
+        agent_artifacts_dir,
+    );
+    prompt_artifact_result_to_py(py, &selected)
+}
+
+/// Rewrite live artifact tokens using a Python target resolver.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_rewrite_links")]
+fn py_prompt_artifact_rewrite_links<'py>(
+    py: Python<'py>,
+    prompt: &str,
+    records: &Bound<'py, PyList>,
+    resolver: &Bound<'py, PyAny>,
+) -> PyResult<PyObject> {
+    if !resolver.is_callable() {
+        return Err(PyValueError::new_err(
+            "prompt artifact resolver must be callable",
+        ));
+    }
+    let records = prompt_artifact_records_from_py_list(records)?;
+    let mut targets = Vec::with_capacity(records.len());
+    for record in &records {
+        let argument = serde_json::to_value(record)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal prompt artifact serialize error: {error}"
+                ))
+            })
+            .and_then(|value| json_value_to_py(py, &value))?;
+        let target = resolver.call1((argument,))?;
+        targets.push(if target.is_none() {
+            None
+        } else {
+            Some(target.extract::<String>().map_err(|_| {
+                PyValueError::new_err(
+                    "prompt artifact resolver must return str or None",
+                )
+            })?)
+        });
+    }
+    let mut target_index = 0;
+    let rewritten =
+        core_rewrite_prompt_artifact_links(prompt, &records, |_| {
+            let target = targets[target_index].clone();
+            target_index += 1;
+            target
+        });
+    prompt_artifact_result_to_py(py, &rewritten)
+}
+
+/// Return the prompt-artifact manifest wire schema version.
+#[pyfunction]
+#[pyo3(name = "prompt_artifact_wire_schema_version")]
+fn py_prompt_artifact_wire_schema_version() -> u64 {
+    PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION
+}
+
+fn prompt_artifact_record_from_pydict(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<PromptArtifactRecord> {
+    serde_json::from_value(py_to_json_value(record.as_any())?).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "record is not a valid PromptArtifactRecord dict: {error}"
+            ))
+        },
+    )
+}
+
+fn prompt_artifact_records_from_py_list(
+    records: &Bound<'_, PyList>,
+) -> PyResult<Vec<PromptArtifactRecord>> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            serde_json::from_value(py_to_json_value(&record)?).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "records[{index}] is not a valid PromptArtifactRecord dict: {error}"
+                    ))
+                },
+            )
+        })
+        .collect()
+}
+
+fn prompt_artifact_result_to_py<T>(
+    py: Python<'_>,
+    result: &T,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal prompt artifact serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Summarize the tolerant artifact-consumption ledger by canonical reference.
@@ -6808,6 +6972,18 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_artifact_pool_filename, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_artifact_manifest_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_prompt_artifact_manifest_render_record,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_artifact_manifest_select, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_artifact_rewrite_links, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_prompt_artifact_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_consumption_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_consumption_wire_schema_version,
@@ -8527,6 +8703,107 @@ mod tests {
     }
 
     #[test]
+    fn prompt_artifact_bindings_round_trip_manifest_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "prompt_artifact_pool_filename",
+                "prompt_artifact_manifest_parse",
+                "prompt_artifact_manifest_render_record",
+                "prompt_artifact_manifest_select",
+                "prompt_artifact_rewrite_links",
+                "prompt_artifact_wire_schema_version",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            assert_eq!(py_prompt_artifact_wire_schema_version(), 1);
+            assert_eq!(
+                py_prompt_artifact_pool_filename(
+                    &"a".repeat(64),
+                    "../../diagram.png"
+                ),
+                "aaaaaaaaaaaa-diagram.png"
+            );
+            let record_value = json!({
+                "schema_version": 1,
+                "recorded_at": "2026-08-01T14:22:03Z",
+                "agent_artifacts_dir": "/artifacts/run",
+                "raw_ref": "@~/diagram.png",
+                "expanded_ref": "@.sase/artifacts/home/diagram.png",
+                "ref_kind": "file",
+                "label": "diagram.png",
+                "source_path": null,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size_bytes": 42,
+                "mime_type": "image/png",
+                "pool_relpath": "pool/aaaaaaaaaaaa-diagram.png",
+                "vcs_repo": null,
+                "vcs_relpath": null,
+                "locator": null,
+                "skipped_reason": null
+            });
+            let record_object = json_value_to_py(py, &record_value).unwrap();
+            let record = record_object.bind(py).downcast::<PyDict>().unwrap();
+            let rendered =
+                py_prompt_artifact_manifest_render_record(record).unwrap();
+            let parsed = py_prompt_artifact_manifest_parse(
+                py,
+                &PyBytes::new_bound(py, rendered.as_bytes()),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(parsed.bind(py)).unwrap(),
+                json!([record_value.clone()])
+            );
+
+            let records_object =
+                json_value_to_py(py, &json!([record_value])).unwrap();
+            let records = records_object.bind(py).downcast::<PyList>().unwrap();
+            let selected = py_prompt_artifact_manifest_select(
+                py,
+                records,
+                "/artifacts/run",
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(selected.bind(py))
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let resolver_module = PyModule::from_code_bound(
+                py,
+                "def resolve(record):\n    return 'archive.png'\n",
+                "resolver.py",
+                "resolver",
+            )
+            .unwrap();
+            let resolver = resolver_module.getattr("resolve").unwrap();
+            let rewritten = py_prompt_artifact_rewrite_links(
+                py,
+                "Open @~/diagram.png.",
+                records,
+                &resolver,
+            )
+            .unwrap();
+            let rewritten = py_to_json_value(rewritten.bind(py)).unwrap();
+            assert_eq!(
+                rewritten["prompt"],
+                json!("Open [@~/diagram.png](archive.png).")
+            );
+            assert_eq!(
+                rewritten["linked_records"].as_array().unwrap().len(),
+                1
+            );
+        });
+    }
+
+    #[test]
     fn artifact_consumption_binding_returns_summary_and_handshake() {
         pyo3::prepare_freethreaded_python();
         let temp = tempfile::tempdir().unwrap();
@@ -8866,9 +9143,9 @@ mod tests {
             assert!(py_sdd_artifact_link_render(
                 "PROMPT",
                 "202607/prompts/example.md",
-                "/absolute.md",
+                "https://example.com/prompts/example.md",
             )
-            .is_err());
+            .is_ok());
         });
     }
 
@@ -8912,7 +9189,7 @@ mod tests {
             let document = format!("{rendered}\n\n# Plan\n");
             let parsed = py_sdd_plan_header_block_parse(py, &document).unwrap();
             let parsed = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed["schema_version"], json!(2));
+            assert_eq!(parsed["schema_version"], json!(3));
             assert_eq!(parsed["sections"][1]["kind"], json!("BEAD"));
             assert_eq!(parsed["sections"][2]["kind"], json!("COMMITS"));
 

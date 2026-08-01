@@ -13,7 +13,7 @@ use serde_yaml::Value;
 use super::wire::PlanError;
 
 /// Wire schema for the plan-header block contract.
-pub const PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION: u64 = 3;
 
 /// Maximum number of visible entries in one list-shaped section.
 pub const MAX_RENDERED_PLAN_HEADER_ENTRIES: usize = 50;
@@ -29,6 +29,7 @@ pub enum SddPlanHeaderSectionKindWire {
     Parent,
     Bead,
     Agents,
+    Artifacts,
     Commits,
 }
 
@@ -40,9 +41,10 @@ impl SddPlanHeaderSectionKindWire {
             "PARENT" => Ok(Self::Parent),
             "BEAD" => Ok(Self::Bead),
             "AGENTS" => Ok(Self::Agents),
+            "ARTIFACTS" => Ok(Self::Artifacts),
             "COMMITS" => Ok(Self::Commits),
             _ => Err(PlanError::validation(format!(
-                "unsupported plan header section `{value}`; expected PLAN, PROMPT, PARENT, BEAD, AGENTS, or COMMITS"
+                "unsupported plan header section `{value}`; expected PLAN, PROMPT, PARENT, BEAD, AGENTS, ARTIFACTS, or COMMITS"
             ))),
         }
     }
@@ -54,6 +56,7 @@ impl SddPlanHeaderSectionKindWire {
             Self::Parent => "PARENT",
             Self::Bead => "BEAD",
             Self::Agents => "AGENTS",
+            Self::Artifacts => "ARTIFACTS",
             Self::Commits => "COMMITS",
         }
     }
@@ -63,7 +66,7 @@ impl SddPlanHeaderSectionKindWire {
             Self::Plan => Some("plan"),
             Self::Prompt => Some("prompt"),
             Self::Parent => Some("parent"),
-            Self::Bead | Self::Agents | Self::Commits => None,
+            Self::Bead | Self::Agents | Self::Artifacts | Self::Commits => None,
         }
     }
 
@@ -750,6 +753,7 @@ fn normalize_sections(
         SddPlanHeaderSectionKindWire::Parent,
         SddPlanHeaderSectionKindWire::Bead,
         SddPlanHeaderSectionKindWire::Agents,
+        SddPlanHeaderSectionKindWire::Artifacts,
         SddPlanHeaderSectionKindWire::Commits,
     ]
     .into_iter()
@@ -1395,7 +1399,7 @@ fn validate_section_target(
     match kind {
         SddPlanHeaderSectionKindWire::Plan
         | SddPlanHeaderSectionKindWire::Prompt => {
-            validate_relative_target(target)
+            validate_absolute_or_relative_target(target)
         }
         SddPlanHeaderSectionKindWire::Parent => {
             validate_absolute_or_relative_target(target)
@@ -1404,6 +1408,7 @@ fn validate_section_target(
             validate_absolute_or_relative_target(target)
         }
         SddPlanHeaderSectionKindWire::Agents
+        | SddPlanHeaderSectionKindWire::Artifacts
         | SddPlanHeaderSectionKindWire::Commits => {
             Err("list-shaped section cannot have a target")
         }
@@ -1578,6 +1583,94 @@ mod tests {
             rendered
         );
         assert_eq!(parsed.body, "# Plan\n");
+    }
+
+    #[test]
+    fn plan_and_prompt_sections_accept_absolute_cross_repo_targets() {
+        for (kind, label, target) in [
+            (
+                SddPlanHeaderSectionKindWire::Plan,
+                "202608/example.md",
+                "https://github.com/sase-org/sase--plans/blob/main/202608/example.md",
+            ),
+            (
+                SddPlanHeaderSectionKindWire::Prompt,
+                "prompts/202608/example.md",
+                "https://github.com/sase-org/sase--agents/blob/main/prompts/202608/example.md",
+            ),
+        ] {
+            let section = link_section(kind, label, target);
+            let rendered =
+                render_sdd_plan_header_block(std::slice::from_ref(&section))
+                    .unwrap();
+            let parsed = parse_sdd_plan_header_block(&format!(
+                "{rendered}\n\nDocument body\n"
+            ));
+            assert_eq!(parsed.sections, vec![section]);
+            assert_eq!(parsed.body, "Document body\n");
+        }
+    }
+
+    #[test]
+    fn artifacts_is_list_shaped_and_orders_between_agents_and_commits() {
+        let artifacts = SddPlanHeaderSectionWire {
+            kind: SddPlanHeaderSectionKindWire::Artifacts,
+            label: None,
+            target: None,
+            entries: vec![entry(
+                "diagram.png",
+                Some("../../artifacts/202608/abcdef012345-diagram.png"),
+                None,
+            )],
+            omitted: 0,
+        };
+        let document = "- **PROMPT:** [prompt.md](https://example.com/prompt.md)\n- **AGENTS:**\n  - agent.one\n- **COMMITS:**\n  - abc1234\n\nBody\n";
+        let updated = upsert_sdd_plan_header_section(
+            document,
+            artifacts.clone(),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            "- **PROMPT:** [prompt.md](https://example.com/prompt.md)\n- **AGENTS:**\n  - agent.one\n- **ARTIFACTS:**\n  - [diagram.png](../../artifacts/202608/abcdef012345-diagram.png)\n- **COMMITS:**\n  - abc1234\n\nBody\n"
+        );
+        let parsed = parse_sdd_plan_header_block(&updated);
+        assert_eq!(parsed.sections[2], artifacts);
+        assert_eq!(
+            render_sdd_plan_header_block(&parsed.sections).unwrap(),
+            updated.trim_end_matches("\n\nBody\n")
+        );
+    }
+
+    #[test]
+    fn artifacts_is_compatible_with_either_counterpart_section() {
+        let artifacts = SddPlanHeaderSectionWire {
+            kind: SddPlanHeaderSectionKindWire::Artifacts,
+            label: None,
+            target: None,
+            entries: vec![entry("artifact", Some("artifact.bin"), None)],
+            omitted: 0,
+        };
+        for counterpart in [
+            link_section(
+                SddPlanHeaderSectionKindWire::Plan,
+                "plan.md",
+                "https://example.com/plan.md",
+            ),
+            link_section(
+                SddPlanHeaderSectionKindWire::Prompt,
+                "prompt.md",
+                "https://example.com/prompt.md",
+            ),
+        ] {
+            assert!(render_sdd_plan_header_block(&[
+                counterpart,
+                artifacts.clone()
+            ])
+            .is_ok());
+        }
     }
 
     #[test]
