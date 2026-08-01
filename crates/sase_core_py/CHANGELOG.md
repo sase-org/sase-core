@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.8](https://github.com/sase-org/sase-core/compare/v0.17.7...v0.17.8) - 2026-08-01
+
+### Added
+
+- *(beads)* add atomic task evidence contract
+- add prompt artifact contract
+
 ## [0.17.5](https://github.com/sase-org/sase-core/compare/v0.17.4...v0.17.5) - 2026-08-01
 
 ### Added
