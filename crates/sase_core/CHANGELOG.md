@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.6](https://github.com/sase-org/sase-core/compare/v0.17.5...v0.17.6) - 2026-08-01
+
+### Added
+
+- *(notifications)* add mobile activity cursors
+
 ## [0.17.5](https://github.com/sase-org/sase-core/compare/v0.17.4...v0.17.5) - 2026-08-01
 
 ### Added
