@@ -12,6 +12,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 use crate::plan::canonicalize_plan_reference;
 
@@ -146,6 +147,8 @@ fn handle_list(
     if issues.is_empty() {
         stdout.push_str("No issues found.\n");
     } else {
+        let color = filters.color.resolve_stdout();
+        let type_width = compact_type_width();
         for issue in &issues {
             let parent = issue
                 .parent_id
@@ -153,9 +156,10 @@ fn handle_list(
                 .map_or(String::new(), |parent_id| format!(" ← {parent_id}"));
             writeln!(
                 stdout,
-                "{} {} · {}{}",
-                status_icon(&issue.status),
-                issue.id,
+                "{} {} {} · {}{}",
+                color_issue_type_cell(&issue.issue_type, color, type_width),
+                color_status_icon(&issue.status, color),
+                color_issue_id(&issue.id, color),
                 issue.title,
                 parent
             )
@@ -1443,6 +1447,7 @@ struct ListFilters {
     statuses: Vec<StatusWire>,
     issue_types: Option<Vec<IssueTypeWire>>,
     tiers: Option<Vec<BeadTierWire>>,
+    color: ColorMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1498,6 +1503,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
     let mut statuses = Vec::new();
     let mut issue_types = Vec::new();
     let mut tiers = Vec::new();
+    let mut color = ColorMode::Auto;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
@@ -1517,6 +1523,20 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
             idx += 1;
             let value = args.get(idx)?;
             tiers.push(parse_tier(value)?);
+        } else if arg == "-c" || arg == "--color" {
+            idx += 1;
+            color = parse_color_mode(args.get(idx)?)?;
+        } else if let Some(value) = arg.strip_prefix("--color=") {
+            color = parse_color_mode(value)?;
+        } else if arg == "-f" || arg == "--format" {
+            idx += 1;
+            if args.get(idx)?.as_str() != "compact" {
+                return None;
+            }
+        } else if let Some(value) = arg.strip_prefix("--format=") {
+            if value != "compact" {
+                return None;
+            }
         } else {
             let value = arg.strip_prefix("--tier=")?;
             tiers.push(parse_tier(value)?);
@@ -1533,6 +1553,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
         statuses,
         issue_types: (!issue_types.is_empty()).then_some(issue_types),
         tiers: (!tiers.is_empty()).then_some(tiers),
+        color,
     })
 }
 
@@ -2112,20 +2133,96 @@ const ANSI_BRIGHT_CYAN: &str = "\x1b[96m";
 const ANSI_MAGENTA: &str = "\x1b[35m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_TYPE_PLAN: &str = "\x1b[38;5;220m";
+const ANSI_TYPE_PHASE: &str = "\x1b[38;5;117m";
+const ANSI_TYPE_TASK: &str = "\x1b[38;5;177m";
+
+/// CLI glyph and ANSI metadata mirrored from SASE's shared Python
+/// presentation modules. Keeping each glyph beside its style prevents the
+/// Rust renderers from developing separate, internally inconsistent maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CliPresentation {
+    glyph: &'static str,
+    cli_style: &'static str,
+}
+
+fn status_presentation(status: &StatusWire) -> CliPresentation {
+    match status {
+        StatusWire::Open => CliPresentation {
+            glyph: "○",
+            cli_style: ANSI_CYAN,
+        },
+        StatusWire::Claimed => CliPresentation {
+            glyph: "◎",
+            cli_style: ANSI_MAGENTA,
+        },
+        StatusWire::Ready => CliPresentation {
+            glyph: "◇",
+            cli_style: ANSI_BRIGHT_CYAN,
+        },
+        StatusWire::InProgress => CliPresentation {
+            glyph: "◐",
+            cli_style: ANSI_YELLOW,
+        },
+        StatusWire::Closed => CliPresentation {
+            glyph: "✓",
+            cli_style: ANSI_GREEN,
+        },
+    }
+}
+
+fn issue_type_presentation(issue_type: &IssueTypeWire) -> CliPresentation {
+    match issue_type {
+        IssueTypeWire::Plan => CliPresentation {
+            glyph: "▸",
+            cli_style: ANSI_TYPE_PLAN,
+        },
+        IssueTypeWire::Phase => CliPresentation {
+            glyph: "↳",
+            cli_style: ANSI_TYPE_PHASE,
+        },
+        IssueTypeWire::Task => CliPresentation {
+            glyph: "◆",
+            cli_style: ANSI_TYPE_TASK,
+        },
+    }
+}
+
+fn color_cli_glyph(presentation: CliPresentation, color: bool) -> String {
+    if color {
+        format!(
+            "{}{}{}",
+            presentation.cli_style, presentation.glyph, ANSI_RESET
+        )
+    } else {
+        presentation.glyph.to_string()
+    }
+}
 
 fn color_status_icon(status: &StatusWire, color: bool) -> String {
-    let icon = status_icon(status);
-    if !color {
-        return icon.to_string();
-    }
-    let code = match status {
-        StatusWire::Open => ANSI_CYAN,
-        StatusWire::Claimed => ANSI_MAGENTA,
-        StatusWire::Ready => ANSI_BRIGHT_CYAN,
-        StatusWire::InProgress => ANSI_YELLOW,
-        StatusWire::Closed => ANSI_GREEN,
-    };
-    format!("{code}{icon}{ANSI_RESET}")
+    color_cli_glyph(status_presentation(status), color)
+}
+
+fn compact_type_width() -> usize {
+    [
+        IssueTypeWire::Plan,
+        IssueTypeWire::Phase,
+        IssueTypeWire::Task,
+    ]
+    .iter()
+    .map(|issue_type| issue_type_presentation(issue_type).glyph.width())
+    .max()
+    .unwrap_or(0)
+}
+
+fn color_issue_type_cell(
+    issue_type: &IssueTypeWire,
+    color: bool,
+    width: usize,
+) -> String {
+    let presentation = issue_type_presentation(issue_type);
+    let padding = " ".repeat(width.saturating_sub(presentation.glyph.width()));
+    format!("{}{padding}", color_cli_glyph(presentation, color))
 }
 
 fn color_issue_id(issue_id: &str, color: bool) -> String {
@@ -2334,13 +2431,7 @@ fn parse_tier(value: &str) -> Option<BeadTierWire> {
 }
 
 fn status_icon(status: &StatusWire) -> &'static str {
-    match status {
-        StatusWire::Open => "○",
-        StatusWire::Claimed => "◎",
-        StatusWire::Ready => "◇",
-        StatusWire::InProgress => "◐",
-        StatusWire::Closed => "✓",
-    }
+    status_presentation(status).glyph
 }
 
 fn status_value(status: &StatusWire) -> &'static str {
@@ -2606,6 +2697,78 @@ mod tests {
     }
 
     #[test]
+    fn list_compact_renders_aligned_glyph_only_type_column() {
+        let store = seed_issues(vec![
+            plan_issue(
+                "beads-1",
+                "Plan bead",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+            phase_issue(
+                "beads-1.1",
+                "Phase bead",
+                "",
+                StatusWire::InProgress,
+                "2026-01-01T00:02:00Z",
+            ),
+            task_issue(
+                "beads-2",
+                "Task bead",
+                "",
+                StatusWire::Ready,
+                "2026-01-01T00:03:00Z",
+            ),
+        ]);
+
+        let list = execute_search(
+            &store.beads_dir,
+            &["list", "--format", "compact", "--color", "never"],
+        );
+
+        assert_eq!(
+            list.stdout,
+            concat!(
+                "▸ ○ beads-1 · Plan bead\n",
+                "↳ ◐ beads-1.1 · Phase bead ← beads-1\n",
+                "◆ ◇ beads-2 · Task bead\n",
+            )
+        );
+    }
+
+    #[test]
+    fn list_compact_colors_shared_type_status_and_id_vocabulary() {
+        let store = seed_issues(vec![plan_issue(
+            "beads-1",
+            "Plan bead",
+            "",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        )]);
+
+        let list =
+            execute_search(&store.beads_dir, &["list", "--color", "always"]);
+
+        assert_eq!(
+            list.stdout,
+            concat!(
+                "\x1b[38;5;220m▸\x1b[0m ",
+                "\x1b[36m○\x1b[0m ",
+                "\x1b[1;34mbeads-1\x1b[0m · Plan bead\n",
+            )
+        );
+    }
+
+    #[test]
+    fn colored_type_cell_keeps_alignment_padding_outside_ansi_span() {
+        assert_eq!(
+            color_issue_type_cell(&IssueTypeWire::Task, true, 2),
+            "\x1b[38;5;177m◆\x1b[0m "
+        );
+    }
+
+    #[test]
     fn claimed_status_is_in_default_list_with_claim_details_and_color() {
         let mut claimed = phase_issue(
             "beads-1.1",
@@ -2627,7 +2790,7 @@ mod tests {
         ]);
 
         let list = execute_search(&store.beads_dir, &["list"]);
-        assert_eq!(list.stdout, "◎ beads-1.1 · Claimed phase ← beads-1\n");
+        assert_eq!(list.stdout, "↳ ◎ beads-1.1 · Claimed phase ← beads-1\n");
 
         let show = execute_search(&store.beads_dir, &["show", "beads-1.1"]);
         assert!(show
@@ -2741,9 +2904,9 @@ mod tests {
         );
 
         let list = execute_search(&store.beads_dir, &["list"]);
-        assert!(list.stdout.contains("◇ beads-1 · Blocking task"));
-        assert!(list.stdout.contains("◇ beads-2 · Blocked task"));
-        assert!(list.stdout.contains("○ beads-3 · Draft task"));
+        assert!(list.stdout.contains("◆ ◇ beads-1 · Blocking task"));
+        assert!(list.stdout.contains("◆ ◇ beads-2 · Blocked task"));
+        assert!(list.stdout.contains("◆ ○ beads-3 · Draft task"));
         let colored = execute_search(
             &store.beads_dir,
             &["search", "blocking", "--color", "always"],
