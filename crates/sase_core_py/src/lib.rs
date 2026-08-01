@@ -200,6 +200,7 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
+//! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None) -> dict`
 //! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
 //! - `bead_update_many(beads_dir: str, issue_ids: list[str], fields: dict) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
@@ -420,8 +421,11 @@ use sase_core::axe_status::{
     classify_axe_status as core_classify_axe_status, AxeStatusError,
     AxeStatusRequestWire, AXE_STATUS_SCHEMA_VERSION,
 };
+#[cfg(test)]
+use sase_core::bead::PhaseSizeWire;
 use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
+    add_task_plus_one as core_bead_add_task_plus_one,
     append_issue_note as core_bead_append_issue_note,
     bead_history as core_bead_history, bead_lost_notes as core_bead_lost_notes,
     blocked_issues as core_bead_blocked_issues,
@@ -440,10 +444,12 @@ use sase_core::bead::{
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
+    needs_plus_one_evidence_migration as core_bead_needs_plus_one_evidence_migration,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
     needs_task_ready_migration as core_bead_needs_task_ready_migration,
     open_issue as core_bead_open_issue,
+    plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     read_event_store_issues as core_bead_read_event_store_issues,
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
@@ -2732,6 +2738,23 @@ fn py_bead_resolution_migration_sql() -> &'static str {
 }
 
 #[pyfunction]
+#[pyo3(
+    name = "bead_needs_plus_one_evidence_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_plus_one_evidence_migration(
+    create_table_sql: Option<&str>,
+) -> bool {
+    core_bead_needs_plus_one_evidence_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_plus_one_evidence_migration_sql")]
+fn py_bead_plus_one_evidence_migration_sql() -> &'static str {
+    core_bead_plus_one_evidence_migration_sql()
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_read_store")]
 fn py_bead_read_store<'py>(
     py: Python<'py>,
@@ -3860,6 +3883,29 @@ fn py_bead_append_note<'py>(
         py.allow_threads(|| {
             core_bead_append_issue_note(
                 &beads_dir, issue_id, entry, author, now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None))]
+fn py_bead_plus_one<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    reporter: &str,
+    note: &str,
+    refs: Option<Vec<String>>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let refs = refs.unwrap_or_default();
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_add_task_plus_one(
+                &beads_dir, issue_id, reporter, note, &refs, now,
             )
         }),
     )
@@ -6940,6 +6986,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_task_ready_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_resolution_migration_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_needs_plus_one_evidence_migration,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_plus_one_evidence_migration_sql,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
@@ -7035,6 +7089,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_append_note, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_plus_one, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_wait, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_release_agent_claim, m)?)?;
@@ -7359,6 +7414,7 @@ mod tests {
             BeadCreateRequestWire {
                 title: "First task".to_string(),
                 issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
                 ..Default::default()
             },
@@ -7371,6 +7427,7 @@ mod tests {
             BeadCreateRequestWire {
                 title: "Second task".to_string(),
                 issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
                 now: Some("2026-01-01T00:01:00Z".to_string()),
                 ..Default::default()
             },
@@ -7425,6 +7482,49 @@ mod tests {
             assert_eq!(
                 repeat_call["unchanged_ids"],
                 json!([first.id, second.id])
+            );
+        });
+    }
+
+    #[test]
+    fn bead_plus_one_binding_exports_structured_atomic_result() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let task = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                created_by: Some("creator-agent".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_plus_one").is_ok());
+            let result = py_bead_plus_one(
+                py,
+                beads_dir.to_str().unwrap(),
+                &task.id,
+                "reporter-agent",
+                "reproduced",
+                Some(vec!["research:202608/repro.md".to_string()]),
+                Some("2026-01-02T00:00:00Z".to_string()),
+            )
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["issue"]["status"], "ready");
+            assert_eq!(
+                result["issue"]["plus_one_evidence"][0]["reporter"],
+                "reporter-agent"
             );
         });
     }

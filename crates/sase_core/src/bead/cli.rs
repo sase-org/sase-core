@@ -2365,6 +2365,7 @@ fn has_active_blocker(
 
 fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
     let mut stats = BTreeMap::new();
+    let mut plus_one_total = 0;
     for issue in issues {
         *stats
             .entry(status_value(&issue.status).to_string())
@@ -2372,8 +2373,10 @@ fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
         *stats
             .entry(issue_type_value(&issue.issue_type).to_string())
             .or_insert(0) += 1;
+        plus_one_total += issue.plus_one_count();
     }
     stats.insert("total".to_string(), issues.len());
+    stats.insert("plus_one".to_string(), plus_one_total);
     stats
 }
 
@@ -3255,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn create_accepts_bare_task_constructor() {
+    fn create_rejects_bare_task_constructor_without_size() {
         let store = seed_issues(Vec::new());
 
         let created = execute_search(
@@ -3263,12 +3266,9 @@ mod tests {
             &["create", "--title", "Follow-up", "--type", "task"],
         );
 
-        assert_eq!(created.exit_code, 0);
-        assert_eq!(created.stdout, "Created task: beads-1 — Follow-up\n");
-        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
-        assert_eq!(issue.issue_type, IssueTypeWire::Task);
-        assert_eq!(issue.parent_id, None);
-        assert_eq!(issue.tier, None);
+        assert_eq!(created.exit_code, 1);
+        assert!(created.stderr.contains("requires an explicit size"));
+        assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
     }
 
     #[test]
@@ -4035,6 +4035,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,

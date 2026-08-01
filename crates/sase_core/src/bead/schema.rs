@@ -26,6 +26,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     notes       TEXT,
     design      TEXT,
     refs        TEXT NOT NULL DEFAULT '',
+    plus_one_evidence TEXT NOT NULL DEFAULT '[]',
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -152,6 +153,19 @@ pub fn refs_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN refs TEXT NOT NULL DEFAULT ''"
 }
 
+pub fn needs_plus_one_evidence_migration(
+    create_table_sql: Option<&str>,
+) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("plus_one_evidence"),
+    }
+}
+
+pub fn plus_one_evidence_migration_sql() -> &'static str {
+    "ALTER TABLE issues ADD COLUMN plus_one_evidence TEXT NOT NULL DEFAULT '[]'"
+}
+
 pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
     match create_table_sql {
         None => false,
@@ -202,6 +216,7 @@ CREATE TABLE _issues_new (
     notes       TEXT,
     design      TEXT,
     refs        TEXT NOT NULL DEFAULT '',
+    plus_one_evidence TEXT NOT NULL DEFAULT '[]',
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -230,13 +245,13 @@ CREATE TABLE _issues_new (
 INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, refs, model, size, is_ready_to_work,
+    description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, refs, model, size, is_ready_to_work,
+    description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 FROM issues;
 DROP TABLE issues;
@@ -288,6 +303,7 @@ CREATE TABLE _issues_new (
     notes       TEXT,
     design      TEXT,
     refs        TEXT NOT NULL DEFAULT '',
+    plus_one_evidence TEXT NOT NULL DEFAULT '[]',
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -316,13 +332,13 @@ CREATE TABLE _issues_new (
 INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, refs, model, size, is_ready_to_work,
+    description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
-    description, notes, design, refs, model, size, is_ready_to_work,
+    description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
 FROM issues;
 DROP TABLE issues;
@@ -423,6 +439,7 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("is_ready_to_work INTEGER"));
         assert!(BEAD_SQLITE_SCHEMA.contains("model       TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("refs        TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("plus_one_evidence TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("size        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xsmall'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xlarge'"));
@@ -435,6 +452,33 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("tier        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("resolution  TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("idx_deps_depends_on"));
+    }
+
+    #[test]
+    fn plus_one_evidence_migration_defaults_legacy_rows_to_empty_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issues (id TEXT PRIMARY KEY);\
+             INSERT INTO issues (id) VALUES ('legacy-task');",
+        )
+        .unwrap();
+        assert!(needs_plus_one_evidence_migration(Some(
+            "CREATE TABLE issues (id TEXT PRIMARY KEY)"
+        )));
+
+        conn.execute(plus_one_evidence_migration_sql(), []).unwrap();
+
+        let evidence: String = conn
+            .query_row(
+                "SELECT plus_one_evidence FROM issues WHERE id='legacy-task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence, "[]");
+        assert!(!needs_plus_one_evidence_migration(Some(
+            "CREATE TABLE issues (plus_one_evidence TEXT)"
+        )));
     }
 
     #[test]

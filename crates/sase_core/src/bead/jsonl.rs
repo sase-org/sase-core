@@ -460,6 +460,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,

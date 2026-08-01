@@ -16,6 +16,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "notes",
     "design",
     "refs",
+    "plus_one_evidence",
     "owner",
     "assignee",
     "model",
@@ -111,6 +112,19 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("notes", issue.notes.as_str()),
         field("design", issue.design.as_str()),
         field("refs", issue.refs.join("\n")),
+        field(
+            "plus_one_evidence",
+            issue
+                .plus_one_evidence
+                .iter()
+                .flat_map(|evidence| {
+                    [evidence.reporter.as_str(), evidence.note.as_str()]
+                        .into_iter()
+                        .chain(evidence.refs.iter().map(String::as_str))
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         field("owner", issue.owner.as_str()),
         field("assignee", issue.assignee.as_str()),
         field("model", issue.model.as_str()),
@@ -534,6 +548,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,

@@ -25,10 +25,11 @@ use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
     write_event_store, write_issues_jsonl,
 };
+use super::read::resolve_issue_id_in_issues;
 use super::wire::{
     deserialize_option_phase_size, validate_model_value, BeadError,
     BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -181,6 +182,11 @@ pub fn create_issue(
     beads_dir: &Path,
     request: BeadCreateRequestWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if request.issue_type == IssueTypeWire::Task && request.size.is_none() {
+        return Err(BeadError::validation(
+            "new task issue creation requires an explicit size",
+        ));
+    }
     with_bead_mutation_lock(beads_dir, "create", || {
         let mut store = MutableStore::load(beads_dir)?;
         let tier = default_create_tier(&request);
@@ -237,6 +243,7 @@ pub fn create_issue(
             notes: request.notes,
             design: request.design,
             refs: references.clone(),
+            plus_one_evidence: Vec::new(),
             model: normalize_model(request.model)?,
             size: request.size,
             is_ready_to_work: false,
@@ -273,6 +280,100 @@ pub fn create_issue(
         result.issue = Some(issue);
         result.references = references;
         result.next_counter = Some(store.config.next_counter);
+        Ok(result)
+    })
+}
+
+/// Append one independently attributed report to an existing task bead.
+///
+/// The evidence, referenced artifacts, and any draft/closed-to-ready status
+/// promotion are persisted together under the bead mutation lock. Repeating
+/// the creator or an existing reporter is an exact no-op.
+pub fn add_task_plus_one(
+    beads_dir: &Path,
+    issue_id: &str,
+    reporter: &str,
+    note: &str,
+    references: &[String],
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let reporter = reporter.trim().to_string();
+    if reporter.is_empty() {
+        return Err(BeadError::validation(
+            "task +1 reporter cannot be empty or blank",
+        ));
+    }
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Err(BeadError::validation(
+            "task +1 note cannot be empty or blank",
+        ));
+    }
+    let references = normalize_references(references)?;
+
+    with_bead_mutation_lock(beads_dir, "plus_one", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let resolved_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
+        let index = store.issue_index(&resolved_id)?;
+        let current = store.issues[index].clone();
+        if current.issue_type != IssueTypeWire::Task {
+            return Err(BeadError::validation(format!(
+                "task +1 only applies to task beads: {resolved_id}"
+            )));
+        }
+        if reporter == current.created_by
+            || current
+                .plus_one_evidence
+                .iter()
+                .any(|evidence| evidence.reporter == reporter)
+        {
+            let mut result =
+                outcome("plus_one", false, vec![resolved_id.clone()]);
+            result.issue = Some(current);
+            result.message =
+                "reporter already represented; use sase bead note for supplementary evidence"
+                    .to_string();
+            return Ok(result);
+        }
+
+        let timestamp = now.unwrap_or_else(now_utc);
+        let evidence = TaskPlusOneEvidenceWire {
+            timestamp: timestamp.clone(),
+            reporter: reporter.clone(),
+            note,
+            refs: references.clone(),
+        };
+        evidence.validate()?;
+
+        let issue = &mut store.issues[index];
+        issue.plus_one_evidence.push(evidence.clone());
+        for reference in &references {
+            if !issue.refs.contains(reference) {
+                issue.refs.push(reference.clone());
+            }
+        }
+        if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
+            issue.status = StatusWire::Ready;
+            issue.closed_at = None;
+            issue.close_reason = None;
+            issue.resolution = None;
+        }
+        issue.updated_at = timestamp.clone();
+        issue.validate()?;
+        let issue = issue.clone();
+
+        store.append_issue_event(
+            &resolved_id,
+            BeadEventOperationWire::TaskPlusOneRecorded,
+            BeadEventPayloadWire::TaskPlusOneRecorded { evidence },
+            &timestamp,
+            &reporter,
+        )?;
+        store.save()?;
+
+        let mut result = outcome("plus_one", true, vec![resolved_id]);
+        result.issue = Some(issue);
+        result.references = references;
         Ok(result)
     })
 }
@@ -2234,6 +2335,192 @@ mod tests {
     use std::time::Instant;
     use tempfile::tempdir;
 
+    fn task_plus_one_fixture(
+        status: StatusWire,
+    ) -> (tempfile::TempDir, PathBuf, String) {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Corroborated task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                created_by: Some("creator-agent".to_string()),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        if status == StatusWire::Closed {
+            close_issues(
+                &beads_dir,
+                std::slice::from_ref(&task.id),
+                Some("stale close".to_string()),
+                Some(BeadResolutionWire::Canceled),
+                false,
+                Some("2026-01-01T00:01:00Z".to_string()),
+            )
+            .unwrap();
+        }
+        (temp, beads_dir, task.id)
+    }
+
+    #[test]
+    fn task_plus_one_is_atomic_normalized_and_promotes_closed_task() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Closed);
+
+        let result = add_task_plus_one(
+            &beads_dir,
+            task_id.rsplit('-').next().unwrap(),
+            " reporter-agent ",
+            " reproduced on a clean checkout ",
+            &[
+                "research:202608/repro.md".to_string(),
+                "research:202608/repro.md".to_string(),
+                "bead:sase-related".to_string(),
+            ],
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        let issue = result.issue.unwrap();
+        assert_eq!(issue.status, StatusWire::Ready);
+        assert_eq!(issue.closed_at, None);
+        assert_eq!(issue.close_reason, None);
+        assert_eq!(issue.resolution, None);
+        assert_eq!(issue.plus_one_count(), 1);
+        assert_eq!(issue.plus_one_evidence[0].reporter, "reporter-agent");
+        assert_eq!(
+            issue.plus_one_evidence[0].note,
+            "reproduced on a clean checkout"
+        );
+        assert_eq!(issue.refs, issue.plus_one_evidence[0].refs);
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let event = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .find(|event| {
+                event.operation == BeadEventOperationWire::TaskPlusOneRecorded
+            })
+            .unwrap();
+        assert_eq!(event.actor, "reporter-agent");
+        assert_eq!(reduce_event_streams(&streams).unwrap(), vec![issue]);
+    }
+
+    #[test]
+    fn task_plus_one_creator_and_repeat_are_byte_identical_noops() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+        let before_creator = persisted_claim_state(&beads_dir);
+
+        let creator = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "creator-agent",
+            "creator retry",
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(!creator.changed);
+        assert_eq!(persisted_claim_state(&beads_dir), before_creator);
+
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-agent",
+            "first independent report",
+            &[],
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        let before_repeat = persisted_claim_state(&beads_dir);
+        let repeat = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-agent",
+            "later supplemental detail",
+            &["research:202608/later.md".to_string()],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!repeat.changed);
+        assert_eq!(persisted_claim_state(&beads_dir), before_repeat);
+    }
+
+    #[test]
+    fn concurrent_task_plus_ones_preserve_reporters_and_deduplicate_retries() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+        let barrier = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+        for reporter in ["agent-a", "agent-b", "agent-a"] {
+            let beads_dir = beads_dir.clone();
+            let task_id = task_id.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                add_task_plus_one(
+                    &beads_dir,
+                    &task_id,
+                    reporter,
+                    "independent reproduction",
+                    &[],
+                    Some("2026-01-02T00:00:00Z".to_string()),
+                )
+                .unwrap()
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let issue = MutableStore::load(&beads_dir)
+            .unwrap()
+            .get_issue(&task_id)
+            .unwrap()
+            .clone();
+        assert_eq!(issue.plus_one_count(), 2);
+        assert_eq!(
+            issue
+                .plus_one_evidence
+                .iter()
+                .map(|evidence| evidence.reporter.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["agent-a", "agent-b"])
+        );
+    }
+
+    #[test]
+    fn create_requires_size_only_for_new_tasks() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Missing size".to_string(),
+                issue_type: IssueTypeWire::Task,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("requires an explicit size"));
+        assert_eq!(fs::read(beads_dir.join("issues.jsonl")).unwrap(), before);
+    }
+
     #[test]
     fn create_add_and_remove_references_use_individual_events_and_noop_cleanly()
     {
@@ -2396,6 +2683,7 @@ mod tests {
             BeadCreateRequestWire {
                 title: "Attributed task".to_string(),
                 issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
                 refs: vec!["bead:sase-parent".to_string()],
                 created_by: Some("  bbugyi200.athena.q8  ".to_string()),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
@@ -2442,6 +2730,7 @@ mod tests {
             BeadCreateRequestWire {
                 title: "Blank explicit creator".to_string(),
                 issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
                 created_by: Some("   ".to_string()),
                 ..Default::default()
             },
@@ -2455,6 +2744,7 @@ mod tests {
             BeadCreateRequestWire {
                 title: "Absent explicit creator".to_string(),
                 issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
                 ..Default::default()
             },
         )

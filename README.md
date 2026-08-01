@@ -124,13 +124,17 @@ JSON shape rules (enforced by tests):
 
 `crates/sase_core/src/bead/` mirrors the portable pieces of `sase_100/src/sase/bead/` for the bead backend migration:
 
-- `wire.rs` defines `IssueWire`, `DependencyWire`, `StatusWire`, `IssueTypeWire`, validation errors, and operation
-  outcomes.
+- `wire.rs` defines `IssueWire`, structured `TaskPlusOneEvidenceWire`, `DependencyWire`, status/type enums, validation
+  errors, and operation outcomes. Task +1 counts are derived from the default-empty evidence collection.
 - `config.rs` loads and saves `sdd/beads/config.json` using the same pretty JSON shape as Python.
 - `jsonl.rs` imports and exports `sdd/beads/issues.jsonl`, skips corrupt lines, applies legacy defaults, validates
   records, sorts import rows as Python does for parent-before-child loading, and exports compact JSON sorted by issue ID.
 - `schema.rs` pins the current SQLite schema plus migration fragments for legacy issue type names, `is_ready_to_work`,
-  and ChangeSpec metadata columns.
+  structured task +1 evidence, and ChangeSpec metadata columns.
+
+The append-only `task_plus_one_recorded` event and `add_task_plus_one` mutation atomically persist independent evidence,
+artifact references, and draft/closed-to-ready promotion. The PyO3 module exports the same operation as
+`bead_plus_one`.
 
 `crates/sase_core/tests/bead_storage_parity.rs` carries the Phase A bead fixtures forward into Rust and checks the
 current JSONL/config shape, legacy defaults, tolerant corrupt-line handling, missing-file behavior, and byte-compatible

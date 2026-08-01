@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::wire::{
     BeadError, BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire,
-    IssueWire, PhaseSizeWire, StatusWire,
+    IssueWire, PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -127,10 +127,13 @@ pub enum BeadEventOperationWire {
     ReadyMarked,
     ReadyUnmarked,
     EpicWorkPreclaimed,
+    TaskPlusOneRecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// Keep the public wire shape direct and serde-compatible with existing event logs.
+#[allow(clippy::large_enum_variant)]
 pub enum BeadEventPayloadWire {
     IssueCreated {
         issue: IssueWire,
@@ -169,6 +172,9 @@ pub enum BeadEventPayloadWire {
     ReadyUnmarked,
     EpicWorkPreclaimed {
         agent_name: String,
+    },
+    TaskPlusOneRecorded {
+        evidence: TaskPlusOneEvidenceWire,
     },
 }
 
@@ -269,6 +275,10 @@ impl BeadEventPayloadWire {
                 }
                 Ok(())
             }
+            (
+                BeadEventOperationWire::TaskPlusOneRecorded,
+                BeadEventPayloadWire::TaskPlusOneRecorded { evidence },
+            ) => evidence.validate(),
             _ => Err(BeadError::validation(format!(
                 "event operation/payload mismatch for {issue_id}"
             ))),
@@ -401,6 +411,23 @@ pub fn import_issues_to_event_streams(
                 .entry(stream_id.clone())
                 .or_default()
                 .push(PendingEvent::reference_added(issue, reference.clone()));
+        }
+    }
+
+    for issue in &issues {
+        let stream_id = root_by_issue
+            .get(&issue.id)
+            .ok_or_else(|| {
+                BeadError::validation(format!(
+                    "cannot determine event stream for +1 evidence on {}",
+                    issue.id
+                ))
+            })?
+            .clone();
+        for evidence in &issue.plus_one_evidence {
+            streams.entry(stream_id.clone()).or_default().push(
+                PendingEvent::task_plus_one_recorded(issue, evidence.clone()),
+            );
         }
     }
 
@@ -720,6 +747,7 @@ pub(super) fn apply_event(
             let mut issue = issue.clone();
             issue.dependencies.clear();
             issue.refs.clear();
+            issue.plus_one_evidence.clear();
             issues.insert(issue.id.clone(), issue);
         }
         BeadEventPayloadWire::IssueUpdated { fields } => {
@@ -832,6 +860,35 @@ pub(super) fn apply_event(
             issue.status = StatusWire::InProgress;
             clear_close_metadata(issue);
             issue.assignee = agent_name.clone();
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
+        BeadEventPayloadWire::TaskPlusOneRecorded { evidence } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            if issue.issue_type != IssueTypeWire::Task {
+                return Err(BeadError::validation(format!(
+                    "task +1 only applies to task beads: {}",
+                    event.issue_id
+                )));
+            }
+            if evidence.reporter == issue.created_by
+                || issue
+                    .plus_one_evidence
+                    .iter()
+                    .any(|existing| existing.reporter == evidence.reporter)
+            {
+                return Ok(());
+            }
+            issue.plus_one_evidence.push(evidence.clone());
+            for reference in &evidence.refs {
+                if !issue.refs.contains(reference) {
+                    issue.refs.push(reference.clone());
+                }
+            }
+            if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
+                issue.status = StatusWire::Ready;
+                clear_close_metadata(issue);
+            }
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -973,6 +1030,7 @@ impl PendingEvent {
         let mut issue = issue.clone();
         issue.dependencies.clear();
         issue.refs.clear();
+        issue.plus_one_evidence.clear();
         Self {
             timestamp: event_timestamp(&issue.created_at, &issue.updated_at),
             actor: issue.created_by.clone(),
@@ -999,6 +1057,19 @@ impl PendingEvent {
             operation: BeadEventOperationWire::ReferenceAdded,
             issue_id: issue.id.clone(),
             payload: BeadEventPayloadWire::ReferenceAdded { reference },
+        }
+    }
+
+    fn task_plus_one_recorded(
+        issue: &IssueWire,
+        evidence: TaskPlusOneEvidenceWire,
+    ) -> Self {
+        Self {
+            timestamp: evidence.timestamp.clone(),
+            actor: evidence.reporter.clone(),
+            operation: BeadEventOperationWire::TaskPlusOneRecorded,
+            issue_id: issue.id.clone(),
+            payload: BeadEventPayloadWire::TaskPlusOneRecorded { evidence },
         }
     }
 
@@ -1062,6 +1133,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs,
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -1098,6 +1170,67 @@ mod tests {
             issue_id: "sase-1".to_string(),
             payload,
         }
+    }
+
+    fn task_issue() -> IssueWire {
+        let mut issue = issue_with_refs(Vec::new());
+        issue.id = "sase-task".to_string();
+        issue.title = "Task".to_string();
+        issue.issue_type = IssueTypeWire::Task;
+        issue.tier = None;
+        issue.created_by = "creator-agent".to_string();
+        issue.size = Some(PhaseSizeWire::Small);
+        issue
+    }
+
+    fn plus_one_event(event_id: &str, reporter: &str) -> BeadEventRecordWire {
+        let evidence = TaskPlusOneEvidenceWire {
+            timestamp: "2026-01-02T00:00:00Z".to_string(),
+            reporter: reporter.to_string(),
+            note: "independent reproduction".to_string(),
+            refs: Vec::new(),
+        };
+        BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: event_id.to_string(),
+            timestamp: evidence.timestamp.clone(),
+            actor: reporter.to_string(),
+            operation: BeadEventOperationWire::TaskPlusOneRecorded,
+            issue_id: "sase-task".to_string(),
+            payload: BeadEventPayloadWire::TaskPlusOneRecorded { evidence },
+        }
+    }
+
+    #[test]
+    fn three_way_merge_preserves_independent_plus_ones_and_deduplicates_reporter(
+    ) {
+        let created = PendingEvent::created(&task_issue())
+            .into_record("sase-task", 1)
+            .unwrap();
+        let base = BeadEventStreamWire {
+            stream_id: "sase-task".to_string(),
+            root_issue_id: "sase-task".to_string(),
+            events: vec![created],
+        };
+        let mut ours = base.clone();
+        ours.events.push(plus_one_event("ours-a", "agent-a"));
+        ours.events.push(plus_one_event("ours-a-retry", "agent-a"));
+        let mut theirs = base.clone();
+        theirs.events.push(plus_one_event("theirs-b", "agent-b"));
+
+        let merged = merge_bead_event_streams(&base, &ours, &theirs).unwrap();
+        let issues = reduce_event_streams(&[merged]).unwrap();
+
+        assert_eq!(issues[0].plus_one_count(), 2);
+        assert_eq!(issues[0].status, StatusWire::Ready);
+        assert_eq!(
+            issues[0]
+                .plus_one_evidence
+                .iter()
+                .map(|evidence| evidence.reporter.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["agent-a", "agent-b"])
+        );
     }
 
     #[test]

@@ -1,7 +1,11 @@
 //! Bead wire records matching `sase_100/src/sase/bead/model.py`.
 
+use std::collections::BTreeSet;
+
 use serde::{de, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+
+use crate::artifact_ref::normalize_artifact_ref_list;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,6 +190,53 @@ pub struct DependencyWire {
     pub created_by: String,
 }
 
+/// One independently attributed corroboration of an existing task bead.
+///
+/// The collection on [`IssueWire`] is the source of truth for the visible
+/// `+N` count.  Keeping the evidence structured and append-only prevents the
+/// count from drifting away from the reports that justify it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPlusOneEvidenceWire {
+    pub timestamp: String,
+    pub reporter: String,
+    pub note: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
+}
+
+impl TaskPlusOneEvidenceWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        if self.timestamp.trim().is_empty() {
+            return Err(BeadError::validation(
+                "task +1 evidence timestamp cannot be empty or blank",
+            ));
+        }
+        if self.reporter.trim().is_empty() {
+            return Err(BeadError::validation(
+                "task +1 reporter cannot be empty or blank",
+            ));
+        }
+        if self.note.trim().is_empty() {
+            return Err(BeadError::validation(
+                "task +1 note cannot be empty or blank",
+            ));
+        }
+        let normalized =
+            normalize_artifact_ref_list(&self.refs).map_err(|error| {
+                BeadError {
+                    kind: error.kind,
+                    message: error.message,
+                }
+            })?;
+        if normalized != self.refs {
+            return Err(BeadError::validation(
+                "task +1 evidence refs must be normalized and deduplicated",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWire {
     pub id: String,
@@ -244,6 +295,8 @@ pub struct IssueWire {
     pub design: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plus_one_evidence: Vec<TaskPlusOneEvidenceWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -278,6 +331,10 @@ pub struct BeadSearchMatchWire {
 }
 
 impl IssueWire {
+    pub fn plus_one_count(&self) -> usize {
+        self.plus_one_evidence.len()
+    }
+
     pub fn validate(&self) -> Result<(), BeadError> {
         if self.issue_type == IssueTypeWire::Phase && self.parent_id.is_none() {
             return Err(BeadError::validation(
@@ -298,6 +355,23 @@ impl IssueWire {
             return Err(BeadError::validation(
                 "Task issues cannot carry plan tier metadata",
             ));
+        }
+        if self.issue_type != IssueTypeWire::Task
+            && !self.plus_one_evidence.is_empty()
+        {
+            return Err(BeadError::validation(
+                "Only task issues can carry +1 evidence",
+            ));
+        }
+        let mut reporters = BTreeSet::new();
+        for evidence in &self.plus_one_evidence {
+            evidence.validate()?;
+            if !reporters.insert(evidence.reporter.as_str()) {
+                return Err(BeadError::validation(format!(
+                    "duplicate task +1 reporter: {}",
+                    evidence.reporter
+                )));
+            }
         }
         if self.issue_type != IssueTypeWire::Plan && self.is_ready_to_work {
             return Err(BeadError::validation(
@@ -379,6 +453,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -440,8 +515,43 @@ mod tests {
         assert!(!issue.is_ready_to_work);
         assert_eq!(issue.model, "");
         assert_eq!(issue.size, None);
+        assert!(issue.plus_one_evidence.is_empty());
         assert_eq!(issue.changespec_name, "");
         assert_eq!(issue.dependencies[0].created_at, "");
+    }
+
+    #[test]
+    fn task_plus_one_evidence_validates_structure_and_reporter_uniqueness() {
+        let mut issue = phase(None);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.size = Some(PhaseSizeWire::Small);
+        issue.plus_one_evidence = vec![TaskPlusOneEvidenceWire {
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            reporter: "agent-a".to_string(),
+            note: "reproduced".to_string(),
+            refs: vec!["research:202608/repro.md".to_string()],
+        }];
+        issue.validate().unwrap();
+        assert_eq!(issue.plus_one_count(), 1);
+
+        issue
+            .plus_one_evidence
+            .push(issue.plus_one_evidence[0].clone());
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "duplicate task +1 reporter: agent-a"
+        );
+
+        issue.plus_one_evidence.truncate(1);
+        issue.plus_one_evidence[0].note = "   ".to_string();
+        assert!(issue.validate().unwrap_err().message.contains("note"));
+
+        issue.plus_one_evidence[0].note = "reproduced".to_string();
+        issue.issue_type = IssueTypeWire::Plan;
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only task issues can carry +1 evidence"
+        );
     }
 
     #[test]

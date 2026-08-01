@@ -770,6 +770,7 @@ fn has_active_blocker(
 
 fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
     let mut stats = BTreeMap::new();
+    let mut plus_one_total = 0;
     for issue in issues {
         *stats
             .entry(status_as_str(&issue.status).to_string())
@@ -777,8 +778,10 @@ fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
         *stats
             .entry(issue_type_as_str(&issue.issue_type).to_string())
             .or_insert(0) += 1;
+        plus_one_total += issue.plus_one_count();
     }
     stats.insert("total".to_string(), issues.len());
+    stats.insert("plus_one".to_string(), plus_one_total);
     stats
 }
 
@@ -890,6 +893,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            plus_one_evidence: Vec::new(),
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -1015,6 +1019,32 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, "claimed");
         assert_eq!(stats_for_issues(&issues).get("claimed"), Some(&1));
+    }
+
+    #[test]
+    fn stats_derive_plus_one_total_from_structured_evidence() {
+        use crate::bead::wire::TaskPlusOneEvidenceWire;
+
+        let mut corroborated = task("sase-task", StatusWire::Ready);
+        corroborated.plus_one_evidence = vec![
+            TaskPlusOneEvidenceWire {
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                reporter: "agent-a".to_string(),
+                note: "first".to_string(),
+                refs: Vec::new(),
+            },
+            TaskPlusOneEvidenceWire {
+                timestamp: "2026-01-02T00:00:00Z".to_string(),
+                reporter: "agent-b".to_string(),
+                note: "second".to_string(),
+                refs: Vec::new(),
+            },
+        ];
+
+        let stats =
+            stats_for_issues(&[corroborated, task("plain", StatusWire::Open)]);
+
+        assert_eq!(stats.get("plus_one"), Some(&2));
     }
 
     #[test]
