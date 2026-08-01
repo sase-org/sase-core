@@ -47,6 +47,7 @@ mod reference_path;
 pub mod runner_limit_override;
 pub mod sections;
 pub mod status;
+mod store_lock;
 pub mod suffix;
 pub mod tasks;
 pub mod telemetry;

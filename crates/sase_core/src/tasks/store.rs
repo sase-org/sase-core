@@ -3,11 +3,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset};
-use fs2::FileExt;
+
+use crate::store_lock::{
+    acquire_store_lock, holder_path_for, timeout_from_env, HeldStoreLock,
+    LockMode, StoreLockError,
+};
 
 use super::wire::{
     BackgroundTaskWire, TaskAppendOutcomeWire, TaskPruneOutcomeWire,
@@ -18,20 +21,20 @@ use super::wire::{
 /// Every task kind the store accepts on write.
 const TASK_KINDS: [&str; 3] = ["command", "tui", "detached"];
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
-const LOCK_RETRY_MIN_MS: u64 = 10;
-const LOCK_RETRY_JITTER_MS: u64 = 20;
+const LOCK_TIMEOUT_ENV: &str = "SASE_TASK_STORE_LOCK_TIMEOUT";
+const LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum TaskStoreError {
     #[error(
-        "task store lock timed out after {waited_ms}ms waiting for {mode} lock: {}",
+        "task store lock timed out after {waited_ms}ms waiting for {mode} lock: {}; holder: {holder}",
         path.display()
     )]
     LockTimeout {
         mode: &'static str,
         path: PathBuf,
         waited_ms: u128,
+        holder: String,
     },
     #[error(
         "task {task_id:?} cannot transition from terminal status {from:?} to {to:?}"
@@ -55,21 +58,6 @@ impl From<String> for TaskStoreError {
 
 type TaskStoreResult<T> = Result<T, TaskStoreError>;
 
-#[derive(Clone, Copy)]
-enum LockMode {
-    Shared,
-    Exclusive,
-}
-
-impl LockMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Shared => "shared",
-            Self::Exclusive => "exclusive",
-        }
-    }
-}
-
 /// Read a stable, newest-first snapshot of the task store.
 #[allow(clippy::incompatible_msrv)]
 pub fn read_tasks_snapshot(
@@ -81,8 +69,12 @@ pub fn read_tasks_snapshot(
             TaskStoreStatsWire::default(),
         ));
     }
-    let lock = open_lock_file(path)?;
-    lock_with_timeout(&lock, path, LockMode::Shared, LOCK_TIMEOUT)?;
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Shared,
+        task_store_lock_timeout(),
+        "read_tasks_snapshot",
+    )?;
     let result = read_rows_unlocked(path);
     unlock(lock)?;
     let (tasks, stats) = result?;
@@ -97,8 +89,12 @@ pub fn append_task(
 ) -> TaskStoreResult<TaskAppendOutcomeWire> {
     let mut task = task.clone();
     normalize_and_validate_task(&mut task)?;
-    let lock = open_lock_file(path)?;
-    lock_with_timeout(&lock, path, LockMode::Exclusive, LOCK_TIMEOUT)?;
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Exclusive,
+        task_store_lock_timeout(),
+        "append_task",
+    )?;
     let result: TaskStoreResult<TaskAppendOutcomeWire> = (|| {
         let (mut rows, _) = read_rows_unlocked(path)?;
         rows.push(task);
@@ -127,8 +123,12 @@ pub fn update_task(
             reason: "task_id must not be empty".to_string(),
         });
     }
-    let lock = open_lock_file(path)?;
-    lock_with_timeout(&lock, path, LockMode::Exclusive, LOCK_TIMEOUT)?;
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Exclusive,
+        task_store_lock_timeout(),
+        "update_task",
+    )?;
     let result: TaskStoreResult<TaskUpdateOutcomeWire> = (|| {
         let (mut rows, _) = read_rows_unlocked(path)?;
         let matched_index =
@@ -162,8 +162,12 @@ pub fn prune_tasks(
     path: &Path,
     history_limit: i64,
 ) -> TaskStoreResult<TaskPruneOutcomeWire> {
-    let lock = open_lock_file(path)?;
-    lock_with_timeout(&lock, path, LockMode::Exclusive, LOCK_TIMEOUT)?;
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Exclusive,
+        task_store_lock_timeout(),
+        "prune_tasks",
+    )?;
     let result: TaskStoreResult<TaskPruneOutcomeWire> = (|| {
         let (rows, _) = read_rows_unlocked(path)?;
         let (kept, pruned_task_ids) =
@@ -506,59 +510,42 @@ fn write_tasks_atomic(
     write_result
 }
 
-fn open_lock_file(path: &Path) -> Result<File, String> {
-    let parent = ensure_parent(path)?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path_for(path))
-        .map_err(|error| error.to_string())
+fn task_store_lock_timeout() -> Duration {
+    timeout_from_env(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT)
 }
 
 fn lock_with_timeout(
-    lock: &File,
     path: &Path,
     mode: LockMode,
     timeout: Duration,
-) -> TaskStoreResult<()> {
-    let started = Instant::now();
-    let mut attempt = 0_u64;
-    loop {
-        let result = match mode {
-            LockMode::Shared => FileExt::try_lock_shared(lock),
-            LockMode::Exclusive => FileExt::try_lock_exclusive(lock),
-        };
-        match result {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                let elapsed = started.elapsed();
-                if elapsed >= timeout {
-                    return Err(TaskStoreError::LockTimeout {
-                        mode: mode.label(),
-                        path: lock_path_for(path),
-                        waited_ms: elapsed.as_millis(),
-                    });
-                }
-                let delay = retry_delay(attempt).min(timeout - elapsed);
-                thread::sleep(delay);
-                attempt = attempt.saturating_add(1);
-            }
-            Err(error) => return Err(TaskStoreError::Store(error.to_string())),
-        }
-    }
-}
-
-fn retry_delay(attempt: u64) -> Duration {
-    let clock_jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0);
-    let jitter = clock_jitter.wrapping_add(attempt.wrapping_mul(17))
-        % (LOCK_RETRY_JITTER_MS + 1);
-    Duration::from_millis(LOCK_RETRY_MIN_MS + jitter)
+    operation: &str,
+) -> TaskStoreResult<HeldStoreLock> {
+    let parent = ensure_parent(path)?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let lock_path = lock_path_for(path);
+    acquire_store_lock(
+        &lock_path,
+        &holder_path_for(&lock_path),
+        mode,
+        timeout,
+        operation,
+    )
+    .map_err(|error| match error {
+        StoreLockError::Timeout {
+            mode,
+            lock_path,
+            waited_ms,
+            holder,
+        } => TaskStoreError::LockTimeout {
+            mode,
+            path: lock_path,
+            waited_ms,
+            holder: holder
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        },
+        error => TaskStoreError::Store(error.to_string()),
+    })
 }
 
 fn lock_path_for(path: &Path) -> PathBuf {
@@ -588,13 +575,15 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
 }
 
 #[allow(clippy::incompatible_msrv)]
-fn unlock(lock: File) -> Result<(), String> {
-    FileExt::unlock(&lock).map_err(|error| error.to_string())
+fn unlock(lock: HeldStoreLock) -> Result<(), String> {
+    lock.release().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Instant;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -898,23 +887,28 @@ mod tests {
     fn held_exclusive_lock_bounds_reader_and_writer_waits() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("tasks.jsonl");
-        let holder = open_lock_file(&path).unwrap();
-        holder.lock_exclusive().unwrap();
+        let holder = lock_with_timeout(
+            &path,
+            LockMode::Exclusive,
+            Duration::from_secs(1),
+            "test_holder",
+        )
+        .unwrap();
 
         for mode in [LockMode::Shared, LockMode::Exclusive] {
-            let contender = open_lock_file(&path).unwrap();
             let started = Instant::now();
             let error = lock_with_timeout(
-                &contender,
                 &path,
                 mode,
                 Duration::from_millis(50),
+                "test_contender",
             )
             .unwrap_err();
-            assert!(matches!(error, TaskStoreError::LockTimeout { .. }));
+            assert!(matches!(&error, TaskStoreError::LockTimeout { .. }));
+            assert!(error.to_string().contains("operation=test_holder"));
             assert!(started.elapsed() < Duration::from_secs(1));
         }
 
-        holder.unlock().unwrap();
+        holder.release().unwrap();
     }
 }

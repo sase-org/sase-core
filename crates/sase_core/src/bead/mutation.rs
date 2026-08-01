@@ -1,18 +1,18 @@
 //! Bead store mutations backed by JSONL persistence.
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::ErrorKind;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::artifact_ref::normalize_artifact_ref_list;
+use crate::store_lock::{
+    acquire_store_lock, timeout_from_env, LockMode, StoreLockError,
+};
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
@@ -36,9 +36,9 @@ use super::wire::{
 // Deleting and recreating beads.db while this lock is held would split
 // contenders across different inodes, so store maintenance must preserve it.
 const BEAD_MUTATION_LOCK_FILENAME: &str = "beads.db";
-const BEAD_MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
-const BEAD_MUTATION_LOCK_RETRY_MIN_MS: u64 = 10;
-const BEAD_MUTATION_LOCK_RETRY_JITTER_MS: u64 = 20;
+const BEAD_MUTATION_HOLDER_FILENAME: &str = ".bead-mutation-lock.holder";
+const BEAD_MUTATION_LOCK_TIMEOUT_ENV: &str = "SASE_BEAD_MUTATION_LOCK_TIMEOUT";
+const BEAD_MUTATION_LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BeadCreateRequestWire {
@@ -126,6 +126,8 @@ pub struct BeadMutationOutcomeWire {
     pub operation: String,
     pub changed: bool,
     #[serde(default)]
+    pub lock_wait_ms: u64,
+    #[serde(default)]
     pub issue_ids: Vec<String>,
     #[serde(default)]
     pub closed_ids: Vec<String>,
@@ -179,7 +181,7 @@ pub fn create_issue(
     beads_dir: &Path,
     request: BeadCreateRequestWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "create", || {
         let mut store = MutableStore::load(beads_dir)?;
         let tier = default_create_tier(&request);
         let references = normalize_references(&request.refs)?;
@@ -307,7 +309,7 @@ pub fn update_issues(
             "is_ready_to_work cannot be set via update(); use mark_ready_to_work() instead.",
         ));
     }
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "update", || {
         let mut store = MutableStore::load(beads_dir)?;
 
         let mut seen = HashSet::new();
@@ -405,7 +407,7 @@ pub fn append_issue_note(
         ));
     }
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "note", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(issue_id)?;
         let now = now.unwrap_or_else(now_utc);
@@ -464,7 +466,7 @@ pub fn claim_for_agent_launch(
         ));
     }
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "claim_for_launch", || {
         let mut store = MutableStore::load(beads_dir)
             .map_err(|error| durable_store_error("read", beads_dir, error))?;
         let index = store.issue_index(issue_id)?;
@@ -532,7 +534,7 @@ pub fn claim_for_agent_wait(
         ));
     }
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "claim_for_wait", || {
         let mut store = MutableStore::load(beads_dir)
             .map_err(|error| durable_store_error("read", beads_dir, error))?;
         let index = store.issue_index(issue_id)?;
@@ -613,7 +615,7 @@ pub fn release_agent_claim(
         ));
     }
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "release_wait_claim", || {
         let mut store = MutableStore::load(beads_dir)
             .map_err(|error| durable_store_error("read", beads_dir, error))?;
         let index = store.issue_index(issue_id)?;
@@ -665,7 +667,7 @@ pub fn preclaim_epic_work_plan(
     epic_agent_name: Option<String>,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "preclaim_epic_work", || {
         let mut store = MutableStore::load(beads_dir)?;
         let epic_index = store.issue_index(epic_id)?;
         let epic = store.issues[epic_index].clone();
@@ -803,7 +805,7 @@ pub fn open_issue(
     issue_id: &str,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "open", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(issue_id)?;
         let was_closed = store.issues[index].status == StatusWire::Closed;
@@ -875,7 +877,7 @@ pub fn close_issues_with_note(
         }
     };
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "close", || {
         let mut store = MutableStore::load(beads_dir)?;
         let now = now.unwrap_or_else(now_utc);
         let effective_resolution =
@@ -1262,7 +1264,7 @@ pub fn remove_issues(
         ));
     }
 
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "remove", || {
         let mut store = MutableStore::load(beads_dir)?;
         let mut requested = Vec::new();
         let mut requested_ids = BTreeSet::new();
@@ -1344,7 +1346,7 @@ pub fn add_dependency(
     depends_on_id: &str,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "add_dependency", || {
         let mut store = MutableStore::load(beads_dir)?;
         store.get_issue(depends_on_id)?;
         let owner = store.config.owner.clone();
@@ -1393,7 +1395,7 @@ pub fn remove_dependencies(
             "remove_dependencies() requires at least one dependency ID",
         ));
     }
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "remove_dependency", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(issue_id)?;
         let mut seen = BTreeSet::new();
@@ -1468,7 +1470,7 @@ pub fn add_bead_references(
         ));
     }
     let references = normalize_references(references)?;
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "add_reference", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(issue_id)?;
         let added = references
@@ -1519,7 +1521,7 @@ pub fn remove_bead_references(
         ));
     }
     let references = normalize_references(references)?;
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "remove_reference", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(issue_id)?;
         let removed = references
@@ -1622,7 +1624,7 @@ fn set_ready_to_work(
     reject_already_ready: bool,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, || {
+    with_bead_mutation_lock(beads_dir, "set_ready_to_work", || {
         let mut store = MutableStore::load(beads_dir)?;
         let index = store.issue_index(epic_id)?;
         if store.issues[index].issue_type != IssueTypeWire::Plan {
@@ -2115,20 +2117,24 @@ fn durable_store_error(
     }
 }
 
-fn with_bead_mutation_lock<T>(
+fn with_bead_mutation_lock(
     beads_dir: &Path,
-    operation: impl FnOnce() -> Result<T, BeadError>,
-) -> Result<T, BeadError> {
+    operation_name: &str,
+    mutation: impl FnOnce() -> Result<BeadMutationOutcomeWire, BeadError>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
     let lock_path = bead_mutation_lock_path(beads_dir);
-    let lock = open_bead_mutation_lock(beads_dir, &lock_path)?;
-    lock_bead_mutation_with_timeout(
-        &lock,
+    let lock = lock_bead_mutation_with_timeout(
         beads_dir,
         &lock_path,
-        BEAD_MUTATION_LOCK_TIMEOUT,
+        timeout_from_env(
+            BEAD_MUTATION_LOCK_TIMEOUT_ENV,
+            BEAD_MUTATION_LOCK_TIMEOUT_DEFAULT,
+        ),
+        operation_name,
     )?;
-    let result = operation();
-    let unlock_result = FileExt::unlock(&lock).map_err(|error| BeadError {
+    let lock_wait_ms = lock.waited_ms();
+    let result = mutation();
+    let unlock_result = lock.release().map_err(|error| BeadError {
         kind: "lock_release".to_string(),
         message: format!(
             "failed to release bead mutation lock {} for store {}: {error}",
@@ -2137,7 +2143,10 @@ fn with_bead_mutation_lock<T>(
         ),
     });
     match (result, unlock_result) {
-        (Ok(value), Ok(())) => Ok(value),
+        (Ok(mut value), Ok(())) => {
+            value.lock_wait_ms = lock_wait_ms;
+            Ok(value)
+        }
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(unlock_error)) => Err(unlock_error),
         (Err(error), Err(unlock_error)) => Err(BeadError {
@@ -2150,83 +2159,40 @@ fn with_bead_mutation_lock<T>(
     }
 }
 
-fn open_bead_mutation_lock(
+fn lock_bead_mutation_with_timeout(
     beads_dir: &Path,
     lock_path: &Path,
-) -> Result<File, BeadError> {
+    timeout: Duration,
+    operation: &str,
+) -> Result<crate::store_lock::HeldStoreLock, BeadError> {
     if !beads_dir.is_dir() {
         return Err(BeadError::io(format!(
             "No beads directory found at {}",
             beads_dir.display()
         )));
     }
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|error| BeadError {
+    let holder_path = bead_mutation_holder_path(beads_dir);
+    acquire_store_lock(
+        lock_path,
+        &holder_path,
+        LockMode::Exclusive,
+        timeout,
+        operation,
+    )
+    .map_err(|error| match error {
+        error @ StoreLockError::Timeout { .. } => BeadError {
+            kind: "lock_timeout".to_string(),
+            message: format!("{error} for store {}", beads_dir.display()),
+        },
+        error => BeadError {
             kind: "lock".to_string(),
-            message: format!(
-                "failed to open bead mutation lock {} for store {}: {error}",
-                lock_path.display(),
-                beads_dir.display()
-            ),
-        })
+            message: format!("{error} for store {}", beads_dir.display()),
+        },
+    })
 }
 
-fn lock_bead_mutation_with_timeout(
-    lock: &File,
-    beads_dir: &Path,
-    lock_path: &Path,
-    timeout: Duration,
-) -> Result<(), BeadError> {
-    let started = Instant::now();
-    let mut attempt = 0_u64;
-    loop {
-        match FileExt::try_lock_exclusive(lock) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                let elapsed = started.elapsed();
-                if elapsed >= timeout {
-                    return Err(BeadError {
-                        kind: "lock_timeout".to_string(),
-                        message: format!(
-                            "timed out after {}ms waiting for bead mutation lock {} for store {}",
-                            elapsed.as_millis(),
-                            lock_path.display(),
-                            beads_dir.display()
-                        ),
-                    });
-                }
-                let delay = bead_mutation_lock_retry_delay(attempt)
-                    .min(timeout - elapsed);
-                thread::sleep(delay);
-                attempt = attempt.saturating_add(1);
-            }
-            Err(error) => {
-                return Err(BeadError {
-                    kind: "lock".to_string(),
-                    message: format!(
-                        "failed to acquire bead mutation lock {} for store {}: {error}",
-                        lock_path.display(),
-                        beads_dir.display()
-                    ),
-                })
-            }
-        }
-    }
-}
-
-fn bead_mutation_lock_retry_delay(attempt: u64) -> Duration {
-    let clock_jitter = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::from(duration.subsec_nanos()))
-        .unwrap_or(0);
-    let jitter = clock_jitter.wrapping_add(attempt.wrapping_mul(17))
-        % (BEAD_MUTATION_LOCK_RETRY_JITTER_MS + 1);
-    Duration::from_millis(BEAD_MUTATION_LOCK_RETRY_MIN_MS + jitter)
+fn bead_mutation_holder_path(beads_dir: &Path) -> PathBuf {
+    beads_dir.join(BEAD_MUTATION_HOLDER_FILENAME)
 }
 
 fn bead_mutation_lock_path(beads_dir: &Path) -> PathBuf {
@@ -2241,6 +2207,7 @@ fn outcome(
     BeadMutationOutcomeWire {
         operation: operation.to_string(),
         changed,
+        lock_wait_ms: 0,
         issue_ids,
         closed_ids: Vec::new(),
         already_closed_ids: Vec::new(),
@@ -2263,6 +2230,8 @@ fn outcome(
 mod tests {
     use super::*;
     use std::sync::{mpsc, Arc, Barrier};
+    use std::thread;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     #[test]
@@ -5410,8 +5379,13 @@ mod tests {
     fn concurrent_update_and_claim_preserve_both_events_and_projection() {
         let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
         let lock_path = bead_mutation_lock_path(&beads_dir);
-        let holder = open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
-        FileExt::lock_exclusive(&holder).unwrap();
+        let holder = lock_bead_mutation_with_timeout(
+            &beads_dir,
+            &lock_path,
+            Duration::from_secs(1),
+            "test_holder",
+        )
+        .unwrap();
 
         let update_beads_dir = beads_dir.clone();
         let update_phase_id = phase_id.clone();
@@ -5452,9 +5426,11 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
 
-        FileExt::unlock(&holder).unwrap();
-        update_handle.join().unwrap().unwrap();
-        claim_handle.join().unwrap().unwrap();
+        holder.release().unwrap();
+        let update_outcome = update_handle.join().unwrap().unwrap();
+        let claim_outcome = claim_handle.join().unwrap().unwrap();
+        assert!(update_outcome.lock_wait_ms > 0);
+        assert!(claim_outcome.lock_wait_ms > 0);
 
         let projected =
             import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
@@ -5578,24 +5554,32 @@ mod tests {
         let beads_dir = temp.path().join("sdd/beads");
         fs::create_dir_all(&beads_dir).unwrap();
         let lock_path = bead_mutation_lock_path(&beads_dir);
-        let holder = open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
-        FileExt::lock_exclusive(&holder).unwrap();
-        let contender =
-            open_bead_mutation_lock(&beads_dir, &lock_path).unwrap();
+        let holder = lock_bead_mutation_with_timeout(
+            &beads_dir,
+            &lock_path,
+            Duration::from_secs(1),
+            "test_holder",
+        )
+        .unwrap();
 
         let started = Instant::now();
         let error = lock_bead_mutation_with_timeout(
-            &contender,
             &beads_dir,
             &lock_path,
             Duration::from_millis(50),
+            "test_contender",
         )
         .unwrap_err();
 
         assert_eq!(error.kind, "lock_timeout");
         assert!(error.message.contains("timed out"));
+        assert!(error
+            .message
+            .contains(&format!("pid={}", std::process::id())));
+        assert!(error.message.contains("operation=test_holder"));
         assert!(started.elapsed() < Duration::from_secs(1));
-        FileExt::unlock(&holder).unwrap();
+        holder.release().unwrap();
+        assert!(!bead_mutation_holder_path(&beads_dir).exists());
     }
 
     #[test]

@@ -1077,4 +1077,21 @@ mod tests {
         assert!(messages.iter().any(|message| message
             == "NOTE: bead artifact reference validation skipped: reference context unavailable"));
     }
+
+    #[test]
+    fn doctor_ignores_transient_mutation_holder_metadata() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        fs::write(beads_dir.join("beads.db"), "").unwrap();
+        fs::write(beads_dir.join("config.json"), "{}").unwrap();
+        fs::write(
+            beads_dir.join(".bead-mutation-lock.holder"),
+            r#"{"pid":42,"operation":"test","acquired_at":"now"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(doctor(&beads_dir).unwrap(), vec!["OK: no issues found"]);
+    }
 }
