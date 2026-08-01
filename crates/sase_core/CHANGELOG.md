@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.8](https://github.com/sase-org/sase-core/compare/v0.17.7...v0.17.8) - 2026-08-01
+
+### Added
+
+- *(beads)* add atomic task evidence contract
+- add prompt artifact contract
+
+### Fixed
+
+- *(core)* make store lock waits contention resilient
+- *(bead)* align compact search type column
+
 ## [0.17.7](https://github.com/sase-org/sase-core/compare/v0.17.6...v0.17.7) - 2026-08-01
 
 ### Added
