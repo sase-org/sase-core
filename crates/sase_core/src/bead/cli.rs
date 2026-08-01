@@ -1940,11 +1940,13 @@ fn render_search_compact(
     }
 
     let mut stdout = String::new();
+    let type_width = compact_type_width();
     for result in matches {
         let issue = &result.issue;
         writeln!(
             stdout,
-            "{} {} · {}",
+            "{} {} {} · {}",
+            color_issue_type_cell(&issue.issue_type, color, type_width),
             color_status_icon(&issue.status, color),
             color_issue_id(&issue.id, color),
             highlight_matches(&issue.title, query, color),
@@ -2692,8 +2694,65 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(
             outcome.stdout,
-            "◐ beads-1.1 · Fix Auth Token\n  Rotate auth tokens safely.\n"
+            "↳ ◐ beads-1.1 · Fix Auth Token\n  Rotate auth tokens safely.\n"
         );
+    }
+
+    #[test]
+    fn search_compact_renders_aligned_glyph_only_type_column() {
+        let store = seed_issues(vec![
+            plan_issue(
+                "beads-1",
+                "Needle plan",
+                "",
+                StatusWire::Open,
+                "2026-01-01T00:01:00Z",
+            ),
+            phase_issue(
+                "beads-1.1",
+                "Needle phase",
+                "",
+                StatusWire::InProgress,
+                "2026-01-01T00:02:00Z",
+            ),
+            task_issue(
+                "beads-2",
+                "Needle task",
+                "",
+                StatusWire::Ready,
+                "2026-01-01T00:03:00Z",
+            ),
+        ]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &[
+                "search", "needle", "--format", "compact", "--color", "never",
+            ],
+        );
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(
+            outcome.stdout,
+            concat!(
+                "◆ ◇ beads-2 · Needle task\n",
+                "↳ ◐ beads-1.1 · Needle phase\n",
+                "▸ ○ beads-1 · Needle plan\n",
+            )
+        );
+        let type_prefix_widths: Vec<usize> = outcome
+            .stdout
+            .lines()
+            .map(|line| {
+                let status_index = line
+                    .char_indices()
+                    .find(|(_, ch)| matches!(ch, '○' | '◐' | '◇'))
+                    .map(|(index, _)| index)
+                    .expect("compact search row should contain a status glyph");
+                line[..status_index].width()
+            })
+            .collect();
+        assert!(type_prefix_widths.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
@@ -2955,8 +3014,8 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(
             outcome.stdout,
-            "○ beads-1.2 · Auth newer\n  Newer item.\n\
-             ○ beads-1.1 · Auth older\n  Older item.\n"
+            "↳ ○ beads-1.2 · Auth newer\n  Newer item.\n\
+             ↳ ○ beads-1.1 · Auth older\n  Older item.\n"
         );
     }
 
@@ -3031,6 +3090,7 @@ mod tests {
         );
 
         assert_eq!(outcome.exit_code, 0);
+        assert!(outcome.stdout.contains("\x1b[38;5;117m↳\x1b[0m"));
         assert!(outcome.stdout.contains("\x1b[32m✓\x1b[0m"));
         assert!(outcome.stdout.contains("\x1b[30;43mAuth\x1b[39;49m token"));
         assert!(outcome.stdout.contains(
@@ -3077,7 +3137,7 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(
             outcome.stdout,
-            "○ beads-2 · Auth epic\n  Plan description\n"
+            "▸ ○ beads-2 · Auth epic\n  Plan description\n"
         );
     }
 
@@ -3101,7 +3161,7 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(
             outcome.stdout,
-            "○ beads-1 · Linked epic\n  design: \"plans:202607/roadmap.md\"\n"
+            "▸ ○ beads-1 · Linked epic\n  design: \"plans:202607/roadmap.md\"\n"
         );
 
         let old_prefix = execute_search(
