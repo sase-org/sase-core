@@ -245,6 +245,8 @@ pub enum EventPayloadWire {
     NotificationsChanged {
         reason: String,
         notification_id: Option<String>,
+        #[serde(default)]
+        activity_cursor: Option<String>,
     },
     AgentsChanged {
         reason: String,
@@ -302,6 +304,7 @@ pub fn push_hint_from_event(record: &EventRecordWire) -> Option<PushHintWire> {
         EventPayloadWire::NotificationsChanged {
             reason,
             notification_id,
+            ..
         } => (
             PushHintCategoryWire::Notifications,
             reason.clone(),
@@ -1020,6 +1023,7 @@ mod tests {
             payload: EventPayloadWire::NotificationsChanged {
                 reason: "mark_read".to_string(),
                 notification_id: Some("notif_123".to_string()),
+                activity_cursor: None,
             },
         })
         .unwrap();

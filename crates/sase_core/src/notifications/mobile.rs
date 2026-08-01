@@ -43,6 +43,8 @@ pub struct MobileNotificationDetailResponseWire {
 pub struct MobileNotificationCardWire {
     pub id: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub resurfaced_at: Option<String>,
     pub sender: String,
     #[serde(default)]
     pub icon: Option<String>,
@@ -461,6 +463,7 @@ pub fn mobile_notification_card_from_wire(
     MobileNotificationCardWire {
         id: notification.id.clone(),
         timestamp: notification.timestamp.clone(),
+        resurfaced_at: notification.resurfaced_at.clone(),
         sender: notification.sender.clone(),
         icon: notification.icon.clone(),
         tags: notification.tags.clone(),

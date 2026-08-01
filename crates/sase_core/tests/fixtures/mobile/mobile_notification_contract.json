@@ -3,6 +3,7 @@
   "notification": {
     "id": "abcdef1234567890",
     "timestamp": "2026-05-06T15:30:00Z",
+    "resurfaced_at": null,
     "sender": "planner",
     "icon": null,
     "tags": [

@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, VecDeque},
     convert::Infallible,
     net::SocketAddr,
@@ -23,8 +24,8 @@ use sase_core::notifications::{
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
     mobile_notification_error_from_wire,
-    mobile_notification_priority_from_wire, ActionResultWire,
-    GateActionRequestWire, MobileActionKindWire,
+    mobile_notification_priority_from_wire, notification_activity_at,
+    ActionResultWire, GateActionRequestWire, MobileActionKindWire,
     MobileNotificationDetailResponseWire, MobileNotificationListResponseWire,
     NotificationWire, QuestionActionChoiceWire, QuestionActionRequestWire,
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
@@ -1204,13 +1205,18 @@ async fn list_notifications(
         .notification_bridge
         .list_notifications(query.include_dismissed)
         .map_err(ApiError::from_host_bridge)?;
+    publish_expired_notification_activity(
+        &state,
+        &snapshot.expired_ids,
+        &snapshot.notifications,
+    )?;
     let mut rows = filtered_notifications(snapshot.notifications, &query);
     sort_newest_first(&mut rows);
     let total_count = rows.len() as u64;
     if let Some(limit) = query.limit {
         rows.truncate(limit as usize);
     }
-    let next_high_water = rows.first().map(|row| row.timestamp.clone());
+    let next_high_water = rows.first().map(notification_activity_cursor_value);
     let notifications = rows
         .iter()
         .map(|row| {
@@ -1242,6 +1248,11 @@ async fn notification_detail(
         .notification_bridge
         .list_notifications(true)
         .map_err(ApiError::from_host_bridge)?;
+    publish_expired_notification_activity(
+        &state,
+        &snapshot.expired_ids,
+        &snapshot.notifications,
+    )?;
     let Some(notification) =
         snapshot.notifications.into_iter().find(|row| row.id == id)
     else {
@@ -1326,6 +1337,7 @@ async fn mutate_notification_state(
                 &state,
                 event_reason,
                 Some(result.notification_id.clone()),
+                None,
             )?;
             Ok(Json(result))
         }
@@ -1481,6 +1493,7 @@ async fn gate_action(
                 &state,
                 "gate_action",
                 result.notification_id.clone(),
+                None,
             )?;
             Ok(Json(result))
         }
@@ -1564,6 +1577,7 @@ async fn execute_question_action_route(
                 &state,
                 "question_action",
                 result.notification_id.clone(),
+                None,
             )?;
             Ok(Json(result))
         }
@@ -1672,6 +1686,7 @@ fn publish_notifications_changed(
     state: &GatewayState,
     reason: &str,
     notification_id: Option<String>,
+    activity_cursor: Option<String>,
 ) -> Result<(), ApiError> {
     let record =
         state
@@ -1679,11 +1694,32 @@ fn publish_notifications_changed(
             .append(|_| EventPayloadWire::NotificationsChanged {
                 reason: reason.to_string(),
                 notification_id,
+                activity_cursor,
             })?;
     state
         .push_dispatcher
         .dispatch_event(state.token_store.clone(), &record);
     Ok(())
+}
+
+fn publish_expired_notification_activity(
+    state: &GatewayState,
+    expired_ids: &[String],
+    notifications: &[NotificationWire],
+) -> Result<(), ApiError> {
+    if expired_ids.is_empty() {
+        return Ok(());
+    }
+    let newest = notifications
+        .iter()
+        .filter(|notification| expired_ids.contains(&notification.id))
+        .max_by(|left, right| compare_notification_activity(left, right));
+    publish_notifications_changed(
+        state,
+        "snooze_expired",
+        (expired_ids.len() == 1).then(|| expired_ids[0].clone()),
+        newest.map(notification_activity_cursor_value),
+    )
 }
 
 fn publish_agents_changed(
@@ -1808,30 +1844,66 @@ fn filtered_notifications(
             query
                 .newer_than
                 .as_deref()
-                .map(|high_water| {
-                    timestamp_is_newer(&row.timestamp, high_water)
-                })
+                .map(|high_water| activity_is_newer(row, high_water))
                 .unwrap_or(true)
         })
         .collect()
 }
 
 fn sort_newest_first(notifications: &mut [NotificationWire]) {
-    notifications.sort_by(|left, right| {
-        timestamp_sort_key(&right.timestamp)
-            .cmp(&timestamp_sort_key(&left.timestamp))
-            .then_with(|| right.id.cmp(&left.id))
-    });
+    notifications
+        .sort_by(|left, right| compare_notification_activity(right, left));
 }
 
-fn timestamp_sort_key(value: &str) -> String {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc).to_rfc3339())
-        .unwrap_or_else(|_| value.to_string())
+fn compare_notification_activity(
+    left: &NotificationWire,
+    right: &NotificationWire,
+) -> Ordering {
+    compare_activity_timestamps(
+        notification_activity_at(left),
+        notification_activity_at(right),
+    )
+    .then_with(|| left.id.cmp(&right.id))
 }
 
-fn timestamp_is_newer(candidate: &str, high_water: &str) -> bool {
-    timestamp_sort_key(candidate) > timestamp_sort_key(high_water)
+fn compare_activity_timestamps(left: &str, right: &str) -> Ordering {
+    match (
+        DateTime::parse_from_rfc3339(left),
+        DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => {
+            left.with_timezone(&Utc).cmp(&right.with_timezone(&Utc))
+        }
+        _ => left.cmp(right),
+    }
+}
+
+fn notification_activity_cursor_value(
+    notification: &NotificationWire,
+) -> String {
+    format!(
+        "{}|{}",
+        notification_activity_at(notification),
+        notification.id
+    )
+}
+
+fn activity_is_newer(candidate: &NotificationWire, high_water: &str) -> bool {
+    let (activity_at, cursor_id) = high_water
+        .rsplit_once('|')
+        .map_or((high_water, None), |(activity_at, id)| {
+            (activity_at, Some(id))
+        });
+    match compare_activity_timestamps(
+        notification_activity_at(candidate),
+        activity_at,
+    ) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => {
+            cursor_id.is_some_and(|id| candidate.id.as_str() > id)
+        }
+    }
 }
 
 fn normalize_home_path(path: &str) -> String {
@@ -4525,7 +4597,7 @@ exit 4
             MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION
         );
         assert_eq!(value["total_count"], 2);
-        assert_eq!(value["next_high_water"], "2026-05-06T17:00:00Z");
+        assert_eq!(value["next_high_water"], "2026-05-06T17:00:00Z|newest-row");
         assert_eq!(value["notifications"][0]["id"], "newest-row");
         assert_eq!(value["notifications"][0]["priority"], true);
         assert_eq!(value["notifications"][0]["actionable"], true);
@@ -4562,6 +4634,103 @@ exit 4
             value["notifications"][0]["action_summary"]["state"],
             "already_handled"
         );
+    }
+
+    #[tokio::test]
+    async fn notifications_list_uses_resurface_activity_cursor_and_id_tiebreaker(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let recent = notification("recent", "2026-05-06T17:00:00Z", None);
+        let mut resurfaced_a =
+            notification("resurfaced-a", "2026-05-01T12:00:00Z", None);
+        resurfaced_a.resurfaced_at = Some("2026-05-06T18:00:00Z".to_string());
+        let mut resurfaced_b =
+            notification("resurfaced-b", "2026-05-01T11:00:00Z", None);
+        resurfaced_b.resurfaced_at = Some("2026-05-06T18:00:00Z".to_string());
+        let state = state_for_notifications(
+            &tmp,
+            vec![recent, resurfaced_a, resurfaced_b],
+        );
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state,
+            notifications_request(
+                Some(&token),
+                "/api/v1/notifications?newer_than=2026-05-06T18%3A00%3A00Z%7Cresurfaced-a&limit=1",
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["total_count"], 1);
+        assert_eq!(value["notifications"][0]["id"], "resurfaced-b");
+        assert_eq!(
+            value["notifications"][0]["timestamp"],
+            "2026-05-01T11:00:00Z"
+        );
+        assert_eq!(
+            value["notifications"][0]["resurfaced_at"],
+            "2026-05-06T18:00:00Z"
+        );
+        assert_eq!(
+            value["next_high_water"],
+            "2026-05-06T18:00:00Z|resurfaced-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn notifications_list_expiry_publishes_activity_cursor_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut due = notification("due-row", "2026-05-01T12:00:00Z", None);
+        due.read = true;
+        due.muted = true;
+        due.snooze_until = Some("2026-05-02T12:00:00Z".to_string());
+        seed_store_notification(&tmp, &due);
+        let state = GatewayState::new_with_sase_home(
+            "127.0.0.1:0".to_string(),
+            tmp.path(),
+        );
+        let (_start, _finish, token, _device_id) =
+            pair_device(state.clone()).await;
+
+        let (status, value) = json_response_with_state(
+            state.clone(),
+            notifications_request(Some(&token), "/api/v1/notifications"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["notifications"][0]["id"], "due-row");
+        assert_eq!(value["notifications"][0]["read"], false);
+        let event = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    &event.payload,
+                    EventPayloadWire::NotificationsChanged { reason, .. }
+                        if reason == "snooze_expired"
+                )
+            })
+            .expect("expiry should publish a notification refresh event");
+        match event.payload {
+            EventPayloadWire::NotificationsChanged {
+                notification_id,
+                activity_cursor,
+                ..
+            } => {
+                assert_eq!(notification_id.as_deref(), Some("due-row"));
+                assert!(activity_cursor
+                    .as_deref()
+                    .is_some_and(|cursor| cursor.ends_with("|due-row")));
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[tokio::test]
@@ -5036,6 +5205,7 @@ exit 4
                 == EventPayloadWire::NotificationsChanged {
                     reason: "dismiss".to_string(),
                     notification_id: Some("dismiss-row".to_string()),
+                    activity_cursor: None,
                 }
         }));
     }

@@ -326,7 +326,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 },
                 "notifications_changed": {
                     "reason": "string",
-                    "notification_id": "string|null"
+                    "notification_id": "string|null",
+                    "activity_cursor": "activity_at|notification_id|null"
                 },
                 "agents_changed": {
                     "reason": "string",
@@ -693,6 +694,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::notifications::mobile",
                 "id": "string",
                 "timestamp": "rfc3339",
+                "resurfaced_at": "rfc3339|null",
                 "sender": "string",
                 "icon": "string|null",
                 "priority": "bool",
@@ -738,14 +740,14 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "include_dismissed": "bool",
                 "include_silent": "bool",
                 "limit": "u32|null",
-                "newer_than": "string|null"
+                "newer_than": "activity_at|notification_id|null; legacy rfc3339 timestamps accepted"
             },
             "MobileNotificationListResponseWire": {
                 "defined_by": "sase_core::notifications::mobile",
                 "schema_version": "u32",
                 "notifications": "MobileNotificationCardWire[]",
                 "total_count": "u64",
-                "next_high_water": "string|null"
+                "next_high_water": "activity_at|notification_id|null"
             },
             "NotificationStateMutationResponseWire": {
                 "schema_version": "u32",

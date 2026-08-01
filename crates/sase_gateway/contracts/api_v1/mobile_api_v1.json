@@ -93,6 +93,7 @@
         "timestamp": "rfc3339|null"
       },
       "notifications_changed": {
+        "activity_cursor": "activity_at|notification_id|null",
         "notification_id": "string|null",
         "reason": "string"
       },
@@ -399,6 +400,7 @@
       "notes_summary": "string",
       "priority": "bool",
       "read": "bool",
+      "resurfaced_at": "rfc3339|null",
       "sender": "string",
       "silent": "bool",
       "timestamp": "rfc3339"
@@ -416,13 +418,13 @@
       "include_dismissed": "bool",
       "include_silent": "bool",
       "limit": "u32|null",
-      "newer_than": "string|null",
+      "newer_than": "activity_at|notification_id|null; legacy rfc3339 timestamps accepted",
       "schema_version": "u32",
       "unread_only": "bool"
     },
     "MobileNotificationListResponseWire": {
       "defined_by": "sase_core::notifications::mobile",
-      "next_high_water": "string|null",
+      "next_high_water": "activity_at|notification_id|null",
       "notifications": "MobileNotificationCardWire[]",
       "schema_version": "u32",
       "total_count": "u64"

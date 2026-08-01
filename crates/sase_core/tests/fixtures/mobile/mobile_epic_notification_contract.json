@@ -3,6 +3,7 @@
   "notification": {
     "id": "epic1234567890",
     "timestamp": "2026-07-16T15:30:00Z",
+    "resurfaced_at": null,
     "sender": "planner",
     "icon": null,
     "tags": [

@@ -3,6 +3,7 @@
   "notification": {
     "id": "custom1234567890",
     "timestamp": "2026-07-16T23:00:00Z",
+    "resurfaced_at": null,
     "sender": "security-agent",
     "icon": "🛡️",
     "tags": [
