@@ -33,10 +33,12 @@ pub use pending_actions::{
 pub use store::{
     append_notification, append_notification_counts,
     apply_notification_state_update, apply_notification_state_update_counts,
-    read_notifications_snapshot, read_notifications_snapshot_with_options,
-    rewrite_notifications, rewrite_notifications_counts,
+    read_current_notifications_snapshot, read_notifications_snapshot,
+    read_notifications_snapshot_with_options, rewrite_notifications,
+    rewrite_notifications_counts,
 };
 pub use wire::{
+    notification_activity_at, notification_activity_cursor,
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,

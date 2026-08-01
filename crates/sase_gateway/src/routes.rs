@@ -2606,6 +2606,7 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+            resurfaced_at: None,
         };
         if action == Some("PlanApproval") {
             notification.action_data.insert(

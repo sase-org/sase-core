@@ -58,6 +58,7 @@
 //! - `apply_project_name_update(content: str, name: str | None) -> str`
 //! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False, projects_only: bool = False) -> list[dict]`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
+//! - `read_current_notifications_snapshot(path: str, include_dismissed: bool) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
 //! - `apply_notification_state_update_counts(path: str, update: dict) -> dict`
 //! - `append_notification(path: str, notification: dict) -> dict`
@@ -516,6 +517,7 @@ use sase_core::notifications::{
     append_notification_counts as core_append_notification_counts,
     apply_notification_state_update as core_apply_notification_state_update,
     apply_notification_state_update_counts as core_apply_notification_state_update_counts,
+    read_current_notifications_snapshot as core_read_current_notifications_snapshot,
     read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
@@ -4382,6 +4384,25 @@ fn py_read_notifications_snapshot<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Read and reconcile the user-facing current notification state.
+#[pyfunction]
+#[pyo3(name = "read_current_notifications_snapshot")]
+fn py_read_current_notifications_snapshot<'py>(
+    py: Python<'py>,
+    path: &str,
+    include_dismissed: bool,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| {
+        core_read_current_notifications_snapshot(&path, include_dismissed)
+    });
+    let value = serde_json::to_value(snapshot.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
 /// Apply one notification state update and return the outcome dict.
 #[pyfunction]
 #[pyo3(name = "apply_notification_state_update")]
@@ -6863,6 +6884,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_notifications_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_read_current_notifications_snapshot,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_apply_notification_state_update, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_apply_notification_state_update_counts,
@@ -9966,6 +9991,44 @@ mod tests {
             let outcome_value = py_to_json_value(outcome.bind(py)).unwrap();
             assert_eq!(outcome_value["matched_count"], json!(1));
             assert_eq!(outcome_value["changed_count"], json!(1));
+        });
+    }
+
+    #[test]
+    fn notification_store_current_snapshot_binding_reconciles_snoozes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (_temp, path) = temp_notification_path("notifications.jsonl");
+            let notification_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": "due",
+                    "timestamp": "2000-01-01T00:00:00+00:00",
+                    "sender": "axe",
+                    "read": true,
+                    "muted": true,
+                    "snooze_until": "2000-01-02T00:00:00+00:00"
+                }),
+            )
+            .unwrap();
+            let notification =
+                notification_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_append_notification(py, path.to_str().unwrap(), notification)
+                .unwrap();
+
+            let snapshot = py_read_current_notifications_snapshot(
+                py,
+                path.to_str().unwrap(),
+                false,
+            )
+            .unwrap();
+            let value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(value["expired_ids"], json!(["due"]));
+            assert_eq!(value["notifications"][0]["muted"], json!(false));
+            assert_eq!(value["notifications"][0]["read"], json!(false));
+            assert_eq!(value["notifications"][0]["snooze_until"], json!(null));
+            assert!(value["notifications"][0]["resurfaced_at"].is_string());
+            assert_eq!(value["next_snooze_deadline"], json!(null));
         });
     }
 

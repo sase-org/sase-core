@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use fs2::FileExt;
 
 use super::wire::{
@@ -24,6 +24,19 @@ pub fn read_notifications_snapshot(
     read_notifications_snapshot_with_options(path, include_dismissed, false)
 }
 
+/// Read the user-facing current notification state, atomically reconciling
+/// every due or malformed legacy snooze before returning the snapshot.
+pub fn read_current_notifications_snapshot(
+    path: &Path,
+    include_dismissed: bool,
+) -> Result<NotificationStoreSnapshotWire, String> {
+    read_notifications_snapshot_expiring_snoozes(
+        path,
+        include_dismissed,
+        DateTime::<Utc>::from(SystemTime::now()),
+    )
+}
+
 #[allow(clippy::incompatible_msrv)]
 pub fn read_notifications_snapshot_with_options(
     path: &Path,
@@ -31,10 +44,7 @@ pub fn read_notifications_snapshot_with_options(
     expire_due_snoozes: bool,
 ) -> Result<NotificationStoreSnapshotWire, String> {
     if expire_due_snoozes {
-        return read_notifications_snapshot_expiring_snoozes(
-            path,
-            include_dismissed,
-        );
+        return read_current_notifications_snapshot(path, include_dismissed);
     }
     let Some(parent) = path.parent() else {
         return Err(format!(
@@ -61,24 +71,14 @@ pub fn read_notifications_snapshot_with_options(
 fn read_notifications_snapshot_expiring_snoozes(
     path: &Path,
     include_dismissed: bool,
+    now: DateTime<Utc>,
 ) -> Result<NotificationStoreSnapshotWire, String> {
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
 
     let result = (|| {
         let (mut rows, _) = read_rows_unlocked(path, true)?;
-        let now = DateTime::<Utc>::from(SystemTime::now()).to_rfc3339();
-        let mut expired_ids = Vec::new();
-        for n in &mut rows {
-            let Some(deadline) = &n.snooze_until else {
-                continue;
-            };
-            if iso_timestamp_due(deadline, &now) {
-                n.muted = false;
-                n.snooze_until = None;
-                expired_ids.push(n.id.clone());
-            }
-        }
+        let expired_ids = expire_snoozes_in_rows(&mut rows, now);
         if !expired_ids.is_empty() {
             merge_and_rewrite_notifications_unlocked(path, &rows)?;
         }
@@ -284,8 +284,9 @@ fn apply_notification_state_update_with_options(
                 for n in &mut rows {
                     if n.id == *id {
                         matched_count += 1;
-                        if !n.dismissed {
+                        if !n.dismissed || n.snooze_until.is_some() {
                             n.dismissed = true;
+                            n.snooze_until = None;
                             changed_count += 1;
                         }
                         break;
@@ -298,8 +299,9 @@ fn apply_notification_state_update_with_options(
                 for n in &mut rows {
                     if ids.contains(n.id.as_str()) {
                         matched_count += 1;
-                        if !n.dismissed {
+                        if !n.dismissed || n.snooze_until.is_some() {
                             n.dismissed = true;
+                            n.snooze_until = None;
                             changed_count += 1;
                         }
                     }
@@ -341,8 +343,12 @@ fn apply_notification_state_update_with_options(
                 }
             }
             NotificationStateUpdateWire::MarkSnoozed { id, until } => {
+                let until = validated_snooze_deadline(until)?;
                 for n in &mut rows {
                     if n.id == *id {
+                        if n.dismissed {
+                            break;
+                        }
                         matched_count += 1;
                         if !n.muted
                             || n.snooze_until.as_deref() != Some(until.as_str())
@@ -356,10 +362,11 @@ fn apply_notification_state_update_with_options(
                 }
             }
             NotificationStateUpdateWire::MarkManySnoozed { ids, until } => {
+                let until = validated_snooze_deadline(until)?;
                 let ids: BTreeSet<&str> =
                     ids.iter().map(String::as_str).collect();
                 for n in &mut rows {
-                    if ids.contains(n.id.as_str()) {
+                    if ids.contains(n.id.as_str()) && !n.dismissed {
                         matched_count += 1;
                         if !n.muted
                             || n.snooze_until.as_deref() != Some(until.as_str())
@@ -372,20 +379,10 @@ fn apply_notification_state_update_with_options(
                 }
             }
             NotificationStateUpdateWire::ExpireSnoozes { now } => {
-                for n in &mut rows {
-                    let Some(deadline) = &n.snooze_until else {
-                        continue;
-                    };
-                    if iso_timestamp_due(deadline, now) {
-                        matched_count += 1;
-                        if n.muted || n.snooze_until.is_some() {
-                            n.muted = false;
-                            n.snooze_until = None;
-                            expired_ids.push(n.id.clone());
-                            changed_count += 1;
-                        }
-                    }
-                }
+                let now = parse_aware_utc(now, "expiry instant")?;
+                expired_ids = expire_snoozes_in_rows(&mut rows, now);
+                matched_count = expired_ids.len() as u64;
+                changed_count = matched_count;
             }
             NotificationStateUpdateWire::DismissMatchingAgents { agents } => {
                 for n in &mut rows {
@@ -395,6 +392,7 @@ fn apply_notification_state_update_with_options(
                     if matches_agent_notification(n, agents) {
                         matched_count += 1;
                         n.dismissed = true;
+                        n.snooze_until = None;
                         changed_count += 1;
                     }
                 }
@@ -409,6 +407,7 @@ fn apply_notification_state_update_with_options(
                     if matches_agent_completion_notification_for_agents(n, agents) {
                         matched_count += 1;
                         n.dismissed = true;
+                        n.snooze_until = None;
                         changed_count += 1;
                     }
                 }
@@ -421,6 +420,7 @@ fn apply_notification_state_update_with_options(
                     if matches_agent_completion_notification(n) {
                         matched_count += 1;
                         n.dismissed = true;
+                        n.snooze_until = None;
                         changed_count += 1;
                     }
                 }
@@ -639,11 +639,13 @@ fn snapshot_from_rows(
     notifications: Vec<NotificationWire>,
     stats: NotificationStoreStatsWire,
 ) -> NotificationStoreSnapshotWire {
+    let next_snooze_deadline = next_snooze_deadline_for(&notifications);
     NotificationStoreSnapshotWire {
         schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
         counts: counts_for(&notifications),
         notifications,
         expired_ids: Vec::new(),
+        next_snooze_deadline,
         stats,
     }
 }
@@ -657,6 +659,7 @@ fn outcome_from_rows(
     rewritten: bool,
     expired_ids: Vec<String>,
 ) -> NotificationUpdateOutcomeWire {
+    let next_snooze_deadline = next_snooze_deadline_for(&notifications);
     NotificationUpdateOutcomeWire {
         schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
         counts: counts_for(&notifications),
@@ -667,6 +670,7 @@ fn outcome_from_rows(
         appended_count,
         rewritten,
         expired_ids,
+        next_snooze_deadline,
     }
 }
 
@@ -686,6 +690,7 @@ fn outcome_without_rows(
         notifications: Vec::new(),
         counts: NotificationCountsWire::default(),
         expired_ids,
+        next_snooze_deadline: None,
         stats: NotificationStoreStatsWire::default(),
     }
 }
@@ -839,36 +844,61 @@ fn normalize_to_14_digit(ts: &str) -> Option<String> {
     None
 }
 
-fn iso_timestamp_due(deadline: &str, now: &str) -> bool {
-    match (parse_iso_moment(deadline), parse_iso_moment(now)) {
-        (Some(IsoMoment::Aware(deadline)), Some(IsoMoment::Aware(now))) => {
-            deadline <= now
-        }
-        (Some(IsoMoment::Naive(deadline)), Some(IsoMoment::Naive(now))) => {
-            deadline <= now
-        }
-        (Some(IsoMoment::Aware(deadline)), Some(IsoMoment::Naive(now))) => {
-            deadline <= now.and_utc().timestamp_micros()
-        }
-        (Some(IsoMoment::Naive(deadline)), Some(IsoMoment::Aware(now))) => {
-            deadline.and_utc().timestamp_micros() <= now
-        }
-        _ => false,
-    }
+fn parse_aware_utc(value: &str, field: &str) -> Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| {
+            format!("{field} must be a timezone-aware RFC-3339 timestamp")
+        })
 }
 
-enum IsoMoment {
-    Aware(i64),
-    Naive(NaiveDateTime),
+fn validated_snooze_deadline(value: &str) -> Result<String, String> {
+    let deadline = parse_aware_utc(value, "snooze deadline")?;
+    if deadline <= DateTime::<Utc>::from(SystemTime::now()) {
+        return Err("snooze deadline must be in the future".to_string());
+    }
+    Ok(deadline.to_rfc3339())
 }
 
-fn parse_iso_moment(value: &str) -> Option<IsoMoment> {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
-        return Some(IsoMoment::Aware(dt.timestamp_micros()));
+fn expire_snoozes_in_rows(
+    rows: &mut [NotificationWire],
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let resurfaced_at = now.to_rfc3339();
+    let mut expired_ids = Vec::new();
+    for notification in rows {
+        if notification.dismissed {
+            continue;
+        }
+        let Some(deadline) = notification.snooze_until.as_deref() else {
+            continue;
+        };
+        let is_due_or_invalid = DateTime::parse_from_rfc3339(deadline)
+            .map(|deadline| deadline.with_timezone(&Utc) <= now)
+            .unwrap_or(true);
+        if !is_due_or_invalid {
+            continue;
+        }
+        notification.muted = false;
+        notification.snooze_until = None;
+        notification.read = false;
+        notification.resurfaced_at = Some(resurfaced_at.clone());
+        expired_ids.push(notification.id.clone());
     }
-    NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
-        .ok()
-        .map(IsoMoment::Naive)
+    expired_ids
+}
+
+fn next_snooze_deadline_for(
+    notifications: &[NotificationWire],
+) -> Option<String> {
+    notifications
+        .iter()
+        .filter(|notification| !notification.dismissed)
+        .filter_map(|notification| notification.snooze_until.as_deref())
+        .filter_map(|deadline| DateTime::parse_from_rfc3339(deadline).ok())
+        .map(|deadline| deadline.with_timezone(&Utc))
+        .min()
+        .map(|deadline| deadline.to_rfc3339())
 }
 
 fn open_lock_file(path: &Path) -> Result<File, String> {

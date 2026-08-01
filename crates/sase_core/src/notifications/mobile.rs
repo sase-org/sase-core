@@ -970,6 +970,7 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+            resurfaced_at: None,
         }
     }
 
@@ -989,6 +990,7 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+            resurfaced_at: None,
         }
     }
 
@@ -1211,6 +1213,7 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+            resurfaced_at: None,
         };
 
         let detail = mobile_action_detail_from_notification(

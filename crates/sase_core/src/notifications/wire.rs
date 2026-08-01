@@ -31,6 +31,8 @@ pub struct NotificationWire {
     pub muted: bool,
     #[serde(default)]
     pub snooze_until: Option<String>,
+    #[serde(default)]
+    pub resurfaced_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,8 @@ pub struct NotificationStoreSnapshotWire {
     pub notifications: Vec<NotificationWire>,
     pub counts: NotificationCountsWire,
     pub expired_ids: Vec<String>,
+    #[serde(default)]
+    pub next_snooze_deadline: Option<String>,
     pub stats: NotificationStoreStatsWire,
 }
 
@@ -71,7 +75,25 @@ pub struct NotificationUpdateOutcomeWire {
     pub notifications: Vec<NotificationWire>,
     pub counts: NotificationCountsWire,
     pub expired_ids: Vec<String>,
+    #[serde(default)]
+    pub next_snooze_deadline: Option<String>,
     pub stats: NotificationStoreStatsWire,
+}
+
+pub fn notification_activity_at(notification: &NotificationWire) -> &str {
+    notification
+        .resurfaced_at
+        .as_deref()
+        .unwrap_or(notification.timestamp.as_str())
+}
+
+pub fn notification_activity_cursor(
+    notification: &NotificationWire,
+) -> (&str, &str) {
+    (
+        notification_activity_at(notification),
+        notification.id.as_str(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

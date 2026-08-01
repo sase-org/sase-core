@@ -515,6 +515,7 @@ mod tests {
             silent: false,
             muted: false,
             snooze_until: None,
+            resurfaced_at: None,
         }
     }
 
