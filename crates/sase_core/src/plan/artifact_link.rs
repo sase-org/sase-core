@@ -1075,38 +1075,8 @@ fn physical_lines(body: &str) -> Vec<PhysicalLine<'_>> {
 }
 
 fn first_header_candidate(lines: &[PhysicalLine<'_>]) -> Option<usize> {
-    let mut fence: Option<(char, usize)> = None;
-    for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.text.trim_start();
-        if let Some((marker, width)) = fence {
-            if fence_marker(trimmed).is_some_and(|(candidate, count)| {
-                candidate == marker && count >= width
-            }) {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(marker) = fence_marker(trimmed) {
-            fence = Some(marker);
-            continue;
-        }
-        if looks_like_known_header_bullet(line.text) {
-            return Some(index);
-        }
-    }
-    None
-}
-
-fn fence_marker(line: &str) -> Option<(char, usize)> {
-    let marker = line.chars().next()?;
-    if !matches!(marker, '`' | '~') {
-        return None;
-    }
-    let width = line
-        .chars()
-        .take_while(|character| *character == marker)
-        .count();
-    (width >= 3).then_some((marker, width))
+    let index = lines.iter().position(|line| !line.text.trim().is_empty())?;
+    looks_like_known_header_bullet(lines[index].text).then_some(index)
 }
 
 fn looks_like_known_header_bullet(line: &str) -> bool {
@@ -1894,6 +1864,19 @@ mod tests {
     }
 
     #[test]
+    fn known_header_labels_after_body_content_are_ordinary_bullets() {
+        let document = "- **PLAN:** [plan.md](plan.md)\n\n# Plan\n\n- **Artifacts:** Files used by the plan.\n- **Beads:** Work tracked by the plan.\n- **Commits:** Changes made for the plan.\n";
+        let parsed = parse_sdd_plan_header_block(document);
+
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert!(parsed.canonical_layout);
+        assert_eq!(
+            parsed.body,
+            "# Plan\n\n- **Artifacts:** Files used by the plan.\n- **Beads:** Work tracked by the plan.\n- **Commits:** Changes made for the plan.\n"
+        );
+    }
+
+    #[test]
     fn fenced_header_example_is_not_a_live_document_header() {
         let body_only = "# Plan\n\n```markdown\n- **PROMPT:** [example](example.md)\n- **AGENTS:**\n  - example.agent\n```\n";
         let parsed = parse_sdd_plan_header_block(body_only);
@@ -1911,6 +1894,18 @@ mod tests {
     }
 
     #[test]
+    fn discontiguous_header_groups_before_body_content_are_invalid() {
+        let document = "- **PLAN:** [plan.md](plan.md)\n\n- **ARTIFACTS:**\n  - artifact.txt\n\n# Plan\n";
+        let parsed = parse_sdd_plan_header_block(document);
+
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Invalid);
+        assert_eq!(
+            parsed.reason.as_deref(),
+            Some("discontiguous or nested plan header bullets found")
+        );
+    }
+
+    #[test]
     fn extra_leading_blank_line_is_recognized_as_noncanonical_layout() {
         let document = "\n- **PROMPT:** [prompt](prompt.md)\n\n# Plan\n";
         let parsed = parse_sdd_plan_header_block(document);
@@ -1919,11 +1914,12 @@ mod tests {
     }
 
     #[test]
-    fn misplaced_unfenced_header_is_recognized_for_layout_diagnostics() {
+    fn title_before_header_means_the_bullet_is_body_content() {
         let document = "# Plan\n\n- **PROMPT:** [prompt](prompt.md)\n";
         let parsed = parse_sdd_plan_header_block(document);
-        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Canonical);
+        assert_eq!(parsed.kind, SddArtifactLinkKindWire::Missing);
         assert!(!parsed.canonical_layout);
+        assert_eq!(parsed.body, document);
     }
 
     #[test]
