@@ -487,6 +487,9 @@ fn append_artifact_path_candidates(
             payload: path,
             detail: format!("{kind} · {}", root.display()),
             age: String::new(),
+            scope: String::new(),
+            rank: None,
+            body: String::new(),
         });
     }
     scan.truncated
@@ -515,6 +518,9 @@ fn append_bead_page_candidates(
                 payload: id,
                 detail: format!("bead · {}", store.project),
                 age: String::new(),
+                scope: String::new(),
+                rank: None,
+                body: String::new(),
             });
         }
     }
@@ -558,6 +564,9 @@ fn append_agent_page_candidates(
                 payload: name,
                 detail: format!("agent · {}", root.project),
                 age: String::new(),
+                scope: String::new(),
+                rank: None,
+                body: String::new(),
             });
         }
     }
@@ -622,6 +631,9 @@ fn append_artifact_index_candidates(
                 payload: id,
                 detail,
                 age: String::new(),
+                scope: String::new(),
+                rank: None,
+                body: String::new(),
             });
         }
     }

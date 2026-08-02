@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
@@ -74,6 +75,12 @@ pub struct AtReferencePayloadRowWire {
     pub label: String,
     pub detail: String,
     pub age: String,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +114,13 @@ struct IndexedPayloadRow {
     row: AtReferencePayloadRowWire,
     payload: FuzzyText,
     title: FuzzyText,
+    qualified: Option<IndexedQualifiedPayload>,
+}
+
+#[derive(Clone, Debug)]
+struct IndexedQualifiedPayload {
+    text: String,
+    fuzzy: FuzzyText,
 }
 
 impl AtReferencePayloadIndex {
@@ -114,10 +128,19 @@ impl AtReferencePayloadIndex {
         Self {
             rows: rows
                 .into_iter()
-                .map(|row| IndexedPayloadRow {
-                    payload: FuzzyText::new(&row.payload),
-                    title: FuzzyText::new(&row.label),
-                    row,
+                .map(|row| {
+                    let qualified = qualified_payload_text(&row).map(|text| {
+                        IndexedQualifiedPayload {
+                            fuzzy: FuzzyText::new(&text),
+                            text,
+                        }
+                    });
+                    IndexedPayloadRow {
+                        payload: FuzzyText::new(&row.payload),
+                        title: FuzzyText::new(&row.label),
+                        qualified,
+                        row,
+                    }
                 })
                 .collect(),
         }
@@ -504,40 +527,103 @@ struct MatchedPayload<'a> {
     row: &'a AtReferencePayloadRowWire,
     payload_match: Option<FuzzyMatch>,
     title_match: Option<FuzzyMatch>,
-    payload_is_best: bool,
+    qualified_match: Option<QualifiedPayloadMatch<'a>>,
     prepared_payload: Option<&'a FuzzyText>,
     prepared_title: Option<&'a FuzzyText>,
 }
 
+struct QualifiedPayloadMatch<'a> {
+    matched: FuzzyMatch,
+    text: Cow<'a, str>,
+    prepared: Option<&'a FuzzyText>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PayloadMatchTarget {
+    Payload,
+    Title,
+    Qualified,
+}
+
 impl MatchedPayload<'_> {
-    fn best_match(&self) -> (&FuzzyMatch, &str) {
-        if self.payload_is_best {
+    fn best_match(&self) -> (&FuzzyMatch, &str, PayloadMatchTarget) {
+        let payload = self.payload_match.as_ref().map(|matched| {
             (
-                self.payload_match.as_ref().expect("payload match"),
-                &self.row.payload,
+                matched,
+                self.row.payload.as_str(),
+                PayloadMatchTarget::Payload,
             )
-        } else {
+        });
+        let title = self.title_match.as_ref().map(|matched| {
+            (matched, self.row.label.as_str(), PayloadMatchTarget::Title)
+        });
+        let qualified = self.qualified_match.as_ref().map(|qualified| {
             (
-                self.title_match.as_ref().expect("title match"),
-                &self.row.label,
+                &qualified.matched,
+                qualified.text.as_ref(),
+                PayloadMatchTarget::Qualified,
             )
-        }
+        });
+        [payload, title, qualified]
+            .into_iter()
+            .flatten()
+            .reduce(|best, candidate| {
+                if compare_fuzzy((candidate.0, candidate.1), (best.0, best.1))
+                    == Ordering::Less
+                {
+                    candidate
+                } else {
+                    best
+                }
+            })
+            .expect("matched payload has at least one match")
     }
 
-    fn best_prepared_match(&self) -> Option<(&FuzzyMatch, &str, &FuzzyText)> {
-        if self.payload_is_best {
+    fn best_prepared_match(
+        &self,
+    ) -> Option<(&FuzzyMatch, &str, &FuzzyText, PayloadMatchTarget)> {
+        let payload =
+            self.payload_match.as_ref().zip(self.prepared_payload).map(
+                |(matched, prepared)| {
+                    (
+                        matched,
+                        self.row.payload.as_str(),
+                        prepared,
+                        PayloadMatchTarget::Payload,
+                    )
+                },
+            );
+        let title = self.title_match.as_ref().zip(self.prepared_title).map(
+            |(matched, prepared)| {
+                (
+                    matched,
+                    self.row.label.as_str(),
+                    prepared,
+                    PayloadMatchTarget::Title,
+                )
+            },
+        );
+        let qualified = self.qualified_match.as_ref().and_then(|qualified| {
             Some((
-                self.payload_match.as_ref()?,
-                &self.row.payload,
-                self.prepared_payload?,
+                &qualified.matched,
+                qualified.text.as_ref(),
+                qualified.prepared?,
+                PayloadMatchTarget::Qualified,
             ))
-        } else {
-            Some((
-                self.title_match.as_ref()?,
-                &self.row.label,
-                self.prepared_title?,
-            ))
-        }
+        });
+        [payload, title, qualified].into_iter().flatten().reduce(
+            |best, candidate| {
+                if compare_fuzzy_prepared(
+                    (candidate.0, candidate.1, candidate.2),
+                    (best.0, best.1, best.2),
+                ) == Ordering::Less
+                {
+                    candidate
+                } else {
+                    best
+                }
+            },
+        )
     }
 }
 
@@ -553,10 +639,22 @@ fn build_payload_menu(
             .rows
             .iter()
             .filter_map(|indexed| {
+                let qualified_match =
+                    indexed.qualified.as_ref().and_then(|qualified| {
+                        Some(QualifiedPayloadMatch {
+                            matched: fuzzy_match_prepared(
+                                &query,
+                                &qualified.fuzzy,
+                            )?,
+                            text: Cow::Borrowed(qualified.text.as_str()),
+                            prepared: Some(&qualified.fuzzy),
+                        })
+                    });
                 matched_payload(
                     &indexed.row,
                     fuzzy_match_prepared(&query, &indexed.payload),
                     fuzzy_match_prepared(&query, &indexed.title),
+                    qualified_match,
                     Some(&indexed.payload),
                     Some(&indexed.title),
                 )
@@ -567,10 +665,19 @@ fn build_payload_menu(
             .payloads
             .iter()
             .filter_map(|row| {
+                let qualified_match =
+                    qualified_payload_text(row).and_then(|text| {
+                        Some(QualifiedPayloadMatch {
+                            matched: fuzzy_match(&context.query, &text)?,
+                            text: Cow::Owned(text),
+                            prepared: None,
+                        })
+                    });
                 matched_payload(
                     row,
                     fuzzy_match(&context.query, &row.payload),
                     fuzzy_match(&context.query, &row.label),
+                    qualified_match,
                     None,
                     None,
                 )
@@ -593,13 +700,30 @@ fn build_payload_menu(
         .into_iter()
         .take(AT_REFERENCE_MAX_GROUP_ROWS)
         .map(|matched| {
-            let match_tier = matched.best_match().0.tier;
+            let (best_match, _, best_target) = matched.best_match();
+            let match_tier = best_match.tier;
             let row = matched.row;
             let detail = match (row.detail.is_empty(), row.age.is_empty()) {
                 (false, false) => format!("{} · {}", row.detail, row.age),
                 (false, true) => row.detail.clone(),
                 (true, false) => row.age.clone(),
                 (true, true) => String::new(),
+            };
+            let (label_match, title_match) = if best_target
+                == PayloadMatchTarget::Qualified
+            {
+                qualified_match_runs(row, best_match)
+            } else {
+                (
+                    matched
+                        .payload_match
+                        .map_or_else(Vec::new, |match_result| {
+                            match_result.runs
+                        }),
+                    matched.title_match.map_or_else(Vec::new, |match_result| {
+                        match_result.runs
+                    }),
+                )
             };
             AtReferenceRowWire {
                 group: AtReferenceGroup::Payload,
@@ -609,12 +733,8 @@ fn build_payload_menu(
                 is_dir: false,
                 detail,
                 builtin: false,
-                label_match: matched
-                    .payload_match
-                    .map_or_else(Vec::new, |match_result| match_result.runs),
-                title_match: matched
-                    .title_match
-                    .map_or_else(Vec::new, |match_result| match_result.runs),
+                label_match,
+                title_match,
                 match_tier,
             }
         })
@@ -634,31 +754,54 @@ fn matched_payload<'a>(
     row: &'a AtReferencePayloadRowWire,
     payload_match: Option<FuzzyMatch>,
     title_match: Option<FuzzyMatch>,
+    qualified_match: Option<QualifiedPayloadMatch<'a>>,
     prepared_payload: Option<&'a FuzzyText>,
     prepared_title: Option<&'a FuzzyText>,
 ) -> Option<MatchedPayload<'a>> {
-    if payload_match.is_none() && title_match.is_none() {
+    if payload_match.is_none()
+        && title_match.is_none()
+        && qualified_match.is_none()
+    {
         return None;
     }
-    let payload_is_best = match (&payload_match, &title_match) {
-        (Some(payload_match), Some(title_match)) => {
-            compare_fuzzy(
-                (payload_match, &row.payload),
-                (title_match, &row.label),
-            ) != Ordering::Greater
-        }
-        (Some(_), None) => true,
-        (None, Some(_)) => false,
-        (None, None) => unreachable!(),
-    };
     Some(MatchedPayload {
         row,
         payload_match,
         title_match,
-        payload_is_best,
+        qualified_match,
         prepared_payload,
         prepared_title,
     })
+}
+
+fn qualified_payload_text(row: &AtReferencePayloadRowWire) -> Option<String> {
+    if row.scope.is_empty() || !row.payload.starts_with(&row.scope) {
+        return None;
+    }
+    let remainder = row.payload.get(row.scope.len()..)?;
+    let separator = remainder.chars().next()?;
+    let prefix_end = row.scope.len() + separator.len_utf8();
+    Some(format!("{}{}", &row.payload[..prefix_end], row.label))
+}
+
+type MatchRuns = Vec<(u32, u32)>;
+
+fn qualified_match_runs(
+    row: &AtReferencePayloadRowWire,
+    matched: &FuzzyMatch,
+) -> (MatchRuns, MatchRuns) {
+    let scope_end = row.scope.chars().count() as u32;
+    let title_start = scope_end + 1;
+    let mut label_runs = Vec::new();
+    let mut title_runs = Vec::new();
+    for &(start, end) in &matched.runs {
+        if end <= scope_end {
+            label_runs.push((start, end));
+        } else if start >= title_start {
+            title_runs.push((start - title_start, end - title_start));
+        }
+    }
+    (label_runs, title_runs)
 }
 
 fn compare_payload_matches(
@@ -666,9 +809,51 @@ fn compare_payload_matches(
     right: &MatchedPayload<'_>,
 ) -> Ordering {
     match (left.best_prepared_match(), right.best_prepared_match()) {
-        (Some(left), Some(right)) => compare_fuzzy_prepared(left, right),
-        _ => compare_fuzzy(left.best_match(), right.best_match()),
+        (Some(left_match), Some(right_match)) => compare_payload_quality(
+            left_match.0,
+            left.row.rank,
+            right_match.0,
+            right.row.rank,
+        )
+        .then_with(|| {
+            compare_fuzzy_prepared(
+                (left_match.0, left_match.1, left_match.2),
+                (right_match.0, right_match.1, right_match.2),
+            )
+        }),
+        _ => {
+            let left_match = left.best_match();
+            let right_match = right.best_match();
+            compare_payload_quality(
+                left_match.0,
+                left.row.rank,
+                right_match.0,
+                right.row.rank,
+            )
+            .then_with(|| {
+                compare_fuzzy(
+                    (left_match.0, left_match.1),
+                    (right_match.0, right_match.1),
+                )
+            })
+        }
     }
+}
+
+fn compare_payload_quality(
+    left_match: &FuzzyMatch,
+    left_rank: Option<u32>,
+    right_match: &FuzzyMatch,
+    right_rank: Option<u32>,
+) -> Ordering {
+    left_match
+        .tier
+        .cmp(&right_match.tier)
+        .then_with(|| right_match.score.cmp(&left_match.score))
+        .then_with(|| match (left_rank, right_rank) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => Ordering::Equal,
+        })
 }
 
 fn compare_payload_text(
@@ -837,6 +1022,9 @@ mod tests {
             label: title.to_string(),
             detail: detail.to_string(),
             age: age.to_string(),
+            scope: String::new(),
+            rank: None,
+            body: String::new(),
         }
     }
 
@@ -866,6 +1054,26 @@ mod tests {
                 &text[byte_offsets[start as usize]..byte_offsets[end as usize]]
             })
             .collect()
+    }
+
+    fn payload_menus(
+        context: &AtReferenceContextWire,
+        payloads: Vec<AtReferencePayloadRowWire>,
+    ) -> (AtReferenceMenuWire, AtReferenceMenuWire) {
+        let wire = build_at_reference_menu(
+            context,
+            &AtReferenceInventoryWire {
+                payloads: payloads.clone(),
+                ..Default::default()
+            },
+        );
+        let index = AtReferencePayloadIndex::new(payloads);
+        let indexed = build_at_reference_menu_with_payload_index(
+            context,
+            &AtReferenceInventoryWire::default(),
+            &index,
+        );
+        (wire, indexed)
     }
 
     #[test]
@@ -1305,6 +1513,117 @@ mod tests {
         assert!(menu.rows[0].label_match.is_empty());
         assert_eq!(menu.rows[0].title_match, vec![(0, 6)]);
         assert_eq!(menu.rows[0].match_tier, 0);
+    }
+
+    #[test]
+    fn scoped_payload_matches_repo_and_title_as_one_qualified_target() {
+        let mut commit = payload(
+            "sase-core@5143cb981f0a",
+            "fix(stats): expose occupancy",
+            "",
+            "now",
+        );
+        commit.scope = "sase-core".to_string();
+        let detected = context("@commit:core@fix", 16).unwrap();
+        let (wire, indexed) = payload_menus(&detected, vec![commit]);
+
+        assert_eq!(wire, indexed);
+        assert_eq!(wire.payload_count, 1);
+        assert_eq!(wire.rows[0].label, "sase-core@5143cb981f0a");
+        assert_eq!(wire.rows[0].title, "fix(stats): expose occupancy");
+    }
+
+    #[test]
+    fn qualified_match_highlights_each_field_and_drops_straddling_runs() {
+        let mut commit = payload(
+            "sase-core@5143cb981f0a",
+            "fix(stats): expose occupancy",
+            "",
+            "now",
+        );
+        commit.scope = "sase-core".to_string();
+
+        let split_context = context("@commit:cofi", 12).unwrap();
+        let (wire, indexed) =
+            payload_menus(&split_context, vec![commit.clone()]);
+        assert_eq!(wire, indexed);
+        assert_eq!(
+            slice_runs(&wire.rows[0].label, &wire.rows[0].label_match),
+            vec!["co"]
+        );
+        assert_eq!(
+            slice_runs(&wire.rows[0].title, &wire.rows[0].title_match),
+            vec!["fi"]
+        );
+
+        let straddling_context = context("@commit:core@fix", 16).unwrap();
+        let (wire, indexed) = payload_menus(&straddling_context, vec![commit]);
+        assert_eq!(wire, indexed);
+        assert!(wire.rows[0].label_match.is_empty());
+        assert!(wire.rows[0].title_match.is_empty());
+    }
+
+    #[test]
+    fn payload_rank_breaks_quality_ties_but_unranked_rows_keep_text_order() {
+        let mut recent = payload("zulu", "Needle", "", "now");
+        recent.rank = Some(0);
+        let mut older = payload("able", "Needle", "", "1d");
+        older.rank = Some(1);
+        let detected = context("@plan:needle", 12).unwrap();
+
+        let (ranked, ranked_indexed) =
+            payload_menus(&detected, vec![older.clone(), recent.clone()]);
+        assert_eq!(ranked, ranked_indexed);
+        assert_eq!(
+            ranked
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zulu", "able"]
+        );
+
+        recent.rank = None;
+        older.rank = None;
+        let (unranked, unranked_indexed) =
+            payload_menus(&detected, vec![recent, older]);
+        assert_eq!(unranked, unranked_indexed);
+        assert_eq!(
+            unranked
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["able", "zulu"]
+        );
+    }
+
+    #[test]
+    fn malformed_scope_degrades_to_an_unscoped_row() {
+        let mut commit = payload(
+            "sase-core@5143cb981f0a",
+            "fix(stats): expose occupancy",
+            "",
+            "now",
+        );
+        commit.scope = "different-repo".to_string();
+        let detected = context("@commit:core@fix", 16).unwrap();
+        let (wire, indexed) = payload_menus(&detected, vec![commit]);
+
+        assert_eq!(wire, indexed);
+        assert_eq!(wire.payload_count, 0);
+    }
+
+    #[test]
+    fn payload_wire_defaults_new_metadata_when_deserializing_old_rows() {
+        let row: AtReferencePayloadRowWire = serde_json::from_str(
+            r#"{"payload":"item","label":"Item","detail":"","age":""}"#,
+        )
+        .unwrap();
+
+        assert_eq!(row.scope, "");
+        assert_eq!(row.rank, None);
+        assert_eq!(row.body, "");
     }
 
     #[test]
