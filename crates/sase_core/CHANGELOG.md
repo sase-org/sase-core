@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.11](https://github.com/sase-org/sase-core/compare/v0.17.10...v0.17.11) - 2026-08-02
+
+### Added
+
+- *(core)* add xprompt provenance link rewriting
+
+### Fixed
+
+- *(plan)* restrict header parsing to leading block
+
 ## [0.17.10](https://github.com/sase-org/sase-core/compare/v0.17.9...v0.17.10) - 2026-08-02
 
 ### Fixed
