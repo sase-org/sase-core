@@ -1,7 +1,12 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -39,6 +44,11 @@ use super::wire::{
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
 const ARTIFACT_REF_MAX_VISITED: usize = 20_000;
 const ARTIFACT_REF_MAX_SCAN_RESULTS: usize = 5_000;
+pub const ARTIFACT_REF_COMMIT_ABBREV: usize = 12;
+pub const ARTIFACT_REF_COMMIT_SCAN_LIMIT: usize = 200;
+pub const ARTIFACT_REF_COMMIT_MAX_ROWS: usize = 1_000;
+const ARTIFACT_REF_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
+const ARTIFACT_REF_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
@@ -369,7 +379,7 @@ pub fn build_artifact_ref_payload_completion_candidates(
     let Some(kind) = trigger.kind.as_deref() else {
         return empty_artifact_ref_completion_list();
     };
-    if matches!(kind, "commit" | "bug") {
+    if kind == "bug" {
         return empty_artifact_ref_completion_list();
     }
 
@@ -411,14 +421,17 @@ pub fn build_artifact_ref_payload_inventory(
     kind: &str,
     context: &ArtifactRefContextWire,
 ) -> AtReferenceInventoryWire {
-    if matches!(kind, "commit" | "bug") {
+    if kind == "bug" {
         return AtReferenceInventoryWire::default();
     }
 
     let mut payloads = Vec::new();
     let mut seen = BTreeSet::new();
     let mut truncated_payloads = 0usize;
-    if kind == "chat" {
+    if kind == "commit" {
+        truncated_payloads +=
+            append_commit_candidates(&mut payloads, &mut seen, context);
+    } else if kind == "chat" {
         if let Some(root) = context.chats_root.as_deref() {
             truncated_payloads += append_artifact_path_candidates(
                 &mut payloads,
@@ -452,6 +465,195 @@ pub fn build_artifact_ref_payload_inventory(
         payloads,
         truncated_payloads,
         ..Default::default()
+    }
+}
+
+#[derive(Debug)]
+struct CommitCandidate {
+    repository: String,
+    abbreviated_sha: String,
+    timestamp: i64,
+    subject: String,
+    body: String,
+}
+
+fn append_commit_candidates(
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
+    seen: &mut BTreeSet<String>,
+    context: &ArtifactRefContextWire,
+) -> usize {
+    let mut commits = Vec::new();
+    for repository in &context.repositories {
+        let Some(checkout) = repository.checkout_paths.first() else {
+            continue;
+        };
+        let checkout = Path::new(checkout);
+        let git_entry = checkout.join(".git");
+        if !checkout.is_dir() || (!git_entry.is_dir() && !git_entry.is_file()) {
+            continue;
+        }
+        let Some(output) = commit_log_output(checkout) else {
+            continue;
+        };
+        commits.extend(parse_commit_log(&repository.name, &output));
+    }
+
+    sort_commit_candidates(&mut commits);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or_default();
+    append_ranked_commit_candidates(payloads, seen, commits, now)
+}
+
+fn sort_commit_candidates(commits: &mut [CommitCandidate]) {
+    commits.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.repository.cmp(&right.repository))
+            .then_with(|| left.abbreviated_sha.cmp(&right.abbreviated_sha))
+    });
+}
+
+fn append_ranked_commit_candidates(
+    payloads: &mut Vec<AtReferencePayloadRowWire>,
+    seen: &mut BTreeSet<String>,
+    commits: Vec<CommitCandidate>,
+    now: i64,
+) -> usize {
+    let mut unique = Vec::new();
+    for commit in commits {
+        let payload =
+            format!("{}@{}", commit.repository, commit.abbreviated_sha);
+        if crate::parse_artifact_ref(&format!("commit:{payload}")).is_err() {
+            continue;
+        }
+        if seen.insert(payload.clone()) {
+            unique.push((payload, commit));
+        }
+    }
+    let truncated = unique.len().saturating_sub(ARTIFACT_REF_COMMIT_MAX_ROWS);
+    unique.truncate(ARTIFACT_REF_COMMIT_MAX_ROWS);
+    payloads.extend(unique.into_iter().enumerate().map(
+        |(rank, (payload, commit))| AtReferencePayloadRowWire {
+            payload,
+            label: if commit.subject.is_empty() {
+                commit.abbreviated_sha.clone()
+            } else {
+                commit.subject
+            },
+            detail: String::new(),
+            age: commit_age_label(commit.timestamp, now),
+            scope: commit.repository,
+            rank: Some(rank as u32),
+            body: commit.body,
+        },
+    ));
+    truncated
+}
+
+fn commit_log_output(checkout: &Path) -> Option<Vec<u8>> {
+    let mut stdout = tempfile::tempfile().ok()?;
+    let stdout_writer = stdout.try_clone().ok()?;
+    let mut child = Command::new("git")
+        .arg("--no-pager")
+        .arg("-C")
+        .arg(checkout)
+        .arg("log")
+        .arg("--no-color")
+        .arg("-n")
+        .arg(ARTIFACT_REF_COMMIT_SCAN_LIMIT.to_string())
+        .arg("-z")
+        .arg("--format=%H%x1f%h%x1f%at%x1f%s%x1f%b")
+        .arg("HEAD")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_writer))
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < ARTIFACT_REF_COMMIT_TIMEOUT => {
+                thread::sleep(ARTIFACT_REF_COMMIT_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    stdout.seek(SeekFrom::Start(0)).ok()?;
+    let mut output = Vec::new();
+    stdout.read_to_end(&mut output).ok()?;
+    Some(output)
+}
+
+fn parse_commit_log(repository: &str, output: &[u8]) -> Vec<CommitCandidate> {
+    output
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let record = std::str::from_utf8(record).ok()?;
+            let mut fields = record.splitn(5, '\u{1f}');
+            let full_sha = fields.next()?.trim();
+            let short_sha = fields.next()?.trim();
+            let timestamp = fields.next()?.trim().parse::<i64>().ok()?;
+            let subject = fields.next()?.trim();
+            let body = fields.next()?.trim();
+            if full_sha.len() < ARTIFACT_REF_COMMIT_ABBREV
+                || !full_sha.bytes().all(|byte| {
+                    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                })
+                || !short_sha.bytes().all(|byte| {
+                    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                })
+            {
+                return None;
+            }
+            let abbreviated_sha =
+                if short_sha.len() >= ARTIFACT_REF_COMMIT_ABBREV {
+                    short_sha.to_string()
+                } else {
+                    full_sha[..ARTIFACT_REF_COMMIT_ABBREV].to_string()
+                };
+            Some(CommitCandidate {
+                repository: repository.to_string(),
+                abbreviated_sha,
+                timestamp,
+                subject: subject.to_string(),
+                body: body.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn commit_age_label(timestamp: i64, now: i64) -> String {
+    if timestamp == 0 {
+        return String::new();
+    }
+    let seconds = now.saturating_sub(timestamp).max(0);
+    if seconds < 60 {
+        "now".to_string()
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else if seconds < 7 * 86_400 {
+        format!("{}d", seconds / 86_400)
+    } else {
+        DateTime::<Utc>::from_timestamp(timestamp, 0)
+            .map(|datetime| {
+                datetime.date_naive().format("%Y-%m-%d").to_string()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -2573,7 +2775,8 @@ mod tests {
     use crate::effort::EFFORT_LEVELS_ORDERED;
     use crate::{
         ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire,
-        ArtifactRefDocumentRootWire, EditorXpromptCatalogEntryWire,
+        ArtifactRefDocumentRootWire, ArtifactRefPayloadWire,
+        ArtifactRefRepositoryWire, EditorXpromptCatalogEntryWire,
         MobileXpromptInputWire,
     };
 
@@ -2673,6 +2876,68 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             ),
+            ..Default::default()
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn init_git_repo(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.name", "Commit Test"]);
+        git(repo, &["config", "user.email", "commit@example.com"]);
+        git(repo, &["config", "core.abbrev", "7"]);
+    }
+
+    fn commit_at(
+        repo: &Path,
+        timestamp: i64,
+        subject: &str,
+        body: &str,
+    ) -> String {
+        let date = format!("{timestamp} +0000");
+        let mut command = Command::new("git");
+        command.arg("-C").arg(repo).args([
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            subject,
+        ]);
+        if !body.is_empty() {
+            command.args(["-m", body]);
+        }
+        let output = command
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn repository(name: &str, checkout: &Path) -> ArtifactRefRepositoryWire {
+        ArtifactRefRepositoryWire {
+            name: name.to_string(),
+            checkout_paths: vec![checkout.to_string_lossy().into_owned()],
             ..Default::default()
         }
     }
@@ -2810,6 +3075,262 @@ mod tests {
         assert_eq!(fallback_list.candidates.len(), 1);
         assert_eq!(fallback_list.candidates[0].insertion, "202607/other.md");
         assert_eq!(fallback_list.candidates[0].name, "other.md");
+    }
+
+    #[test]
+    fn commit_inventory_merges_repositories_by_recency_and_assigns_rank() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        init_git_repo(&first);
+        init_git_repo(&second);
+        let old_sha = commit_at(&first, 1_700_000_000, "oldest", "");
+        let middle_sha = commit_at(&second, 1_700_000_100, "middle", "");
+        let new_sha = commit_at(&first, 1_700_000_200, "newest", "");
+        let context = ArtifactRefContextWire {
+            repositories: vec![
+                repository("alpha", &first),
+                repository("beta", &second),
+                repository("alpha", &first),
+            ],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert_eq!(inventory.truncated_payloads, 0);
+        assert_eq!(inventory.payloads.len(), 3);
+        assert_eq!(
+            inventory
+                .payloads
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newest", "middle", "oldest"]
+        );
+        assert_eq!(
+            inventory
+                .payloads
+                .iter()
+                .map(|row| row.rank)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2)]
+        );
+        assert_eq!(
+            inventory
+                .payloads
+                .iter()
+                .map(|row| row.payload.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("alpha@{}", &new_sha[..ARTIFACT_REF_COMMIT_ABBREV]),
+                format!("beta@{}", &middle_sha[..ARTIFACT_REF_COMMIT_ABBREV]),
+                format!("alpha@{}", &old_sha[..ARTIFACT_REF_COMMIT_ABBREV]),
+            ]
+        );
+        assert!(inventory.payloads.iter().all(|row| {
+            row.detail.is_empty()
+                && row.scope == row.payload.split_once('@').unwrap().0
+        }));
+
+        for row in &inventory.payloads {
+            let parsed =
+                crate::parse_artifact_ref(&format!("commit:{}", row.payload))
+                    .unwrap();
+            let ArtifactRefPayloadWire::Commit { repo, sha } = parsed.payload
+            else {
+                panic!("expected commit payload");
+            };
+            assert!(context
+                .repositories
+                .iter()
+                .any(|entry| entry.name == repo));
+            assert_eq!(sha.len(), ARTIFACT_REF_COMMIT_ABBREV);
+        }
+
+        let completion = artifact_completion_context("@commit:", 8, &context);
+        let list = build_artifact_ref_payload_completion_candidates(
+            completion.artifact_ref.as_ref().unwrap(),
+            None,
+            &context,
+        );
+        assert_eq!(list.candidates.len(), 3);
+    }
+
+    #[test]
+    fn commit_inventory_preserves_subject_and_multiline_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        let subject = "fix \"quoted\"\t日本語";
+        let body = "first body line\nsecond\tline";
+        commit_at(&repo, 1_700_000_000, subject, body);
+        let context = ArtifactRefContextWire {
+            repositories: vec![repository("sase-core", &repo)],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert_eq!(inventory.payloads.len(), 1);
+        assert_eq!(inventory.payloads[0].label, subject);
+        assert_eq!(inventory.payloads[0].body, body);
+    }
+
+    #[test]
+    fn commit_inventory_enforces_the_per_repository_scan_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        for index in 0..=ARTIFACT_REF_COMMIT_SCAN_LIMIT {
+            commit_at(
+                &repo,
+                1_700_000_000 + index as i64,
+                &format!("commit {index}"),
+                "",
+            );
+        }
+        let context = ArtifactRefContextWire {
+            repositories: vec![repository("sase", &repo)],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert_eq!(inventory.payloads.len(), ARTIFACT_REF_COMMIT_SCAN_LIMIT);
+        assert_eq!(inventory.payloads[0].label, "commit 200");
+        assert_eq!(inventory.payloads.last().unwrap().label, "commit 1");
+        assert!(!inventory.payloads.iter().any(|row| row.label == "commit 0"));
+    }
+
+    #[test]
+    fn commit_inventory_skips_unusable_checkouts_and_bug_stays_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let not_git = temp.path().join("not-git");
+        let empty_git = temp.path().join("empty-git");
+        let populated_git = temp.path().join("populated-git");
+        fs::create_dir_all(&not_git).unwrap();
+        init_git_repo(&empty_git);
+        init_git_repo(&populated_git);
+        commit_at(&populated_git, 1_700_000_000, "hidden second path", "");
+        let context = ArtifactRefContextWire {
+            repositories: vec![
+                repository("missing", &missing),
+                repository("not-git", &not_git),
+                repository("empty-git", &empty_git),
+                repository("bad@repo", &populated_git),
+                ArtifactRefRepositoryWire {
+                    name: "first-only".to_string(),
+                    checkout_paths: vec![
+                        missing.to_string_lossy().into_owned(),
+                        populated_git.to_string_lossy().into_owned(),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(build_artifact_ref_payload_inventory("commit", &context)
+            .payloads
+            .is_empty());
+        assert_eq!(
+            build_artifact_ref_payload_inventory("bug", &context),
+            AtReferenceInventoryWire::default()
+        );
+    }
+
+    #[test]
+    fn commit_inventory_reports_the_merged_row_cap() {
+        let commits = (0..ARTIFACT_REF_COMMIT_MAX_ROWS + 3)
+            .map(|index| CommitCandidate {
+                repository: "sase".to_string(),
+                abbreviated_sha: format!("{index:012x}"),
+                timestamp: 10_000 - index as i64,
+                subject: format!("commit {index}"),
+                body: String::new(),
+            })
+            .collect();
+        let mut payloads = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        let truncated = append_ranked_commit_candidates(
+            &mut payloads,
+            &mut seen,
+            commits,
+            10_000,
+        );
+
+        assert_eq!(payloads.len(), ARTIFACT_REF_COMMIT_MAX_ROWS);
+        assert_eq!(truncated, 3);
+        assert_eq!(payloads.last().unwrap().rank, Some(999));
+    }
+
+    #[test]
+    fn commit_merge_ties_break_by_repository_then_sha() {
+        let mut commits = vec![
+            CommitCandidate {
+                repository: "zeta".to_string(),
+                abbreviated_sha: "000000000001".to_string(),
+                timestamp: 100,
+                subject: String::new(),
+                body: String::new(),
+            },
+            CommitCandidate {
+                repository: "alpha".to_string(),
+                abbreviated_sha: "000000000002".to_string(),
+                timestamp: 100,
+                subject: String::new(),
+                body: String::new(),
+            },
+            CommitCandidate {
+                repository: "alpha".to_string(),
+                abbreviated_sha: "000000000001".to_string(),
+                timestamp: 100,
+                subject: String::new(),
+                body: String::new(),
+            },
+            CommitCandidate {
+                repository: "zeta".to_string(),
+                abbreviated_sha: "000000000002".to_string(),
+                timestamp: 200,
+                subject: String::new(),
+                body: String::new(),
+            },
+        ];
+
+        sort_commit_candidates(&mut commits);
+
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| {
+                    format!("{}@{}", commit.repository, commit.abbreviated_sha)
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                "zeta@000000000002",
+                "alpha@000000000001",
+                "alpha@000000000002",
+                "zeta@000000000001",
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_age_labels_match_prompt_bar_thresholds() {
+        let now = 1_700_000_000;
+        assert_eq!(commit_age_label(0, now), "");
+        assert_eq!(commit_age_label(now + 1, now), "now");
+        assert_eq!(commit_age_label(now - 59, now), "now");
+        assert_eq!(commit_age_label(now - 60, now), "1m");
+        assert_eq!(commit_age_label(now - 3_600, now), "1h");
+        assert_eq!(commit_age_label(now - 86_400, now), "1d");
+        assert_eq!(commit_age_label(now - 7 * 86_400, now), "2023-11-07");
     }
 
     #[test]
