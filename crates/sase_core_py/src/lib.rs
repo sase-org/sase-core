@@ -193,6 +193,7 @@
 //! - `at_reference_context(text: str, line: int, character: int, known_kinds:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `AtReferenceInventory(payloads: Sequence[dict])`
+//! - `artifact_ref_payload_inventory(kind: str, context: dict) -> dict`
 //! - `at_reference_menu(context: dict, inventory: dict, payload_index:
 //!   AtReferenceInventory | None = None, options: dict | None = None) -> dict`
 //! - `fuzzy_match(query: str, text: str) -> dict | None`
@@ -5562,6 +5563,23 @@ fn py_at_reference_menu(
     json_value_to_py(py, &value)
 }
 
+/// Return the shared artifact-reference payload inventory for one kind.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_payload_inventory")]
+fn py_artifact_ref_payload_inventory(
+    py: Python<'_>,
+    kind: &str,
+    context: Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let context = artifact_ref_context_from_pydict(&context)?;
+    let inventory =
+        sase_core::editor_build_artifact_ref_payload_inventory(kind, &context);
+    let value = serde_json::to_value(&inventory).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Fuzzy-match a query against text using the shared editor matcher.
 #[pyfunction]
 #[pyo3(name = "fuzzy_match")]
@@ -7261,6 +7279,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_class::<PyAtReferenceInventory>()?;
     m.add_function(wrap_pyfunction!(py_at_reference_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_payload_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_at_reference_menu, m)?)?;
     m.add_function(wrap_pyfunction!(py_fuzzy_match, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
@@ -7355,6 +7374,8 @@ mod tests {
     use sase_core::bead::IssueTypeWire;
     use serde_json::json;
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
 
     fn append_json<'py>(
         py: Python<'py>,
@@ -7362,6 +7383,60 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn init_git_repo(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.name", "Binding Test"]);
+        git(repo, &["config", "user.email", "binding@example.com"]);
+        git(repo, &["config", "core.abbrev", "7"]);
+    }
+
+    fn commit_at(
+        repo: &Path,
+        timestamp: i64,
+        subject: &str,
+        body: &str,
+    ) -> String {
+        let date = format!("{timestamp} +0000");
+        let mut command = Command::new("git");
+        command.arg("-C").arg(repo).args([
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            subject,
+        ]);
+        if !body.is_empty() {
+            command.args(["-m", body]);
+        }
+        let output = command
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        git(repo, &["rev-parse", "HEAD"])
     }
 
     #[test]
@@ -9808,6 +9883,74 @@ mod tests {
                 .call1(("missing", "text"))
                 .unwrap();
             assert!(no_match.is_none());
+        });
+    }
+
+    #[test]
+    fn artifact_ref_payload_inventory_binding_returns_plain_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        let sha = commit_at(
+            &repo,
+            1_700_000_000,
+            "binding inventory subject",
+            "body line\nsecond line",
+        );
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_artifact_ref_payload_inventory,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+
+            let context = json_value_to_py(
+                py,
+                &json!({
+                    "repositories": [{
+                        "name": "sase-core",
+                        "checkout_paths": [repo.to_string_lossy()],
+                    }],
+                }),
+            )
+            .unwrap();
+            let inventory = module
+                .getattr("artifact_ref_payload_inventory")
+                .unwrap()
+                .call1(("commit", context.bind(py)))
+                .unwrap();
+            let inventory = py_to_json_value(&inventory).unwrap();
+
+            assert_eq!(inventory["truncated_payloads"], json!(0));
+            assert_eq!(inventory["payloads"].as_array().unwrap().len(), 1);
+            let row = &inventory["payloads"][0];
+            assert_eq!(
+                row["payload"],
+                json!(format!("sase-core@{}", &sha[..12]))
+            );
+            assert_eq!(row["label"], json!("binding inventory subject"));
+            assert_eq!(row["detail"], json!(""));
+            assert!(row["age"].as_str().is_some());
+            assert_eq!(row["scope"], json!("sase-core"));
+            assert_eq!(row["rank"], json!(0));
+            assert_eq!(row["body"], json!("body line\nsecond line"));
+
+            let bad_context =
+                json_value_to_py(py, &json!({"repositories": "invalid"}))
+                    .unwrap();
+            let error = module
+                .getattr("artifact_ref_payload_inventory")
+                .unwrap()
+                .call1(("commit", bad_context.bind(py)))
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 
