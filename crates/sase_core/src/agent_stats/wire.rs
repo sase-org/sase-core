@@ -73,15 +73,13 @@ pub struct AgentRunStatsRequestWire {
 /// Query controls for durable activity-log and plan statistics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentActivityStatsRequestWire {
-    /// Inclusive Unix event/launch timestamp.
+    /// Inclusive Unix event timestamp.
     pub start_ts: i64,
-    /// Exclusive Unix event/launch timestamp.
+    /// Exclusive Unix event timestamp.
     pub end_ts: i64,
     #[serde(default = "default_top_n")]
     pub top_n: u32,
-    /// Exact project directory name used to scope skills and memories.
-    /// Question sessions and plan-document aggregates are intentionally
-    /// global because their durable files are not project-scoped.
+    /// Exact project directory name used to scope all durable activity.
     #[serde(default)]
     pub project: Option<String>,
 }
@@ -160,7 +158,10 @@ pub struct AgentCommitStatsWire {
     pub top_repos: Vec<AgentStatsCountWire>,
 }
 
-/// Plan-proposal lifecycle signals available directly in run metadata.
+/// Index-derived plan signals retained for wire compatibility.
+///
+/// These fields under-count handed-off planner agents and must not be used for
+/// user-facing totals. Use [`AgentPlanActivityStatsWire`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPlanStatsWire {
     /// Number of entries across all `plan_submitted_at` lists.
@@ -174,7 +175,10 @@ pub struct AgentPlanStatsWire {
     pub actions: Vec<AgentStatsCountWire>,
 }
 
-/// Question-session signals available directly in run metadata.
+/// Index-derived question signals retained for wire compatibility.
+///
+/// These fields can diverge from the durable gate store and must not be used
+/// for user-facing totals. Use [`AgentQuestionActivityStatsWire`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentQuestionStatsWire {
     /// Number of entries across all `questions_submitted_at` lists.
@@ -396,15 +400,20 @@ pub struct AgentRunStatsResponseWire {
     pub malformed_rows_skipped: u64,
 }
 
-/// Plan-file statistics for runs that submitted plans in the selected window.
+/// Durable plan-gate statistics for proposals submitted in the selected window.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentPlanActivityStatsWire {
-    /// Number of entries across all in-window `plan_submitted_at` lists.
+    /// Number of in-window plan and epic-plan gate bundles.
     pub proposed: u64,
+    /// Number of distinct producing agents across those bundles.
+    #[serde(default)]
+    pub proposing_agents: u64,
     #[serde(default)]
     pub tiers: Vec<AgentStatsCountWire>,
     pub approved: u64,
     pub rejected: u64,
+    #[serde(default)]
+    pub feedback: u64,
     pub pending: u64,
     #[serde(default)]
     pub phases_per_epic: Vec<AgentStatsDistributionWire>,
@@ -415,18 +424,24 @@ pub struct AgentPlanActivityStatsWire {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentQuestionActivityStatsWire {
     pub sessions: u64,
+    /// Number of distinct producing agents across those sessions.
+    #[serde(default)]
+    pub asking_agents: u64,
     pub questions: u64,
     #[serde(default)]
     pub questions_per_session: Vec<AgentStatsDistributionWire>,
     pub mean_questions_per_session: f64,
 }
 
-/// Everything backed by durable activity logs, question requests, and plans.
+/// Everything backed by durable activity logs and notification-gate bundles.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentActivityStatsResponseWire {
     pub schema_version: u32,
     pub start_ts: i64,
     pub end_ts: i64,
+    /// Earliest valid plan, epic-plan, or question gate timestamp observed.
+    #[serde(default)]
+    pub coverage_start_ts: Option<f64>,
     #[serde(default)]
     pub skills: Vec<AgentActivityCountWire>,
     #[serde(default)]
@@ -435,12 +450,10 @@ pub struct AgentActivityStatsResponseWire {
     pub questions: AgentQuestionActivityStatsWire,
     /// Invalid JSONL rows across the skill and memory logs.
     pub malformed_log_lines_skipped: u64,
-    /// Invalid question request files or request payloads.
+    /// Missing or malformed durable question-gate bundles.
     pub malformed_question_files_skipped: u64,
-    /// In-window index rows whose cached `record_json` could not be decoded.
+    /// Missing or malformed durable plan-gate bundles.
     pub malformed_rows_skipped: u64,
-    /// Plan proposals whose referenced or mirrored markdown could not be read.
-    pub unresolved_plan_files: u64,
 }
 
 #[cfg(test)]

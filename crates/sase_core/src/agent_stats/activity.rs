@@ -2,16 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use chrono::NaiveDateTime;
-use rusqlite::{Connection, OpenFlags};
 use serde_json::Value as JsonValue;
-use serde_yaml::Value as YamlValue;
 
-use crate::agent_scan::AgentArtifactRecordWire;
-use crate::plan::read::split_frontmatter;
-
+use super::gate_bundles::{
+    read_gate_bundles, GateBundle, GateKind, GateOutcome,
+};
 use super::run::parse_timestamp;
 use super::wire::{
     AgentActivityCountWire, AgentActivityStatsRequestWire,
@@ -20,7 +16,6 @@ use super::wire::{
     AgentStatsDistributionWire, AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 
-const INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const UNKNOWN: &str = "unknown";
 
 #[derive(Debug, Default)]
@@ -29,26 +24,13 @@ struct ActivityAccumulator {
     agents: BTreeSet<String>,
 }
 
-#[derive(Debug)]
-struct ActivityIndexRow {
-    timestamp: String,
-    started_at: Option<String>,
-    record_json: String,
-}
-
-#[derive(Debug)]
-struct PlanDocumentStats {
-    tier: String,
-    phase_count: u64,
-}
-
 /// Aggregate durable skill, memory, question-session, and plan activity.
 ///
 /// Missing files and directories are treated as empty inputs. Malformed log
-/// lines, request files, and cached artifact rows are skipped independently so
-/// one damaged durable record never prevents the rest of the snapshot.
+/// lines and gate bundles are skipped independently so one damaged durable
+/// record never prevents the rest of the snapshot.
 pub fn query_activity_stats(
-    index_path: &Path,
+    _index_path: &Path,
     sase_home: &Path,
     request: AgentActivityStatsRequestWire,
 ) -> Result<AgentActivityStatsResponseWire, String> {
@@ -84,18 +66,36 @@ pub fn query_activity_stats(
     );
     response.malformed_log_lines_skipped = malformed_logs;
 
-    response.questions = scan_question_sessions(
+    let question_scan = read_gate_bundles(
         sase_home,
-        &request,
+        GateKind::Question,
         &mut response.malformed_question_files_skipped,
     );
-    response.plans = scan_plan_activity(
-        index_path,
+    let plan_scan = read_gate_bundles(
         sase_home,
-        &request,
+        GateKind::Plan,
         &mut response.malformed_rows_skipped,
-        &mut response.unresolved_plan_files,
-    )?;
+    );
+    let epic_plan_scan = read_gate_bundles(
+        sase_home,
+        GateKind::EpicPlan,
+        &mut response.malformed_rows_skipped,
+    );
+    response.coverage_start_ts = [
+        question_scan.coverage_start_ts,
+        plan_scan.coverage_start_ts,
+        epic_plan_scan.coverage_start_ts,
+    ]
+    .into_iter()
+    .flatten()
+    .min_by(f64::total_cmp);
+    response.questions =
+        scan_question_sessions(&question_scan.bundles, &request);
+    response.plans = scan_plan_activity(
+        &plan_scan.bundles,
+        &epic_plan_scan.bundles,
+        &request,
+    );
     Ok(response)
 }
 
@@ -195,52 +195,27 @@ fn finish_activity_counts(
 }
 
 fn scan_question_sessions(
-    sase_home: &Path,
+    bundles: &[GateBundle],
     request: &AgentActivityStatsRequestWire,
-    malformed: &mut u64,
 ) -> AgentQuestionActivityStatsWire {
     let mut result = AgentQuestionActivityStatsWire::default();
     let mut distribution = BTreeMap::<u64, u64>::new();
-    for session_dir in sorted_subdirs(&sase_home.join("user_question")) {
-        let path = session_dir.join("question_request.json");
-        if !path.is_file() {
+    let mut asking_agents = BTreeSet::<&str>::new();
+    for bundle in bundles {
+        if !matches_project(bundle, request) {
             continue;
         }
-        let Ok(content) = fs::read_to_string(path) else {
-            *malformed += 1;
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<JsonValue>(&content) else {
-            *malformed += 1;
-            continue;
-        };
-        let payload = value.get("payload").unwrap_or(&value);
-        let timestamp = payload
-            .get("timestamp")
-            .and_then(json_timestamp)
-            .or_else(|| value.get("created_at_unix").and_then(json_timestamp))
-            .or_else(|| value.get("created_at").and_then(json_timestamp));
-        let Some(timestamp) = timestamp.filter(|value| value.is_finite())
-        else {
-            *malformed += 1;
-            continue;
-        };
-        let Some(questions) = payload
-            .get("questions")
-            .and_then(JsonValue::as_array)
-            .filter(|values| !values.is_empty())
-        else {
-            *malformed += 1;
-            continue;
-        };
-        if !in_window(timestamp, request) {
+        if !in_window(bundle.timestamp, request) {
             continue;
         }
-        let question_count = questions.len() as u64;
         result.sessions += 1;
-        result.questions += question_count;
-        *distribution.entry(question_count).or_default() += 1;
+        result.questions += bundle.questions;
+        *distribution.entry(bundle.questions).or_default() += 1;
+        if let Some(agent) = bundle.producer_agent.as_deref() {
+            asking_agents.insert(agent);
+        }
     }
+    result.asking_agents = asking_agents.len() as u64;
     result.questions_per_session = finish_distribution(distribution);
     result.mean_questions_per_session = if result.sessions == 0 {
         0.0
@@ -251,107 +226,54 @@ fn scan_question_sessions(
 }
 
 fn scan_plan_activity(
-    index_path: &Path,
-    sase_home: &Path,
+    plan_bundles: &[GateBundle],
+    epic_plan_bundles: &[GateBundle],
     request: &AgentActivityStatsRequestWire,
-    malformed_rows: &mut u64,
-    unresolved_plans: &mut u64,
-) -> Result<AgentPlanActivityStatsWire, String> {
-    let conn = Connection::open_with_flags(
-        index_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| {
-        format!(
-            "failed to open agent artifact index {}: {error}",
-            index_path.display()
-        )
-    })?;
-    conn.busy_timeout(INDEX_BUSY_TIMEOUT)
-        .map_err(|error| error.to_string())?;
-    let mut statement = conn
-        .prepare(
-            r#"
-            SELECT timestamp, started_at, record_json
-            FROM agent_artifacts
-            WHERE hidden = 0
-            ORDER BY timestamp ASC
-            "#,
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(ActivityIndexRow {
-                timestamp: row.get(0)?,
-                started_at: row.get(1)?,
-                record_json: row.get(2)?,
-            })
-        })
-        .map_err(|error| error.to_string())?;
-
+) -> AgentPlanActivityStatsWire {
     let mut result = AgentPlanActivityStatsWire::default();
     let mut tiers = BTreeMap::<String, u64>::new();
     let mut phase_distribution = BTreeMap::<u64, u64>::new();
+    let mut proposing_agents = BTreeSet::<&str>::new();
     let mut epic_proposals = 0u64;
     let mut epic_phases = 0u64;
-    for row in rows {
-        let row = row.map_err(|error| error.to_string())?;
-        let launch_ts = row
-            .started_at
-            .as_deref()
-            .and_then(parse_timestamp)
-            .or_else(|| parse_artifact_timestamp(&row.timestamp));
-        let Some(launch_ts) = launch_ts else {
-            continue;
-        };
-        if !in_window(launch_ts, request) {
-            continue;
-        }
-        let Ok(record) =
-            serde_json::from_str::<AgentArtifactRecordWire>(&row.record_json)
-        else {
-            *malformed_rows += 1;
-            continue;
-        };
-        let Some(meta) = record.agent_meta.as_ref() else {
-            continue;
-        };
-        let proposed = meta.plan_submitted_at.len() as u64;
-        if proposed == 0 {
-            continue;
-        }
-        result.proposed += proposed;
-        if meta.plan_approved {
-            result.approved += proposed;
-        } else if record
-            .done
-            .as_ref()
-            .and_then(|done| done.outcome.as_deref())
-            == Some("plan_rejected")
-            || matches!(
-                meta.plan_action.as_deref(),
-                Some("reject" | "rejected")
-            )
+    for (bundle, is_epic_plan) in plan_bundles
+        .iter()
+        .map(|bundle| (bundle, false))
+        .chain(epic_plan_bundles.iter().map(|bundle| (bundle, true)))
+    {
+        if !matches_project(bundle, request)
+            || !in_window(bundle.timestamp, request)
         {
-            result.rejected += proposed;
-        } else {
-            result.pending += proposed;
-        }
-
-        let stats = resolve_plan_document_stats(&record, sase_home);
-        let Some(stats) = stats else {
-            *unresolved_plans += proposed;
-            *tiers.entry(UNKNOWN.to_string()).or_default() += proposed;
             continue;
-        };
-        *tiers.entry(stats.tier.clone()).or_default() += proposed;
-        if stats.tier == "epic" {
-            epic_proposals += proposed;
-            epic_phases += stats.phase_count * proposed;
-            *phase_distribution.entry(stats.phase_count).or_default() +=
-                proposed;
+        }
+        result.proposed += 1;
+        match bundle.outcome {
+            GateOutcome::Approved => result.approved += 1,
+            GateOutcome::Rejected => result.rejected += 1,
+            GateOutcome::Feedback => result.feedback += 1,
+            GateOutcome::Pending => result.pending += 1,
+        }
+        if let Some(agent) = bundle.producer_agent.as_deref() {
+            proposing_agents.insert(agent);
+        }
+        *tiers
+            .entry(
+                bundle
+                    .authored_tier
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN.to_string()),
+            )
+            .or_default() += 1;
+        if is_epic_plan {
+            let Some(phase_count) = bundle.phase_count else {
+                continue;
+            };
+            epic_proposals += 1;
+            epic_phases += phase_count;
+            *phase_distribution.entry(phase_count).or_default() += 1;
         }
     }
+    result.proposing_agents = proposing_agents.len() as u64;
     result.tiers = ranked_counts(tiers);
     result.phases_per_epic = finish_distribution(phase_distribution);
     result.mean_phases_per_epic = if epic_proposals == 0 {
@@ -359,129 +281,16 @@ fn scan_plan_activity(
     } else {
         epic_phases as f64 / epic_proposals as f64
     };
-    Ok(result)
+    result
 }
 
-fn resolve_plan_document_stats(
-    record: &AgentArtifactRecordWire,
-    sase_home: &Path,
-) -> Option<PlanDocumentStats> {
-    let meta = record.agent_meta.as_ref()?;
-    let mut references = Vec::<&str>::new();
-    for value in [
-        meta.sdd_plan_path.as_deref(),
-        meta.plan_path.as_deref(),
-        record
-            .plan_path
-            .as_ref()
-            .and_then(|marker| marker.plan_path.as_deref()),
-        record
-            .done
-            .as_ref()
-            .and_then(|done| done.plan_path.as_deref()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let value = value.trim();
-        if !value.is_empty() && !references.contains(&value) {
-            references.push(value);
-        }
-    }
-
-    let mut candidates = Vec::<PathBuf>::new();
-    for reference in &references {
-        let path = expand_home_reference(reference, sase_home);
-        if path.is_absolute() {
-            push_unique(&mut candidates, path);
-        } else if let Some(workspace_dir) = meta.workspace_dir.as_deref() {
-            push_unique(&mut candidates, Path::new(workspace_dir).join(&path));
-        }
-    }
-
-    let mirror_root = sase_home.join("plans");
-    for reference in &references {
-        let Some(filename) = Path::new(reference).file_name() else {
-            continue;
-        };
-        for month in plan_month_candidates(reference, &meta.plan_submitted_at) {
-            push_unique(
-                &mut candidates,
-                mirror_root.join(month).join(filename),
-            );
-        }
-        push_unique(&mut candidates, mirror_root.join(filename));
-        for shard in sorted_subdirs(&mirror_root) {
-            push_unique(&mut candidates, shard.join(filename));
-        }
-    }
-
-    candidates
-        .into_iter()
-        .find_map(|path| read_plan_document_stats(&path))
-}
-
-fn read_plan_document_stats(path: &Path) -> Option<PlanDocumentStats> {
-    let content = fs::read_to_string(path).ok()?;
-    let (frontmatter, _) = split_frontmatter(&content);
-    let parsed = frontmatter
-        .as_deref()
-        .and_then(|value| serde_yaml::from_str::<YamlValue>(value).ok());
-    let mapping = parsed.as_ref().and_then(YamlValue::as_mapping);
-    let tier = mapping
-        .and_then(|value| value.get(YamlValue::String("tier".to_string())))
-        .and_then(YamlValue::as_str)
-        .map(str::trim)
-        .map(str::to_lowercase)
-        .filter(|value| matches!(value.as_str(), "tale" | "epic"))
-        .unwrap_or_else(|| UNKNOWN.to_string());
-    let phase_count = mapping
-        .and_then(|value| value.get(YamlValue::String("phases".to_string())))
-        .and_then(YamlValue::as_sequence)
-        .map(|values| values.len() as u64)
-        .unwrap_or(0);
-    Some(PlanDocumentStats { tier, phase_count })
-}
-
-fn plan_month_candidates(reference: &str, submitted: &[String]) -> Vec<String> {
-    let mut months = BTreeSet::<String>::new();
-    if let Some(parent) = Path::new(reference)
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str())
-        .filter(|value| is_month_shard(value))
-    {
-        months.insert(parent.to_string());
-    }
-    for value in submitted {
-        if value.len() >= 7 {
-            let prefix = &value[..7];
-            if prefix.as_bytes().get(4) == Some(&b'-') {
-                let month = prefix.replace('-', "");
-                if is_month_shard(&month) {
-                    months.insert(month);
-                }
-            }
-        }
-    }
-    months.into_iter().collect()
-}
-
-fn is_month_shard(value: &str) -> bool {
-    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn expand_home_reference(reference: &str, sase_home: &Path) -> PathBuf {
-    let path = Path::new(reference);
-    let Some(suffix) = reference.strip_prefix("~/") else {
-        return path.to_path_buf();
-    };
-    sase_home.parent().unwrap_or(sase_home).join(suffix)
-}
-
-fn push_unique(values: &mut Vec<PathBuf>, value: PathBuf) {
-    if !values.contains(&value) {
-        values.push(value);
+fn matches_project(
+    bundle: &GateBundle,
+    request: &AgentActivityStatsRequestWire,
+) -> bool {
+    match request.project.as_deref() {
+        Some(project) => bundle.project_key.as_deref() == Some(project),
+        None => true,
     }
 }
 
@@ -525,11 +334,6 @@ fn json_timestamp(value: &JsonValue) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(parse_timestamp))
-}
-
-fn parse_artifact_timestamp(value: &str) -> Option<f64> {
-    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
-    Some(parsed.and_utc().timestamp() as f64)
 }
 
 fn in_window(timestamp: f64, request: &AgentActivityStatsRequestWire) -> bool {
@@ -581,6 +385,74 @@ mod tests {
         dir
     }
 
+    fn add_gate(
+        home: &Path,
+        kind: &str,
+        request_id: &str,
+        request: JsonValue,
+        plan: Option<&str>,
+        response: Option<JsonValue>,
+    ) -> PathBuf {
+        let dir = home
+            .join("interaction_requests")
+            .join(kind)
+            .join(request_id);
+        write_json(&dir.join("request.json"), request);
+        if let Some(plan) = plan {
+            write(&dir.join("plan.md"), plan);
+        }
+        if let Some(response) = response {
+            write_json(&dir.join("response.json"), response);
+        }
+        dir
+    }
+
+    fn plan_request(
+        request_id: &str,
+        timestamp: f64,
+        tier: &str,
+        agent: &str,
+        project: &str,
+    ) -> JsonValue {
+        json!({
+            "request_id": request_id,
+            "producer": {
+                "agent_name": agent,
+                "artifacts_dir": format!(
+                    "/tmp/.sase/projects/{project}/artifacts/ace-run/one"
+                )
+            },
+            "payload": {
+                "timestamp": timestamp,
+                "authored_tier": tier
+            }
+        })
+    }
+
+    fn question_request(
+        request_id: &str,
+        timestamp: f64,
+        agent: &str,
+        project: &str,
+        questions: usize,
+    ) -> JsonValue {
+        json!({
+            "request_id": request_id,
+            "producer": {
+                "agent_name": agent,
+                "artifacts_dir": format!(
+                    "/tmp/.sase/projects/{project}/artifacts/ace-run/one"
+                )
+            },
+            "payload": {
+                "timestamp": timestamp,
+                "questions": (0..questions)
+                    .map(|index| json!({"question": index.to_string()}))
+                    .collect::<Vec<_>>()
+            }
+        })
+    }
+
     fn request() -> AgentActivityStatsRequestWire {
         AgentActivityStatsRequestWire {
             start_ts: 100,
@@ -590,8 +462,12 @@ mod tests {
         }
     }
 
+    const TALE_PLAN: &str = "---\ntier: tale\n---\n# Tale\n";
+    const EPIC_PLAN: &str =
+        "---\ntier: epic\nphases:\n  - id: one\n  - id: two\n---\n# Epic\n";
+
     #[test]
-    fn aggregates_logs_questions_and_plan_documents() {
+    fn aggregates_logs_and_project_scoped_gate_bundles() {
         let tmp = tempdir().unwrap();
         let home = tmp.path().join(".sase");
         let projects = home.join("projects");
@@ -600,192 +476,199 @@ mod tests {
             concat!(
                 "{\"timestamp\":\"100\",\"skill_name\":\"review\",\"agent_name\":\"a\"}\n",
                 "{\"timestamp\":\"120\",\"skill_name\":\"review\",\"agent_name\":\"b\"}\n",
-                "{\"timestamp\":\"125\",\"skill_name\":\"build\",\"agent_name\":\"a\"}\n",
-                "{\"timestamp\":\"99\",\"skill_name\":\"outside\",\"agent_name\":\"a\"}\n",
                 "not json\n"
             ),
         );
         write(
             &projects.join("beta/memory_reads.jsonl"),
             concat!(
-                "{\"timestamp\":\"1970-01-01T00:02:30Z\",\"canonical_path\":\"sase/memory/a.md\",\"agent_name\":\"a\"}\n",
-                "{\"timestamp\":\"151\",\"canonical_path\":\"sase/memory/a.md\",\"agent_name\":\"a\"}\n",
-                "{\"timestamp\":\"152\",\"canonical_path\":\"sase/memory/b.md\",\"agent_name\":\"b\"}\n"
+                "{\"timestamp\":\"150\",\"canonical_path\":\"sase/memory/a.md\",\"agent_name\":\"a\"}\n",
+                "{\"timestamp\":\"151\",\"canonical_path\":\"sase/memory/a.md\",\"agent_name\":\"a\"}\n"
             ),
         );
 
-        write_json(
-            &home.join("user_question/one/question_request.json"),
-            json!({"timestamp": 110.0, "questions": [{"question": "one"}]}),
+        add_gate(
+            &home,
+            "plan",
+            "plan-one",
+            plan_request("plan-one", 110.0, "tale", "planner-a", "alpha"),
+            Some(TALE_PLAN),
+            Some(json!({"selected_option_ids": ["approve", "commit"]})),
         );
-        write_json(
-            &home.join("user_question/two/question_request.json"),
-            json!({
-                "created_at_unix": 130.0,
-                "payload": {
-                    "questions": [{"question": "one"}, {"question": "two"}]
-                }
-            }),
+        add_gate(
+            &home,
+            "epic_plan",
+            "epic-one",
+            plan_request("epic-one", 120.0, "epic", "planner-b", "alpha"),
+            Some(EPIC_PLAN),
+            Some(json!({"choice_id": "reject"})),
         );
-        write(&home.join("user_question/bad/question_request.json"), "{");
-
-        let epic = tmp.path().join("plans/epic.md");
-        write(
-            &epic,
-            "---\ntier: epic\nphases:\n- id: one\n- id: two\n---\n# Epic\n",
-        );
-        let tale = tmp.path().join("plans/tale.md");
-        write(&tale, "---\ntier: tale\n---\n# Tale\n");
-        add_run(
-            &projects,
-            "19700101000140",
-            json!({
-                "name": "planner-one",
-                "run_started_at": "100",
-                "sdd_plan_path": epic,
-                "plan_submitted_at": ["1970-01-01T00:01:40Z", "1970-01-01T00:01:41Z"],
-                "plan_approved": true
-            }),
-            Some(json!({"outcome": "completed", "finished_at": 105.0})),
-        );
-        add_run(
-            &projects,
-            "19700101000200",
-            json!({
-                "name": "planner-two",
-                "run_started_at": "120",
-                "plan_path": tale,
-                "plan_submitted_at": ["1970-01-01T00:02:00Z"],
-                "plan_action": "reject"
-            }),
-            Some(json!({"outcome": "plan_rejected", "finished_at": 125.0})),
-        );
-        add_run(
-            &projects,
-            "19700101000220",
-            json!({
-                "name": "planner-three",
-                "run_started_at": "140",
-                "plan_path": tmp.path().join("missing.md"),
-                "plan_submitted_at": ["1970-01-01T00:02:20Z"]
-            }),
+        add_gate(
+            &home,
+            "question",
+            "question-one",
+            question_request("question-one", 130.0, "asker-a", "alpha", 2),
+            None,
             None,
         );
-        add_run(
-            &projects,
-            "19700101000050",
-            json!({
-                "name": "outside",
-                "run_started_at": "50",
-                "sdd_plan_path": epic,
-                "plan_submitted_at": ["1970-01-01T00:00:50Z"]
-            }),
-            None,
-        );
-
-        let index = tmp.path().join("agent_artifact_index.sqlite");
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        let malformed = add_run(
-            &projects,
-            "19700101000240",
-            json!({"name": "bad", "run_started_at": "160"}),
-            None,
-        );
-        rebuild_agent_artifact_index(
-            &index,
-            &projects,
-            AgentArtifactScanOptionsWire::default(),
-        )
-        .unwrap();
-        Connection::open(&index)
+        let mut legacy_producer =
+            question_request("question-two", 140.0, "ignored", "beta", 1);
+        legacy_producer["producer"]
+            .as_object_mut()
             .unwrap()
-            .execute(
-                "UPDATE agent_artifacts SET record_json = '{' WHERE artifact_dir = ?1",
-                params![malformed.to_string_lossy().as_ref()],
-            )
-            .unwrap();
-
-        let result = query_activity_stats(&index, &home, request()).unwrap();
-        assert_eq!(
-            result
-                .skills
-                .iter()
-                .map(|value| (
-                    value.name.as_str(),
-                    value.count,
-                    value.distinct_agents
-                ))
-                .collect::<Vec<_>>(),
-            vec![("review", 2, 2), ("build", 1, 1)]
+            .remove("agent_name");
+        legacy_producer["producer"]["agent"] = json!("asker-b");
+        add_gate(
+            &home,
+            "question",
+            "question-two",
+            legacy_producer,
+            None,
+            None,
         );
-        assert_eq!(result.memories[0].name, "sase/memory/a.md");
+
+        let result =
+            query_activity_stats(Path::new("/unused/index"), &home, request())
+                .unwrap();
+        assert_eq!(result.coverage_start_ts, Some(110.0));
+        assert_eq!(result.skills[0].count, 2);
+        assert_eq!(result.skills[0].distinct_agents, 2);
         assert_eq!(result.memories[0].count, 2);
         assert_eq!(result.malformed_log_lines_skipped, 1);
-        assert_eq!(result.questions.sessions, 2);
-        assert_eq!(result.questions.questions, 3);
-        assert_eq!(result.questions.mean_questions_per_session, 1.5);
-        assert_eq!(
-            result.questions.questions_per_session,
-            vec![
-                AgentStatsDistributionWire { value: 1, count: 1 },
-                AgentStatsDistributionWire { value: 2, count: 1 },
-            ]
-        );
-        assert_eq!(result.malformed_question_files_skipped, 1);
-        assert_eq!(result.plans.proposed, 4);
+        assert_eq!(result.plans.proposed, 2);
+        assert_eq!(result.plans.proposing_agents, 2);
+        assert_eq!(result.plans.approved, 1);
+        assert_eq!(result.plans.rejected, 1);
+        assert_eq!(result.plans.feedback, 0);
+        assert_eq!(result.plans.pending, 0);
         assert_eq!(
             result
                 .plans
                 .tiers
                 .iter()
-                .map(|value| (value.name.as_str(), value.count))
+                .map(|row| (row.name.as_str(), row.count))
                 .collect::<Vec<_>>(),
-            vec![("epic", 2), ("tale", 1), ("unknown", 1)]
+            vec![("epic", 1), ("tale", 1)]
         );
-        assert_eq!(result.plans.approved, 2);
-        assert_eq!(result.plans.rejected, 1);
-        assert_eq!(result.plans.pending, 1);
         assert_eq!(
             result.plans.phases_per_epic,
-            vec![AgentStatsDistributionWire { value: 2, count: 2 }]
+            vec![AgentStatsDistributionWire { value: 2, count: 1 }]
         );
         assert_eq!(result.plans.mean_phases_per_epic, 2.0);
-        assert_eq!(result.unresolved_plan_files, 1);
-        assert_eq!(result.malformed_rows_skipped, 1);
+        assert_eq!(result.questions.sessions, 2);
+        assert_eq!(result.questions.asking_agents, 2);
+        assert_eq!(result.questions.questions, 3);
+        assert_eq!(result.questions.mean_questions_per_session, 1.5);
 
         let mut filtered_request = request();
         filtered_request.project = Some("alpha".to_string());
-        let filtered =
-            query_activity_stats(&index, &home, filtered_request).unwrap();
-        assert_eq!(filtered.skills.len(), 2);
+        let filtered = query_activity_stats(
+            Path::new("/still/unused"),
+            &home,
+            filtered_request,
+        )
+        .unwrap();
+        assert_eq!(filtered.plans.proposed, 2);
+        assert_eq!(filtered.questions.sessions, 1);
+        assert_eq!(filtered.questions.questions, 2);
         assert!(filtered.memories.is_empty());
-        assert_eq!(filtered.questions.sessions, 2);
-        assert_eq!(filtered.plans.proposed, 4);
     }
 
     #[test]
-    fn resolves_missing_primary_plan_from_local_month_mirror() {
+    fn maps_both_response_shapes_and_pending_plan_bundles() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join(".sase");
+        let fixtures = [
+            (
+                "selected-approved",
+                Some(json!({"selected_option_ids": ["commit"]})),
+            ),
+            (
+                "selected-rejected",
+                Some(json!({"selected_option_ids": ["reject"]})),
+            ),
+            (
+                "selected-feedback",
+                Some(json!({"selected_option_ids": ["feedback"]})),
+            ),
+            (
+                "choice-approved",
+                Some(json!({
+                    "selected_option_ids": [],
+                    "choice_id": "approve"
+                })),
+            ),
+            ("choice-rejected", Some(json!({"choice_id": "reject"}))),
+            ("choice-feedback", Some(json!({"choice_id": "feedback"}))),
+            ("legacy-tale", Some(json!({"choice_id": "tale"}))),
+            ("legacy-epic", Some(json!({"choice_id": "epic"}))),
+            ("pending-one", None),
+            ("pending-two", None),
+        ];
+        for (index, (request_id, response)) in fixtures.into_iter().enumerate()
+        {
+            add_gate(
+                &home,
+                "plan",
+                request_id,
+                plan_request(
+                    request_id,
+                    110.0 + index as f64,
+                    "tale",
+                    "planner",
+                    "alpha",
+                ),
+                Some(TALE_PLAN),
+                response,
+            );
+        }
+
+        let result =
+            query_activity_stats(Path::new("/unused"), &home, request())
+                .unwrap();
+        assert_eq!(result.plans.proposed, 10);
+        assert_eq!(result.plans.approved, 4);
+        assert_eq!(result.plans.rejected, 2);
+        assert_eq!(result.plans.feedback, 2);
+        assert_eq!(result.plans.pending, 2);
+        assert_eq!(result.plans.proposing_agents, 1);
+    }
+
+    #[test]
+    fn counts_gate_even_when_index_row_is_hidden_abandoned() {
         let tmp = tempdir().unwrap();
         let home = tmp.path().join(".sase");
         let projects = home.join("projects");
-        write(
-            &home.join("plans/202607/mirrored.md"),
-            "---\ntier: epic\nphases:\n- id: only\n---\n# Mirrored\n",
+        add_gate(
+            &home,
+            "plan",
+            "inside",
+            plan_request("inside", 150.0, "tale", "planner", "proj"),
+            Some(TALE_PLAN),
+            Some(json!({"selected_option_ids": ["approve"]})),
         );
-        add_run(
+        add_gate(
+            &home,
+            "plan",
+            "outside",
+            plan_request("outside", 50.0, "tale", "planner", "proj"),
+            Some(TALE_PLAN),
+            Some(json!({"selected_option_ids": ["approve"]})),
+        );
+        let artifact_dir = add_run(
             &projects,
-            "20260710000000",
+            "19700101000050",
             json!({
-                "run_started_at": "2026-07-10T00:00:00Z",
-                "sdd_plan_path": "/gone/202607/mirrored.md",
-                "plan_submitted_at": ["2026-07-10T00:00:01Z"]
+                "name": "planner",
+                "hidden": false,
+                "run_started_at": "50",
+                "plan_submitted_at": ["1970-01-01T00:02:30Z"]
             }),
-            None,
+            Some(json!({
+                "outcome": "abandoned",
+                "hidden": true,
+                "finished_at": 60.0
+            })),
         );
         let index = tmp.path().join("index.sqlite");
         rebuild_agent_artifact_index(
@@ -794,21 +677,79 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        let result = query_activity_stats(
-            &index,
+        let conn = Connection::open(&index).unwrap();
+        let (hidden, record_json): (i64, String) = conn
+            .query_row(
+                "SELECT hidden, record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+                params![artifact_dir.to_string_lossy().as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hidden, 1);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&record_json).unwrap()["done"]
+                ["outcome"],
+            "abandoned"
+        );
+
+        let result = query_activity_stats(&index, &home, request()).unwrap();
+        assert_eq!(result.plans.proposed, 1);
+        assert_eq!(result.plans.approved, 1);
+        assert_eq!(result.coverage_start_ts, Some(50.0));
+    }
+
+    #[test]
+    fn skips_malformed_bundles_and_ignores_legacy_question_store() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join(".sase");
+        write(
+            &home.join("interaction_requests/question/bad/request.json"),
+            "{",
+        );
+        let mut fallback =
+            question_request("valid-question", 120.0, "asker", "alpha", 1);
+        fallback["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp");
+        fallback["created_at_unix"] = json!(120.0);
+        add_gate(&home, "question", "valid-question", fallback, None, None);
+        write_json(
+            &home.join("user_question/legacy/question_request.json"),
+            json!({"timestamp": 130.0, "questions": [{"question": "ignored"}]}),
+        );
+        write(
+            &home.join("interaction_requests/plan/bad-request/request.json"),
+            "{",
+        );
+        let malformed_response = add_gate(
             &home,
-            AgentActivityStatsRequestWire {
-                start_ts: parse_timestamp("2026-07-10T00:00:00Z").unwrap()
-                    as i64,
-                end_ts: parse_timestamp("2026-07-11T00:00:00Z").unwrap() as i64,
-                top_n: 5,
-                project: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(result.plans.tiers[0].name, "epic");
-        assert_eq!(result.plans.phases_per_epic[0].value, 1);
-        assert_eq!(result.unresolved_plan_files, 0);
+            "plan",
+            "bad-response",
+            plan_request("bad-response", 110.0, "tale", "planner", "alpha"),
+            Some(TALE_PLAN),
+            None,
+        );
+        write(&malformed_response.join("response.json"), "{");
+        add_gate(
+            &home,
+            "plan",
+            "valid-plan",
+            plan_request("valid-plan", 140.0, "tale", "planner", "alpha"),
+            Some(TALE_PLAN),
+            None,
+        );
+
+        let result =
+            query_activity_stats(Path::new("/unused"), &home, request())
+                .unwrap();
+        assert_eq!(result.malformed_question_files_skipped, 1);
+        assert_eq!(result.malformed_rows_skipped, 2);
+        assert_eq!(result.questions.sessions, 1);
+        assert_eq!(result.questions.questions, 1);
+        assert_eq!(result.plans.proposed, 1);
+        assert_eq!(result.plans.pending, 1);
+        assert_eq!(result.coverage_start_ts, Some(110.0));
     }
 
     #[test]

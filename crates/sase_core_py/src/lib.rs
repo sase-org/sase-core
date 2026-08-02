@@ -10845,12 +10845,23 @@ mod tests {
                 ),
             )
             .unwrap();
-            fs::create_dir_all(root.join("user_question/session")).unwrap();
+            fs::create_dir_all(
+                root.join("interaction_requests/question/session"),
+            )
+            .unwrap();
             fs::write(
-                root.join("user_question/session/question_request.json"),
+                root.join("interaction_requests/question/session/request.json"),
                 serde_json::to_vec(&json!({
-                    "timestamp": 120.0,
-                    "questions": [{"question": "Continue?"}]
+                    "request_id": "session",
+                    "producer": {
+                        "agent_name": "binding-agent",
+                        "artifacts_dir": root
+                            .join("projects/proj/artifacts/ace-run/one")
+                    },
+                    "payload": {
+                        "timestamp": 120.0,
+                        "questions": [{"question": "Continue?"}]
+                    }
                 }))
                 .unwrap(),
             )
@@ -10886,7 +10897,9 @@ mod tests {
             assert_eq!(result["skills"][0]["name"], json!("review"));
             assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
             assert_eq!(result["questions"]["sessions"], json!(1));
+            assert_eq!(result["questions"]["asking_agents"], json!(1));
             assert_eq!(result["questions"]["questions"], json!(1));
+            assert_eq!(result["coverage_start_ts"], json!(120.0));
 
             let _ = fs::remove_dir_all(root);
         });
