@@ -52,6 +52,7 @@ pub fn at_reference_completion_response(
     replacement_range: EditorRange,
 ) -> CompletionResponse {
     let filter_text = at_reference_filter_text(context);
+    let payload_kind = context.kind.as_deref();
     let truncated_payloads = menu.truncated_payloads;
     CompletionResponse::List(lsp_types::CompletionList {
         is_incomplete: true,
@@ -62,6 +63,7 @@ pub fn at_reference_completion_response(
             .map(|(index, row)| {
                 at_reference_completion_item(
                     row,
+                    payload_kind,
                     &filter_text,
                     replacement_range,
                     index,
@@ -84,6 +86,7 @@ fn at_reference_filter_text(context: &AtReferenceContextWire) -> String {
 
 fn at_reference_completion_item(
     row: AtReferenceRowWire,
+    payload_kind: Option<&str>,
     filter_text: &str,
     replacement_range: EditorRange,
     index: usize,
@@ -97,7 +100,10 @@ fn at_reference_completion_item(
             (1, CompletionItemKind::FOLDER, "directory")
         }
         AtReferenceGroup::File => (1, CompletionItemKind::FILE, "file"),
-        AtReferenceGroup::Payload => (0, CompletionItemKind::FILE, "file"),
+        AtReferenceGroup::Payload => {
+            let kind = payload_kind.unwrap_or("file");
+            (0, payload_completion_item_kind(kind), kind)
+        }
     };
     // Providers that have no separate title echo the primary text back as one;
     // repeating it beside the label and in the preview is pure noise.
@@ -117,6 +123,7 @@ fn at_reference_completion_item(
             &row.label,
             &row.label_match,
             title,
+            &row.body,
         ),
         detail: at_reference_item_detail(row.detail, truncated_payloads),
         filter_text: Some(filter_text.to_string()),
@@ -127,6 +134,17 @@ fn at_reference_completion_item(
         })),
         tags: None::<Vec<CompletionItemTag>>,
         ..Default::default()
+    }
+}
+
+/// Payload kinds that resolve to an identifier (a SHA, a bead id, an agent
+/// name) rather than a filesystem path render with a reference icon; every
+/// other kind keeps the file icon it always had.
+fn payload_completion_item_kind(kind: &str) -> CompletionItemKind {
+    if matches!(kind, "commit" | "bead" | "agent") {
+        CompletionItemKind::REFERENCE
+    } else {
+        CompletionItemKind::FILE
     }
 }
 
@@ -148,6 +166,10 @@ fn at_reference_item_detail(
     })
 }
 
+/// Hover documentation shows at most this many lines of a payload row's body
+/// (a commit message, say) so a large one cannot flood the popup.
+const AT_REFERENCE_BODY_DOC_MAX_LINES: usize = 12;
+
 /// Show *why* a fuzzy row is in the list: the matched payload with its matched
 /// runs bolded, and the title underneath. Editors cannot highlight inside a
 /// completion label, so the preview window carries the match affordance the ACE
@@ -156,6 +178,7 @@ fn at_reference_documentation(
     label: &str,
     label_match: &[(u32, u32)],
     title: &str,
+    body: &str,
 ) -> Option<Documentation> {
     if label.is_empty() {
         return None;
@@ -166,7 +189,34 @@ fn at_reference_documentation(
         value.push('\n');
         value.push_str(title);
     }
+    if let Some(body) = truncated_body_block(body) {
+        value.push('\n');
+        value.push('\n');
+        value.push_str(&body);
+    }
     Some(markdown_doc(value))
+}
+
+/// Render `body` as a fenced block, truncated to
+/// [`AT_REFERENCE_BODY_DOC_MAX_LINES`] lines. `None` when `body` is empty.
+fn truncated_body_block(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut lines = body.lines();
+    let kept = lines
+        .by_ref()
+        .take(AT_REFERENCE_BODY_DOC_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut block = String::from("```\n");
+    block.push_str(&kept);
+    if lines.next().is_some() {
+        block.push_str("\n…");
+    }
+    block.push_str("\n```");
+    Some(block)
 }
 
 /// Wrap each half-open char range of `runs` in `**`, leaving `text` otherwise
@@ -975,6 +1025,7 @@ mod tests {
                 label_match: vec![(12, 16)],
                 title_match: vec![(5, 9)],
                 match_tier: 2,
+                body: String::new(),
             }],
             truncated_payloads: 3,
             ..Default::default()
@@ -991,6 +1042,15 @@ mod tests {
         assert_eq!(item.label, "@research:202607/sase_sites.md");
         assert_eq!(item.filter_text.as_deref(), Some("@research:site"));
         assert_eq!(item.sort_text.as_deref(), Some("0:0000"));
+        // A filesystem-backed kind keeps the file icon and takes its own name
+        // as the description, rather than the fixed word "file".
+        assert_eq!(item.kind, Some(CompletionItemKind::FILE));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("research")
+        );
         assert_eq!(
             item.label_details
                 .as_ref()
@@ -1016,6 +1076,155 @@ mod tests {
             panic!("expected a reference text edit");
         };
         assert_eq!(edit.new_text, "@research:202607/sase_sites.md");
+    }
+
+    fn commit_payload_row(body: &str) -> AtReferenceRowWire {
+        AtReferenceRowWire {
+            group: AtReferenceGroup::Payload,
+            label: "sase-core@5143cb981f0a".to_string(),
+            title: "fix(stats): expose occupancy".to_string(),
+            insertion: "@commit:sase-core@5143cb981f0a".to_string(),
+            is_dir: false,
+            detail: "sase-core · 2h".to_string(),
+            builtin: false,
+            label_match: vec![(5, 9)],
+            title_match: Vec::new(),
+            match_tier: 0,
+            body: body.to_string(),
+        }
+    }
+
+    fn commit_completion_context(query: &str) -> AtReferenceContextWire {
+        AtReferenceContextWire {
+            stage: AtReferenceStage::Payload,
+            candidate_span: (0, 8 + query.len()),
+            replacement_span: (0, 8 + query.len()),
+            query_span: (8, 8 + query.len()),
+            query: query.to_string(),
+            kind: Some("commit".to_string()),
+            path_query: None,
+        }
+    }
+
+    #[test]
+    fn commit_payload_rows_render_as_references_with_body_in_documentation() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row(
+                "Expose runner occupancy diagnostics for stats.",
+            )],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let item = &list.items[0];
+        // Commits resolve to a canonical SHA, not a filesystem path, so they
+        // render with a reference icon rather than a file icon.
+        assert_eq!(item.kind, Some(CompletionItemKind::REFERENCE));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("commit")
+        );
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · fix(stats): expose occupancy")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(
+            documentation.value,
+            "sase-**core**@5143cb981f0a\n\nfix(stats): expose occupancy\n\n\
+             ```\nExpose runner occupancy diagnostics for stats.\n```"
+        );
+    }
+
+    #[test]
+    fn commit_documentation_omits_the_body_block_when_empty() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row("")],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let Some(Documentation::MarkupContent(documentation)) =
+            list.items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert!(!documentation.value.contains("```"));
+    }
+
+    #[test]
+    fn commit_documentation_truncates_a_long_body_to_a_bounded_line_count() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let long_body = (1..=50)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row(&long_body)],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let Some(Documentation::MarkupContent(documentation)) =
+            list.items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert!(documentation.value.contains("line 1\n"));
+        assert!(!documentation.value.contains("line 50"));
+        assert!(documentation.value.contains('…'));
+        assert!(
+            documentation.value.lines().count() < long_body.lines().count()
+        );
     }
 
     #[test]
@@ -1051,6 +1260,7 @@ mod tests {
                 label_match: vec![(0, 1), (2, 3), (4, 6)],
                 title_match: Vec::new(),
                 match_tier: 3,
+                body: String::new(),
             }],
             ..Default::default()
         };

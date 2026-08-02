@@ -849,7 +849,7 @@ impl XpromptLspServer {
             return None;
         }
         let kind = context.kind.as_deref()?;
-        if matches!(kind, "commit" | "bug") {
+        if kind == "bug" {
             return None;
         }
         let key = (project.key.clone(), kind.to_string());
@@ -2451,7 +2451,7 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
+    use std::{path::Path, process::Command, sync::Arc};
 
     use lsp_types::{
         CodeActionOrCommand, CompletionClientCapabilities, CompletionContext,
@@ -5205,6 +5205,107 @@ mod tests {
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "@designs:sase.md");
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_commit_git_repo(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.name", "Commit Test"]);
+        git(repo, &["config", "user.email", "commit@example.com"]);
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fix(stats): expose occupancy",
+            ])
+            .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+            .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn completes_commit_payloads_from_a_real_git_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkout = temp.path().join("sase-core-checkout");
+        init_commit_git_repo(&checkout);
+
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        fs::write(
+            &artifact_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "default_project": "sase",
+                "projects": [{
+                    "name": "sase",
+                    "key": "key_sase",
+                    "context": {
+                        "repositories": [{
+                            "name": "sase-core",
+                            "checkout_paths": [checkout.to_string_lossy()],
+                        }],
+                    },
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().artifact_ref_catalog =
+            Some(artifact_path);
+
+        // The regression this phase fixes: `commit` used to short-circuit to
+        // an empty inventory before the payload cache was ever consulted.
+        let text = "@commit:sase-core@fix";
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    text.to_string(),
+                    Position::new(0, text.len() as u32),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(!items.is_empty(), "{text}: expected ranked commit items");
+        assert!(items[0].label.starts_with("@commit:sase-core@"));
+        assert_eq!(items[0].kind, Some(CompletionItemKind::REFERENCE));
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("commit")
+        );
     }
 
     #[tokio::test]

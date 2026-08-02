@@ -167,6 +167,8 @@ pub struct AtReferenceRowWire {
     pub label_match: Vec<(u32, u32)>,
     pub title_match: Vec<(u32, u32)>,
     pub match_tier: u8,
+    #[serde(default)]
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +438,7 @@ fn build_kind_menu(
             label_match: match_result.runs,
             title_match: Vec::new(),
             match_tier: match_result.tier,
+            body: String::new(),
         })
         .collect::<Vec<_>>();
 
@@ -500,6 +503,7 @@ fn build_kind_menu(
                     label_match: match_result.runs,
                     title_match: Vec::new(),
                     match_tier: match_result.tier,
+                    body: String::new(),
                 }
             })
             .collect::<Vec<_>>()
@@ -736,6 +740,7 @@ fn build_payload_menu(
                 label_match,
                 title_match,
                 match_tier,
+                body: row.body.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -1040,6 +1045,7 @@ mod tests {
             label_match: Vec::new(),
             title_match: Vec::new(),
             match_tier,
+            body: String::new(),
         }
     }
 
