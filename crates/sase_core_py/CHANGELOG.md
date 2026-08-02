@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.13](https://github.com/sase-org/sase-core/compare/v0.17.12...v0.17.13) - 2026-08-02
+
+### Added
+
+- *(py)* expose artifact ref payload inventory
+
 ## [0.17.11](https://github.com/sase-org/sase-core/compare/v0.17.10...v0.17.11) - 2026-08-02
 
 ### Added

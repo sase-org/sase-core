@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.13](https://github.com/sase-org/sase-core/compare/v0.17.12...v0.17.13) - 2026-08-02
+
+### Added
+
+- *(lsp)* describe artifact payload rows by kind and render commit bodies
+- *(editor)* enumerate local commit references
+- *(py)* expose artifact ref payload inventory
+
 ## [0.17.12](https://github.com/sase-org/sase-core/compare/v0.17.11...v0.17.12) - 2026-08-02
 
 ### Added
