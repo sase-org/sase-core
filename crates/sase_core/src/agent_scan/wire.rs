@@ -112,6 +112,10 @@ pub struct DoneMarkerWire {
     pub outcome: Option<String>,
     #[serde(default)]
     pub finished_at: Option<f64>,
+    /// Whether `finished_at` was chosen by stale-artifact terminalization
+    /// rather than recorded by the agent process itself.
+    #[serde(default)]
+    pub finished_at_estimated: bool,
     #[serde(default)]
     pub cl_name: Option<String>,
     #[serde(default)]

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_clan_tribe::ClanTribeMemberWire;
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_launch::list_workspace_claims_from_content;
+use crate::agent_runtime::parse_runtime_timestamp;
 
 use super::context::{
     clan_key_from_meta, represented_clan_keys, resolve_clan_context,
@@ -1329,14 +1330,20 @@ fn terminalize_stale_candidate(
     if !record_is_terminalization_candidate(&record) {
         return Ok(TerminalizationOutcome::Skipped);
     }
-    if !artifact_dir_is_stale(&record.artifact_dir, stale_after) {
+    let Some(latest_modified) =
+        artifact_dir_latest_modified(&record.artifact_dir)
+    else {
+        return Ok(TerminalizationOutcome::Skipped);
+    };
+    if !artifact_dir_is_stale(latest_modified, stale_after) {
         return Ok(TerminalizationOutcome::Skipped);
     }
     if record_has_live_workspace_claim(&record)? {
         return Ok(TerminalizationOutcome::Skipped);
     }
 
-    let terminalized = terminalized_abandoned_record(record);
+    let terminalized =
+        terminalized_abandoned_record(record, Some(latest_modified));
     upsert_record(conn, &projects_root, &terminalized)?;
     Ok(TerminalizationOutcome::Terminalized)
 }
@@ -1352,10 +1359,7 @@ fn record_is_terminalization_candidate(
         && record.workflow_state.is_none()
 }
 
-fn artifact_dir_is_stale(artifact_dir: &str, stale_after: Duration) -> bool {
-    let Some(latest) = artifact_dir_latest_modified(artifact_dir) else {
-        return false;
-    };
+fn artifact_dir_is_stale(latest: SystemTime, stale_after: Duration) -> bool {
     SystemTime::now()
         .duration_since(latest)
         .map(|age| age >= stale_after)
@@ -1431,16 +1435,24 @@ fn record_workspace_num(record: &AgentArtifactRecordWire) -> Option<u32> {
 
 fn terminalized_abandoned_record(
     mut record: AgentArtifactRecordWire,
+    latest_modified: Option<SystemTime>,
 ) -> AgentArtifactRecordWire {
     let summary = RecordSummary::from_record(&record);
     let meta = record.agent_meta.as_ref();
+    let finished_at = meta
+        .and_then(|value| value.stopped_at.as_deref())
+        .and_then(parse_runtime_timestamp)
+        .or_else(|| {
+            latest_modified.and_then(system_time_to_unix_timestamp_secs)
+        });
     record.running = None;
     record.waiting = None;
     record.pending_question = None;
     record.has_done_marker = true;
     record.done = Some(DoneMarkerWire {
         outcome: Some(ABANDONED_DONE_OUTCOME.to_string()),
-        finished_at: current_unix_timestamp_secs(),
+        finished_at,
+        finished_at_estimated: true,
         cl_name: summary
             .cl_name
             .clone()
@@ -1459,8 +1471,8 @@ fn terminalized_abandoned_record(
     record
 }
 
-fn current_unix_timestamp_secs() -> Option<f64> {
-    SystemTime::now()
+fn system_time_to_unix_timestamp_secs(value: SystemTime) -> Option<f64> {
+    value
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs_f64())
@@ -3664,6 +3676,46 @@ mod tests {
             .done
             .as_ref()
             .is_some_and(|done| done.hidden));
+        assert!(hidden_completed.records[0]
+            .done
+            .as_ref()
+            .is_some_and(|done| done.finished_at.is_some()));
+        assert!(hidden_completed.records[0]
+            .done
+            .as_ref()
+            .is_some_and(|done| done.finished_at_estimated));
+    }
+
+    #[test]
+    fn abandoned_terminalization_prefers_stopped_at_then_directory_mtime() {
+        let record = |stopped_at: &str| {
+            serde_json::from_value::<AgentArtifactRecordWire>(json!({
+                "project_name": "proj",
+                "project_dir": "/tmp/proj",
+                "project_file": "/tmp/proj/proj.sase",
+                "workflow_dir_name": "ace-run",
+                "artifact_dir": "/tmp/proj/artifacts/ace-run/record",
+                "timestamp": "record",
+                "agent_meta": {
+                    "name": "abandoned",
+                    "stopped_at": stopped_at
+                }
+            }))
+            .unwrap()
+        };
+        let latest = UNIX_EPOCH + Duration::from_secs(999);
+
+        let stopped =
+            terminalized_abandoned_record(record("123.5"), Some(latest));
+        let done = stopped.done.as_ref().unwrap();
+        assert_eq!(done.finished_at, Some(123.5));
+        assert!(done.finished_at_estimated);
+
+        let fallback =
+            terminalized_abandoned_record(record("not-a-time"), Some(latest));
+        let done = fallback.done.as_ref().unwrap();
+        assert_eq!(done.finished_at, Some(999.0));
+        assert!(done.finished_at_estimated);
     }
 
     #[test]

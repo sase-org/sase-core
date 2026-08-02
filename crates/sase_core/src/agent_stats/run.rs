@@ -13,6 +13,7 @@ use crate::effort::{is_valid_effort, EFFORT_LEVELS_ORDERED};
 use crate::parser::parse_project_bytes;
 use crate::project_spec::{preferred_project_spec_path, project_spec_basename};
 
+use super::gate_bundles::{read_gate_bundles, GateKind};
 use super::runner::{
     HostRunnerLivenessProbe, RunnerLivenessProbe, RunnerStatsBuilder,
 };
@@ -202,8 +203,7 @@ fn query_run_stats_with_liveness(
                    status, cl_name, agent_name, model, llm_provider,
                    started_at, finished_at, record_json
             FROM agent_artifacts
-            WHERE hidden = 0
-              AND (?1 IS NULL OR project_name = ?1)
+            WHERE (?1 IS NULL OR project_name = ?1)
             ORDER BY timestamp ASC
             "#,
         )
@@ -258,6 +258,7 @@ fn query_run_stats_with_liveness(
         }),
     };
     let mut runner_stats = RunnerStatsBuilder::default();
+    let question_answer_times = resolved_question_answer_times(index_path);
     let requested_start = request.start_ts as f64;
     let requested_end = request.end_ts as f64;
 
@@ -283,11 +284,20 @@ fn query_run_stats_with_liveness(
             }
             continue;
         };
+        if record_is_user_hidden(&record) {
+            runner_stats.record_user_hidden();
+            continue;
+        }
         if runner_candidate {
+            let resolved_answers = question_answer_times
+                .get(record.artifact_dir.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             runner_stats.add_record(
                 &record,
                 requested_start,
                 requested_end,
+                resolved_answers,
                 liveness,
             );
         }
@@ -387,6 +397,36 @@ fn query_run_stats_with_liveness(
     Ok(response)
 }
 
+fn resolved_question_answer_times(
+    index_path: &Path,
+) -> BTreeMap<String, Vec<f64>> {
+    let Some(sase_home) = index_path.parent() else {
+        return BTreeMap::new();
+    };
+    let mut ignored_malformed = 0;
+    let scan = read_gate_bundles(
+        sase_home,
+        GateKind::Question,
+        &mut ignored_malformed,
+    );
+    let mut by_artifacts_dir = BTreeMap::<String, Vec<f64>>::new();
+    for bundle in scan.bundles {
+        let (Some(artifacts_dir), Some(answered_at)) =
+            (bundle.producer_artifacts_dir, bundle.response_timestamp)
+        else {
+            continue;
+        };
+        by_artifacts_dir
+            .entry(artifacts_dir)
+            .or_default()
+            .push(answered_at);
+    }
+    for answers in by_artifacts_dir.values_mut() {
+        answers.sort_by(f64::total_cmp);
+    }
+    by_artifacts_dir
+}
+
 fn validate_request(request: &AgentRunStatsRequestWire) -> Result<u64, String> {
     if request.end_ts <= request.start_ts {
         return Err(
@@ -467,6 +507,10 @@ fn runner_overlap_candidate(
         return false;
     }
     true
+}
+
+fn record_is_user_hidden(record: &AgentArtifactRecordWire) -> bool {
+    record.agent_meta.as_ref().is_some_and(|meta| meta.hidden)
 }
 
 pub(super) fn parse_timestamp(value: &str) -> Option<f64> {
@@ -1870,7 +1914,7 @@ mod tests {
         focused_request.xprompt_breakdown_top_n = 1;
         focused_request.xprompt_focus = Some("gh".to_string());
         let result = query_run_stats(&index, focused_request).unwrap();
-        assert_eq!(result.schema_version, 4);
+        assert_eq!(result.schema_version, 5);
         let xprompts = result.xprompts.as_ref().unwrap();
         assert_eq!(xprompts.runs_with_xprompts, 3);
         assert_eq!(xprompts.runs_without_xprompts, 1);
@@ -2430,34 +2474,89 @@ mod tests {
         .unwrap();
         let runners = result.runners.as_ref().unwrap();
 
-        assert_eq!(result.schema_version, 4);
+        assert_eq!(result.schema_version, 5);
         assert_eq!(result.totals.runs, 4);
         assert_eq!(runners.start_ts, RUNNER_BASE as f64);
         assert_eq!(runners.end_ts, (RUNNER_BASE + 100) as f64);
         assert_eq!(runners.peak_runners, 3);
-        assert_eq!(runners.peak_seconds, 10.0);
-        assert_eq!(runners.average_runners, 1.6);
+        assert_eq!(runners.peak_seconds, 30.0);
+        assert_eq!(runners.average_runners, 1.8);
         assert_eq!(runners.busy_seconds, 90.0);
         assert_eq!(runners.busy_share, 0.9);
-        assert_eq!(runners.runner_seconds, 160.0);
+        assert_eq!(runners.runner_seconds, 180.0);
         assert_eq!(
             runners
                 .distribution
                 .iter()
                 .map(|row| (row.runners, row.seconds))
                 .collect::<Vec<_>>(),
-            vec![(0, 10.0), (1, 30.0), (2, 50.0), (3, 10.0)]
+            vec![(0, 10.0), (1, 30.0), (2, 30.0), (3, 30.0)]
         );
         assert_eq!(runners.trend.len(), 4);
         assert_eq!(runners.trend[0].average_runners, 2.0);
         assert_eq!(runners.trend[0].peak_runners, 3);
         assert_eq!(runners.trend[0].runner_seconds, 60.0);
-        assert_eq!(runners.trend[1].average_runners, 2.0);
+        assert_eq!(runners.trend[1].average_runners, 8.0 / 3.0);
         assert_eq!(runners.trend[2].average_runners, 4.0 / 3.0);
         assert_eq!(runners.trend[3].start_ts, (RUNNER_BASE + 90) as f64);
         assert_eq!(runners.trend[3].end_ts, (RUNNER_BASE + 100) as f64);
         assert_eq!(runners.trend[3].runner_seconds, 0.0);
+        assert_eq!(runners.lanes_counted, 5);
         assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_question_wait_uses_matching_gate_response_time() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let runner = add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "question",
+                "run_started_at": runner_time(0),
+                "questions_submitted_at": [runner_time(20)]
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 100) as f64
+            })),
+            false,
+        );
+        let gate = tmp.path().join("interaction_requests/question/req-1");
+        write_json(
+            &gate.join("request.json"),
+            json!({
+                "request_id": "req-1",
+                "created_at_unix": (RUNNER_BASE + 20) as f64,
+                "payload": {
+                    "timestamp": (RUNNER_BASE + 20) as f64,
+                    "questions": [{"question": "Continue?"}]
+                },
+                "producer": {"artifacts_dir": runner.to_string_lossy()}
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let unresolved =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        assert_eq!(unresolved.runners.as_ref().unwrap().runner_seconds, 100.0);
+
+        write_json(
+            &gate.join("response.json"),
+            json!({"responded_at_unix": (RUNNER_BASE + 55) as f64}),
+        );
+        let resolved =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = resolved.runners.as_ref().unwrap();
+        assert_eq!(runners.runner_seconds, 65.0);
+        assert_eq!(runners.lanes_counted, 1);
     }
 
     #[test]
@@ -2556,7 +2655,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 10.0), (1, 15.0), (2, 15.0)]
         );
-        assert_eq!(runners.invalid_intervals_skipped, 1);
+        assert_eq!(runners.lanes_counted, 3);
+        assert_eq!(runners.lanes_without_end_skipped, 1);
+        assert_eq!(runners.invalid_intervals_skipped, 0);
         assert_eq!(runners.malformed_rows_skipped, 0);
         assert_eq!(
             runners
@@ -2605,6 +2706,7 @@ mod tests {
             query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
         let runners = result.runners.as_ref().unwrap();
         assert_eq!(runners.runner_seconds, 90.0);
+        assert_eq!(runners.lanes_without_end_skipped, 0);
         assert_eq!(runners.invalid_intervals_skipped, 0);
 
         fs::write(
@@ -2619,7 +2721,8 @@ mod tests {
             query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
         let runners = result.runners.as_ref().unwrap();
         assert_eq!(runners.runner_seconds, 0.0);
-        assert_eq!(runners.invalid_intervals_skipped, 1);
+        assert_eq!(runners.lanes_without_end_skipped, 1);
+        assert_eq!(runners.invalid_intervals_skipped, 0);
         assert_runner_conservation(runners);
     }
 
@@ -2742,6 +2845,77 @@ mod tests {
         assert_eq!(runners.peak_runners, 3);
         assert_eq!(runners.runner_seconds, 300.0);
         assert_eq!(runners.distribution[3].seconds, 100.0);
+        assert_eq!(runners.lanes_counted, 3);
+        assert_eq!(runners.user_hidden_skipped, 1);
+        assert_eq!(runners.invalid_intervals_skipped, 0);
+        assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_recovers_synthesized_hidden_lanes_without_trusting_the_stamp() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "recovered",
+                "run_started_at": runner_time(0),
+                "stopped_at": runner_time(10)
+            }),
+            Some(json!({
+                "outcome": "abandoned",
+                "finished_at": (RUNNER_BASE + 40 * 60 * 60) as f64,
+                "hidden": true
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(20),
+            json!({
+                "name": "no-end",
+                "run_started_at": runner_time(20)
+            }),
+            Some(json!({
+                "outcome": "abandoned",
+                "finished_at": (RUNNER_BASE + 40 * 60 * 60) as f64,
+                "hidden": true
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(30),
+            json!({
+                "name": "user-hidden",
+                "run_started_at": runner_time(30),
+                "hidden": true
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 40) as f64
+            })),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let result =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = result.runners.as_ref().unwrap();
+
+        assert_eq!(result.totals.runs, 2);
+        assert_eq!(runners.runner_seconds, 10.0);
+        assert_eq!(runners.peak_runners, 1);
+        assert_eq!(runners.lanes_counted, 1);
+        assert_eq!(runners.lanes_without_end_skipped, 1);
+        assert_eq!(runners.user_hidden_skipped, 1);
         assert_eq!(runners.invalid_intervals_skipped, 0);
         assert_runner_conservation(runners);
     }
@@ -2934,11 +3108,11 @@ mod tests {
         )
         .unwrap();
         let runners = all_time.runners.as_ref().unwrap();
-        assert_eq!(runners.start_ts, (RUNNER_BASE + 50) as f64);
+        assert_eq!(runners.start_ts, (RUNNER_BASE + 40) as f64);
         assert_eq!(runners.end_ts, (RUNNER_BASE + 100) as f64);
-        assert_eq!(runners.runner_seconds, 20.0);
+        assert_eq!(runners.runner_seconds, 30.0);
         assert_eq!(runners.distribution[0].seconds, 30.0);
-        assert_eq!(runners.distribution[1].seconds, 20.0);
+        assert_eq!(runners.distribution[1].seconds, 30.0);
         assert_runner_conservation(runners);
 
         let mut no_data = runner_request(0, 100, 30);

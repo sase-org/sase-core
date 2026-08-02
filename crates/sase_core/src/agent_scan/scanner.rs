@@ -1088,6 +1088,9 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
     DoneMarkerWire {
         outcome: coerce_str(data.get("outcome")),
         finished_at: coerce_float(data.get("finished_at")),
+        finished_at_estimated: coerce_bool_truthy(
+            data.get("finished_at_estimated"),
+        ),
         cl_name: coerce_str(data.get("cl_name")),
         project_file: coerce_str(data.get("project_file")),
         workspace_num: coerce_int(data.get("workspace_num")),

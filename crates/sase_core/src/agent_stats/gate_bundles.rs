@@ -43,10 +43,12 @@ pub(super) struct GateBundle {
     pub(super) timestamp: f64,
     pub(super) authored_tier: Option<String>,
     pub(super) producer_agent: Option<String>,
+    pub(super) producer_artifacts_dir: Option<String>,
     pub(super) project_key: Option<String>,
     pub(super) questions: u64,
     pub(super) phase_count: Option<u64>,
     pub(super) outcome: GateOutcome,
+    pub(super) response_timestamp: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -150,16 +152,21 @@ fn parse_bundle(
     } else {
         GateOutcome::Pending
     };
+    let response_timestamp = (kind == GateKind::Question)
+        .then(|| question_response_timestamp(&bundle_dir.join("response.json")))
+        .flatten();
 
     Ok(GateBundle {
         request_id,
         timestamp,
         authored_tier,
         producer_agent,
+        producer_artifacts_dir: artifacts_dir,
         project_key,
         questions,
         phase_count,
         outcome,
+        response_timestamp,
     })
 }
 
@@ -213,6 +220,15 @@ fn read_plan_outcome(path: &Path) -> Result<GateOutcome, ()> {
         .and_then(JsonValue::as_str)
         .and_then(|value| classify_option_ids(&[value]))
         .ok_or(())
+}
+
+fn question_response_timestamp(path: &Path) -> Option<f64> {
+    let response = read_json_object(path).ok()?;
+    response
+        .get("responded_at_unix")
+        .and_then(json_timestamp)
+        .or_else(|| response.get("responded_at").and_then(json_timestamp))
+        .filter(|value| value.is_finite())
 }
 
 fn classify_option_ids(values: &[&str]) -> Option<GateOutcome> {

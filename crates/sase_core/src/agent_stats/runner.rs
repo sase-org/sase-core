@@ -9,7 +9,7 @@ use crate::agent_launch::{
 };
 use crate::agent_runtime::{
     derive_active_intervals, is_runner_eligible_record, ActiveInterval,
-    ActiveIntervalError, ClanRuntimeMemberWire,
+    ActiveIntervalError, ClanRuntimeMemberWire, WaitPolicy,
 };
 use crate::agent_scan::{AgentArtifactRecordWire, RunningMarkerWire};
 
@@ -183,6 +183,14 @@ fn process_exists(_pid: i32) -> bool {
 #[derive(Debug, Default)]
 pub(super) struct RunnerStatsBuilder {
     intervals: Vec<ActiveInterval>,
+    diagnostics: RunnerDiagnostics,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RunnerDiagnostics {
+    lanes_counted: u64,
+    lanes_without_end_skipped: u64,
+    user_hidden_skipped: u64,
     malformed_rows_skipped: u64,
     invalid_intervals_skipped: u64,
 }
@@ -196,7 +204,11 @@ struct OccupancySegment {
 
 impl RunnerStatsBuilder {
     pub(super) fn record_malformed_row(&mut self) {
-        self.malformed_rows_skipped += 1;
+        self.diagnostics.malformed_rows_skipped += 1;
+    }
+
+    pub(super) fn record_user_hidden(&mut self) {
+        self.diagnostics.user_hidden_skipped += 1;
     }
 
     pub(super) fn add_record(
@@ -204,30 +216,50 @@ impl RunnerStatsBuilder {
         record: &AgentArtifactRecordWire,
         requested_start: f64,
         requested_end: f64,
+        resolved_question_answers: &[f64],
         liveness: &dyn RunnerLivenessProbe,
     ) {
         if !is_runner_eligible_record(record) {
             return;
         }
         let member = ClanRuntimeMemberWire::from_record(record);
-        let derived = match derive_active_intervals(&member, requested_end) {
+        let derived = match derive_active_intervals(
+            &member,
+            requested_end,
+            WaitPolicy::SlotYield,
+            resolved_question_answers,
+        ) {
             Ok(derived) => derived,
             Err(ActiveIntervalError::InvalidStart) => return,
-            Err(_) => {
-                self.invalid_intervals_skipped += 1;
+            Err(ActiveIntervalError::UnusableTerminal) => {
+                self.diagnostics.lanes_without_end_skipped += 1;
+                return;
+            }
+            Err(
+                ActiveIntervalError::InvalidTerminal
+                | ActiveIntervalError::ImpossibleBounds,
+            ) => {
+                self.diagnostics.invalid_intervals_skipped += 1;
                 return;
             }
         };
         if derived.open_ended && !liveness.is_live(record) {
-            self.invalid_intervals_skipped += 1;
+            self.diagnostics.lanes_without_end_skipped += 1;
             return;
         }
-        self.intervals
-            .extend(derived.intervals.into_iter().filter_map(|interval| {
+        let clipped = derived
+            .intervals
+            .into_iter()
+            .filter_map(|interval| {
                 let start = interval.start.max(requested_start);
                 let end = interval.end.min(requested_end);
                 (end > start).then_some(ActiveInterval { start, end })
-            }));
+            })
+            .collect::<Vec<_>>();
+        if !clipped.is_empty() {
+            self.diagnostics.lanes_counted += 1;
+            self.intervals.extend(clipped);
+        }
     }
 
     pub(super) fn finish(
@@ -252,8 +284,7 @@ impl RunnerStatsBuilder {
             requested_end,
             bucket_seconds,
             segments,
-            self.malformed_rows_skipped,
-            self.invalid_intervals_skipped,
+            self.diagnostics,
         ))
     }
 }
@@ -327,8 +358,7 @@ fn finish_stats(
     analysis_end: f64,
     bucket_seconds: u64,
     segments: Vec<OccupancySegment>,
-    malformed_rows_skipped: u64,
-    invalid_intervals_skipped: u64,
+    diagnostics: RunnerDiagnostics,
 ) -> AgentRunnerStatsWire {
     let span = analysis_end - analysis_start;
     let peak_runners = segments
@@ -384,8 +414,11 @@ fn finish_stats(
             analysis_end,
             bucket_seconds,
         ),
-        malformed_rows_skipped,
-        invalid_intervals_skipped,
+        lanes_counted: diagnostics.lanes_counted,
+        lanes_without_end_skipped: diagnostics.lanes_without_end_skipped,
+        user_hidden_skipped: diagnostics.user_hidden_skipped,
+        malformed_rows_skipped: diagnostics.malformed_rows_skipped,
+        invalid_intervals_skipped: diagnostics.invalid_intervals_skipped,
     }
 }
 
@@ -528,15 +561,29 @@ mod tests {
                 .and_then(|meta| meta.name.as_deref())
                 == Some("live")
         };
-        builder.add_record(&open_record("stale", Some("0")), 0.0, 100.0, &live);
-        builder.add_record(&open_record("live", Some("20")), 0.0, 100.0, &live);
-        builder.add_record(&open_record("never", None), 0.0, 100.0, &live);
+        builder.add_record(
+            &open_record("stale", Some("0")),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+        builder.add_record(
+            &open_record("live", Some("20")),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+        builder.add_record(&open_record("never", None), 0.0, 100.0, &[], &live);
 
         let result = builder.finish(0.0, 100.0, 100, false).unwrap();
         assert_eq!(result.runner_seconds, 80.0);
         assert_eq!(result.distribution[0].seconds, 20.0);
         assert_eq!(result.distribution[1].seconds, 80.0);
-        assert_eq!(result.invalid_intervals_skipped, 1);
+        assert_eq!(result.lanes_counted, 1);
+        assert_eq!(result.lanes_without_end_skipped, 1);
+        assert_eq!(result.invalid_intervals_skipped, 0);
     }
 
     #[test]

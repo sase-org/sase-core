@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 4;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 5;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -357,10 +357,18 @@ pub struct AgentRunnerStatsWire {
     /// Chronological, contiguous slices bounded by the backend limit.
     #[serde(default)]
     pub trend: Vec<AgentRunnerTrendSliceWire>,
+    /// Runner-eligible lanes that contributed at least one clipped interval.
+    #[serde(default)]
+    pub lanes_counted: u64,
+    /// Runner-eligible lanes omitted because no trustworthy end was available.
+    #[serde(default)]
+    pub lanes_without_end_skipped: u64,
+    /// Candidate rows omitted because `agent_meta.hidden` records user intent.
+    #[serde(default)]
+    pub user_hidden_skipped: u64,
     /// Overlap candidates whose cached `record_json` could not be decoded.
     pub malformed_rows_skipped: u64,
-    /// Eligible records with missing, malformed, reversed, or zero-length
-    /// runtime boundaries.
+    /// Eligible records with malformed, reversed, or zero-length bounds.
     pub invalid_intervals_skipped: u64,
 }
 

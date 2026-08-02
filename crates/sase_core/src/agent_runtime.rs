@@ -1,9 +1,9 @@
 //! Wall-clock runtime aggregation for agent clans and sequential families.
 //!
 //! A member contributes the interval from `run_started_at` through its
-//! terminal marker (or `now` while it is live). Plan-review and question
-//! windows are removed before member intervals are unioned, so concurrent
-//! agents never double-count wall-clock time and human waits never accrue.
+//! terminal marker (or `now` while it is live). Callers choose whether to
+//! remove human waits or only waits that release a runner slot before member
+//! intervals are unioned.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,10 @@ pub struct ClanRuntimeMemberWire {
     /// a live member from a malformed terminal record with no usable end.
     #[serde(default)]
     pub has_done_marker: bool,
+    /// Whether the terminal marker was synthesized while abandoning a stale
+    /// artifact. Its `finished_at` is not a trustworthy runtime boundary.
+    #[serde(default)]
+    pub terminal_is_synthesized: bool,
     #[serde(default)]
     pub plan_submitted_at: Vec<String>,
     #[serde(default)]
@@ -46,6 +50,11 @@ impl ClanRuntimeMemberWire {
             stopped_at: meta.and_then(|value| value.stopped_at.clone()),
             finished_at: record.done.as_ref().and_then(|done| done.finished_at),
             has_done_marker: record.has_done_marker,
+            terminal_is_synthesized: record
+                .done
+                .as_ref()
+                .and_then(|done| done.outcome.as_deref())
+                == Some("abandoned"),
             plan_submitted_at: meta
                 .map(|value| value.plan_submitted_at.clone())
                 .unwrap_or_default(),
@@ -85,7 +94,17 @@ pub(crate) struct ActiveInterval {
 pub(crate) enum ActiveIntervalError {
     InvalidStart,
     InvalidTerminal,
+    UnusableTerminal,
     ImpossibleBounds,
+}
+
+/// Which inactive windows a runtime consumer removes from a member interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitPolicy {
+    /// Exclude plan-review and question waits from clan/family wall time.
+    HumanWaits,
+    /// Exclude only question waits where runner admission released the slot.
+    SlotYield,
 }
 
 #[derive(Debug, Default)]
@@ -123,8 +142,12 @@ pub fn aggregate_clan_runtime(
     let mut intervals = Vec::new();
     let mut active = false;
     for member in members {
-        let Ok(derived) = derive_active_intervals(member, now_epoch_seconds)
-        else {
+        let Ok(derived) = derive_active_intervals(
+            member,
+            now_epoch_seconds,
+            WaitPolicy::HumanWaits,
+            &[],
+        ) else {
             continue;
         };
         active |= derived.live_at_end;
@@ -149,12 +172,14 @@ pub fn aggregate_clan_runtime_records(
     aggregate_clan_runtime(&members, now_epoch_seconds)
 }
 
-/// Derive the active, human-wait-free intervals for one member, capped at an
-/// exclusive query end. Runner analytics clips these same intervals at its
-/// lower analysis bound; clan/family runtime consumes them from run start.
+/// Derive active intervals for one member under the requested wait policy,
+/// capped at an exclusive query end. Runner analytics clips these intervals at
+/// its lower analysis bound; clan/family runtime consumes them from run start.
 pub(crate) fn derive_active_intervals(
     member: &ClanRuntimeMemberWire,
     query_end: f64,
+    wait_policy: WaitPolicy,
+    resolved_question_answers: &[f64],
 ) -> Result<ActiveIntervalDerivation, ActiveIntervalError> {
     if !query_end.is_finite() {
         return Err(ActiveIntervalError::ImpossibleBounds);
@@ -173,7 +198,12 @@ pub(crate) fn derive_active_intervals(
         return Ok(ActiveIntervalDerivation::default());
     }
 
-    let exclusions = member_human_waits(member, start, end);
+    let exclusions = match wait_policy {
+        WaitPolicy::HumanWaits => member_human_waits(member, start, end),
+        WaitPolicy::SlotYield => {
+            member_slot_yields(member, start, end, resolved_question_answers)
+        }
+    };
     let live_at_end =
         terminal.is_none() && !point_is_excluded(query_end, &exclusions);
     Ok(ActiveIntervalDerivation {
@@ -217,14 +247,20 @@ fn member_terminal(
             candidates.push(parsed);
         }
     }
-    if let Some(value) = member.finished_at {
-        declared = true;
-        if value.is_finite() {
-            candidates.push(value);
+    if !member.terminal_is_synthesized {
+        if let Some(value) = member.finished_at {
+            declared = true;
+            if value.is_finite() {
+                candidates.push(value);
+            }
         }
+    } else {
+        declared = true;
     }
     if candidates.is_empty() {
-        return if declared {
+        return if member.terminal_is_synthesized {
+            Err(ActiveIntervalError::UnusableTerminal)
+        } else if declared {
             Err(ActiveIntervalError::InvalidTerminal)
         } else {
             Ok(None)
@@ -271,6 +307,52 @@ fn member_human_waits(
                     end,
                 });
             }
+        }
+    }
+
+    if let Some(submitted) = member
+        .pending_question_submitted_at
+        .as_deref()
+        .and_then(parse_runtime_timestamp)
+        .filter(|value| *value >= start && *value < end)
+    {
+        waits.push(ActiveInterval {
+            start: submitted,
+            end,
+        });
+    }
+
+    merge_intervals(&mut waits)
+}
+
+fn member_slot_yields(
+    member: &ClanRuntimeMemberWire,
+    start: f64,
+    end: f64,
+    resolved_question_answers: &[f64],
+) -> Vec<ActiveInterval> {
+    let mut waits = Vec::new();
+    let mut answers = resolved_question_answers
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    answers.sort_by(f64::total_cmp);
+
+    for submitted in parsed_sorted(&member.questions_submitted_at) {
+        if submitted < start || submitted >= end {
+            continue;
+        }
+        let Some(index) = answers.iter().position(|value| *value >= submitted)
+        else {
+            continue;
+        };
+        let answered = answers.remove(index).min(end);
+        if answered > submitted {
+            waits.push(ActiveInterval {
+                start: submitted,
+                end: answered,
+            });
         }
     }
 
@@ -404,6 +486,14 @@ mod tests {
         }
     }
 
+    fn derived_seconds(derived: &ActiveIntervalDerivation) -> f64 {
+        derived
+            .intervals
+            .iter()
+            .map(|interval| interval.end - interval.start)
+            .sum()
+    }
+
     #[test]
     fn empty_input_has_zero_inactive_runtime() {
         assert_eq!(
@@ -447,6 +537,59 @@ mod tests {
         let result = aggregate_clan_runtime(&[value], BASE + 100.0);
         assert_eq!(result.wall_clock_seconds, 65.0);
         assert!(!result.active);
+    }
+
+    #[test]
+    fn wait_policies_distinguish_plan_review_from_slot_yields() {
+        let mut value = member(0, Some(100));
+        value.plan_submitted_at = vec![timestamp(20)];
+        value.feedback_submitted_at = vec![timestamp(55)];
+
+        let human = derive_active_intervals(
+            &value,
+            BASE + 100.0,
+            WaitPolicy::HumanWaits,
+            &[],
+        )
+        .unwrap();
+        let slot = derive_active_intervals(
+            &value,
+            BASE + 100.0,
+            WaitPolicy::SlotYield,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(derived_seconds(&human), 65.0);
+        assert_eq!(derived_seconds(&slot), 100.0);
+        assert_eq!(
+            aggregate_clan_runtime(&[value], BASE + 100.0).wall_clock_seconds,
+            65.0
+        );
+    }
+
+    #[test]
+    fn slot_yield_needs_a_resolved_question_answer_time() {
+        let mut value = member(0, Some(100));
+        value.questions_submitted_at = vec![timestamp(20)];
+
+        let resolved = derive_active_intervals(
+            &value,
+            BASE + 100.0,
+            WaitPolicy::SlotYield,
+            &[BASE + 55.0],
+        )
+        .unwrap();
+        let unresolved = derive_active_intervals(
+            &value,
+            BASE + 100.0,
+            WaitPolicy::SlotYield,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(derived_seconds(&resolved), 65.0);
+        assert_eq!(derived_seconds(&unresolved), 100.0);
     }
 
     #[test]
@@ -521,6 +664,37 @@ mod tests {
         fallback.has_done_marker = true;
         let result = aggregate_clan_runtime(&[fallback], BASE + 100.0);
         assert_eq!(result.wall_clock_seconds, 30.0);
+    }
+
+    #[test]
+    fn synthesized_terminal_never_supplies_the_runtime_end() {
+        let mut stopped = member(0, Some(10));
+        stopped.finished_at = Some(BASE + 40.0 * 60.0 * 60.0);
+        stopped.has_done_marker = true;
+        stopped.terminal_is_synthesized = true;
+        let derived = derive_active_intervals(
+            &stopped,
+            BASE + 100.0,
+            WaitPolicy::SlotYield,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(derived_seconds(&derived), 10.0);
+
+        let mut unusable = member(0, None);
+        unusable.finished_at = stopped.finished_at;
+        unusable.has_done_marker = true;
+        unusable.terminal_is_synthesized = true;
+        assert_eq!(
+            derive_active_intervals(
+                &unusable,
+                BASE + 100.0,
+                WaitPolicy::SlotYield,
+                &[],
+            )
+            .unwrap_err(),
+            ActiveIntervalError::UnusableTerminal
+        );
     }
 
     #[test]
