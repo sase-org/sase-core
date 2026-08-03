@@ -44,6 +44,15 @@ pub struct BeadDoctorReportWire {
     pub redundant_close_recent_window_days: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadIssueDetailWire {
+    pub issue: IssueWire,
+    pub ancestors: Vec<Option<IssueWire>>,
+    pub children: Vec<IssueWire>,
+    pub depends_on: Vec<Option<IssueWire>>,
+    pub blocks: Vec<IssueWire>,
+}
+
 pub fn read_store_issues(
     beads_dir: &Path,
 ) -> Result<Vec<IssueWire>, BeadError> {
@@ -92,6 +101,15 @@ pub fn show_issue(
     let (issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
     let resolved_id = resolver.resolve(issue_id)?;
     show_issue_in_issues(issues, &resolved_id)
+}
+
+pub fn show_issue_detail(
+    beads_dir: &Path,
+    issue_id: &str,
+) -> Result<BeadIssueDetailWire, BeadError> {
+    let (issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
+    let resolved_id = resolver.resolve(issue_id)?;
+    show_issue_detail_in_issues(&issues, &resolver, &resolved_id)
 }
 
 pub fn resolve_issue_id(
@@ -666,6 +684,99 @@ fn show_issue_in_issues(
             kind: "not_found".to_string(),
             message: format!("Issue not found: {issue_id}"),
         })
+}
+
+fn show_issue_detail_in_issues(
+    issues: &[IssueWire],
+    resolver: &BeadIdentityResolver,
+    issue_id: &str,
+) -> Result<BeadIssueDetailWire, BeadError> {
+    let issue = issues
+        .iter()
+        .find(|issue| issue.id == issue_id)
+        .cloned()
+        .ok_or_else(|| BeadError {
+            kind: "not_found".to_string(),
+            message: format!("Issue not found: {issue_id}"),
+        })?;
+
+    let ancestors = issue_ancestors_in_issues(issues, resolver, &issue)?;
+    let mut ordered_issues = issues.to_vec();
+    sort_by_created_at(&mut ordered_issues);
+    let children = ordered_issues
+        .iter()
+        .filter(|candidate| candidate.parent_id.as_deref() == Some(issue_id))
+        .cloned()
+        .collect();
+    let depends_on = issue
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            resolve_optional_issue_in_issues(
+                issues,
+                resolver,
+                &dependency.depends_on_id,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let blocks = ordered_issues
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.depends_on_id == issue.id)
+        })
+        .collect();
+
+    Ok(BeadIssueDetailWire {
+        issue,
+        ancestors,
+        children,
+        depends_on,
+        blocks,
+    })
+}
+
+fn issue_ancestors_in_issues(
+    issues: &[IssueWire],
+    resolver: &BeadIdentityResolver,
+    issue: &IssueWire,
+) -> Result<Vec<Option<IssueWire>>, BeadError> {
+    let mut ancestors = Vec::new();
+    let mut parent_id = issue.parent_id.clone();
+    let mut seen = BTreeSet::from([issue.id.clone()]);
+    while let Some(current_parent_id) = parent_id {
+        if !seen.insert(current_parent_id.clone()) {
+            ancestors.push(None);
+            break;
+        }
+        let Some(parent) = resolve_optional_issue_in_issues(
+            issues,
+            resolver,
+            &current_parent_id,
+        )?
+        else {
+            ancestors.push(None);
+            break;
+        };
+        parent_id = parent.parent_id.clone();
+        ancestors.push(Some(parent));
+    }
+    Ok(ancestors)
+}
+
+fn resolve_optional_issue_in_issues(
+    issues: &[IssueWire],
+    resolver: &BeadIdentityResolver,
+    issue_id: &str,
+) -> Result<Option<IssueWire>, BeadError> {
+    let resolved_id = match resolver.resolve(issue_id) {
+        Ok(resolved_id) => resolved_id,
+        Err(error) if error.kind == "not_found" => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(issues.iter().find(|issue| issue.id == resolved_id).cloned())
 }
 
 pub fn resolve_issue_id_in_issues(

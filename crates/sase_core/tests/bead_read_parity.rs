@@ -6,11 +6,11 @@ use sase_core::bead::BeadResolutionWire;
 use sase_core::{
     bead_blocked_issues, bead_doctor, bead_doctor_report,
     bead_doctor_with_plan_roots, bead_get_epic_children, bead_list_issues,
-    bead_ready_issues, bead_show_issue, bead_stats, import_issues_from_jsonl,
-    import_issues_to_event_streams, repair_event_store_manifest,
-    BeadEventManifestRepairStatusWire, BeadEventOperationWire,
-    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire, BEAD_EVENT_SCHEMA_VERSION,
+    bead_ready_issues, bead_show_issue, bead_show_issue_detail, bead_stats,
+    import_issues_from_jsonl, import_issues_to_event_streams,
+    repair_event_store_manifest, BeadEventManifestRepairStatusWire,
+    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
+    BeadEventStoreManifestWire, BeadEventStreamWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -70,6 +70,27 @@ fn read_queries_match_python_contract_ordering() {
         ids(bead_get_epic_children(&beads_dir, "beads-1").unwrap()),
         vec!["beads-1.1", "beads-1.2"]
     );
+    let detail = bead_show_issue_detail(&beads_dir, "beads-1.1").unwrap();
+    assert_eq!(
+        detail.issue,
+        bead_show_issue(&beads_dir, "beads-1.1").unwrap()
+    );
+    assert_eq!(
+        detail.ancestors,
+        vec![Some(bead_show_issue(&beads_dir, "beads-1").unwrap())]
+    );
+    assert_eq!(
+        ids(detail.children),
+        ids(bead_get_epic_children(&beads_dir, "beads-1.1").unwrap())
+    );
+    assert!(detail.depends_on.is_empty());
+    assert_eq!(ids(detail.blocks), vec!["beads-1.2"]);
+
+    let detail = bead_show_issue_detail(&beads_dir, "beads-1.2").unwrap();
+    assert_eq!(
+        detail.depends_on,
+        vec![Some(bead_show_issue(&beads_dir, "beads-1.1").unwrap())]
+    );
     let stats = bead_stats(&beads_dir).unwrap();
     assert_eq!(stats["total"], 6);
     assert_eq!(stats["ready"], 2);
@@ -78,6 +99,33 @@ fn read_queries_match_python_contract_ordering() {
         bead_doctor(&beads_dir).unwrap(),
         vec!["OK: no issues found"]
     );
+}
+
+#[test]
+fn issue_detail_preserves_unresolved_relationship_slots() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        issue(
+            "beads-1",
+            "Dangling relationships",
+            "phase",
+            Some("beads-missing-parent"),
+            "open",
+            "2026-01-01T00:00:00Z",
+            r#","dependencies":[{"issue_id":"beads-1","depends_on_id":"beads-missing-dependency","created_at":"2026-01-01T00:00:00Z","created_by":""}]"#,
+        ) + "\n",
+    )
+    .unwrap();
+
+    let detail = bead_show_issue_detail(&beads_dir, "beads-1").unwrap();
+
+    assert_eq!(detail.ancestors, vec![None]);
+    assert_eq!(detail.depends_on, vec![None]);
 }
 
 #[test]

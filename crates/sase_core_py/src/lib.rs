@@ -472,6 +472,7 @@ use sase_core::bead::{
     rewrite_id_tokens as core_bead_rewrite_id_tokens,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
+    show_issue_detail as core_bead_show_issue_detail,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     task_ready_migration_sql as core_bead_task_ready_migration_sql,
@@ -2830,6 +2831,20 @@ fn py_bead_show<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| core_bead_show_issue(&beads_dir, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_show_issue_detail")]
+fn py_bead_show_issue_detail<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_show_issue_detail(&beads_dir, issue_id)),
     )
 }
 
@@ -7294,6 +7309,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_doctor, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_doctor_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_get_epic_children, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_show_issue_detail, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_resolve_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_init_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_create, m)?)?;
