@@ -49,6 +49,7 @@ pub const ARTIFACT_REF_COMMIT_SCAN_LIMIT: usize = 200;
 pub const ARTIFACT_REF_COMMIT_MAX_ROWS: usize = 1_000;
 const ARTIFACT_REF_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ARTIFACT_REF_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const ARTIFACT_REF_REPOSITORY_KIND_SIDECAR: &str = "sidecar";
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
@@ -417,6 +418,10 @@ pub fn build_artifact_ref_payload_completion_candidates(
 /// this inventory is built, so a memorable match beyond the first 200 files
 /// remains reachable. Callers should cache this inventory: document titles
 /// require bounded file reads across the scanned corpus.
+///
+/// Commit payload inventory enumerates non-sidecar repositories. SDD sidecars
+/// are excluded because they are machine-written stores, not human-authored
+/// code history.
 pub fn build_artifact_ref_payload_inventory(
     kind: &str,
     context: &ArtifactRefContextWire,
@@ -484,7 +489,7 @@ fn append_commit_candidates(
 ) -> usize {
     let mut commits = Vec::new();
     for repository in &context.repositories {
-        if repository.kind == "sidecar" {
+        if repository_is_sdd_sidecar(repository) {
             continue;
         }
         let Some(checkout) = repository.checkout_paths.first() else {
@@ -508,6 +513,12 @@ fn append_commit_candidates(
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or_default();
     append_ranked_commit_candidates(payloads, seen, commits, now)
+}
+
+fn repository_is_sdd_sidecar(
+    repository: &crate::ArtifactRefRepositoryWire,
+) -> bool {
+    repository.kind == ARTIFACT_REF_REPOSITORY_KIND_SIDECAR
 }
 
 fn sort_commit_candidates(commits: &mut [CommitCandidate]) {
@@ -3176,21 +3187,32 @@ mod tests {
     fn commit_inventory_keeps_non_sidecar_repository_kinds() {
         let temp = tempfile::tempdir().unwrap();
         let unclassified = temp.path().join("unclassified");
-        let human_code = temp.path().join("human-code");
+        let primary = temp.path().join("primary");
+        let linked = temp.path().join("linked");
+        let external = temp.path().join("external");
         let sidecar = temp.path().join("sidecar");
         init_git_repo(&unclassified);
-        init_git_repo(&human_code);
+        init_git_repo(&primary);
+        init_git_repo(&linked);
+        init_git_repo(&external);
         init_git_repo(&sidecar);
         let unclassified_sha =
             commit_at(&unclassified, 1_700_000_000, "unclassified", "");
-        let human_code_sha =
-            commit_at(&human_code, 1_700_000_100, "human code", "");
-        commit_at(&sidecar, 1_700_000_200, "sidecar", "");
+        let primary_sha = commit_at(&primary, 1_700_000_100, "primary", "");
+        let linked_sha = commit_at(&linked, 1_700_000_200, "linked", "");
+        let external_sha = commit_at(&external, 1_700_000_300, "external", "");
+        commit_at(&sidecar, 1_700_000_400, "sidecar", "");
         let context = ArtifactRefContextWire {
             repositories: vec![
                 repository("unclassified", &unclassified),
-                repository_with_kind("human-code", "human-code", &human_code),
-                repository_with_kind("plans", "sidecar", &sidecar),
+                repository_with_kind("primary", "primary", &primary),
+                repository_with_kind("linked", "linked", &linked),
+                repository_with_kind("external", "external", &external),
+                repository_with_kind(
+                    "plans",
+                    ARTIFACT_REF_REPOSITORY_KIND_SIDECAR,
+                    &sidecar,
+                ),
             ],
             ..Default::default()
         };
@@ -3207,8 +3229,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 format!(
-                    "human-code@{}",
-                    &human_code_sha[..ARTIFACT_REF_COMMIT_ABBREV]
+                    "external@{}",
+                    &external_sha[..ARTIFACT_REF_COMMIT_ABBREV]
+                ),
+                format!("linked@{}", &linked_sha[..ARTIFACT_REF_COMMIT_ABBREV]),
+                format!(
+                    "primary@{}",
+                    &primary_sha[..ARTIFACT_REF_COMMIT_ABBREV]
                 ),
                 format!(
                     "unclassified@{}",
