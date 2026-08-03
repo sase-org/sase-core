@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.16](https://github.com/sase-org/sase-core/compare/v0.17.15...v0.17.16) - 2026-08-03
+
+### Fixed
+
+- *(beads)* remove abandoned prefix migration primitives
+
 ## [0.17.15](https://github.com/sase-org/sase-core/compare/v0.17.14...v0.17.15) - 2026-08-03
 
 ### Added
