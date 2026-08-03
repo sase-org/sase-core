@@ -44,7 +44,6 @@ pub mod prompt_artifact;
 pub mod prompt_literals;
 mod prompt_rewrite;
 pub mod prompt_stash;
-pub mod prompt_xprompt;
 pub mod query;
 mod reference_path;
 pub mod runner_limit_override;

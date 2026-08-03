@@ -168,9 +168,6 @@
 //! - `prompt_artifact_manifest_select(records: list[dict], agent_artifacts_dir: str) -> list[dict]`
 //! - `prompt_artifact_rewrite_links(prompt: str, records: list[dict], resolver: Callable[[dict], str | None]) -> dict`
 //! - `prompt_artifact_wire_schema_version() -> int`
-//! - `prompt_xprompt_records_parse(data: bytes) -> list[dict]`
-//! - `prompt_xprompt_records_select(records: list[dict]) -> list[dict]`
-//! - `prompt_xprompt_rewrite_links(prompt: str, records: list[dict], resolver: Callable[[dict], str | None]) -> dict`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
@@ -581,11 +578,6 @@ use sase_core::prompt_stash::{
     rewrite_prompt_stash as core_rewrite_prompt_stash,
     set_prompt_stash_pinned as core_set_prompt_stash_pinned,
     PromptStashEntryWire, PromptStashStoreError,
-};
-use sase_core::prompt_xprompt::{
-    parse_xprompt_records as core_parse_xprompt_records,
-    rewrite_prompt_xprompt_links as core_rewrite_prompt_xprompt_links,
-    select_xprompt_records as core_select_xprompt_records, PromptXpromptRecord,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -3283,97 +3275,6 @@ fn py_prompt_artifact_wire_schema_version() -> u64 {
     PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION
 }
 
-/// Parse valid rows from a tolerant xprompt-source JSON array.
-#[pyfunction]
-#[pyo3(name = "prompt_xprompt_records_parse")]
-fn py_prompt_xprompt_records_parse<'py>(
-    py: Python<'py>,
-    data: &Bound<'py, PyBytes>,
-) -> PyResult<PyObject> {
-    serialized_result_to_py(
-        py,
-        &core_parse_xprompt_records(data.as_bytes()),
-        "xprompt source records",
-    )
-}
-
-/// Select the newest provenance row for each exact xprompt reference.
-#[pyfunction]
-#[pyo3(name = "prompt_xprompt_records_select")]
-fn py_prompt_xprompt_records_select<'py>(
-    py: Python<'py>,
-    records: &Bound<'py, PyList>,
-) -> PyResult<PyObject> {
-    let records = prompt_xprompt_records_from_py_list(records)?;
-    serialized_result_to_py(
-        py,
-        &core_select_xprompt_records(&records),
-        "xprompt source records",
-    )
-}
-
-/// Rewrite captured xprompt tokens using a Python target resolver.
-#[pyfunction]
-#[pyo3(name = "prompt_xprompt_rewrite_links")]
-fn py_prompt_xprompt_rewrite_links<'py>(
-    py: Python<'py>,
-    prompt: &str,
-    records: &Bound<'py, PyList>,
-    resolver: &Bound<'py, PyAny>,
-) -> PyResult<PyObject> {
-    if !resolver.is_callable() {
-        return Err(PyValueError::new_err(
-            "xprompt source resolver must be callable",
-        ));
-    }
-    let records = prompt_xprompt_records_from_py_list(records)?;
-    let mut targets = Vec::with_capacity(records.len());
-    for record in &records {
-        let argument = serde_json::to_value(record)
-            .map_err(|error| {
-                PyValueError::new_err(format!(
-                    "internal xprompt source serialize error: {error}"
-                ))
-            })
-            .and_then(|value| json_value_to_py(py, &value))?;
-        let target = resolver.call1((argument,))?;
-        targets.push(if target.is_none() {
-            None
-        } else {
-            Some(target.extract::<String>().map_err(|_| {
-                PyValueError::new_err(
-                    "xprompt source resolver must return str or None",
-                )
-            })?)
-        });
-    }
-    let mut target_index = 0;
-    let rewritten = core_rewrite_prompt_xprompt_links(prompt, &records, |_| {
-        let target = targets[target_index].clone();
-        target_index += 1;
-        target
-    });
-    serialized_result_to_py(py, &rewritten, "xprompt rewrite")
-}
-
-fn prompt_xprompt_records_from_py_list(
-    records: &Bound<'_, PyList>,
-) -> PyResult<Vec<PromptXpromptRecord>> {
-    records
-        .iter()
-        .enumerate()
-        .map(|(index, record)| {
-            serde_json::from_value(py_to_json_value(&record)?).map_err(
-                |error| {
-                    PyValueError::new_err(format!(
-                        "records[{index}] is not a valid PromptXpromptRecord dict: {error}"
-                    ))
-                },
-            )
-        })
-        .collect()
-}
-
 fn prompt_artifact_record_from_pydict(
     record: &Bound<'_, PyDict>,
 ) -> PyResult<PromptArtifactRecord> {
@@ -3414,22 +3315,6 @@ where
     let value = serde_json::to_value(result).map_err(|error| {
         PyValueError::new_err(format!(
             "internal prompt artifact serialize error: {error}"
-        ))
-    })?;
-    json_value_to_py(py, &value)
-}
-
-fn serialized_result_to_py<T>(
-    py: Python<'_>,
-    result: &T,
-    description: &str,
-) -> PyResult<PyObject>
-where
-    T: serde::Serialize,
-{
-    let value = serde_json::to_value(result).map_err(|error| {
-        PyValueError::new_err(format!(
-            "internal {description} serialize error: {error}"
         ))
     })?;
     json_value_to_py(py, &value)
@@ -7186,9 +7071,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_prompt_artifact_wire_schema_version,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(py_prompt_xprompt_records_parse, m)?)?;
-    m.add_function(wrap_pyfunction!(py_prompt_xprompt_records_select, m)?)?;
-    m.add_function(wrap_pyfunction!(py_prompt_xprompt_rewrite_links, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_consumption_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_consumption_wire_schema_version,
@@ -9109,97 +8991,6 @@ mod tests {
                 rewritten["linked_records"].as_array().unwrap().len(),
                 1
             );
-        });
-    }
-
-    #[test]
-    fn prompt_xprompt_bindings_round_trip_record_shapes() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
-            sase_core_rs(py, &module).unwrap();
-            for name in [
-                "prompt_xprompt_records_parse",
-                "prompt_xprompt_records_select",
-                "prompt_xprompt_rewrite_links",
-            ] {
-                assert!(module.getattr(name).is_ok(), "missing {name}");
-            }
-
-            let old_record = json!({
-                "schema_version": 1,
-                "raw_ref": "#plan",
-                "name": "plan",
-                "kind": "workflow",
-                "source_kind": "yaml",
-                "source_path": "/repo/sase.yml",
-                "definition_line": 12,
-                "repo": "chezmoi",
-                "repo_root": "/repo",
-                "repo_relpath": "home/dot_config/sase/sase.yml",
-                "chezmoi": true,
-                "skipped_reason": null
-            });
-            let new_record = json!({
-                "schema_version": 1,
-                "raw_ref": "#plan",
-                "name": "plan",
-                "kind": "workflow",
-                "source_kind": "yaml",
-                "source_path": "/repo/new-sase.yml",
-                "definition_line": 24,
-                "repo": "chezmoi",
-                "repo_root": "/repo",
-                "repo_relpath": "home/dot_config/sase/sase.yml",
-                "chezmoi": true,
-                "skipped_reason": null
-            });
-            let encoded = serde_json::to_vec(&json!([
-                old_record.clone(),
-                new_record.clone()
-            ]))
-            .unwrap();
-            let parsed = py_prompt_xprompt_records_parse(
-                py,
-                &PyBytes::new_bound(py, &encoded),
-            )
-            .unwrap();
-            assert_eq!(
-                py_to_json_value(parsed.bind(py)).unwrap(),
-                json!([old_record, new_record.clone()])
-            );
-
-            let records_object =
-                json_value_to_py(py, &json!([new_record.clone()])).unwrap();
-            let records = records_object.bind(py).downcast::<PyList>().unwrap();
-            let selected =
-                py_prompt_xprompt_records_select(py, records).unwrap();
-            assert_eq!(
-                py_to_json_value(selected.bind(py)).unwrap(),
-                json!([new_record])
-            );
-
-            let resolver_module = PyModule::from_code_bound(
-                py,
-                "def resolve(record):\n    return 'definition.yml#L24'\n",
-                "resolver.py",
-                "resolver",
-            )
-            .unwrap();
-            let resolver = resolver_module.getattr("resolve").unwrap();
-            let rewritten = py_prompt_xprompt_rewrite_links(
-                py,
-                "Use #plan now.",
-                records,
-                &resolver,
-            )
-            .unwrap();
-            let rewritten = py_to_json_value(rewritten.bind(py)).unwrap();
-            assert_eq!(
-                rewritten["prompt"],
-                json!("Use [#plan](definition.yml#L24) now.")
-            );
-            assert_eq!(rewritten["linked_records"], json!([new_record]));
         });
     }
 
