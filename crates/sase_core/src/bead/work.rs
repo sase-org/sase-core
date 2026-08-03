@@ -5,6 +5,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use super::config::{default_config, load_config};
+use super::identity::BeadIdentityResolver;
 use super::read::read_store_issues;
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, PhaseSizeWire,
@@ -42,7 +44,11 @@ pub fn build_epic_work_plan(
     beads_dir: &Path,
     epic_id: &str,
 ) -> Result<EpicWorkPlanWire, BeadError> {
-    build_epic_work_plan_from_issues(read_store_issues(beads_dir)?, epic_id)
+    let issues = read_store_issues(beads_dir)?;
+    let config = load_config(beads_dir, default_config("beads", ""))?;
+    let resolved_id = BeadIdentityResolver::new(&issues, &config.id_aliases)?
+        .resolve(epic_id)?;
+    build_epic_work_plan_from_issues(issues, &resolved_id)
 }
 
 pub fn build_epic_work_plan_from_issues(

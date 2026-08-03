@@ -8,9 +8,11 @@ pub mod cli;
 pub mod config;
 pub mod events;
 pub mod history;
+pub mod identity;
 pub mod jsonl;
 pub mod mutation;
 pub mod read;
+pub mod reprefix;
 pub mod schema;
 pub mod search;
 pub mod wire;
@@ -34,6 +36,10 @@ pub use history::{
     bead_history, bead_lost_notes, BeadHistoryChangeWire, BeadHistoryEntryWire,
     BeadHistoryWire, BeadLostNoteRevisionWire, BeadLostNotesWire,
     BEAD_HISTORY_WIRE_SCHEMA_VERSION,
+};
+pub use identity::{
+    rewrite_id_tokens, validate_id_aliases, validate_issue_id_for_prefix,
+    validate_issue_prefix, BeadIdTokenRewriteOutcomeWire, BeadIdentityResolver,
 };
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
@@ -59,6 +65,10 @@ pub use read::{
     resolve_issue_id_in_issues, resolve_issue_ids, show_issue, stats,
     BeadDoctorReportWire, BeadProjectionDriftWire,
     BEAD_READ_WIRE_SCHEMA_VERSION,
+};
+pub use reprefix::{
+    apply_prefix_migration, preview_prefix_migration,
+    BeadPrefixMigrationOutcomeWire, BeadPrefixMigrationRequestWire,
 };
 pub use schema::{
     changespec_metadata_migration_sql, is_ready_to_work_migration_sql,

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 
 use sase_core::{
@@ -94,6 +95,7 @@ fn load_config_fixture_matches_python_shape() {
             issue_prefix: "gold".to_string(),
             next_counter: 42,
             owner: "owner@example.com".to_string(),
+            id_aliases: BTreeMap::new(),
         }
     );
 }

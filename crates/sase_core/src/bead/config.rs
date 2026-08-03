@@ -1,5 +1,6 @@
 //! `sase bead` config JSON handling.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -38,6 +39,8 @@ pub struct BeadConfigWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub owner: String,
+    #[serde(default)]
+    pub id_aliases: BTreeMap<String, String>,
 }
 
 pub fn default_config(
@@ -48,6 +51,7 @@ pub fn default_config(
         issue_prefix: issue_prefix.into(),
         next_counter: 1,
         owner: owner.into(),
+        id_aliases: BTreeMap::new(),
     }
 }
 
@@ -95,6 +99,7 @@ mod tests {
                 issue_prefix: "gold".to_string(),
                 next_counter: 42,
                 owner: "owner@example.com".to_string(),
+                id_aliases: BTreeMap::new(),
             }
         );
     }
@@ -116,6 +121,7 @@ mod tests {
             issue_prefix: "proj".to_string(),
             next_counter: 5,
             owner: String::new(),
+            id_aliases: BTreeMap::new(),
         };
         save_config(temp.path(), &config).unwrap();
         let raw =

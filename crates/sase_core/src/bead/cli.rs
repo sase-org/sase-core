@@ -22,9 +22,7 @@ use super::mutation::{
     update_issues, BeadCreateRequestWire, BeadMutationOutcomeWire,
     BeadUpdateFieldsWire,
 };
-use super::read::{
-    read_store_issues, resolve_issue_id_in_issues, resolve_issue_ids,
-};
+use super::read::{read_store_issues, resolve_issue_id, resolve_issue_ids};
 use super::search::search_issues_in_issues;
 use super::wire::{
     BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
@@ -181,7 +179,7 @@ fn handle_show(
         return Ok(defer());
     }
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
-    let issue_id = match resolve_cli_issue_id(&issues, &args[0]) {
+    let issue_id = match resolve_cli_issue_id(write_beads_dir, &args[0]) {
         Ok(issue_id) => issue_id,
         Err(err) => return Ok(issue_resolution_outcome(&args[0], err)),
     };
@@ -565,11 +563,13 @@ fn handle_create(
         ));
     }
     if let Some(parent_id) = parsed.parent_id.as_deref() {
-        let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-        parsed.parent_id = match resolve_cli_parent_id(&issues, parent_id) {
-            Ok(parent_id) => Some(parent_id),
-            Err(err) => return Ok(parent_resolution_outcome(parent_id, err)),
-        };
+        parsed.parent_id =
+            match resolve_cli_parent_id(write_beads_dir, parent_id) {
+                Ok(parent_id) => Some(parent_id),
+                Err(err) => {
+                    return Ok(parent_resolution_outcome(parent_id, err))
+                }
+            };
     }
 
     let design = match parsed.plan_path.as_deref() {
@@ -896,7 +896,7 @@ fn handle_open(
         return Ok(defer());
     }
     let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    let issue_id = match resolve_cli_issue_id(&issues, &args[0]) {
+    let issue_id = match resolve_cli_issue_id(write_beads_dir, &args[0]) {
         Ok(issue_id) => issue_id,
         Err(err) => return Ok(issue_resolution_outcome(&args[0], err)),
     };
@@ -946,7 +946,7 @@ fn handle_update(
     let issues = read_store_issues(write_beads_dir).unwrap_or_default();
     let issue_ids = match raw_ids
         .iter()
-        .map(|issue_id| resolve_cli_issue_id(&issues, issue_id))
+        .map(|issue_id| resolve_cli_issue_id(write_beads_dir, issue_id))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(ids) => ids,
@@ -1029,7 +1029,7 @@ fn handle_close(
     let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
     let ids = match ids
         .iter()
-        .map(|issue_id| resolve_cli_issue_id(&old_issues, issue_id))
+        .map(|issue_id| resolve_cli_issue_id(write_beads_dir, issue_id))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(ids) => ids,
@@ -1118,16 +1118,16 @@ fn handle_dep(
             ))
         }
         Some("rm") if args.len() >= 3 => {
-            let issue_ids =
-                match resolve_cli_issue_ids(write_beads_dir, &args[1..]) {
-                    Ok(issue_ids) => issue_ids,
-                    Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-                };
-            let issue_id = &issue_ids[0];
+            let issue_id = match resolve_cli_issue_id(write_beads_dir, &args[1])
+            {
+                Ok(issue_id) => issue_id,
+                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
+            };
+            let depends_on_ids = args[2..].to_vec();
             let outcome = remove_dependencies(
                 write_beads_dir,
-                issue_id,
-                &issue_ids[1..],
+                &issue_id,
+                &depends_on_ids,
                 None,
             )?;
             let mut stdout = String::new();
@@ -1144,7 +1144,7 @@ fn handle_dep(
                 active_blocker_ids(&issues, issue_id.as_str());
             let source_is_ready = issues
                 .iter()
-                .find(|issue| issue.id == *issue_id)
+                .find(|issue| issue.id == issue_id)
                 .is_some_and(|issue| {
                     issue.status == StatusWire::Ready
                         && issue.issue_type == IssueTypeWire::Task
@@ -1196,20 +1196,19 @@ fn handle_ref(
     };
     match action {
         "add" if action_args.len() >= 2 => {
-            let issue_id = match resolve_cli_issue_ids(
-                write_beads_dir,
-                &[action_args[0].clone()],
-            ) {
-                Ok(mut issue_ids) => issue_ids.remove(0),
-                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-            };
+            let requested_issue_id = &action_args[0];
             match add_bead_references(
                 write_beads_dir,
-                &issue_id,
+                requested_issue_id,
                 &action_args[1..],
                 None,
             ) {
                 Ok(outcome) => {
+                    let issue_id = outcome
+                        .issue
+                        .as_ref()
+                        .map(|issue| issue.id.as_str())
+                        .unwrap_or(requested_issue_id);
                     let mut stdout = String::new();
                     for reference in &outcome.references {
                         writeln!(
@@ -1226,7 +1225,7 @@ fn handle_ref(
                         BeadCliMutationSummaryWire {
                             operation: "ref_add".to_string(),
                             changed: outcome.changed,
-                            issue_ids: vec![issue_id.clone()],
+                            issue_ids: vec![issue_id.to_string()],
                             status_transitions: Vec::new(),
                         },
                     ))
@@ -1243,20 +1242,19 @@ fn handle_ref(
             }
         }
         "rm" if action_args.len() >= 2 => {
-            let issue_id = match resolve_cli_issue_ids(
-                write_beads_dir,
-                &[action_args[0].clone()],
-            ) {
-                Ok(mut issue_ids) => issue_ids.remove(0),
-                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-            };
+            let requested_issue_id = &action_args[0];
             match remove_bead_references(
                 write_beads_dir,
-                &issue_id,
+                requested_issue_id,
                 &action_args[1..],
                 None,
             ) {
                 Ok(outcome) => {
+                    let issue_id = outcome
+                        .issue
+                        .as_ref()
+                        .map(|issue| issue.id.as_str())
+                        .unwrap_or(requested_issue_id);
                     let mut stdout = String::new();
                     for reference in &outcome.references {
                         writeln!(
@@ -1273,7 +1271,7 @@ fn handle_ref(
                         BeadCliMutationSummaryWire {
                             operation: "ref_rm".to_string(),
                             changed: outcome.changed,
-                            issue_ids: vec![issue_id.clone()],
+                            issue_ids: vec![issue_id.to_string()],
                             status_transitions: Vec::new(),
                         },
                     ))
@@ -1317,7 +1315,7 @@ fn handle_ref_list(
 
     let issues = read_store_issues(write_beads_dir)?;
     let selected = if let Some(issue_id) = issue_id {
-        let issue_id = match resolve_cli_issue_id(&issues, issue_id) {
+        let issue_id = match resolve_cli_issue_id(write_beads_dir, issue_id) {
             Ok(issue_id) => issue_id,
             Err(err) => return Ok(issue_resolution_outcome(issue_id, err)),
         };
@@ -1856,17 +1854,17 @@ fn find_issue<'a>(
 }
 
 fn resolve_cli_issue_id(
-    issues: &[IssueWire],
+    beads_dir: &Path,
     issue_id: &str,
 ) -> Result<String, BeadError> {
-    resolve_issue_id_in_issues(issues, issue_id)
+    resolve_issue_id(beads_dir, issue_id)
 }
 
 fn resolve_cli_parent_id(
-    issues: &[IssueWire],
+    beads_dir: &Path,
     issue_id: &str,
 ) -> Result<String, BeadError> {
-    resolve_issue_id_in_issues(issues, issue_id)
+    resolve_issue_id(beads_dir, issue_id)
 }
 
 fn resolve_cli_issue_ids(

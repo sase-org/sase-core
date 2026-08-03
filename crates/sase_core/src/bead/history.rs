@@ -6,10 +6,12 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::config::{default_config, load_config};
 use super::events::{
-    apply_event, merge_stream_events, validated_event_streams,
-    BeadEventOperationWire, BeadEventStreamWire,
+    apply_event, merge_stream_events, reduce_event_streams,
+    validated_event_streams, BeadEventOperationWire, BeadEventStreamWire,
 };
+use super::identity::BeadIdentityResolver;
 use super::jsonl::read_event_store;
 use super::wire::{BeadError, IssueWire};
 
@@ -57,7 +59,8 @@ pub fn bead_history(
     issue_id: &str,
 ) -> Result<BeadHistoryWire, BeadError> {
     let (_manifest, streams) = read_event_store(beads_dir)?;
-    history_from_streams(&streams, issue_id)
+    let issue_id = resolve_stream_issue_id(beads_dir, &streams, issue_id)?;
+    history_from_streams(&streams, &issue_id)
 }
 
 pub fn bead_lost_notes(
@@ -65,7 +68,20 @@ pub fn bead_lost_notes(
     issue_id: Option<&str>,
 ) -> Result<Vec<BeadLostNotesWire>, BeadError> {
     let (_manifest, streams) = read_event_store(beads_dir)?;
-    lost_notes_from_streams(&streams, issue_id)
+    let issue_id = issue_id
+        .map(|issue_id| resolve_stream_issue_id(beads_dir, &streams, issue_id))
+        .transpose()?;
+    lost_notes_from_streams(&streams, issue_id.as_deref())
+}
+
+fn resolve_stream_issue_id(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    let issues = reduce_event_streams(streams)?;
+    let config = load_config(beads_dir, default_config("beads", ""))?;
+    BeadIdentityResolver::new(&issues, &config.id_aliases)?.resolve(issue_id)
 }
 
 fn history_from_streams(
