@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.15](https://github.com/sase-org/sase-core/compare/v0.17.14...v0.17.15) - 2026-08-03
+
+### Added
+
+- *(beads)* add prefix migration primitives
+
+### Fixed
+
+- *(completion)* exclude sidecars from commit refs
+- *(artifacts)* honor embedded offsets for calendar dates
+
+### Other
+
+- *(bead)* add single-pass detail read
+
 ## [0.17.14](https://github.com/sase-org/sase-core/compare/v0.17.13...v0.17.14) - 2026-08-03
 
 ### Fixed
