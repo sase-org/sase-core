@@ -6,8 +6,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    artifact_file_is_vcs_backed, parse_artifact_datetime,
-    read_artifact_file_index, ArtifactFileQueryError, ArtifactFileWire,
+    artifact_file_is_vcs_backed, parse_artifact_time, read_artifact_file_index,
+    ArtifactFileQueryError, ArtifactFileWire,
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
 };
 
@@ -129,15 +129,14 @@ pub fn artifact_file_store_economics(
     let by_agent_truncated_bytes =
         truncated_agents.map(|group| group.bytes).sum();
 
-    let mut dated = rows
-        .iter()
-        .filter_map(|row| {
-            row.created_at
-                .as_deref()
-                .and_then(parse_artifact_datetime)
-                .map(|date| (date, row.created_at.clone().unwrap_or_default()))
-        })
-        .collect::<Vec<_>>();
+    let mut dated =
+        rows.iter()
+            .filter_map(|row| {
+                row.created_at.as_deref().and_then(parse_artifact_time).map(
+                    |date| (date, row.created_at.clone().unwrap_or_default()),
+                )
+            })
+            .collect::<Vec<_>>();
     dated.sort_by_key(|item| item.0);
     let first_created_at = dated.first().map(|(_, raw)| raw.clone());
     let last_created_at = dated.last().map(|(_, raw)| raw.clone());
@@ -280,7 +279,7 @@ fn row_recency_key(row: &ArtifactFileWire) -> (i64, &str) {
     (
         row.created_at
             .as_deref()
-            .and_then(parse_artifact_datetime)
+            .and_then(parse_artifact_time)
             .map(|value| value.and_utc().timestamp_micros())
             .unwrap_or(i64::MIN),
         row.id.as_str(),

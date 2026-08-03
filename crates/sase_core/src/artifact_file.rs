@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -312,21 +312,28 @@ fn artifact_file_index_schema_supported(version: u64) -> bool {
 }
 
 fn parse_artifact_date(value: &str) -> Option<NaiveDate> {
-    parse_artifact_datetime(value).map(|datetime| datetime.date())
-}
-
-fn parse_artifact_time(value: &str) -> Option<i64> {
-    parse_artifact_datetime(value)
-        .map(|datetime| datetime.and_utc().timestamp_micros())
-}
-
-fn parse_artifact_datetime(value: &str) -> Option<NaiveDateTime> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
     DateTime::parse_from_rfc3339(value)
-        .map(|datetime| datetime.with_timezone(&Utc).naive_utc())
+        .map(|datetime| datetime.naive_local().date())
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                .map(|datetime| datetime.date())
+                .ok()
+        })
+        .or_else(|| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+}
+
+fn parse_artifact_time(value: &str) -> Option<NaiveDateTime> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(value)
+        .map(|datetime| datetime.naive_utc())
         .ok()
         .or_else(|| {
             NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f").ok()
@@ -578,6 +585,39 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["new", "old"]
+        );
+        drop(temp);
+    }
+
+    #[test]
+    fn embedded_offset_controls_calendar_date_but_sorting_uses_instant() {
+        let local_late = "2026-07-03T21:30:00-04:00";
+        assert_eq!(
+            parse_artifact_date(local_late),
+            NaiveDate::from_ymd_opt(2026, 7, 3)
+        );
+        assert_eq!(
+            parse_artifact_time(local_late),
+            NaiveDate::from_ymd_opt(2026, 7, 4)
+                .unwrap()
+                .and_hms_opt(1, 30, 0)
+        );
+
+        let (temp, index) = write_index(&[
+            row(1, "local-late", Some(local_late)),
+            row(1, "utc-earlier", Some("2026-07-04T01:00:00Z")),
+        ]);
+        let rows = query_artifact_files(
+            Path::new(&index),
+            &ArtifactFileQueryFiltersWire {
+                since: Some("2026-07-03".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["local-late", "utc-earlier"]
         );
         drop(temp);
     }

@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::plan::search::parse_since_date_bound;
 
 use super::{
-    artifact_file_is_vcs_backed, parse_artifact_date, parse_artifact_datetime,
+    artifact_file_is_vcs_backed, parse_artifact_date, parse_artifact_time,
     read_artifact_file_index, ArtifactFileQueryError, ArtifactFileWire,
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
 };
@@ -244,7 +244,7 @@ fn require_schema(schema_version: u64) -> Result<(), ArtifactFileQueryError> {
 
 fn parse_now(raw: &str) -> Result<NaiveDate, ArtifactFileQueryError> {
     DateTime::parse_from_rfc3339(raw)
-        .map(|value| value.with_timezone(&Utc).date_naive())
+        .map(|value| value.naive_local().date())
         .map_err(|_| {
             ArtifactFileQueryError::InvalidDate(format!(
                 "invalid RFC3339 retention now: {raw}"
@@ -256,7 +256,7 @@ fn row_recency_key(row: &ArtifactFileWire) -> (i64, &str) {
     (
         row.created_at
             .as_deref()
-            .and_then(parse_artifact_datetime)
+            .and_then(parse_artifact_time)
             .map(|value| value.and_utc().timestamp_micros())
             .unwrap_or(i64::MIN),
         row.id.as_str(),
@@ -507,6 +507,14 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("schema mismatch"));
+    }
+
+    #[test]
+    fn retention_now_uses_its_embedded_offset_calendar_date() {
+        assert_eq!(
+            parse_now("2026-07-03T21:30:00-04:00").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 3).unwrap()
+        );
     }
 
     fn selected_ids(plan: &ArtifactFileRetentionPlanWire) -> Vec<&str> {
