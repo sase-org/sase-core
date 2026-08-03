@@ -1498,6 +1498,7 @@ mod tests {
     fn namespace_resolution_is_canonical_and_local() {
         let context = ArtifactRefContextWire {
             repositories: vec![ArtifactRefRepositoryWire {
+                kind: String::new(),
                 name: "sase".to_string(),
                 aliases: vec!["core".to_string()],
                 shas: vec![FULL_SHA.to_string()],
@@ -1554,6 +1555,30 @@ mod tests {
             .status,
             "unknown_project"
         );
+    }
+
+    #[test]
+    fn commit_resolution_still_considers_sidecar_repositories() {
+        let context = ArtifactRefContextWire {
+            repositories: vec![ArtifactRefRepositoryWire {
+                kind: "sidecar".to_string(),
+                name: "plans".to_string(),
+                aliases: vec!["sdd".to_string()],
+                shas: vec![FULL_SHA.to_string()],
+                checkout_paths: vec!["/workspaces/sase--plans".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let commit = resolve_artifact_ref(
+            &parse_artifact_ref("commit:sdd@0123456").unwrap(),
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(commit.status, "exact");
+        assert_eq!(commit.rendered, format!("commit:plans@{FULL_SHA}"));
+        assert_eq!(commit.locator, Some(format!("plans@{FULL_SHA}")));
     }
 
     #[test]

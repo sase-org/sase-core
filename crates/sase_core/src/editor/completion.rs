@@ -484,6 +484,9 @@ fn append_commit_candidates(
 ) -> usize {
     let mut commits = Vec::new();
     for repository in &context.repositories {
+        if repository.kind == "sidecar" {
+            continue;
+        }
         let Some(checkout) = repository.checkout_paths.first() else {
             continue;
         };
@@ -2942,6 +2945,17 @@ mod tests {
         }
     }
 
+    fn repository_with_kind(
+        name: &str,
+        kind: &str,
+        checkout: &Path,
+    ) -> ArtifactRefRepositoryWire {
+        ArtifactRefRepositoryWire {
+            kind: kind.to_string(),
+            ..repository(name, checkout)
+        }
+    }
+
     fn artifact_completion_context(
         text: &str,
         cursor: usize,
@@ -3156,6 +3170,119 @@ mod tests {
             &context,
         );
         assert_eq!(list.candidates.len(), 3);
+    }
+
+    #[test]
+    fn commit_inventory_keeps_non_sidecar_repository_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let unclassified = temp.path().join("unclassified");
+        let human_code = temp.path().join("human-code");
+        let sidecar = temp.path().join("sidecar");
+        init_git_repo(&unclassified);
+        init_git_repo(&human_code);
+        init_git_repo(&sidecar);
+        let unclassified_sha =
+            commit_at(&unclassified, 1_700_000_000, "unclassified", "");
+        let human_code_sha =
+            commit_at(&human_code, 1_700_000_100, "human code", "");
+        commit_at(&sidecar, 1_700_000_200, "sidecar", "");
+        let context = ArtifactRefContextWire {
+            repositories: vec![
+                repository("unclassified", &unclassified),
+                repository_with_kind("human-code", "human-code", &human_code),
+                repository_with_kind("plans", "sidecar", &sidecar),
+            ],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert_eq!(inventory.truncated_payloads, 0);
+        assert_eq!(
+            inventory
+                .payloads
+                .iter()
+                .map(|row| row.payload.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "human-code@{}",
+                    &human_code_sha[..ARTIFACT_REF_COMMIT_ABBREV]
+                ),
+                format!(
+                    "unclassified@{}",
+                    &unclassified_sha[..ARTIFACT_REF_COMMIT_ABBREV]
+                ),
+            ]
+        );
+        assert!(!inventory.payloads.iter().any(|row| row.scope == "plans"));
+    }
+
+    #[test]
+    fn commit_inventory_is_empty_for_sidecar_only_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let sidecar = temp.path().join("sidecar");
+        init_git_repo(&sidecar);
+        commit_at(&sidecar, 1_700_000_000, "sidecar", "");
+        let context = ArtifactRefContextWire {
+            repositories: vec![repository_with_kind(
+                "plans", "sidecar", &sidecar,
+            )],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert!(inventory.payloads.is_empty());
+        assert_eq!(inventory.truncated_payloads, 0);
+    }
+
+    #[test]
+    fn commit_inventory_skips_sidecars_before_reporting_the_row_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut repositories = Vec::new();
+        for repo_index in
+            0..(ARTIFACT_REF_COMMIT_MAX_ROWS / ARTIFACT_REF_COMMIT_SCAN_LIMIT)
+        {
+            let repo = temp.path().join(format!("code-{repo_index}"));
+            init_git_repo(&repo);
+            for commit_index in 0..ARTIFACT_REF_COMMIT_SCAN_LIMIT {
+                commit_at(
+                    &repo,
+                    1_700_000_000
+                        + (repo_index * ARTIFACT_REF_COMMIT_SCAN_LIMIT
+                            + commit_index) as i64,
+                    &format!("code {repo_index} {commit_index}"),
+                    "",
+                );
+            }
+            repositories.push(repository_with_kind(
+                &format!("code-{repo_index}"),
+                "human-code",
+                &repo,
+            ));
+        }
+        let sidecar = temp.path().join("sidecar");
+        init_git_repo(&sidecar);
+        commit_at(&sidecar, 1_800_000_000, "newer sidecar", "");
+        repositories.push(repository_with_kind("plans", "sidecar", &sidecar));
+        let context = ArtifactRefContextWire {
+            repositories,
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("commit", &context);
+
+        assert_eq!(inventory.payloads.len(), ARTIFACT_REF_COMMIT_MAX_ROWS);
+        assert_eq!(inventory.truncated_payloads, 0);
+        assert!(!inventory.payloads.iter().any(|row| row.scope == "plans"));
+        assert!(!inventory
+            .payloads
+            .iter()
+            .any(|row| row.label == "newer sidecar"));
     }
 
     #[test]

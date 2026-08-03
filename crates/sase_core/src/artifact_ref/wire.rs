@@ -141,6 +141,8 @@ pub struct ArtifactRefDocumentRootWire {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefRepositoryWire {
+    #[serde(default)]
+    pub kind: String,
     pub name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
