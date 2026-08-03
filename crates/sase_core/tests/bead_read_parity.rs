@@ -70,6 +70,12 @@ fn read_queries_match_python_contract_ordering() {
         ids(bead_get_epic_children(&beads_dir, "beads-1").unwrap()),
         vec!["beads-1.1", "beads-1.2"]
     );
+    let detail = bead_show_issue_detail(&beads_dir, "beads-1").unwrap();
+    assert!(detail.ancestors.is_empty());
+    assert_eq!(ids(detail.children), vec!["beads-1.1", "beads-1.2"]);
+    assert!(detail.depends_on.is_empty());
+    assert!(detail.blocks.is_empty());
+
     let detail = bead_show_issue_detail(&beads_dir, "beads-1.1").unwrap();
     assert_eq!(
         detail.issue,
@@ -91,6 +97,11 @@ fn read_queries_match_python_contract_ordering() {
         detail.depends_on,
         vec![Some(bead_show_issue(&beads_dir, "beads-1.1").unwrap())]
     );
+    let missing =
+        bead_show_issue_detail(&beads_dir, "beads-missing").unwrap_err();
+    assert_eq!(missing.kind, "not_found");
+    assert_eq!(missing.message, "Issue not found: beads-missing");
+
     let stats = bead_stats(&beads_dir).unwrap();
     assert_eq!(stats["total"], 6);
     assert_eq!(stats["ready"], 2);

@@ -431,7 +431,6 @@ use sase_core::bead::{
     add_dependency as core_bead_add_dependency,
     add_task_plus_one as core_bead_add_task_plus_one,
     append_issue_note as core_bead_append_issue_note,
-    apply_prefix_migration as core_bead_prefix_migration_apply,
     bead_history as core_bead_history, bead_lost_notes as core_bead_lost_notes,
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
@@ -456,7 +455,6 @@ use sase_core::bead::{
     open_issue as core_bead_open_issue,
     plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
-    preview_prefix_migration as core_bead_prefix_migration_preview,
     read_event_store_issues as core_bead_read_event_store_issues,
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
     read_store_issues as core_bead_read_store_issues,
@@ -469,7 +467,6 @@ use sase_core::bead::{
     repair_event_store_manifest as core_repair_event_store_manifest,
     resolution_migration_sql as core_bead_resolution_migration_sql,
     resolve_issue_id as core_bead_resolve_issue_id,
-    rewrite_id_tokens as core_bead_rewrite_id_tokens,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
     show_issue_detail as core_bead_show_issue_detail,
@@ -478,11 +475,9 @@ use sase_core::bead::{
     task_ready_migration_sql as core_bead_task_ready_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue,
-    update_issues as core_bead_update_issues,
-    validate_issue_prefix as core_bead_validate_issue_prefix,
-    BeadCreateRequestWire, BeadError, BeadEventStoreManifestWire,
-    BeadEventStreamWire, BeadPreclaimAssignmentWire,
-    BeadPrefixMigrationRequestWire, BeadResolutionWire, BeadUpdateFieldsWire,
+    update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
+    BeadEventStoreManifestWire, BeadEventStreamWire,
+    BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
     IssueWire,
 };
 use sase_core::commit_footer::{
@@ -2874,72 +2869,6 @@ fn py_bead_lost_notes<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| core_bead_lost_notes(&beads_dir, issue_id)),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_validate_issue_prefix")]
-fn py_bead_validate_issue_prefix(prefix: &str) -> PyResult<()> {
-    core_bead_validate_issue_prefix(prefix).map_err(bead_error_to_pyerr)
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_rewrite_id_tokens")]
-fn py_bead_rewrite_id_tokens<'py>(
-    py: Python<'py>,
-    text: &str,
-    replacements: BTreeMap<String, String>,
-) -> PyResult<PyObject> {
-    let outcome = core_bead_rewrite_id_tokens(text, &replacements);
-    let value = serde_json::to_value(outcome).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_prefix_migration_preview")]
-fn py_bead_prefix_migration_preview<'py>(
-    py: Python<'py>,
-    beads_dir: &str,
-    request: &Bound<'_, PyDict>,
-) -> PyResult<PyObject> {
-    let beads_dir = PathBuf::from(beads_dir);
-    let request = bead_prefix_migration_request_from_pydict(request)?;
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| {
-            core_bead_prefix_migration_preview(&beads_dir, request)
-        }),
-    )
-}
-
-#[pyfunction]
-#[pyo3(name = "bead_prefix_migration_apply")]
-fn py_bead_prefix_migration_apply<'py>(
-    py: Python<'py>,
-    beads_dir: &str,
-    request: &Bound<'_, PyDict>,
-) -> PyResult<PyObject> {
-    let beads_dir = PathBuf::from(beads_dir);
-    let request = bead_prefix_migration_request_from_pydict(request)?;
-    bead_result_to_py(
-        py,
-        py.allow_threads(|| {
-            core_bead_prefix_migration_apply(&beads_dir, request)
-        }),
-    )
-}
-
-fn bead_prefix_migration_request_from_pydict(
-    request: &Bound<'_, PyDict>,
-) -> PyResult<BeadPrefixMigrationRequestWire> {
-    serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
-        |error| {
-            PyValueError::new_err(format!(
-                "request is not a valid BeadPrefixMigrationRequestWire dict: {error}"
-            ))
-        },
     )
 }
 
@@ -7219,10 +7148,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_history, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_lost_notes, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_validate_issue_prefix, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_rewrite_id_tokens, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_prefix_migration_preview, m)?)?;
-    m.add_function(wrap_pyfunction!(py_bead_prefix_migration_apply, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;

@@ -7,12 +7,10 @@ use std::time::SystemTime;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::config::{default_config, load_config};
 use super::events::{
     apply_event, merge_stream_events, reduce_event_streams,
     validated_event_streams, BeadEventOperationWire, BeadEventStreamWire,
 };
-use super::identity::BeadIdentityResolver;
 use super::jsonl::{
     event_manifest_path, event_store_present, event_streams_dir,
     import_issues_from_jsonl, read_event_store,
@@ -62,14 +60,10 @@ pub fn read_store_issues(
             beads_dir.display()
         )));
     }
-    let issues = if event_store_present(beads_dir) {
-        read_event_store_issues(beads_dir)?
-    } else {
-        read_legacy_jsonl_issues(beads_dir)?
-    };
-    let config = load_config(beads_dir, default_config("beads", ""))?;
-    BeadIdentityResolver::new(&issues, &config.id_aliases)?;
-    Ok(issues)
+    if event_store_present(beads_dir) {
+        return read_event_store_issues(beads_dir);
+    }
+    read_legacy_jsonl_issues(beads_dir)
 }
 
 pub fn read_event_store_issues(
@@ -85,49 +79,37 @@ pub fn read_legacy_jsonl_issues(
     Ok(import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))?.issues)
 }
 
-fn read_store_issues_with_resolver(
-    beads_dir: &Path,
-) -> Result<(Vec<IssueWire>, BeadIdentityResolver), BeadError> {
-    let issues = read_store_issues(beads_dir)?;
-    let config = load_config(beads_dir, default_config("beads", ""))?;
-    let resolver = BeadIdentityResolver::new(&issues, &config.id_aliases)?;
-    Ok((issues, resolver))
-}
-
 pub fn show_issue(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<IssueWire, BeadError> {
-    let (issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
-    let resolved_id = resolver.resolve(issue_id)?;
-    show_issue_in_issues(issues, &resolved_id)
+    show_issue_in_issues(read_store_issues(beads_dir)?, issue_id)
 }
 
 pub fn show_issue_detail(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<BeadIssueDetailWire, BeadError> {
-    let (issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
-    let resolved_id = resolver.resolve(issue_id)?;
-    show_issue_detail_in_issues(&issues, &resolver, &resolved_id)
+    let issues = read_store_issues(beads_dir)?;
+    let resolved_id = resolve_issue_id_in_issues(&issues, issue_id)?;
+    show_issue_detail_in_issues(&issues, &resolved_id)
 }
 
 pub fn resolve_issue_id(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<String, BeadError> {
-    let (_issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
-    resolver.resolve(issue_id)
+    resolve_issue_id_in_issues(&read_store_issues(beads_dir)?, issue_id)
 }
 
 pub fn resolve_issue_ids(
     beads_dir: &Path,
     issue_ids: &[String],
 ) -> Result<Vec<String>, BeadError> {
-    let (_issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
+    let issues = read_store_issues(beads_dir)?;
     issue_ids
         .iter()
-        .map(|issue_id| resolver.resolve(issue_id))
+        .map(|issue_id| resolve_issue_id_in_issues(&issues, issue_id))
         .collect()
 }
 
@@ -161,9 +143,7 @@ pub fn get_epic_children(
     beads_dir: &Path,
     epic_id: &str,
 ) -> Result<Vec<IssueWire>, BeadError> {
-    let (issues, resolver) = read_store_issues_with_resolver(beads_dir)?;
-    let resolved_id = resolver.resolve(epic_id)?;
-    get_epic_children_in_issues(issues, &resolved_id)
+    get_epic_children_in_issues(read_store_issues(beads_dir)?, epic_id)
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
@@ -688,7 +668,6 @@ fn show_issue_in_issues(
 
 fn show_issue_detail_in_issues(
     issues: &[IssueWire],
-    resolver: &BeadIdentityResolver,
     issue_id: &str,
 ) -> Result<BeadIssueDetailWire, BeadError> {
     let issue = issues
@@ -700,7 +679,7 @@ fn show_issue_detail_in_issues(
             message: format!("Issue not found: {issue_id}"),
         })?;
 
-    let ancestors = issue_ancestors_in_issues(issues, resolver, &issue)?;
+    let ancestors = issue_ancestors_in_issues(issues, &issue)?;
     let mut ordered_issues = issues.to_vec();
     sort_by_created_at(&mut ordered_issues);
     let children = ordered_issues
@@ -712,11 +691,7 @@ fn show_issue_detail_in_issues(
         .dependencies
         .iter()
         .map(|dependency| {
-            resolve_optional_issue_in_issues(
-                issues,
-                resolver,
-                &dependency.depends_on_id,
-            )
+            resolve_optional_issue_in_issues(issues, &dependency.depends_on_id)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let blocks = ordered_issues
@@ -740,7 +715,6 @@ fn show_issue_detail_in_issues(
 
 fn issue_ancestors_in_issues(
     issues: &[IssueWire],
-    resolver: &BeadIdentityResolver,
     issue: &IssueWire,
 ) -> Result<Vec<Option<IssueWire>>, BeadError> {
     let mut ancestors = Vec::new();
@@ -751,11 +725,8 @@ fn issue_ancestors_in_issues(
             ancestors.push(None);
             break;
         }
-        let Some(parent) = resolve_optional_issue_in_issues(
-            issues,
-            resolver,
-            &current_parent_id,
-        )?
+        let Some(parent) =
+            resolve_optional_issue_in_issues(issues, &current_parent_id)?
         else {
             ancestors.push(None);
             break;
@@ -768,10 +739,9 @@ fn issue_ancestors_in_issues(
 
 fn resolve_optional_issue_in_issues(
     issues: &[IssueWire],
-    resolver: &BeadIdentityResolver,
     issue_id: &str,
 ) -> Result<Option<IssueWire>, BeadError> {
-    let resolved_id = match resolver.resolve(issue_id) {
+    let resolved_id = match resolve_issue_id_in_issues(issues, issue_id) {
         Ok(resolved_id) => resolved_id,
         Err(error) if error.kind == "not_found" => return Ok(None),
         Err(error) => return Err(error),
@@ -783,7 +753,33 @@ pub fn resolve_issue_id_in_issues(
     issues: &[IssueWire],
     issue_id: &str,
 ) -> Result<String, BeadError> {
-    BeadIdentityResolver::new(issues, &BTreeMap::new())?.resolve(issue_id)
+    if issue_id.is_empty() || issue_id.contains('-') {
+        return Ok(issue_id.to_string());
+    }
+    let mut candidates = issues
+        .iter()
+        .filter_map(|issue| {
+            issue.id.rsplit_once('-').and_then(|(_, suffix)| {
+                (suffix == issue_id).then(|| issue.id.clone())
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [resolved] => Ok(resolved.clone()),
+        [] => Err(BeadError {
+            kind: "not_found".to_string(),
+            message: format!("Issue not found: {issue_id}"),
+        }),
+        _ => Err(BeadError {
+            kind: "ambiguous".to_string(),
+            message: format!(
+                "ambiguous bead ID shorthand {issue_id:?}: {}",
+                candidates.join(", ")
+            ),
+        }),
+    }
 }
 
 pub(crate) fn list_issues_in_issues(
@@ -1027,6 +1023,10 @@ mod tests {
         assert_eq!(
             resolve_issue_id_in_issues(&issues, "sase-a1").unwrap(),
             "sase-a1"
+        );
+        assert_eq!(
+            resolve_issue_id_in_issues(&issues, "sase-missing").unwrap(),
+            "sase-missing"
         );
         assert_eq!(
             resolve_issue_id_in_issues(&issues, "a1.2").unwrap(),
