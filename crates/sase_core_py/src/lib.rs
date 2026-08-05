@@ -445,6 +445,7 @@ use sase_core::bead::{
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
+    merge_bead_event_streams_with_relocation as core_merge_bead_event_streams_with_relocation,
     needs_plus_one_evidence_migration as core_bead_needs_plus_one_evidence_migration,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
@@ -4096,6 +4097,32 @@ fn py_bead_merge_event_streams<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_merge_event_streams_with_relocation")]
+#[pyo3(signature = (base, ours, theirs, relocation_issue_id=None))]
+fn py_bead_merge_event_streams_with_relocation<'py>(
+    py: Python<'py>,
+    base: &Bound<'py, PyDict>,
+    ours: &Bound<'py, PyDict>,
+    theirs: &Bound<'py, PyDict>,
+    relocation_issue_id: Option<String>,
+) -> PyResult<PyObject> {
+    let base = bead_event_stream_from_pydict(base, "base")?;
+    let ours = bead_event_stream_from_pydict(ours, "ours")?;
+    let theirs = bead_event_stream_from_pydict(theirs, "theirs")?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_merge_bead_event_streams_with_relocation(
+                &base,
+                &ours,
+                &theirs,
+                relocation_issue_id.as_deref(),
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_reduce_event_streams")]
 fn py_bead_reduce_event_streams<'py>(
     py: Python<'py>,
@@ -7131,6 +7158,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_open, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_close, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_merge_event_streams, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_merge_event_streams_with_relocation,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bead_reduce_event_streams, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_repair_event_store_manifest, m)?)?;

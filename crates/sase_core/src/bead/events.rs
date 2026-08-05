@@ -501,11 +501,58 @@ pub(super) fn validated_event_streams(
     Ok(streams)
 }
 
+/// Outcome of merging one conflicted bead event stream.
+///
+/// Two clones minting from their own counters can allocate the same bead id,
+/// so both sides add an `issue_created` event for it. The union of those
+/// branches is unreducible, and before relocation that error wedged every
+/// later sync behind the same conflicted store. Renumbering the losing side
+/// keeps the merge total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadEventStreamMergeWire {
+    /// Merged stream, keeping the winning side of any id collision.
+    pub merged: BeadEventStreamWire,
+    /// Losing side of a top-level id collision, renamed onto a free id.
+    #[serde(default)]
+    pub relocated: Option<BeadEventStreamWire>,
+    /// Every `(old_id, new_id)` pair this merge had to renumber.
+    #[serde(default)]
+    pub relocations: Vec<(String, String)>,
+}
+
+/// Which merge input contributed an event, used to attribute id collisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchTag {
+    Base,
+    Ours,
+    Theirs,
+    Both,
+}
+
 pub fn merge_bead_event_streams(
     base: &BeadEventStreamWire,
     ours: &BeadEventStreamWire,
     theirs: &BeadEventStreamWire,
 ) -> Result<BeadEventStreamWire, BeadError> {
+    Ok(
+        merge_bead_event_streams_with_relocation(base, ours, theirs, None)?
+            .merged,
+    )
+}
+
+/// Merge one stream, relocating a duplicated top-level bead onto a free id.
+///
+/// `relocation_issue_id` must be an id no stream in the store uses yet; the
+/// caller owns that allocation because a single stream cannot see the rest of
+/// the store. Passing `None` keeps the historical behavior of failing on a
+/// duplicate `issue_created`. Duplicated *child* ids need no caller input:
+/// the next free sibling number is derivable from the stream itself.
+pub fn merge_bead_event_streams_with_relocation(
+    base: &BeadEventStreamWire,
+    ours: &BeadEventStreamWire,
+    theirs: &BeadEventStreamWire,
+    relocation_issue_id: Option<&str>,
+) -> Result<BeadEventStreamMergeWire, BeadError> {
     base.validate()?;
     ours.validate()?;
     theirs.validate()?;
@@ -530,10 +577,12 @@ pub fn merge_bead_event_streams(
     let theirs_base_indexes =
         validate_append_only_branch(base, theirs, "theirs")?;
     let base_events = event_keys(&base.events)?;
-    let mut additions: BTreeMap<String, BeadEventRecordWire> = BTreeMap::new();
-    for (branch, base_indexes) in
-        [(ours, &ours_base_indexes), (theirs, &theirs_base_indexes)]
-    {
+    let mut additions: BTreeMap<String, (BeadEventRecordWire, BranchTag)> =
+        BTreeMap::new();
+    for (tag, branch, base_indexes) in [
+        (BranchTag::Ours, ours, &ours_base_indexes),
+        (BranchTag::Theirs, theirs, &theirs_base_indexes),
+    ] {
         for (index, event) in branch.events.iter().enumerate() {
             if base_indexes.contains(&index) {
                 continue;
@@ -542,19 +591,322 @@ pub fn merge_bead_event_streams(
             if base_events.contains(&key) {
                 continue;
             }
-            additions.entry(key).or_insert_with(|| event.clone());
+            additions
+                .entry(key)
+                .and_modify(|entry| entry.1 = BranchTag::Both)
+                .or_insert_with(|| (event.clone(), tag));
         }
     }
 
     let mut additions = additions.into_iter().collect::<Vec<_>>();
-    additions
-        .sort_by_key(|(serialized, event)| event_union_key(event, serialized));
+    additions.sort_by_key(|(serialized, (event, _))| {
+        event_union_key(event, serialized)
+    });
     let mut merged = base.clone();
-    merged
-        .events
-        .extend(additions.into_iter().map(|(_, event)| event));
+    let mut provenance = vec![BranchTag::Base; base.events.len()];
+    for (_, (event, tag)) in additions {
+        merged.events.push(event);
+        provenance.push(tag);
+    }
+
+    let (relocated, relocations) = split_duplicate_creations(
+        &mut merged,
+        provenance,
+        relocation_issue_id,
+    )?;
     merged.validate()?;
-    Ok(merged)
+    if let Some(stream) = &relocated {
+        stream.validate()?;
+    }
+    Ok(BeadEventStreamMergeWire {
+        merged,
+        relocated,
+        relocations,
+    })
+}
+
+/// A relocated stream, if any, plus every `(old_id, new_id)` pair renumbered.
+type DuplicateCreationSplit =
+    (Option<BeadEventStreamWire>, Vec<(String, String)>);
+
+/// Renumber every bead whose `issue_created` event was minted twice.
+///
+/// Each round resolves exactly one collision and then re-scans, because
+/// relocating a colliding root also carries away its children, which is often
+/// what made those children look duplicated in the first place.
+fn split_duplicate_creations(
+    merged: &mut BeadEventStreamWire,
+    provenance: Vec<BranchTag>,
+    relocation_issue_id: Option<&str>,
+) -> Result<DuplicateCreationSplit, BeadError> {
+    let mut tagged: Vec<(BeadEventRecordWire, BranchTag)> =
+        merged.events.drain(..).zip(provenance).collect();
+    let mut relocated: Option<BeadEventStreamWire> = None;
+    let mut relocations: Vec<(String, String)> = Vec::new();
+
+    while let Some((issue_id, loser_tag)) = losing_creation(&tagged)? {
+        if issue_id == merged.stream_id {
+            let Some(new_id) = relocation_issue_id else {
+                return Err(BeadError::validation(format!(
+                    "duplicate issue_created event for {issue_id}"
+                )));
+            };
+            if new_id.is_empty() || new_id == issue_id {
+                return Err(BeadError::validation(format!(
+                    "invalid relocation id for duplicate bead {issue_id}"
+                )));
+            }
+            let moved = extract_subtree(&mut tagged, &issue_id, loser_tag);
+            relocated = Some(relocated_stream(new_id, &issue_id, moved)?);
+            relocations.push((issue_id, new_id.to_string()));
+        } else {
+            let new_id = next_sibling_issue_id(&tagged, &issue_id)?;
+            remap_subtree(
+                &mut tagged,
+                &issue_id,
+                loser_tag,
+                &new_id,
+                &merged.stream_id,
+            )?;
+            relocations.push((issue_id, new_id));
+        }
+    }
+
+    merged.events = tagged.into_iter().map(|(event, _)| event).collect();
+    Ok((relocated, relocations))
+}
+
+/// Return the issue id and contributing branch of the next creation to move.
+fn losing_creation(
+    tagged: &[(BeadEventRecordWire, BranchTag)],
+) -> Result<Option<(String, BranchTag)>, BeadError> {
+    let mut creations: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, (event, _)) in tagged.iter().enumerate() {
+        if event.operation == BeadEventOperationWire::IssueCreated {
+            creations
+                .entry(event.issue_id.as_str())
+                .or_default()
+                .push(index);
+        }
+    }
+    for (issue_id, indexes) in creations {
+        if indexes.len() < 2 {
+            continue;
+        }
+        // Whichever creation the merge base already carried is authoritative;
+        // otherwise the older creation keeps the id so both clones agree
+        // regardless of which side git happened to call "ours".
+        let winner = indexes
+            .iter()
+            .copied()
+            .find(|index| tagged[*index].1 == BranchTag::Base)
+            .unwrap_or_else(|| {
+                *indexes
+                    .iter()
+                    .min_by_key(|index| {
+                        let event = &tagged[**index].0;
+                        (event.timestamp.as_str(), event.event_id.as_str())
+                    })
+                    .expect("collision groups are non-empty")
+            });
+        let loser = indexes
+            .iter()
+            .copied()
+            .find(|index| *index != winner)
+            .expect("collision groups hold at least two creations");
+        let loser_tag = tagged[loser].1;
+        // A single side that minted the same id twice, or two byte-identical
+        // creations, cannot be told apart by provenance, so there is nothing
+        // safe to relocate.
+        let ambiguous = matches!(loser_tag, BranchTag::Base | BranchTag::Both)
+            || indexes
+                .iter()
+                .filter(|index| **index != winner)
+                .any(|index| tagged[*index].1 != loser_tag);
+        if ambiguous {
+            return Err(BeadError::validation(format!(
+                "duplicate issue_created event for {issue_id}"
+            )));
+        }
+        return Ok(Some((issue_id.to_string(), loser_tag)));
+    }
+    Ok(None)
+}
+
+/// Remove and return the losing branch's events for `issue_id` and its children.
+fn extract_subtree(
+    tagged: &mut Vec<(BeadEventRecordWire, BranchTag)>,
+    issue_id: &str,
+    tag: BranchTag,
+) -> Vec<BeadEventRecordWire> {
+    let mut moved = Vec::new();
+    let mut kept = Vec::with_capacity(tagged.len());
+    for (event, event_tag) in tagged.drain(..) {
+        if event_tag == tag && issue_id_in_subtree(&event.issue_id, issue_id) {
+            moved.push(event);
+        } else {
+            kept.push((event, event_tag));
+        }
+    }
+    *tagged = kept;
+    moved
+}
+
+fn relocated_stream(
+    new_id: &str,
+    old_id: &str,
+    events: Vec<BeadEventRecordWire>,
+) -> Result<BeadEventStreamWire, BeadError> {
+    let events = events
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| {
+            remapped_event(event, old_id, new_id, new_id, index + 1)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BeadEventStreamWire {
+        stream_id: new_id.to_string(),
+        root_issue_id: new_id.to_string(),
+        events,
+    })
+}
+
+/// Rewrite a duplicated child bead onto a free sibling number, in place.
+fn remap_subtree(
+    tagged: &mut [(BeadEventRecordWire, BranchTag)],
+    issue_id: &str,
+    tag: BranchTag,
+    new_id: &str,
+    stream_id: &str,
+) -> Result<(), BeadError> {
+    for (index, (event, event_tag)) in tagged.iter_mut().enumerate() {
+        if *event_tag != tag || !issue_id_in_subtree(&event.issue_id, issue_id)
+        {
+            continue;
+        }
+        *event = remapped_event(
+            event.clone(),
+            issue_id,
+            new_id,
+            stream_id,
+            index + 1,
+        )?;
+    }
+    Ok(())
+}
+
+fn issue_id_in_subtree(issue_id: &str, root: &str) -> bool {
+    issue_id == root || issue_id.starts_with(&format!("{root}."))
+}
+
+fn remapped_id(issue_id: &str, old_id: &str, new_id: &str) -> String {
+    if issue_id == old_id {
+        return new_id.to_string();
+    }
+    match issue_id.strip_prefix(&format!("{old_id}.")) {
+        Some(rest) => format!("{new_id}.{rest}"),
+        None => issue_id.to_string(),
+    }
+}
+
+/// Rewrite every id a single event carries, then re-mint its event id.
+///
+/// The event id embeds the stream, ordinal, and issue id, so leaving the
+/// original in place would let a relocated event collide with the bead it was
+/// moved away from.
+fn remapped_event(
+    mut event: BeadEventRecordWire,
+    old_id: &str,
+    new_id: &str,
+    stream_id: &str,
+    ordinal: usize,
+) -> Result<BeadEventRecordWire, BeadError> {
+    event.issue_id = remapped_id(&event.issue_id, old_id, new_id);
+    match &mut event.payload {
+        BeadEventPayloadWire::IssueCreated { issue } => {
+            issue.id = remapped_id(&issue.id, old_id, new_id);
+            if let Some(parent_id) = &issue.parent_id {
+                issue.parent_id = Some(remapped_id(parent_id, old_id, new_id));
+            }
+            for dependency in &mut issue.dependencies {
+                remap_dependency(dependency, old_id, new_id);
+            }
+        }
+        BeadEventPayloadWire::IssueClosed {
+            forced_descendant_ids,
+            ..
+        } => {
+            for descendant_id in forced_descendant_ids.iter_mut() {
+                *descendant_id = remapped_id(descendant_id, old_id, new_id);
+            }
+        }
+        BeadEventPayloadWire::IssueRemoved {
+            cascade_removed_issue_ids,
+        } => {
+            for removed_id in cascade_removed_issue_ids.iter_mut() {
+                *removed_id = remapped_id(removed_id, old_id, new_id);
+            }
+        }
+        BeadEventPayloadWire::DependencyAdded { dependency }
+        | BeadEventPayloadWire::DependencyRemoved { dependency } => {
+            remap_dependency(dependency, old_id, new_id);
+        }
+        _ => {}
+    }
+    event.event_id = mint_bead_event_id(
+        stream_id,
+        ordinal,
+        &event.timestamp,
+        &event.actor,
+        event.operation,
+        &event.issue_id,
+        &event.payload,
+    )?;
+    event.validate()?;
+    Ok(event)
+}
+
+fn remap_dependency(
+    dependency: &mut DependencyWire,
+    old_id: &str,
+    new_id: &str,
+) {
+    dependency.issue_id = remapped_id(&dependency.issue_id, old_id, new_id);
+    dependency.depends_on_id =
+        remapped_id(&dependency.depends_on_id, old_id, new_id);
+}
+
+/// Return the next unused direct-child id next to a duplicated child bead.
+fn next_sibling_issue_id(
+    tagged: &[(BeadEventRecordWire, BranchTag)],
+    issue_id: &str,
+) -> Result<String, BeadError> {
+    let Some((parent_id, _)) = issue_id.rsplit_once('.') else {
+        return Err(BeadError::validation(format!(
+            "duplicate issue_created event for {issue_id}"
+        )));
+    };
+    let child_prefix = format!("{parent_id}.");
+    let mut max_child = 0u64;
+    for (event, _) in tagged {
+        for candidate in event_issue_ids(event) {
+            let Some(suffix) = candidate.strip_prefix(&child_prefix) else {
+                continue;
+            };
+            if let Ok(counter) = suffix.parse::<u64>() {
+                max_child = max_child.max(counter);
+            }
+        }
+    }
+    Ok(format!("{child_prefix}{}", max_child + 1))
+}
+
+fn event_issue_ids(event: &BeadEventRecordWire) -> Vec<String> {
+    let mut ids = vec![event.issue_id.clone()];
+    if let BeadEventPayloadWire::IssueCreated { issue } = &event.payload {
+        ids.push(issue.id.clone());
+    }
+    ids
 }
 
 fn validate_append_only_branch(
@@ -1359,5 +1711,201 @@ mod tests {
             reduce_event_streams(&streams).unwrap()[0].refs,
             vec!["bead:sase-bb.1"]
         );
+    }
+
+    /// Build one side of a concurrent mint: same id, different bead.
+    fn colliding_stream(
+        issue_id: &str,
+        title: &str,
+        created_at: &str,
+    ) -> BeadEventStreamWire {
+        let mut issue = issue_with_refs(Vec::new());
+        issue.id = issue_id.to_string();
+        issue.title = title.to_string();
+        issue.created_at = created_at.to_string();
+        issue.updated_at = created_at.to_string();
+        let created = PendingEvent::created(&issue)
+            .into_record(issue_id, 1)
+            .unwrap();
+        BeadEventStreamWire {
+            stream_id: issue_id.to_string(),
+            root_issue_id: issue_id.to_string(),
+            events: vec![created],
+        }
+    }
+
+    fn empty_stream(stream_id: &str) -> BeadEventStreamWire {
+        BeadEventStreamWire {
+            stream_id: stream_id.to_string(),
+            root_issue_id: stream_id.to_string(),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn concurrently_minted_bead_id_relocates_instead_of_wedging_the_store() {
+        let base = empty_stream("sase-ey");
+        let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:00Z");
+        let theirs =
+            colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:01Z");
+
+        let outcome = merge_bead_event_streams_with_relocation(
+            &base,
+            &ours,
+            &theirs,
+            Some("sase-ez"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.relocations,
+            vec![("sase-ey".to_string(), "sase-ez".to_string())]
+        );
+        let relocated = outcome.relocated.clone().unwrap();
+        assert_eq!(relocated.stream_id, "sase-ez");
+        // Both beads survive: the older creation keeps the contested id.
+        let issues =
+            reduce_event_streams(&[outcome.merged.clone(), relocated]).unwrap();
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| (issue.id.as_str(), issue.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("sase-ey", "Ours"), ("sase-ez", "Theirs")]
+        );
+    }
+
+    #[test]
+    fn relocation_picks_the_same_loser_whichever_side_git_calls_ours() {
+        let base = empty_stream("sase-ey");
+        let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:00Z");
+        let theirs =
+            colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:01Z");
+
+        let forward = merge_bead_event_streams_with_relocation(
+            &base,
+            &ours,
+            &theirs,
+            Some("sase-ez"),
+        )
+        .unwrap();
+        let swapped = merge_bead_event_streams_with_relocation(
+            &base,
+            &theirs,
+            &ours,
+            Some("sase-ez"),
+        )
+        .unwrap();
+
+        assert_eq!(forward, swapped);
+    }
+
+    #[test]
+    fn relocated_events_are_reminted_onto_their_new_stream() {
+        let base = empty_stream("sase-ey");
+        let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:00Z");
+        let theirs =
+            colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:01Z");
+
+        let outcome = merge_bead_event_streams_with_relocation(
+            &base,
+            &ours,
+            &theirs,
+            Some("sase-ez"),
+        )
+        .unwrap();
+
+        let relocated = outcome.relocated.unwrap();
+        let event = &relocated.events[0];
+        assert_eq!(event.issue_id, "sase-ez");
+        assert!(event.event_id.starts_with("sase-ez:000001:"));
+        assert!(outcome
+            .merged
+            .events
+            .iter()
+            .all(|kept| kept.event_id != event.event_id));
+    }
+
+    #[test]
+    fn merging_without_a_relocation_id_still_reports_the_duplicate() {
+        let base = empty_stream("sase-ey");
+        let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:00Z");
+        let theirs =
+            colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:01Z");
+
+        assert_eq!(
+            merge_bead_event_streams(&base, &ours, &theirs)
+                .unwrap_err()
+                .message,
+            "duplicate issue_created event for sase-ey"
+        );
+    }
+
+    #[test]
+    fn concurrently_minted_child_id_renumbers_to_a_free_sibling() {
+        let base = colliding_stream("sase-ey", "Epic", "2026-08-03T11:00:00Z");
+        let mut ours = base.clone();
+        ours.events.push(child_created(
+            "sase-ey",
+            "sase-ey.1",
+            "Phase ours",
+            "2026-08-03T11:01:00Z",
+            2,
+        ));
+        let mut theirs = base.clone();
+        theirs.events.push(child_created(
+            "sase-ey",
+            "sase-ey.1",
+            "Phase theirs",
+            "2026-08-03T11:01:01Z",
+            2,
+        ));
+
+        let outcome = merge_bead_event_streams_with_relocation(
+            &base,
+            &ours,
+            &theirs,
+            Some("sase-ez"),
+        )
+        .unwrap();
+
+        assert!(outcome.relocated.is_none());
+        assert_eq!(
+            outcome.relocations,
+            vec![("sase-ey.1".to_string(), "sase-ey.2".to_string())]
+        );
+        let issues = reduce_event_streams(&[outcome.merged]).unwrap();
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| (issue.id.as_str(), issue.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("sase-ey", "Epic"),
+                ("sase-ey.1", "Phase ours"),
+                ("sase-ey.2", "Phase theirs"),
+            ]
+        );
+    }
+
+    fn child_created(
+        stream_id: &str,
+        issue_id: &str,
+        title: &str,
+        created_at: &str,
+        ordinal: usize,
+    ) -> BeadEventRecordWire {
+        let mut issue = issue_with_refs(Vec::new());
+        issue.id = issue_id.to_string();
+        issue.title = title.to_string();
+        issue.issue_type = IssueTypeWire::Phase;
+        issue.tier = None;
+        issue.parent_id = Some(stream_id.to_string());
+        issue.size = Some(PhaseSizeWire::Small);
+        issue.created_at = created_at.to_string();
+        issue.updated_at = created_at.to_string();
+        PendingEvent::created(&issue)
+            .into_record(stream_id, ordinal)
+            .unwrap()
     }
 }
