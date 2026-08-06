@@ -37,8 +37,18 @@ Issues = "https://github.com/sase-org/sase-core/issues"
 # Distribution name (`sase-core-rs`) differs from the import module name
 # (`sase_core_rs`). The crate name `sase_core_py` is the Cargo crate name
 # only; consumers `import sase_core_rs` and `pip install sase-core-rs`.
+#
+# `python-source = "python"` swaps maturin's auto-generated package init
+# (a star-import template that binds the extension module name only via
+# importlib's post-import `setattr` side effect) for the explicit one
+# under `python/sase_core_rs/__init__.py`, which imports the submodule by
+# name before re-exporting it. The auto-generated version raises
+# `NameError` if a consumer re-imports `sase_core_rs` while the compiled
+# submodule is still cached in `sys.modules` but the parent package entry
+# was evicted or swapped.
 [tool.maturin]
 module-name = "sase_core_rs"
+python-source = "python"
 manifest-path = "Cargo.toml"
 features = ["pyo3/extension-module"]
 # Strip release wheels so platform downloads stay small.
