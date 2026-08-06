@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2](https://github.com/sase-org/sase-core/compare/v0.18.1...v0.18.2) - 2026-08-06
+
+### Fixed
+
+- *(editor)* stop a slow git log from silently emptying the commit inventory
+
+### Other
+
+- *(host-bridge)* stop exec-ing freshly written helper scripts
+
 ## [0.18.1](https://github.com/sase-org/sase-core/compare/v0.18.0...v0.18.1) - 2026-08-05
 
 ### Fixed
