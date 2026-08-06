@@ -237,6 +237,75 @@ impl TaskPlusOneEvidenceWire {
     }
 }
 
+/// Why a close was undone.
+///
+/// One variant per reducer branch that reopens a bead, so an archived record
+/// can say what brought the bead back without the reader having to correlate
+/// timestamps against the event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadReopenCauseWire {
+    PlusOne,
+    Open,
+    Update,
+    EpicPreclaim,
+}
+
+impl BeadReopenCauseWire {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlusOne => "plus_one",
+            Self::Open => "open",
+            Self::Update => "update",
+            Self::EpicPreclaim => "epic_preclaim",
+        }
+    }
+}
+
+/// One close episode that has since been undone.
+///
+/// The flat `closed_at` / `close_reason` / `resolution` fields on
+/// [`IssueWire`] always describe the *current* close; this record is strictly
+/// the past.  Every record carries a `reopened_at`, because a record only
+/// comes into existence once the close is undone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadCloseRecordWire {
+    pub closed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<BeadResolutionWire>,
+    pub reopened_at: String,
+    pub reopened_via: BeadReopenCauseWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_by: Option<String>,
+}
+
+impl BeadCloseRecordWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        if self.closed_at.trim().is_empty() {
+            return Err(BeadError::validation(
+                "close history closed_at cannot be empty or blank",
+            ));
+        }
+        if self.reopened_at.trim().is_empty() {
+            return Err(BeadError::validation(
+                "close history reopened_at cannot be empty or blank",
+            ));
+        }
+        if self
+            .reopened_by
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(BeadError::validation(
+                "close history reopened_by cannot be empty or blank",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWire {
     pub id: String,
@@ -278,6 +347,8 @@ pub struct IssueWire {
     pub close_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<BeadResolutionWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub close_history: Vec<BeadCloseRecordWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -409,6 +480,9 @@ impl IssueWire {
                 "Only closed issues can carry resolution metadata",
             ));
         }
+        for record in &self.close_history {
+            record.validate()?;
+        }
         validate_model_value(&self.model)?;
         Ok(())
     }
@@ -449,6 +523,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             resolution: None,
+            close_history: Vec::new(),
             description: String::new(),
             notes: String::new(),
             design: String::new(),
@@ -460,6 +535,120 @@ mod tests {
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             dependencies: vec![],
+        }
+    }
+
+    fn close_record() -> BeadCloseRecordWire {
+        BeadCloseRecordWire {
+            closed_at: "2026-07-30T09:12:04Z".to_string(),
+            close_reason: Some("Not reproducible on main.".to_string()),
+            resolution: Some(BeadResolutionWire::Canceled),
+            reopened_at: "2026-08-05T17:04:11Z".to_string(),
+            reopened_via: BeadReopenCauseWire::PlusOne,
+            reopened_by: Some("claude.probe".to_string()),
+        }
+    }
+
+    #[test]
+    fn close_history_round_trips_and_stays_absent_when_empty() {
+        let mut issue = phase(Some("test-0"));
+        assert!(issue.close_history.is_empty());
+        let without_history = serde_json::to_value(&issue).unwrap();
+        assert!(without_history.get("close_history").is_none());
+
+        issue.close_history.push(close_record());
+        issue.validate().unwrap();
+        let encoded = serde_json::to_value(&issue).unwrap();
+        assert_eq!(
+            encoded["close_history"],
+            json!([{
+                "closed_at": "2026-07-30T09:12:04Z",
+                "close_reason": "Not reproducible on main.",
+                "resolution": "canceled",
+                "reopened_at": "2026-08-05T17:04:11Z",
+                "reopened_via": "plus_one",
+                "reopened_by": "claude.probe",
+            }])
+        );
+        let decoded: IssueWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, issue);
+
+        // A row written before this change carries no key at all.
+        let legacy =
+            serde_json::from_value::<IssueWire>(without_history).unwrap();
+        assert!(legacy.close_history.is_empty());
+    }
+
+    #[test]
+    fn close_history_omits_absent_reason_and_resolution() {
+        let record = BeadCloseRecordWire {
+            close_reason: None,
+            resolution: None,
+            reopened_via: BeadReopenCauseWire::Open,
+            reopened_by: None,
+            ..close_record()
+        };
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            json!({
+                "closed_at": "2026-07-30T09:12:04Z",
+                "reopened_at": "2026-08-05T17:04:11Z",
+                "reopened_via": "open",
+            })
+        );
+    }
+
+    #[test]
+    fn close_history_validation_rejects_blank_fields() {
+        let mut issue = phase(Some("test-0"));
+
+        issue.close_history = vec![BeadCloseRecordWire {
+            closed_at: "  ".to_string(),
+            ..close_record()
+        }];
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("closed_at cannot be empty"));
+
+        issue.close_history = vec![BeadCloseRecordWire {
+            reopened_at: String::new(),
+            ..close_record()
+        }];
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("reopened_at cannot be empty"));
+
+        issue.close_history = vec![BeadCloseRecordWire {
+            reopened_by: Some(" ".to_string()),
+            ..close_record()
+        }];
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("reopened_by cannot be empty"));
+
+        issue.close_history = vec![close_record()];
+        issue.validate().unwrap();
+    }
+
+    #[test]
+    fn close_history_is_allowed_on_every_issue_type() {
+        for (issue_type, parent_id, tier) in [
+            (IssueTypeWire::Phase, Some("test-0"), None),
+            (IssueTypeWire::Plan, None, Some(BeadTierWire::Epic)),
+            (IssueTypeWire::Task, None, None),
+        ] {
+            let mut issue = phase(parent_id);
+            issue.issue_type = issue_type.clone();
+            issue.parent_id = parent_id.map(str::to_string);
+            issue.tier = tier;
+            issue.close_history = vec![close_record()];
+            issue.validate().unwrap();
         }
     }
 

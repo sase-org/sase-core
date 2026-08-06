@@ -16,10 +16,10 @@ use crate::store_lock::{
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
-    appended_note_text, import_issues_to_event_streams, mint_bead_event_id,
-    reduce_event_streams, BeadEventOperationWire, BeadEventPayloadWire,
-    BeadEventRecordWire, BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
-    BEAD_EVENT_SCHEMA_VERSION,
+    appended_note_text, archive_close_metadata, import_issues_to_event_streams,
+    mint_bead_event_id, reduce_event_streams, BeadEventOperationWire,
+    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStreamWire,
+    BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
@@ -28,8 +28,9 @@ use super::jsonl::{
 use super::read::resolve_issue_id_in_issues;
 use super::wire::{
     deserialize_option_phase_size, validate_model_value, BeadError,
-    BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    BeadReopenCauseWire, BeadResolutionWire, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -239,6 +240,7 @@ pub fn create_issue(
             closed_at: None,
             close_reason: None,
             resolution: None,
+            close_history: Vec::new(),
             description: request.description,
             notes: request.notes,
             design: request.design,
@@ -354,9 +356,12 @@ pub fn add_task_plus_one(
         }
         if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
             issue.status = StatusWire::Ready;
-            issue.closed_at = None;
-            issue.close_reason = None;
-            issue.resolution = None;
+            archive_close_metadata(
+                issue,
+                &timestamp,
+                BeadReopenCauseWire::PlusOne,
+                Some(reporter.clone()),
+            );
         }
         issue.updated_at = timestamp.clone();
         issue.validate()?;
@@ -439,7 +444,7 @@ pub fn update_issues(
             let current = store.issues[index].clone();
             let was_closed = current.status == StatusWire::Closed;
             let mut issue = current.clone();
-            apply_update_fields(&mut issue, fields.clone())?;
+            apply_update_fields(&mut issue, fields.clone(), &now)?;
             if issue == current {
                 unchanged_ids.push(target_id.clone());
                 resulting_issues.push(current);
@@ -854,6 +859,15 @@ pub fn preclaim_epic_work_plan(
         for (assignment, index) in assignments.iter().zip(indexes) {
             let issue = &mut store.issues[index];
             issue.status = StatusWire::InProgress;
+            // A closed target is rejected above, so this archives nothing
+            // today; it keeps the mutation path aligned with the
+            // `EpicWorkPreclaimed` reducer branch if that guard ever moves.
+            archive_close_metadata(
+                issue,
+                &now,
+                BeadReopenCauseWire::EpicPreclaim,
+                None,
+            );
             issue.assignee = assignment.agent_name.clone();
             issue.updated_at = now.clone();
             issue.validate()?;
@@ -873,6 +887,12 @@ pub fn preclaim_epic_work_plan(
         if let Some(agent_name) = epic_agent_name {
             let issue = &mut store.issues[epic_index];
             issue.status = StatusWire::InProgress;
+            archive_close_metadata(
+                issue,
+                &now,
+                BeadReopenCauseWire::EpicPreclaim,
+                None,
+            );
             issue.assignee = agent_name.clone();
             issue.updated_at = now.clone();
             issue.validate()?;
@@ -912,7 +932,12 @@ pub fn open_issue(
         let was_closed = store.issues[index].status == StatusWire::Closed;
         let now = now.unwrap_or_else(now_utc);
         store.issues[index].status = StatusWire::Open;
-        store.issues[index].resolution = None;
+        archive_close_metadata(
+            &mut store.issues[index],
+            &now,
+            BeadReopenCauseWire::Open,
+            None,
+        );
         store.issues[index].updated_at = now.clone();
         let issue = store.issues[index].clone();
         issue.validate()?;
@@ -1339,7 +1364,12 @@ fn reopen_closed_ancestors(
             continue;
         }
         store.issues[index].status = StatusWire::Open;
-        store.issues[index].resolution = None;
+        archive_close_metadata(
+            &mut store.issues[index],
+            opened_at,
+            BeadReopenCauseWire::Open,
+            None,
+        );
         store.issues[index].updated_at = opened_at.to_string();
         let ancestor = store.issues[index].clone();
         ancestor.validate()?;
@@ -1783,15 +1813,15 @@ fn set_ready_to_work(
 fn apply_update_fields(
     issue: &mut IssueWire,
     fields: BeadUpdateFieldsWire,
+    timestamp: &str,
 ) -> Result<(), BeadError> {
+    let mut reopened = false;
     if let Some(value) = fields.title {
         issue.title = value;
     }
     if let Some(value) = fields.status {
         issue.status = parse_status(&value)?;
-        if issue.status != StatusWire::Closed {
-            issue.resolution = None;
-        }
+        reopened = issue.status != StatusWire::Closed;
     }
     if let Some(value) = fields.assignee {
         issue.assignee = value;
@@ -1828,6 +1858,17 @@ fn apply_update_fields(
     }
     if let Some(value) = fields.tier {
         issue.tier = Some(value);
+    }
+    // Archive last, matching `apply_update_event_fields`, so an explicit
+    // closed_at/close_reason/resolution in the same update is archived rather
+    // than surviving a move away from closed.
+    if reopened {
+        archive_close_metadata(
+            issue,
+            timestamp,
+            BeadReopenCauseWire::Update,
+            None,
+        );
     }
     Ok(())
 }
@@ -6553,6 +6594,363 @@ mod tests {
         .unwrap();
 
         (temp, beads_dir, source.id, vec![first.id, second.id])
+    }
+
+    /// The issue the mutation wrote to `issues.jsonl`, and the same issue as
+    /// the reducer projects it from the store's event streams.
+    fn projected_and_reduced(
+        beads_dir: &Path,
+        issue_id: &str,
+    ) -> (IssueWire, IssueWire) {
+        let projected =
+            import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
+                .unwrap()
+                .issues
+                .into_iter()
+                .find(|issue| issue.id == issue_id)
+                .unwrap();
+        let (_manifest, streams) = read_event_store(beads_dir).unwrap();
+        let reduced = reduce_event_streams(&streams)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == issue_id)
+            .unwrap();
+        (projected, reduced)
+    }
+
+    fn assert_reopen_parity(beads_dir: &Path, issue_id: &str, label: &str) {
+        let (projected, reduced) = projected_and_reduced(beads_dir, issue_id);
+        assert_eq!(projected, reduced, "{label}");
+    }
+
+    /// An epic plan with one phase child and one task, all in one store.
+    fn close_history_fixture() -> (tempfile::TempDir, PathBuf, Vec<String>) {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                tier: Some(BeadTierWire::Epic),
+                created_by: Some("creator-agent".to_string()),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(epic.id.clone()),
+                size: Some(PhaseSizeWire::Small),
+                created_by: Some("creator-agent".to_string()),
+                now: Some("2026-01-01T00:00:01Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                created_by: Some("creator-agent".to_string()),
+                now: Some("2026-01-01T00:00:02Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        (temp, beads_dir, vec![epic.id, phase.id, task.id])
+    }
+
+    fn close_for_history(beads_dir: &Path, issue_id: &str, now: &str) {
+        close_issues(
+            beads_dir,
+            &[issue_id.to_string()],
+            Some("Not reproducible on main.".to_string()),
+            Some(BeadResolutionWire::Canceled),
+            false,
+            Some(now.to_string()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn every_reopen_cause_archives_the_close_reason_it_used_to_destroy() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+        close_for_history(&beads_dir, &task_id, "2026-01-02T00:00:00Z");
+
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Saw the same flake in CI run 4821.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let (projected, _) = projected_and_reduced(&beads_dir, &task_id);
+        assert_eq!(projected.status, StatusWire::Ready);
+        assert_eq!(projected.closed_at, None);
+        assert_eq!(projected.close_reason, None);
+        assert_eq!(projected.resolution, None);
+        assert_eq!(projected.close_history.len(), 1);
+        let record = &projected.close_history[0];
+        assert_eq!(record.closed_at.as_str(), "2026-01-02T00:00:00Z");
+        assert_eq!(
+            record.close_reason.as_deref(),
+            Some("Not reproducible on main.")
+        );
+        assert_eq!(record.resolution, Some(BeadResolutionWire::Canceled));
+        assert_eq!(record.reopened_via, BeadReopenCauseWire::PlusOne);
+        assert_eq!(record.reopened_by.as_deref(), Some("claude.probe"));
+    }
+
+    #[test]
+    fn mutation_and_reducer_agree_on_every_reopen_path() {
+        // plus_one
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+        close_for_history(&beads_dir, &task_id, "2026-01-02T00:00:00Z");
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Still flaky.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        assert_reopen_parity(&beads_dir, &task_id, "plus_one");
+
+        // open — the path that used to leave a stale closed_at in issues.jsonl
+        let phase_id = ids[1].clone();
+        close_for_history(&beads_dir, &phase_id, "2026-01-02T00:00:00Z");
+        open_issue(
+            &beads_dir,
+            &phase_id,
+            Some("2026-01-04T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        assert_reopen_parity(&beads_dir, &phase_id, "open");
+        // ...and its closed ancestor, reopened by the same call.
+        assert_reopen_parity(&beads_dir, &ids[0], "open ancestor");
+
+        // update
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let phase_id = ids[1].clone();
+        close_for_history(&beads_dir, &phase_id, "2026-01-02T00:00:00Z");
+        update_issue(
+            &beads_dir,
+            &phase_id,
+            BeadUpdateFieldsWire {
+                status: Some("open".to_string()),
+                now: Some("2026-01-05T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_reopen_parity(&beads_dir, &phase_id, "update");
+
+        // epic_preclaim
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        preclaim_epic_work_plan(
+            &beads_dir,
+            &ids[0],
+            &[BeadPreclaimAssignmentWire {
+                bead_id: ids[1].clone(),
+                agent_name: "phase-agent".to_string(),
+            }],
+            Some("epic-agent".to_string()),
+            Some("2026-01-06T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        assert_reopen_parity(&beads_dir, &ids[0], "epic_preclaim epic");
+        assert_reopen_parity(&beads_dir, &ids[1], "epic_preclaim phase");
+    }
+
+    #[test]
+    fn open_issue_no_longer_leaves_stale_close_metadata_in_the_projection() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let phase_id = ids[1].clone();
+        close_for_history(&beads_dir, &phase_id, "2026-01-02T00:00:00Z");
+        open_issue(
+            &beads_dir,
+            &phase_id,
+            Some("2026-01-04T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let (projected, _) = projected_and_reduced(&beads_dir, &phase_id);
+        assert_eq!(projected.status, StatusWire::Open);
+        assert_eq!(projected.closed_at, None);
+        assert_eq!(projected.close_reason, None);
+        assert_eq!(projected.close_history.len(), 1);
+        assert_eq!(
+            projected.close_history[0].reopened_via,
+            BeadReopenCauseWire::Open
+        );
+        assert_eq!(projected.close_history[0].reopened_by, None);
+        assert_eq!(
+            projected.close_history[0].reopened_at.as_str(),
+            "2026-01-04T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn plus_one_close_record_joins_its_evidence_entry_exactly() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+        close_for_history(&beads_dir, &task_id, "2026-01-02T00:00:00Z");
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Still flaky.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let (_, reduced) = projected_and_reduced(&beads_dir, &task_id);
+        let record = &reduced.close_history[0];
+        let evidence = &reduced.plus_one_evidence[0];
+        assert_eq!(record.reopened_at, evidence.timestamp);
+        assert_eq!(
+            record.reopened_by.as_deref(),
+            Some(evidence.reporter.as_str())
+        );
+    }
+
+    #[test]
+    fn repeated_close_episodes_append_oldest_first_with_their_causes() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+
+        close_for_history(&beads_dir, &task_id, "2026-01-02T00:00:00Z");
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Still flaky.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        close_for_history(&beads_dir, &task_id, "2026-01-04T00:00:00Z");
+        open_issue(
+            &beads_dir,
+            &task_id,
+            Some("2026-01-05T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let (projected, reduced) = projected_and_reduced(&beads_dir, &task_id);
+        assert_eq!(projected, reduced);
+        let causes: Vec<_> = projected
+            .close_history
+            .iter()
+            .map(|record| (record.closed_at.as_str(), &record.reopened_via))
+            .collect();
+        assert_eq!(
+            causes,
+            vec![
+                ("2026-01-02T00:00:00Z", &BeadReopenCauseWire::PlusOne),
+                ("2026-01-04T00:00:00Z", &BeadReopenCauseWire::Open),
+            ]
+        );
+        assert_eq!(projected.closed_at, None);
+        assert_eq!(projected.close_history[1].reopened_by, None);
+    }
+
+    #[test]
+    fn reopening_a_bead_that_was_never_closed_archives_nothing() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Also hit this.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        open_issue(
+            &beads_dir,
+            &ids[1],
+            Some("2026-01-04T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        for issue_id in [&task_id, &ids[1]] {
+            let (projected, reduced) =
+                projected_and_reduced(&beads_dir, issue_id);
+            assert_eq!(projected, reduced);
+            assert!(projected.close_history.is_empty(), "{issue_id}");
+        }
+    }
+
+    #[test]
+    fn a_pre_close_history_projection_recovers_its_reason_on_the_next_load() {
+        let (_temp, beads_dir, ids) = close_history_fixture();
+        let task_id = ids[2].clone();
+        close_for_history(&beads_dir, &task_id, "2026-01-02T00:00:00Z");
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "claude.probe",
+            "Still flaky.",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        // Rewrite issues.jsonl the way a pre-change build left it: the close
+        // reason destroyed, no close_history key at all. Only the event log
+        // still holds the bytes.
+        let jsonl = fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+        let damaged = jsonl
+            .lines()
+            .map(|line| {
+                let mut row: serde_json::Value =
+                    serde_json::from_str(line).unwrap();
+                row.as_object_mut().unwrap().remove("close_history");
+                serde_json::to_string(&row).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert!(!damaged.contains("close_history"));
+        fs::write(beads_dir.join("issues.jsonl"), damaged).unwrap();
+
+        let recovered = MutableStore::load(&beads_dir)
+            .unwrap()
+            .get_issue(&task_id)
+            .unwrap()
+            .clone();
+        assert_eq!(recovered.close_history.len(), 1);
+        assert_eq!(
+            recovered.close_history[0].close_reason.as_deref(),
+            Some("Not reproducible on main.")
+        );
+        assert_eq!(
+            recovered.close_history[0].resolution,
+            Some(BeadResolutionWire::Canceled)
+        );
     }
 
     fn issue(

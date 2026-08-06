@@ -75,9 +75,10 @@ pub use schema::{
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{
-    validate_model_value, BeadError, BeadResolutionWire, BeadSearchMatchWire,
-    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
-    StatusWire, TaskPlusOneEvidenceWire,
+    validate_model_value, BeadCloseRecordWire, BeadError, BeadReopenCauseWire,
+    BeadResolutionWire, BeadSearchMatchWire, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,

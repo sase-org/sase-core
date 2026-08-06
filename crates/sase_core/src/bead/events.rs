@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::wire::{
-    BeadError, BeadResolutionWire, BeadTierWire, DependencyWire, IssueTypeWire,
-    IssueWire, PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
+    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
+    StatusWire, TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -1100,11 +1101,12 @@ pub(super) fn apply_event(
             issue.dependencies.clear();
             issue.refs.clear();
             issue.plus_one_evidence.clear();
+            issue.close_history.clear();
             issues.insert(issue.id.clone(), issue);
         }
         BeadEventPayloadWire::IssueUpdated { fields } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
-            apply_update_event_fields(issue, fields);
+            apply_update_event_fields(issue, fields, &event.timestamp);
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -1122,7 +1124,12 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::IssueOpened => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Open;
-            clear_close_metadata(issue);
+            archive_close_metadata(
+                issue,
+                &event.timestamp,
+                BeadReopenCauseWire::Open,
+                None,
+            );
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -1210,7 +1217,12 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::EpicWorkPreclaimed { agent_name } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::InProgress;
-            clear_close_metadata(issue);
+            archive_close_metadata(
+                issue,
+                &event.timestamp,
+                BeadReopenCauseWire::EpicPreclaim,
+                None,
+            );
             issue.assignee = agent_name.clone();
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
@@ -1239,7 +1251,12 @@ pub(super) fn apply_event(
             }
             if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
                 issue.status = StatusWire::Ready;
-                clear_close_metadata(issue);
+                archive_close_metadata(
+                    issue,
+                    &event.timestamp,
+                    BeadReopenCauseWire::PlusOne,
+                    Some(evidence.reporter.clone()),
+                );
             }
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
@@ -1251,6 +1268,7 @@ pub(super) fn apply_event(
 fn apply_update_event_fields(
     issue: &mut IssueWire,
     fields: &BeadIssueUpdateEventFieldsWire,
+    timestamp: &str,
 ) {
     if let Some(value) = &fields.title {
         issue.title = value.clone();
@@ -1302,11 +1320,38 @@ fn apply_update_event_fields(
         .as_ref()
         .is_some_and(|status| *status != StatusWire::Closed)
     {
-        clear_close_metadata(issue);
+        archive_close_metadata(
+            issue,
+            timestamp,
+            BeadReopenCauseWire::Update,
+            None,
+        );
     }
 }
 
-fn clear_close_metadata(issue: &mut IssueWire) {
+/// Move an undone close out of the flat close fields and into `close_history`.
+///
+/// This is the single chokepoint for every reopen path on both the reducer and
+/// the mutation side, so a bead reprojected from its event streams is
+/// byte-identical to the same bead mutated in memory.  Reopening a bead that
+/// was never closed archives nothing; the trailing nulls still run so an
+/// already-invalid stray `resolution` is cleared exactly as before.
+pub(super) fn archive_close_metadata(
+    issue: &mut IssueWire,
+    reopened_at: &str,
+    reopened_via: BeadReopenCauseWire,
+    reopened_by: Option<String>,
+) {
+    if let Some(closed_at) = issue.closed_at.take() {
+        issue.close_history.push(BeadCloseRecordWire {
+            closed_at,
+            close_reason: issue.close_reason.take(),
+            resolution: issue.resolution.take(),
+            reopened_at: reopened_at.to_string(),
+            reopened_via,
+            reopened_by,
+        });
+    }
     issue.closed_at = None;
     issue.close_reason = None;
     issue.resolution = None;
@@ -1481,6 +1526,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             resolution: None,
+            close_history: Vec::new(),
             description: String::new(),
             notes: String::new(),
             design: String::new(),
