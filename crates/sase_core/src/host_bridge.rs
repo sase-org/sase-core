@@ -1218,11 +1218,23 @@ mod tests {
         );
     }
 
+    /// Run a just-written helper script through `/bin/sh` rather than making
+    /// it executable and exec-ing it directly.
+    ///
+    /// Exec-ing a file this process only just finished writing races every
+    /// other thread in the test binary: a concurrent `Command::spawn` forks
+    /// between `fs::write`'s open and close, the forked child inherits the
+    /// write descriptor, and the exec here fails with `ETXTBSY`. Passing the
+    /// script as an argument means nothing ever execs it.
+    #[cfg(unix)]
+    fn sh_bridge_command(script: &std::path::Path) -> Vec<String> {
+        vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()]
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_helper_bridge_invokes_editor_snippet_catalog() {
         use std::fs;
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("helper");
@@ -1237,13 +1249,8 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).unwrap();
 
-        let bridge = CommandHelperHostBridge::new(vec![script
-            .to_string_lossy()
-            .into_owned()]);
+        let bridge = CommandHelperHostBridge::new(sh_bridge_command(&script));
         let response = bridge
             .snippet_catalog(&EditorSnippetCatalogRequestWire {
                 schema_version: 1,
@@ -1258,7 +1265,6 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
     #[test]
     fn command_helper_bridge_invokes_editor_vcs_repo_catalog() {
         use std::fs;
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("helper");
@@ -1273,13 +1279,8 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
 "#,
         )
         .unwrap();
-        let mut permissions = fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script, permissions).unwrap();
 
-        let bridge = CommandHelperHostBridge::new(vec![script
-            .to_string_lossy()
-            .into_owned()]);
+        let bridge = CommandHelperHostBridge::new(sh_bridge_command(&script));
         let response = bridge
             .vcs_repo_catalog(&VcsRepoCatalogRequest {
                 schema_version: 1,

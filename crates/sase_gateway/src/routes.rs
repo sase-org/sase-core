@@ -3050,10 +3050,21 @@ mod tests {
         )
     }
 
+    /// Run a just-written helper script through `/bin/sh` rather than making
+    /// it executable and exec-ing it directly.
+    ///
+    /// Exec-ing a file this process only just finished writing races every
+    /// other thread in the test binary: a concurrent `Command::spawn` forks
+    /// between `std::fs::write`'s open and close, the forked child inherits
+    /// the write descriptor, and the exec fails with `ETXTBSY`. Passing the
+    /// script as an argument means nothing ever execs it.
+    #[cfg(unix)]
+    fn sh_bridge_command(script: &std::path::Path) -> Vec<String> {
+        vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()]
+    }
+
     #[cfg(unix)]
     fn state_for_command_agent_bridge(tmp: &TempDir) -> GatewayState {
-        use std::os::unix::fs::PermissionsExt;
-
         let script = tmp.path().join("mobile-agent-bridge");
         std::fs::write(
             &script,
@@ -3087,9 +3098,6 @@ esac
 "##,
         )
         .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
 
         GatewayState::new_with_agent_bridge_command(
             GatewayStateOptions {
@@ -3103,7 +3111,7 @@ esac
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
                 push_config: PushConfig::default(),
             },
-            vec![script.to_string_lossy().to_string()],
+            sh_bridge_command(&script),
         )
     }
 
@@ -3112,8 +3120,6 @@ esac
         tmp: &TempDir,
         mode: &str,
     ) -> GatewayState {
-        use std::os::unix::fs::PermissionsExt;
-
         let script = tmp.path().join(format!("mobile-helper-bridge-{mode}"));
         let script_body = match mode {
             "success" => {
@@ -3161,9 +3167,6 @@ exit 4
             _ => panic!("unknown helper bridge script mode: {mode}"),
         };
         std::fs::write(&script, script_body).unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
 
         GatewayState::new_with_helper_bridge_command(
             GatewayStateOptions {
@@ -3177,7 +3180,7 @@ exit 4
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
                 push_config: PushConfig::default(),
             },
-            vec![script.to_string_lossy().to_string()],
+            sh_bridge_command(&script),
         )
     }
 
