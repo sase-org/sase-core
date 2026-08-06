@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3](https://github.com/sase-org/sase-core/compare/v0.18.2...v0.18.3) - 2026-08-06
+
+### Added
+
+- *(bead)* archive close metadata instead of destroying it on reopen ([#86](https://github.com/sase-org/sase-core/pull/86))
+
 ## [0.18.2](https://github.com/sase-org/sase-core/compare/v0.18.1...v0.18.2) - 2026-08-06
 
 ### Fixed
