@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -592,6 +592,66 @@ fn append_ranked_commit_candidates(
     truncated
 }
 
+/// The operating-system error behind a `CommitLogFailure`.
+///
+/// The failure variants used to discard their `io::Error` through
+/// `map_err(|_| ...)`, which left every diagnostic guessing at the cause. The
+/// errno is the one piece of evidence that separates, say, descriptor
+/// exhaustion from a full filesystem, so it is carried through instead. Only
+/// the `Copy` parts of `io::Error` are kept, so the failure type stays cheap
+/// and comparable; the human-readable text is reconstructed on demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommitLogIoCause {
+    kind: io::ErrorKind,
+    raw_os_error: Option<i32>,
+}
+
+impl CommitLogIoCause {
+    fn new(error: &io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+
+    fn describe(self) -> String {
+        match self.raw_os_error {
+            // `io::Error`'s `Display` for a raw errno renders both the
+            // strerror text and the number, e.g.
+            // "Too many open files (os error 24)".
+            Some(errno) => io::Error::from_raw_os_error(errno).to_string(),
+            None => format!("{:?}", self.kind),
+        }
+    }
+}
+
+/// Which scratch-file syscall failed.
+///
+/// `tempfile::tempfile()` is an `open` under `TMPDIR` and `try_clone()` is a
+/// `dup`; both fail with `EMFILE`, so naming the call site is what tells a
+/// reader whether the process ran out of descriptors before or after the file
+/// existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScratchStep {
+    Create,
+    Clone,
+}
+
+impl ScratchStep {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Create => {
+                "could not create a scratch file for `git log` output under \
+                 TMPDIR"
+            }
+            Self::Clone => {
+                "could not duplicate the scratch-file descriptor for `git \
+                 log` output"
+            }
+        }
+    }
+}
+
 /// Why one repository contributed no rows to the commit inventory.
 ///
 /// Every variant used to collapse into a bare `None`, which surfaced as an
@@ -599,40 +659,41 @@ fn append_ranked_commit_candidates(
 /// a `git` invocation that never produced any output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommitLogFailure {
-    Scratch,
-    Spawn,
+    Scratch(ScratchStep, CommitLogIoCause),
+    Spawn(CommitLogIoCause),
     Budget,
-    Wait,
+    Wait(CommitLogIoCause),
     ExitStatus,
-    Read,
+    Read(CommitLogIoCause),
 }
 
 impl CommitLogFailure {
     fn describe(self, budget: Duration) -> String {
         match self {
-            Self::Scratch => {
-                "could not open a scratch file for `git log` output; check \
-                 that TMPDIR exists and is writable"
-                    .to_string()
+            Self::Scratch(step, cause) => {
+                format!("{}: {}", step.describe(), cause.describe())
             }
-            Self::Spawn => {
-                "could not spawn `git`; check that it is installed and on PATH"
-                    .to_string()
-            }
+            Self::Spawn(cause) => format!(
+                "could not spawn `git`; check that it is installed and on \
+                 PATH: {}",
+                cause.describe()
+            ),
             Self::Budget => format!(
                 "`git log` exceeded its {:?} budget and was killed; raise \
                  {} to allow more time",
                 budget, ARTIFACT_REF_COMMIT_TIMEOUT_ENV
             ),
-            Self::Wait => {
-                "could not wait on the `git log` child process".to_string()
-            }
+            Self::Wait(cause) => format!(
+                "could not wait on the `git log` child process: {}",
+                cause.describe()
+            ),
             Self::ExitStatus => {
                 "`git log` exited with a failure status".to_string()
             }
-            Self::Read => {
-                "could not read the `git log` output back".to_string()
-            }
+            Self::Read(cause) => format!(
+                "could not read the `git log` output back: {}",
+                cause.describe()
+            ),
         }
     }
 }
@@ -658,10 +719,18 @@ fn commit_log_output(
     checkout: &Path,
     budget: Duration,
 ) -> Result<Vec<u8>, CommitLogFailure> {
-    let mut stdout =
-        tempfile::tempfile().map_err(|_| CommitLogFailure::Scratch)?;
-    let stdout_writer =
-        stdout.try_clone().map_err(|_| CommitLogFailure::Scratch)?;
+    let mut stdout = tempfile::tempfile().map_err(|error| {
+        CommitLogFailure::Scratch(
+            ScratchStep::Create,
+            CommitLogIoCause::new(&error),
+        )
+    })?;
+    let stdout_writer = stdout.try_clone().map_err(|error| {
+        CommitLogFailure::Scratch(
+            ScratchStep::Clone,
+            CommitLogIoCause::new(&error),
+        )
+    })?;
     let mut child = Command::new("git")
         .arg("--no-pager")
         .arg("-C")
@@ -678,7 +747,9 @@ fn commit_log_output(
         .stdout(Stdio::from(stdout_writer))
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| CommitLogFailure::Spawn)?;
+        .map_err(|error| {
+            CommitLogFailure::Spawn(CommitLogIoCause::new(&error))
+        })?;
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -689,10 +760,11 @@ fn commit_log_output(
             outcome => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(if outcome.is_err() {
-                    CommitLogFailure::Wait
-                } else {
-                    CommitLogFailure::Budget
+                return Err(match outcome {
+                    Err(error) => {
+                        CommitLogFailure::Wait(CommitLogIoCause::new(&error))
+                    }
+                    Ok(_) => CommitLogFailure::Budget,
                 });
             }
         }
@@ -700,13 +772,13 @@ fn commit_log_output(
     if !status.success() {
         return Err(CommitLogFailure::ExitStatus);
     }
-    stdout
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| CommitLogFailure::Read)?;
+    stdout.seek(SeekFrom::Start(0)).map_err(|error| {
+        CommitLogFailure::Read(CommitLogIoCause::new(&error))
+    })?;
     let mut output = Vec::new();
-    stdout
-        .read_to_end(&mut output)
-        .map_err(|_| CommitLogFailure::Read)?;
+    stdout.read_to_end(&mut output).map_err(|error| {
+        CommitLogFailure::Read(CommitLogIoCause::new(&error))
+    })?;
     Ok(output)
 }
 
@@ -3663,13 +3735,16 @@ mod tests {
         );
 
         let budget = Duration::from_secs(30);
+        let cause =
+            CommitLogIoCause::new(&io::Error::from(io::ErrorKind::NotFound));
         let descriptions = [
-            CommitLogFailure::Scratch,
-            CommitLogFailure::Spawn,
+            CommitLogFailure::Scratch(ScratchStep::Create, cause),
+            CommitLogFailure::Scratch(ScratchStep::Clone, cause),
+            CommitLogFailure::Spawn(cause),
             CommitLogFailure::Budget,
-            CommitLogFailure::Wait,
+            CommitLogFailure::Wait(cause),
             CommitLogFailure::ExitStatus,
-            CommitLogFailure::Read,
+            CommitLogFailure::Read(cause),
         ]
         .map(|failure| failure.describe(budget));
         assert!(descriptions.iter().all(|text| !text.is_empty()));
@@ -3677,8 +3752,50 @@ mod tests {
             descriptions.iter().collect::<BTreeSet<_>>().len(),
             descriptions.len()
         );
-        assert!(descriptions[2].contains("30s"));
-        assert!(descriptions[2].contains(ARTIFACT_REF_COMMIT_TIMEOUT_ENV));
+
+        let budget_text = CommitLogFailure::Budget.describe(budget);
+        assert!(budget_text.contains("30s"));
+        assert!(budget_text.contains(ARTIFACT_REF_COMMIT_TIMEOUT_ENV));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_log_failures_report_the_underlying_os_error() {
+        // The investigation behind this plumbing stalled because
+        // `CommitLogFailure::Scratch` guessed at "check that TMPDIR exists and
+        // is writable" while discarding the errno: EMFILE (descriptor
+        // exhaustion) and ENOSPC (no space or inodes) both reach the same two
+        // syscalls and were indistinguishable in the message.
+        let budget = Duration::from_secs(30);
+        let emfile =
+            CommitLogIoCause::new(&io::Error::from_raw_os_error(libc::EMFILE));
+        let enospc =
+            CommitLogIoCause::new(&io::Error::from_raw_os_error(libc::ENOSPC));
+
+        let create = CommitLogFailure::Scratch(ScratchStep::Create, emfile)
+            .describe(budget);
+        assert!(create.contains("os error 24"), "{create}");
+        assert!(
+            !create.contains("TMPDIR exists and is writable"),
+            "the disproved TMPDIR guess should not have come back: {create}"
+        );
+
+        let full = CommitLogFailure::Scratch(ScratchStep::Create, enospc)
+            .describe(budget);
+        assert!(full.contains("os error 28"), "{full}");
+        assert_ne!(create, full, "distinct errnos must read differently");
+
+        // The `dup` call site is named separately from the `open` one.
+        let clone = CommitLogFailure::Scratch(ScratchStep::Clone, emfile)
+            .describe(budget);
+        assert!(clone.contains("os error 24"), "{clone}");
+        assert_ne!(create, clone);
+
+        // A cause with no errno still renders something usable.
+        let kind_only =
+            CommitLogIoCause::new(&io::Error::from(io::ErrorKind::BrokenPipe));
+        assert_eq!(kind_only.raw_os_error, None);
+        assert!(!kind_only.describe().is_empty());
     }
 
     #[test]
