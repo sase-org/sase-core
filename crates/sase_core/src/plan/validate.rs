@@ -13,8 +13,13 @@ use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::bead::validate_model_value;
 
+use super::artifact_link::sdd_plan_header_block_problem;
 use super::read::split_frontmatter;
 use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
+
+/// Canonical form restated in the `header-invalid` message, so an agent can
+/// repair the block from the diagnostic alone.
+const HEADER_BLOCK_REMEDY: &str = "SASE owns the plan header block: a link-shaped section (`PLAN`, `PROMPT`, `PARENT`, `BEAD`) must be a bolded key followed by exactly one Markdown link and nothing else, and a list-shaped section (`AGENTS`, `ARTIFACTS`, `COMMITS`) must be a bare bolded key whose entries are indented bullets. Delete the hand-authored text; SASE rewrites this block itself.";
 
 const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
 const SYSTEM_FIELDS: &[&str] = &[
@@ -373,6 +378,7 @@ impl<'a> Validator<'a> {
                 None,
             );
         }
+        self.validate_header_block();
 
         let value = match serde_yaml::from_str::<YamlValue>(&yaml) {
             Ok(value) => value,
@@ -467,6 +473,27 @@ impl<'a> Validator<'a> {
             parent,
         });
         self.finish(plan)
+    }
+
+    /// Reject a leading plan-header block that does not parse.
+    ///
+    /// The block is machine-owned, so a bullet the parser refuses can only
+    /// have been hand-authored; catching it here costs one edit instead of a
+    /// failed launch at the archive boundary that rewrites the block.
+    fn validate_header_block(&mut self) {
+        let Some(problem) = sdd_plan_header_block_problem(self.content) else {
+            return;
+        };
+        self.push_direct(
+            "error",
+            "header-invalid",
+            "",
+            format!(
+                "plan header block is invalid: {}. {HEADER_BLOCK_REMEDY}",
+                problem.reason
+            ),
+            problem.line,
+        );
     }
 
     fn strict_frontmatter(&mut self) -> Option<(String, String)> {
@@ -1837,6 +1864,152 @@ mod tests {
                 .unwrap()
                 .required
         );
+    }
+
+    /// A tale whose body opens with `block` as its plan-header block. The
+    /// block's first bullet is document line 7.
+    fn tale_with_header(block: &str) -> String {
+        format!("---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n\n{block}\n\n# Plan\nDo it.\n")
+    }
+
+    fn header_diagnostic(content: &str) -> PlanDiagnosticWire {
+        let result = plan_validate(content, "tale").unwrap();
+        assert!(!result.ok, "{:?}", result.diagnostics);
+        assert!(result.plan.is_none());
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "header-invalid")
+            .unwrap_or_else(|| panic!("no header diagnostic: {result:?}"))
+            .clone();
+        assert_eq!(diagnostic.severity, "error");
+        assert_eq!(diagnostic.field_path, "");
+        assert!(
+            diagnostic.message.contains("Markdown link"),
+            "{}",
+            diagnostic.message
+        );
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "header-invalid")
+                .count(),
+            1
+        );
+        diagnostic
+    }
+
+    #[test]
+    fn trailing_text_in_a_link_section_is_a_located_error() {
+        for (block, kind) in [
+            (
+                "- **PARENT:** [202608/epic.md](epic.md) (epic sase-g4 · in progress)",
+                "PARENT",
+            ),
+            ("- **PLAN:** [202608/plan.md](plan.md) — stale", "PLAN"),
+            ("- **BEAD:** [sase-g4.1](beads/sase-g4.1.md) done", "BEAD"),
+        ] {
+            let diagnostic = header_diagnostic(&tale_with_header(block));
+            assert!(
+                diagnostic.message.contains(&format!(
+                    "unexpected trailing text in {kind} plan header section"
+                )),
+                "{}",
+                diagnostic.message
+            );
+            assert_eq!(diagnostic.line, Some(7));
+        }
+    }
+
+    #[test]
+    fn other_header_block_defects_are_located_errors() {
+        let duplicate = header_diagnostic(&tale_with_header(
+            "- **PARENT:** [a](a.md)\n- **PARENT:** [b](b.md)",
+        ));
+        assert!(
+            duplicate
+                .message
+                .contains("duplicate PARENT plan header section"),
+            "{}",
+            duplicate.message
+        );
+        assert_eq!(duplicate.line, Some(8));
+
+        // An unknown key can only start a block's second bullet: a leading
+        // unknown bullet is prose, so no block is detected at all.
+        let unknown = header_diagnostic(&tale_with_header(
+            "- **PARENT:** [a](a.md)\n- **NOPE:** [b](b.md)",
+        ));
+        assert!(
+            unknown
+                .message
+                .contains("unknown `NOPE` section inside plan header block"),
+            "{}",
+            unknown.message
+        );
+        assert_eq!(unknown.line, Some(8));
+
+        let malformed =
+            header_diagnostic(&tale_with_header("- **PARENT:** epic.md"));
+        assert!(
+            malformed
+                .message
+                .contains("malformed PARENT plan header link Markdown"),
+            "{}",
+            malformed.message
+        );
+        assert_eq!(malformed.line, Some(7));
+
+        let entry = header_diagnostic(&tale_with_header(
+            "- **PARENT:** [a](a.md)\n- **AGENTS:**\n  - [one](one.md)\n  - [two](two.md) bad",
+        ));
+        assert!(
+            entry
+                .message
+                .contains("malformed plan header entry trailing text"),
+            "{}",
+            entry.message
+        );
+        assert_eq!(entry.line, Some(10));
+    }
+
+    #[test]
+    fn a_well_formed_or_absent_header_block_raises_nothing() {
+        let canonical = plan_validate(
+            &tale_with_header(
+                "- **PARENT:** [202608/epic.md](epic.md)\n- **AGENTS:**\n  - [worker](https://example.com/worker) — phase one",
+            ),
+            "tale",
+        )
+        .unwrap();
+        assert!(canonical.ok, "{:?}", canonical.diagnostics);
+
+        let absent = plan_validate(valid_tale(), "tale").unwrap();
+        assert!(absent.ok, "{:?}", absent.diagnostics);
+
+        // Header-shaped bullets outside the leading block are prose, not a
+        // header block, so this plan's own examples stay valid.
+        let prose = plan_validate(
+            "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n# Plan\nDo not author:\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n```markdown\n- **PARENT:** [epic](epic.md) (annotated)\n```\n",
+            "tale",
+        )
+        .unwrap();
+        assert!(prose.ok, "{:?}", prose.diagnostics);
+    }
+
+    #[test]
+    fn a_malformed_header_block_does_not_hide_frontmatter_diagnostics() {
+        let result = plan_validate(
+            "---\ntier: tale\ngoal: [not, text]\n---\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n# Plan\n",
+            "tale",
+        )
+        .unwrap();
+        assert_eq!(
+            codes(&result),
+            ["header-invalid", "required-missing", "type-mismatch"]
+        );
+        assert_eq!(result.diagnostics[0].line, Some(6));
     }
 
     #[test]

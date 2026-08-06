@@ -430,6 +430,64 @@ pub fn parse_sdd_plan_header_block(
     }
 }
 
+/// One leading plan-header block that does not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SddPlanHeaderBlockProblem {
+    /// The parser's reason, verbatim.
+    pub(crate) reason: String,
+    /// 1-based line of the offending bullet in the whole document, counting
+    /// the frontmatter, when the parser reached a bullet at all.
+    pub(crate) line: Option<u64>,
+}
+
+/// Report the document's leading plan-header block when it does not parse.
+///
+/// Only block-level problems are reported. Unparseable frontmatter is a
+/// frontmatter problem, and callers already diagnose that separately.
+pub(crate) fn sdd_plan_header_block_problem(
+    document: &str,
+) -> Option<SddPlanHeaderBlockProblem> {
+    let parts = split_document(document).ok()?;
+    let mut offending = None;
+    let reason = match parse_block_tracked(
+        parts.body,
+        parts.has_frontmatter,
+        &mut offending,
+    ) {
+        Ok(block) => counterpart_conflict_reason(block.as_ref())?,
+        Err(reason) => reason,
+    };
+    let lines = physical_lines(parts.body);
+    let line = offending
+        .or_else(|| first_header_candidate(&lines))
+        .and_then(|index| lines.get(index))
+        .map(|line| document_line_number(parts.prefix, parts.body, line.start));
+    Some(SddPlanHeaderBlockProblem { reason, line })
+}
+
+fn counterpart_conflict_reason(block: Option<&ParsedBlock>) -> Option<String> {
+    let counterparts = block?
+        .sections
+        .iter()
+        .filter(|section| {
+            matches!(
+                section.kind,
+                SddPlanHeaderSectionKindWire::Plan
+                    | SddPlanHeaderSectionKindWire::Prompt
+            )
+        })
+        .count();
+    (counterparts > 1).then(|| {
+        "header block contains both PLAN and PROMPT sections".to_string()
+    })
+}
+
+fn document_line_number(prefix: &str, body: &str, offset: usize) -> u64 {
+    let preceding =
+        prefix.matches('\n').count() + body[..offset].matches('\n').count();
+    preceding as u64 + 1
+}
+
 /// Render canonical sections in their fixed order.
 pub fn render_sdd_plan_header_block(
     sections: &[SddPlanHeaderSectionWire],
@@ -835,6 +893,16 @@ fn parse_block(
     body: &str,
     has_frontmatter: bool,
 ) -> Result<Option<ParsedBlock>, String> {
+    parse_block_tracked(body, has_frontmatter, &mut None)
+}
+
+/// Parse the block while recording the physical-line index of the bullet the
+/// parser was reading when it failed, so callers can report a location.
+fn parse_block_tracked(
+    body: &str,
+    has_frontmatter: bool,
+    offending: &mut Option<usize>,
+) -> Result<Option<ParsedBlock>, String> {
     let lines = physical_lines(body);
     let Some(start_index) = first_header_candidate(&lines) else {
         return Ok(None);
@@ -848,6 +916,7 @@ fn parse_block(
         if !is_top_level_header_bullet(line.text) {
             break;
         }
+        *offending = Some(index);
         let (kind_text, inline) = parse_header_prefix(line.text)
             .ok_or_else(|| "malformed plan header Markdown".to_string())?;
         let kind =
@@ -924,6 +993,7 @@ fn parse_block(
         let mut entries = Vec::new();
         let mut omitted = 0;
         while index < lines.len() && is_sub_bullet(lines[index].text) {
+            *offending = Some(index);
             let mut logical = sub_bullet_content(lines[index].text).to_string();
             index += 1;
             while index < lines.len()
@@ -961,7 +1031,8 @@ fn parse_block(
     }
 
     let end = if index == 0 { 0 } else { lines[index - 1].end };
-    if first_header_candidate(&lines[index..]).is_some() {
+    if let Some(stray) = first_header_candidate(&lines[index..]) {
+        *offending = Some(index + stray);
         return Err(
             "discontiguous or nested plan header bullets found".to_string()
         );
