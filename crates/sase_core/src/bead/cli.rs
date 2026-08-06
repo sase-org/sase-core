@@ -4031,6 +4031,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             resolution: None,
+            close_history: Vec::new(),
             description: description.to_string(),
             notes: String::new(),
             design: String::new(),

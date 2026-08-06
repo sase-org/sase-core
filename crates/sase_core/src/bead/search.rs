@@ -5,8 +5,8 @@ use std::path::Path;
 
 use super::read::{list_issues_in_issues, read_store_issues};
 use super::wire::{
-    BeadError, BeadSearchMatchWire, BeadTierWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire,
+    BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
+    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
 };
 
 pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
@@ -17,6 +17,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "design",
     "refs",
     "plus_one_evidence",
+    "close_history",
     "owner",
     "assignee",
     "model",
@@ -125,6 +126,27 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
+        field(
+            "close_history",
+            issue
+                .close_history
+                .iter()
+                .flat_map(|record| {
+                    [
+                        record.close_reason.as_deref(),
+                        record
+                            .resolution
+                            .as_ref()
+                            .map(BeadResolutionWire::as_str),
+                        Some(record.closed_at.as_str()),
+                        Some(record.reopened_at.as_str()),
+                    ]
+                })
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         field("owner", issue.owner.as_str()),
         field("assignee", issue.assignee.as_str()),
         field("model", issue.model.as_str()),
@@ -176,6 +198,8 @@ mod tests {
     use super::*;
     use std::fs;
 
+    use super::super::wire::{BeadCloseRecordWire, BeadReopenCauseWire};
+
     use tempfile::tempdir;
 
     #[test]
@@ -218,6 +242,16 @@ mod tests {
                 "refs",
                 phase_issue_with(|issue| {
                     issue.refs = vec!["research:202607/needle.md".to_string()];
+                }),
+                "needle",
+            ),
+            (
+                "close_history",
+                phase_issue_with(|issue| {
+                    issue.close_history = vec![close_record_with(|record| {
+                        record.close_reason =
+                            Some("Needle close reason".to_string());
+                    })];
                 }),
                 "needle",
             ),
@@ -311,6 +345,74 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(field_names, expected);
+    }
+
+    #[test]
+    fn matches_an_archived_close_reason() {
+        let issue = phase_issue_with(|issue| {
+            issue.close_history = vec![close_record_with(|record| {
+                record.close_reason =
+                    Some("superseded by the kaleidoscope rewrite".to_string());
+            })];
+        });
+
+        let results = search_issues_in_issues(
+            vec![issue],
+            "kaleidoscope",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.1"]);
+        assert_eq!(results[0].matched_fields, vec!["close_history"]);
+    }
+
+    #[test]
+    fn matches_an_archived_resolution() {
+        let issue = phase_issue_with(|issue| {
+            issue.close_history = vec![close_record_with(|record| {
+                record.resolution = Some(BeadResolutionWire::Superseded);
+            })];
+        });
+
+        let results = search_issues_in_issues(
+            vec![issue],
+            "superseded",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.1"]);
+        assert_eq!(results[0].matched_fields, vec!["close_history"]);
+    }
+
+    #[test]
+    fn issues_without_close_history_do_not_match_an_archived_reason() {
+        let archived = phase_issue_with(|issue| {
+            issue.close_history = vec![close_record_with(|record| {
+                record.close_reason =
+                    Some("closed for kaleidoscope reasons".to_string());
+            })];
+        });
+        let untouched = task_issue_with(|_| {});
+
+        let results = search_issues_in_issues(
+            vec![archived, untouched],
+            "kaleidoscope",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.1"]);
     }
 
     #[test]
@@ -528,6 +630,21 @@ mod tests {
             .collect()
     }
 
+    fn close_record_with(
+        update: impl FnOnce(&mut BeadCloseRecordWire),
+    ) -> BeadCloseRecordWire {
+        let mut record = BeadCloseRecordWire {
+            closed_at: "2026-01-01T00:02:00Z".to_string(),
+            close_reason: None,
+            resolution: None,
+            reopened_at: "2026-01-01T00:03:00Z".to_string(),
+            reopened_via: BeadReopenCauseWire::PlusOne,
+            reopened_by: None,
+        };
+        update(&mut record);
+        record
+    }
+
     fn phase_issue_with(update: impl FnOnce(&mut IssueWire)) -> IssueWire {
         let mut issue = IssueWire {
             id: "beads-1.1".to_string(),
@@ -544,6 +661,7 @@ mod tests {
             closed_at: None,
             close_reason: None,
             resolution: None,
+            close_history: Vec::new(),
             description: String::new(),
             notes: String::new(),
             design: String::new(),
