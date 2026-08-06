@@ -47,7 +47,16 @@ const ARTIFACT_REF_MAX_SCAN_RESULTS: usize = 5_000;
 pub const ARTIFACT_REF_COMMIT_ABBREV: usize = 12;
 pub const ARTIFACT_REF_COMMIT_SCAN_LIMIT: usize = 200;
 pub const ARTIFACT_REF_COMMIT_MAX_ROWS: usize = 1_000;
-const ARTIFACT_REF_COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Environment override for the artifact-ref commit-log wall-clock budget,
+/// expressed in seconds as a positive, finite decimal number. Anything else
+/// (including an unset or empty value) falls back to the default budget.
+pub const ARTIFACT_REF_COMMIT_TIMEOUT_ENV: &str =
+    "SASE_ARTIFACT_REF_COMMIT_TIMEOUT";
+/// Generous enough that a heavily oversubscribed host still produces commit
+/// rows. An expired budget yields an empty inventory with no in-band error, so
+/// this is a runaway-`git` backstop rather than a responsiveness knob.
+pub const ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT: Duration =
+    Duration::from_secs(30);
 const ARTIFACT_REF_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ARTIFACT_REF_REPOSITORY_KIND_SIDECAR: &str = "sidecar";
 
@@ -487,6 +496,7 @@ fn append_commit_candidates(
     seen: &mut BTreeSet<String>,
     context: &ArtifactRefContextWire,
 ) -> usize {
+    let budget = artifact_ref_commit_timeout();
     let mut commits = Vec::new();
     for repository in &context.repositories {
         if repository_is_sdd_sidecar(repository) {
@@ -500,8 +510,22 @@ fn append_commit_candidates(
         if !checkout.is_dir() || (!git_entry.is_dir() && !git_entry.is_file()) {
             continue;
         }
-        let Some(output) = commit_log_output(checkout) else {
-            continue;
+        let output = match commit_log_output(checkout, budget) {
+            Ok(output) => output,
+            Err(failure) => {
+                // Diagnostics go to stderr because a dropped repository is
+                // indistinguishable from one with no commits in the returned
+                // inventory, which otherwise makes an empty completion menu
+                // impossible to explain.
+                eprintln!(
+                    "artifact-ref commit inventory: skipping repository {} \
+                     at {}: {}",
+                    repository.name,
+                    checkout.display(),
+                    failure.describe(budget)
+                );
+                continue;
+            }
         };
         commits.extend(parse_commit_log(&repository.name, &output));
     }
@@ -568,9 +592,76 @@ fn append_ranked_commit_candidates(
     truncated
 }
 
-fn commit_log_output(checkout: &Path) -> Option<Vec<u8>> {
-    let mut stdout = tempfile::tempfile().ok()?;
-    let stdout_writer = stdout.try_clone().ok()?;
+/// Why one repository contributed no rows to the commit inventory.
+///
+/// Every variant used to collapse into a bare `None`, which surfaced as an
+/// empty completion menu with no way to tell a genuine absence of commits from
+/// a `git` invocation that never produced any output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitLogFailure {
+    Scratch,
+    Spawn,
+    Budget,
+    Wait,
+    ExitStatus,
+    Read,
+}
+
+impl CommitLogFailure {
+    fn describe(self, budget: Duration) -> String {
+        match self {
+            Self::Scratch => {
+                "could not open a scratch file for `git log` output; check \
+                 that TMPDIR exists and is writable"
+                    .to_string()
+            }
+            Self::Spawn => {
+                "could not spawn `git`; check that it is installed and on PATH"
+                    .to_string()
+            }
+            Self::Budget => format!(
+                "`git log` exceeded its {:?} budget and was killed; raise \
+                 {} to allow more time",
+                budget, ARTIFACT_REF_COMMIT_TIMEOUT_ENV
+            ),
+            Self::Wait => {
+                "could not wait on the `git log` child process".to_string()
+            }
+            Self::ExitStatus => {
+                "`git log` exited with a failure status".to_string()
+            }
+            Self::Read => {
+                "could not read the `git log` output back".to_string()
+            }
+        }
+    }
+}
+
+fn artifact_ref_commit_timeout() -> Duration {
+    parse_commit_timeout(
+        std::env::var(ARTIFACT_REF_COMMIT_TIMEOUT_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT)
+}
+
+fn parse_commit_timeout(value: Option<&str>) -> Option<Duration> {
+    let seconds = value?.trim().parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Duration::try_from_secs_f64(seconds).ok()
+}
+
+fn commit_log_output(
+    checkout: &Path,
+    budget: Duration,
+) -> Result<Vec<u8>, CommitLogFailure> {
+    let mut stdout =
+        tempfile::tempfile().map_err(|_| CommitLogFailure::Scratch)?;
+    let stdout_writer =
+        stdout.try_clone().map_err(|_| CommitLogFailure::Scratch)?;
     let mut child = Command::new("git")
         .arg("--no-pager")
         .arg("-C")
@@ -587,28 +678,36 @@ fn commit_log_output(checkout: &Path) -> Option<Vec<u8>> {
         .stdout(Stdio::from(stdout_writer))
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+        .map_err(|_| CommitLogFailure::Spawn)?;
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < ARTIFACT_REF_COMMIT_TIMEOUT => {
+            Ok(None) if started.elapsed() < budget => {
                 thread::sleep(ARTIFACT_REF_COMMIT_POLL_INTERVAL);
             }
-            Ok(None) | Err(_) => {
+            outcome => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(if outcome.is_err() {
+                    CommitLogFailure::Wait
+                } else {
+                    CommitLogFailure::Budget
+                });
             }
         }
     };
     if !status.success() {
-        return None;
+        return Err(CommitLogFailure::ExitStatus);
     }
-    stdout.seek(SeekFrom::Start(0)).ok()?;
+    stdout
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| CommitLogFailure::Read)?;
     let mut output = Vec::new();
-    stdout.read_to_end(&mut output).ok()?;
-    Some(output)
+    stdout
+        .read_to_end(&mut output)
+        .map_err(|_| CommitLogFailure::Read)?;
+    Ok(output)
 }
 
 fn parse_commit_log(repository: &str, output: &[u8]) -> Vec<CommitCandidate> {
@@ -3485,6 +3584,145 @@ mod tests {
         assert_eq!(commit_age_label(now - 3_600, now), "1h");
         assert_eq!(commit_age_label(now - 86_400, now), "1d");
         assert_eq!(commit_age_label(now - 7 * 86_400, now), "2023-11-07");
+    }
+
+    /// Make `git` block forever inside this repository.
+    ///
+    /// A configured `include.path` pointing at a FIFO with no writer stalls
+    /// git during start-up config parsing, which is deterministic in a way
+    /// that a merely tiny budget is not: with a small budget the child can
+    /// still win the race and exit before the first poll observes it.
+    #[cfg(unix)]
+    fn wedge_git_forever(repo: &Path) {
+        use std::ffi::CString;
+
+        let blocker = repo.join("blocker.fifo");
+        let path = CString::new(blocker.as_os_str().as_encoded_bytes())
+            .expect("fifo path should not contain a NUL byte");
+        // SAFETY: `path` is a valid NUL-terminated string that outlives the
+        // call, and the mode is a plain permission bitmask.
+        let created = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(
+            created,
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
+        git(
+            repo,
+            &["config", "include.path", &blocker.to_string_lossy()],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_log_reports_an_expired_budget_instead_of_empty_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let healthy = temp.path().join("healthy");
+        let wedged = temp.path().join("wedged");
+        init_git_repo(&healthy);
+        init_git_repo(&wedged);
+        commit_at(&healthy, 1_700_000_000, "only", "");
+        commit_at(&wedged, 1_700_000_000, "only", "");
+        wedge_git_forever(&wedged);
+
+        // This is the R6 mechanism in isolation: a `git log` that outlives the
+        // budget is killed and the repository silently contributes zero rows.
+        let budget = Duration::from_millis(250);
+        let started = Instant::now();
+        assert_eq!(
+            commit_log_output(&wedged, budget),
+            Err(CommitLogFailure::Budget)
+        );
+        assert!(started.elapsed() >= budget, "the budget was not honoured");
+
+        // The row-producing path is unaffected by the new plumbing.
+        assert!(!commit_log_output(
+            &healthy,
+            ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT
+        )
+        .expect("default budget should complete")
+        .is_empty());
+    }
+
+    #[test]
+    fn commit_log_distinguishes_every_unusable_repository_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let broken_repo = temp.path().join("broken");
+        fs::create_dir_all(&broken_repo).unwrap();
+        // A malformed `.git` file makes git fail in place instead of walking
+        // up to whatever repository happens to contain TMPDIR.
+        fs::write(broken_repo.join(".git"), "not a gitfile\n").unwrap();
+
+        assert_eq!(
+            commit_log_output(
+                &broken_repo,
+                ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT
+            ),
+            Err(CommitLogFailure::ExitStatus)
+        );
+
+        let budget = Duration::from_secs(30);
+        let descriptions = [
+            CommitLogFailure::Scratch,
+            CommitLogFailure::Spawn,
+            CommitLogFailure::Budget,
+            CommitLogFailure::Wait,
+            CommitLogFailure::ExitStatus,
+            CommitLogFailure::Read,
+        ]
+        .map(|failure| failure.describe(budget));
+        assert!(descriptions.iter().all(|text| !text.is_empty()));
+        assert_eq!(
+            descriptions.iter().collect::<BTreeSet<_>>().len(),
+            descriptions.len()
+        );
+        assert!(descriptions[2].contains("30s"));
+        assert!(descriptions[2].contains(ARTIFACT_REF_COMMIT_TIMEOUT_ENV));
+    }
+
+    #[test]
+    fn commit_timeout_override_accepts_only_positive_finite_seconds() {
+        assert_eq!(
+            parse_commit_timeout(Some("0.25")),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse_commit_timeout(Some("  120  ")),
+            Some(Duration::from_secs(120))
+        );
+        for rejected in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-5"),
+            Some("nan"),
+            Some("inf"),
+        ] {
+            assert_eq!(parse_commit_timeout(rejected), None);
+        }
+        assert_eq!(
+            ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT,
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn commit_timeout_reads_the_documented_environment_override() {
+        // Deliberately not mutating the process environment: these tests share
+        // it with every other test in the binary. Assert the wiring instead.
+        assert_eq!(
+            ARTIFACT_REF_COMMIT_TIMEOUT_ENV,
+            "SASE_ARTIFACT_REF_COMMIT_TIMEOUT"
+        );
+        let observed = artifact_ref_commit_timeout();
+        let expected = parse_commit_timeout(
+            std::env::var(ARTIFACT_REF_COMMIT_TIMEOUT_ENV)
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or(ARTIFACT_REF_COMMIT_TIMEOUT_DEFAULT);
+        assert_eq!(observed, expected);
     }
 
     #[test]
