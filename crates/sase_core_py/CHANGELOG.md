@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5](https://github.com/sase-org/sase-core/compare/v0.18.4...v0.18.5) - 2026-08-07
+
+### Added
+
+- *(bead)* add the snoozed task-bead status with two wake conditions
+- *(notifications)* make tab ownership a single-valued core rule
+
 ## [0.18.1](https://github.com/sase-org/sase-core/compare/v0.18.0...v0.18.1) - 2026-08-05
 
 ### Fixed

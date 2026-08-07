@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5](https://github.com/sase-org/sase-core/compare/v0.18.4...v0.18.5) - 2026-08-07
+
+### Added
+
+- *(notifications)* carry a sender-declared color on each notification tab
+- *(bead)* add the snoozed task-bead status with two wake conditions
+- *(notifications)* make tab ownership a single-valued core rule
+
 ## [0.18.4](https://github.com/sase-org/sase-core/compare/v0.18.3...v0.18.4) - 2026-08-06
 
 ### Added
