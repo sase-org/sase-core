@@ -44,7 +44,12 @@ const RESERVED_PANELS: [&str; 5] =
 
 const MAX_PANEL_LEN: usize = 32;
 
+/// Icon bounds, matching `validate_icon` on the Python gate-write path.
+const MAX_TAB_ICON_CODEPOINTS: usize = 32;
+const MAX_TAB_ICON_BYTES: usize = 128;
+
 const GATE_PANEL_ACTION_DATA_KEY: &str = "panel";
+const GATE_PANEL_ICON_ACTION_DATA_KEY: &str = "panel_icon";
 
 /// Return the single tab key that owns this notification, with its kind.
 pub fn tab_key_for(notification: &NotificationWire) -> (String, &'static str) {
@@ -124,6 +129,9 @@ struct TabAccumulator {
     color: Option<String>,
     /// Activity cursor of the row that donated `color`, newest wins.
     color_cursor: Option<(String, String)>,
+    icon: Option<String>,
+    /// Activity cursor of the row that donated `icon`, newest wins.
+    icon_cursor: Option<(String, String)>,
 }
 
 fn accumulate(
@@ -153,20 +161,33 @@ fn accumulate(
             accumulator.next_wake_at = Some(until.to_string());
         }
     }
+    // The panel lists a tab newest first, so the tab wears the color and the
+    // icon of the first row a reader would see that declares one.
+    let cursor = (activity_at.to_string(), row.id.clone());
     if let Some(color) = declared_color(row) {
-        // The panel lists a tab newest first, so the tab wears the color of
-        // the first row a reader would see that declares one.
-        let cursor = (activity_at.to_string(), row.id.clone());
-        let wins = match accumulator.color_cursor.as_ref() {
-            None => true,
-            Some(current) => cursor > *current,
-        };
-        if wins {
+        if donation_wins(&cursor, accumulator.color_cursor.as_ref()) {
             accumulator.color = Some(color);
-            accumulator.color_cursor = Some(cursor);
+            accumulator.color_cursor = Some(cursor.clone());
+        }
+    }
+    if let Some(icon) = declared_tab_icon(row) {
+        if donation_wins(&cursor, accumulator.icon_cursor.as_ref()) {
+            accumulator.icon = Some(icon);
+            accumulator.icon_cursor = Some(cursor);
         }
     }
     key
+}
+
+/// Return whether a donating row outranks the row that donated already.
+fn donation_wins(
+    cursor: &(String, String),
+    current: Option<&(String, String)>,
+) -> bool {
+    match current {
+        None => true,
+        Some(current) => cursor > current,
+    }
 }
 
 /// Return a well-formed `#RRGGBB` sender color, ignoring stored junk.
@@ -177,6 +198,26 @@ fn declared_color(notification: &NotificationWire) -> Option<String> {
         return None;
     }
     Some(color.to_string())
+}
+
+/// Return a sender-declared tab icon, ignoring stored junk.
+///
+/// This is a defensive reader, not a validator: Python rejects a malformed
+/// icon at gate-write time, so this only has to refuse what an old or
+/// hand-edited store may already hold.
+fn declared_tab_icon(notification: &NotificationWire) -> Option<String> {
+    let icon = notification
+        .action_data
+        .get(GATE_PANEL_ICON_ACTION_DATA_KEY)?
+        .trim();
+    if icon.is_empty()
+        || icon.chars().count() > MAX_TAB_ICON_CODEPOINTS
+        || icon.len() > MAX_TAB_ICON_BYTES
+        || icon.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(icon.to_string())
 }
 
 /// Rank tab kinds so a key claimed by two kinds resolves order-independently.
@@ -217,6 +258,7 @@ fn ordered_tabs(
                     None
                 },
                 color: accumulator.color.clone(),
+                icon: accumulator.icon.clone(),
                 key,
             }
         })
@@ -635,6 +677,90 @@ mod tests {
         let tabs = classify_notification_tabs(&[sent_later, resurfaced]).tabs;
 
         assert_eq!(tabs[0].color.as_deref(), Some("#112233"));
+    }
+
+    #[test]
+    fn a_tab_wears_the_newest_declared_icon_and_ignores_junk() {
+        fn declaring(id: &str, at: &str, icon: &str) -> NotificationWire {
+            let mut row = notification(id);
+            row.tags = vec!["alpha".to_string()];
+            row.timestamp = at.to_string();
+            row.action_data
+                .insert("panel_icon".to_string(), icon.to_string());
+            row
+        }
+
+        let older = declaring("older", "2026-03-17T08:00:00-04:00", "◆");
+        let newer = declaring("newer", "2026-03-17T09:00:00-04:00", " ◈ ");
+        let blank = declaring("blank", "2026-03-17T10:00:00-04:00", "  ");
+        let control =
+            declaring("control", "2026-03-17T11:00:00-04:00", "\u{7}");
+        let long =
+            declaring("long", "2026-03-17T12:00:00-04:00", &"x".repeat(33));
+        let mut plain = notification("plain");
+        plain.tags = vec!["beta".to_string()];
+
+        for rows in [
+            vec![
+                older.clone(),
+                newer.clone(),
+                blank.clone(),
+                control.clone(),
+                long.clone(),
+                plain.clone(),
+            ],
+            vec![plain, long, control, blank, newer, older],
+        ] {
+            let tabs = classify_notification_tabs(&rows).tabs;
+            let alpha = tabs.iter().find(|tab| tab.key == "alpha").unwrap();
+            let beta = tabs.iter().find(|tab| tab.key == "beta").unwrap();
+            assert_eq!(alpha.icon.as_deref(), Some("◈"));
+            assert_eq!(beta.icon, None);
+        }
+    }
+
+    #[test]
+    fn a_resurfaced_row_donates_its_icon_over_a_newer_sent_row() {
+        let mut sent_later = notification("sent-later");
+        sent_later.tags = vec!["alpha".to_string()];
+        sent_later.timestamp = "2026-03-17T09:00:00-04:00".to_string();
+        sent_later
+            .action_data
+            .insert("panel_icon".to_string(), "◆".to_string());
+        let mut resurfaced = notification("resurfaced");
+        resurfaced.tags = vec!["alpha".to_string()];
+        resurfaced.timestamp = "2026-03-01T00:00:00-04:00".to_string();
+        resurfaced.resurfaced_at =
+            Some("2026-03-17T12:00:00-04:00".to_string());
+        resurfaced
+            .action_data
+            .insert("panel_icon".to_string(), "◈".to_string());
+
+        let tabs = classify_notification_tabs(&[sent_later, resurfaced]).tabs;
+
+        assert_eq!(tabs[0].icon.as_deref(), Some("◈"));
+    }
+
+    #[test]
+    fn any_row_may_donate_an_icon_not_only_a_panel_row() {
+        let mut row = notification("h");
+        row.action = Some("PlanApproval".to_string());
+        row.action_data
+            .insert("panel_icon".to_string(), "⚑".to_string());
+
+        let tabs = classify_notification_tabs(&[row]).tabs;
+
+        assert_eq!(tabs[0].kind, TAB_KIND_HITL);
+        assert_eq!(tabs[0].icon.as_deref(), Some("⚑"));
+    }
+
+    #[test]
+    fn an_absent_icon_stays_absent_on_the_wire() {
+        let tabs = classify_notification_tabs(&[notification("plain")]).tabs;
+
+        let encoded = serde_json::to_string(&tabs[0]).unwrap();
+
+        assert!(!encoded.contains("icon"), "{encoded}");
     }
 
     #[test]

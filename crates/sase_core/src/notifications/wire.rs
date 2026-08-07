@@ -64,6 +64,9 @@ pub struct NotificationTabWire {
     /// Sender-declared color, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Sender-declared tab icon, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// Ordered tabs plus the single tab key owning each classified row.
