@@ -8,7 +8,7 @@ use super::wire::{
 };
 
 const XPROMPT_INPUT_TYPE_EXPECTED: &str =
-    "word, line, text, path, agent, int/integer, bool/boolean, float";
+    "word, line, text, path, agent, int/integer, bool/boolean, float, enum";
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
 ///
@@ -168,6 +168,7 @@ enum InputType {
     Int,
     Bool,
     Float,
+    Enum,
 }
 
 pub(super) fn diagnostics(
@@ -553,12 +554,22 @@ fn validate_shortform_inputs(
             source.as_ref(),
             item_range,
         );
+        let choices = validate_input_choices(
+            builder,
+            raw.as_mapping()
+                .and_then(|mapping| yaml_mapping_get(mapping, "choices")),
+            declared_type,
+            type_known,
+            source.as_ref().and_then(|source| source.field("choices")),
+            item_range,
+        );
         validate_input_default(
             builder,
             raw.as_mapping()
                 .and_then(|mapping| yaml_mapping_get(mapping, "default")),
             declared_type,
             type_known,
+            &choices,
             source.as_ref().and_then(|source| {
                 source.default_value.as_ref().map(|default| default.range)
             }),
@@ -658,11 +669,20 @@ fn validate_longform_inputs(
             type_source.as_ref(),
             item_range,
         );
+        let choices = validate_input_choices(
+            builder,
+            yaml_mapping_get(mapping, "choices"),
+            declared_type,
+            type_known,
+            source.as_ref().and_then(|source| source.field("choices")),
+            item_range,
+        );
         validate_input_default(
             builder,
             yaml_mapping_get(mapping, "default"),
             declared_type,
             type_known,
+            &choices,
             source.as_ref().and_then(|source| {
                 source
                     .field("default")
@@ -817,11 +837,88 @@ fn validate_explicit_input_type(
     (input_type, true)
 }
 
+/// Validate a declared `input`'s `choices` and return the declared values.
+///
+/// `choices` is required and non-empty for `enum` and forbidden for every
+/// other type. Each item must be a scalar or a `{value, label}` mapping;
+/// declared values must be unique. The returned values feed
+/// [`validate_input_default`]'s `enum` membership check.
+fn validate_input_choices(
+    builder: &mut FrontmatterDiagnosticBuilder<'_>,
+    choices: Option<&Value>,
+    declared_type: InputType,
+    type_known: bool,
+    source: Option<&KeyValueSource>,
+    fallback_range: (usize, usize),
+) -> Vec<String> {
+    if !type_known {
+        return Vec::new();
+    }
+    let range = source
+        .and_then(|field| field.scalar.as_ref())
+        .map(|scalar| scalar.range)
+        .or_else(|| source.map(|field| field.value_range))
+        .unwrap_or(fallback_range);
+    if declared_type != InputType::Enum {
+        if choices.is_some() {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_choices",
+                "Xprompt input choices is only valid for type `enum`",
+            );
+        }
+        return Vec::new();
+    }
+    let items = match choices.and_then(|value| value.as_sequence()) {
+        Some(items) if !items.is_empty() => items,
+        _ => {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_choices",
+                "Xprompt input type `enum` requires a non-empty `choices` list",
+            );
+            return Vec::new();
+        }
+    };
+    let mut values = Vec::new();
+    let mut seen = HashSet::<String>::new();
+    for item in items {
+        let value = yaml_scalar_to_string(item).or_else(|| {
+            item.as_mapping()
+                .and_then(|mapping| yaml_mapping_get(mapping, "value"))
+                .and_then(yaml_scalar_to_string)
+        });
+        let Some(value) = value else {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_choices",
+                "Xprompt input choice must be a scalar or a `{value, label}` mapping",
+            );
+            continue;
+        };
+        if !seen.insert(value.clone()) {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_choices",
+                format!("Duplicate xprompt input choice value `{value}`"),
+            );
+            continue;
+        }
+        values.push(value);
+    }
+    values
+}
+
 fn validate_input_default(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     default: Option<&Value>,
     declared_type: InputType,
     type_known: bool,
+    choices: &[String],
     source_range: Option<(usize, usize)>,
     fallback_range: (usize, usize),
 ) {
@@ -854,6 +951,7 @@ fn validate_input_default(
         InputType::Int => raw.parse::<i64>().is_ok(),
         InputType::Float => raw.parse::<f64>().is_ok(),
         InputType::Bool => is_bool_spelling(&raw),
+        InputType::Enum => choices.iter().any(|choice| choice == &raw),
     };
     if !valid {
         builder.push(
@@ -945,7 +1043,7 @@ fn validate_nested_input_unknown_keys(
     for field in source.fields {
         if matches!(
             field.key.as_str(),
-            "type" | "default" | "description" | "repeatable"
+            "type" | "default" | "description" | "repeatable" | "choices"
         ) {
             continue;
         }
@@ -971,7 +1069,7 @@ fn validate_longform_unknown_keys(
     for field in source.fields {
         if matches!(
             field.key.as_str(),
-            "name" | "type" | "default" | "description" | "repeatable"
+            "name" | "type" | "default" | "description" | "repeatable" | "choices"
         ) {
             continue;
         }
@@ -2230,7 +2328,7 @@ fn yaml_scalar_to_string(value: &Value) -> Option<String> {
 
 impl InputType {
     /// Every input type, in catalog order, for schema enumeration.
-    const ALL: [InputType; 8] = [
+    const ALL: [InputType; 9] = [
         InputType::Word,
         InputType::Agent,
         InputType::Line,
@@ -2239,6 +2337,7 @@ impl InputType {
         InputType::Int,
         InputType::Float,
         InputType::Bool,
+        InputType::Enum,
     ];
 
     /// Accepted aliases for this type's canonical name (see
@@ -2265,6 +2364,7 @@ impl InputType {
             InputType::Bool => {
                 "A boolean: true or false (also yes/no, on/off, 1/0)."
             }
+            InputType::Enum => "One of the values declared under `choices`.",
         }
     }
 }
@@ -2279,6 +2379,7 @@ fn parse_input_type(raw: &str) -> Option<InputType> {
         "int" | "integer" => Some(InputType::Int),
         "bool" | "boolean" => Some(InputType::Bool),
         "float" => Some(InputType::Float),
+        "enum" => Some(InputType::Enum),
         _ => None,
     }
 }
@@ -2293,6 +2394,7 @@ fn declared_type_name(input_type: InputType) -> &'static str {
         InputType::Int => "int",
         InputType::Bool => "bool",
         InputType::Float => "float",
+        InputType::Enum => "enum",
     }
 }
 
@@ -2405,7 +2507,10 @@ mod tests {
             schema.iter().map(|input| input.name.as_str()).collect();
         assert_eq!(
             names,
-            ["word", "agent", "line", "text", "path", "int", "float", "bool"]
+            [
+                "word", "agent", "line", "text", "path", "int", "float", "bool",
+                "enum"
+            ]
         );
         for input in &schema {
             assert!(!input.rule.is_empty(), "{} has no rule", input.name);
@@ -2464,6 +2569,62 @@ mod tests {
         let diagnostics = validate("---\ninput:\n  service: wordd\n---\n");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+        }));
+    }
+
+    #[test]
+    fn validate_accepts_enum_choices_shortform_and_longform() {
+        let shortform = validate(
+            "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, slow]\n---\n",
+        );
+        assert!(!has_error(&shortform), "{shortform:?}");
+
+        let longform = validate(
+            "---\ninput:\n  - name: mode\n    type: enum\n    choices:\n      - value: fast\n        label: Fast\n      - value: slow\n---\n",
+        );
+        assert!(!has_error(&longform), "{longform:?}");
+    }
+
+    #[test]
+    fn validate_flags_enum_without_choices() {
+        let diagnostics = validate("---\ninput:\n  mode:\n    type: enum\n---\n");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+        }));
+    }
+
+    #[test]
+    fn validate_flags_choices_on_non_enum_type() {
+        let diagnostics = validate(
+            "---\ninput:\n  mode:\n    type: word\n    choices: [fast, slow]\n---\n",
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+        }));
+    }
+
+    #[test]
+    fn validate_flags_duplicate_choice_values() {
+        let diagnostics = validate(
+            "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, fast]\n---\n",
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+        }));
+    }
+
+    #[test]
+    fn validate_checks_enum_default_membership() {
+        let valid = validate(
+            "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, slow]\n    default: fast\n---\n",
+        );
+        assert!(!has_error(&valid), "{valid:?}");
+
+        let invalid = validate(
+            "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, slow]\n    default: turbo\n---\n",
+        );
+        assert!(invalid.iter().any(|diagnostic| {
+            diagnostic.code == "invalid_xprompt_frontmatter_input_default"
         }));
     }
 

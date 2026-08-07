@@ -2167,6 +2167,7 @@ fn parse_input_type(raw: &str) -> String {
         "int" | "integer" => "int",
         "bool" | "boolean" => "bool",
         "float" => "float",
+        "enum" => "enum",
         _ => "line",
     }
     .to_string()
