@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 
+use super::tabs::tabs_and_counts_for;
 use super::wire::{
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
@@ -640,9 +641,11 @@ fn snapshot_from_rows(
     stats: NotificationStoreStatsWire,
 ) -> NotificationStoreSnapshotWire {
     let next_snooze_deadline = next_snooze_deadline_for(&notifications);
+    let (tabs, counts) = tabs_and_counts_for(&notifications);
     NotificationStoreSnapshotWire {
         schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
-        counts: counts_for(&notifications),
+        counts,
+        tabs,
         notifications,
         expired_ids: Vec::new(),
         next_snooze_deadline,
@@ -695,31 +698,9 @@ fn outcome_without_rows(
     }
 }
 
+/// Count unread rows the same way the tab pass does, discarding the tabs.
 fn counts_for(notifications: &[NotificationWire]) -> NotificationCountsWire {
-    let mut counts = NotificationCountsWire::default();
-    for n in notifications {
-        if n.read || n.silent {
-            continue;
-        }
-        if n.muted {
-            counts.muted += 1;
-        } else if is_error(n) {
-            counts.errors += 1;
-        } else if is_priority(n) {
-            counts.priority += 1;
-        } else {
-            counts.rest += 1;
-        }
-    }
-    counts
-}
-
-fn is_priority(notification: &NotificationWire) -> bool {
-    super::mobile::mobile_notification_priority_from_wire(notification)
-}
-
-fn is_error(notification: &NotificationWire) -> bool {
-    super::mobile::mobile_notification_error_from_wire(notification)
+    tabs_and_counts_for(notifications).1
 }
 
 fn matches_agent_notification(

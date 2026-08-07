@@ -65,6 +65,7 @@
 //! - `append_notification_counts(path: str, notification: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
+//! - `classify_notification_tabs(notifications: list[dict]) -> dict`
 //! - `read_prompt_stash_snapshot(path: str) -> dict`
 //! - `append_prompt_stash(path: str, entry: dict) -> dict`
 //! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
@@ -532,6 +533,7 @@ use sase_core::notifications::{
     append_notification_counts as core_append_notification_counts,
     apply_notification_state_update as core_apply_notification_state_update,
     apply_notification_state_update_counts as core_apply_notification_state_update_counts,
+    classify_notification_tabs as core_classify_notification_tabs,
     read_current_notifications_snapshot as core_read_current_notifications_snapshot,
     read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
     rewrite_notifications as core_rewrite_notifications,
@@ -4773,6 +4775,24 @@ fn py_rewrite_notifications_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Classify notification dicts into ordered tabs and per-row tab keys.
+///
+/// One call classifies a whole page, so callers never pay one FFI hop per row.
+#[pyfunction]
+#[pyo3(name = "classify_notification_tabs")]
+fn py_classify_notification_tabs<'py>(
+    py: Python<'py>,
+    notifications: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let notifications = notifications_from_py_list(notifications)?;
+    let classification =
+        py.allow_threads(|| core_classify_notification_tabs(&notifications));
+    let value = serde_json::to_value(classification).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Prompt stash store bindings -----------------------------------------
 
 fn prompt_stash_error_to_pyerr(error: PromptStashStoreError) -> PyErr {
@@ -7193,6 +7213,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_append_notification_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_prompt_stash_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;

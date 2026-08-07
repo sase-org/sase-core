@@ -44,6 +44,33 @@ pub struct NotificationCountsWire {
     pub muted: u64,
 }
 
+/// One notification-panel tab and its ordered, single-valued membership.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationTabWire {
+    /// "hitl" | "errors" | "general" | "__muted__" | "__snoozed__" | panel | tag
+    pub key: String,
+    /// "hitl"|"panel"|"errors"|"general"|"tag"|"muted"|"snoozed"
+    pub kind: String,
+    pub count: u64,
+    /// Minimum activity timestamp in the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_activity_at: Option<String>,
+    /// Snoozed tab only: the minimum `snooze_until` in the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_wake_at: Option<String>,
+    /// Sender-declared color, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// Ordered tabs plus the single tab key owning each classified row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationTabClassificationWire {
+    pub schema_version: u32,
+    pub tabs: Vec<NotificationTabWire>,
+    pub row_tab_keys: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationStoreStatsWire {
     pub total_lines: u64,
@@ -59,6 +86,9 @@ pub struct NotificationStoreSnapshotWire {
     pub schema_version: u32,
     pub notifications: Vec<NotificationWire>,
     pub counts: NotificationCountsWire,
+    /// Ordered per-tab counts; empty when produced by an older core.
+    #[serde(default)]
+    pub tabs: Vec<NotificationTabWire>,
     pub expired_ids: Vec<String>,
     #[serde(default)]
     pub next_snooze_deadline: Option<String>,

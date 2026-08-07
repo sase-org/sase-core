@@ -1,6 +1,7 @@
 pub mod mobile;
 pub mod pending_actions;
 pub mod store;
+pub mod tabs;
 pub mod wire;
 
 pub use mobile::{
@@ -37,10 +38,16 @@ pub use store::{
     read_notifications_snapshot_with_options, rewrite_notifications,
     rewrite_notifications_counts,
 };
+pub use tabs::{
+    classify_notification_tabs, tab_key_for, tab_label, DONE_TAB_KEY,
+    ERRORS_TAB_KEY, GENERAL_TAB_KEY, HITL_TAB_KEY, MUTED_TAB_KEY,
+    SNOOZED_TAB_KEY,
+};
 pub use wire::{
     notification_activity_at, notification_activity_cursor,
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
-    NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
-    NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    NotificationStoreStatsWire, NotificationTabClassificationWire,
+    NotificationTabWire, NotificationUpdateOutcomeWire, NotificationWire,
+    NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
