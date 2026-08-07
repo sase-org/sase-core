@@ -426,6 +426,87 @@ fn plus_one_wake_note(issue: &IssueWire) -> Option<String> {
     ))
 }
 
+/// Render the note appended to a task bead the moment its deferral begins,
+/// so the "why and until when" survives the wake that clears the snooze
+/// record.
+///
+/// `previous_until` is `Some` exactly when this call replaces an existing
+/// snooze record (a re-snooze), naming the wake time it displaces.
+/// `deferral_seconds` is `until - snoozed_at`, a snapshot of the length that
+/// was chosen rather than a countdown, so the note never goes stale.
+fn snooze_note(
+    snooze: &BeadSnoozeWire,
+    plus_ones: Option<u32>,
+    previous_until: Option<&str>,
+    deferral_seconds: i64,
+) -> String {
+    let until = snooze.until.trim();
+    let length = deferral_length_label(deferral_seconds);
+    let mut note = match previous_until {
+        Some(previous_until) => format!(
+            "Re-snoozed until {until} (in {length}), replacing the wake time {}.",
+            previous_until.trim()
+        ),
+        None => format!("Snoozed until {until} (in {length})."),
+    };
+
+    if let Some(requested) = plus_ones {
+        let unit = if requested == 1 { "+1" } else { "+1s" };
+        let baseline = snooze.plus_one_baseline.unwrap_or(0);
+        if baseline > 0 {
+            let target = snooze.plus_one_target.unwrap_or(baseline + requested);
+            note.push_str(&format!(
+                " Also wakes at {requested} more {unit} ({target} total)."
+            ));
+        } else {
+            note.push_str(&format!(" Also wakes at {requested} more {unit}."));
+        }
+    }
+
+    let reason: String = snooze
+        .reason
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !reason.is_empty() {
+        note.push_str(&format!(" Reason: {reason}"));
+    }
+
+    note
+}
+
+/// Round to the nearest integer, half away from zero, without floats.
+fn round_div(numerator: i64, denominator: i64) -> i64 {
+    (numerator + denominator / 2) / denominator
+}
+
+/// Render a deferral length in the same compact vocabulary as
+/// `_snooze_remaining_label` (`src/sase/bead/snooze_presentation.py`) —
+/// `s`/`m`/`h`/`d`/`mo`/`y` — but for a fixed length rather than a countdown
+/// from "now". Two deliberate departures from that ladder, both because this
+/// is a length and not a remaining time: the sub-minute bucket renders
+/// `<secs>s` rather than `now`, and there is no `due now` case — `until`
+/// after `snoozed_at` is enforced before this is ever called, so the delta is
+/// always at least one second.
+fn deferral_length_label(seconds: i64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m", round_div(seconds, 60));
+    }
+    if seconds < 86_400 {
+        return format!("{}h", round_div(seconds, 3_600));
+    }
+    if seconds < 30 * 86_400 {
+        return format!("{}d", round_div(seconds, 86_400));
+    }
+    if seconds < 365 * 86_400 {
+        return format!("{}mo", round_div(seconds, 30 * 86_400));
+    }
+    format!("{}y", round_div(seconds, 365 * 86_400))
+}
+
 /// Defer one task bead until a wake time, and optionally a +1 threshold.
 ///
 /// Re-snoozing an already-snoozed bead is allowed and replaces the record;
@@ -494,13 +575,22 @@ pub fn snooze_task(
             reason,
         };
         snooze.validate()?;
+        let deferral_seconds = (until_at - now_at).num_seconds();
+        let note = snooze_note(
+            &snooze,
+            plus_ones,
+            current
+                .snooze
+                .as_ref()
+                .map(|previous| previous.until.as_str()),
+            deferral_seconds,
+        );
 
         let issue = &mut store.issues[index];
         issue.status = StatusWire::Snoozed;
         issue.snooze = Some(snooze.clone());
         issue.updated_at = timestamp.clone();
         issue.validate()?;
-        let issue = issue.clone();
 
         store.append_issue_event(
             &resolved_id,
@@ -509,6 +599,8 @@ pub fn snooze_task(
             &timestamp,
             &actor,
         )?;
+        append_note_to_store(&mut store, index, &note, &actor, &timestamp)?;
+        let issue = store.issues[index].clone();
         store.save()?;
 
         let mut result = outcome("snooze", true, vec![resolved_id]);
@@ -2666,6 +2758,14 @@ mod tests {
         assert_eq!(snooze.reason, "needs the upstream fix first");
         assert_eq!(snooze.plus_one_baseline, Some(0));
         assert_eq!(snooze.plus_one_target, Some(2));
+        // The wake time is 3d13h58m after the snoozed_at fixture timestamp,
+        // which the deferral-length ladder rounds up to `4d` — asserting the
+        // value the ladder actually produces rather than reverse-engineering
+        // it to read `3d`.
+        assert_eq!(
+            issue.notes,
+            "[2026-01-01T00:02:00Z · bryanbugyi34@gmail.com] Snoozed until 2026-01-04T09:00:00-05:00 (in 4d). Also wakes at 2 more +1s. Reason: needs the upstream fix first"
+        );
 
         assert_eq!(reduces_to_store(&beads_dir), vec![issue.clone()]);
         // The generated projection carries the record too, so a reader that
@@ -2673,6 +2773,86 @@ mod tests {
         let projected =
             import_issues_from_jsonl(&beads_dir.join("issues.jsonl")).unwrap();
         assert_eq!(projected.issues, vec![issue]);
+    }
+
+    #[test]
+    fn snooze_task_with_no_reason_or_target_still_names_the_wake_conditions() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+
+        let issue = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-01T00:32:00Z",
+            None,
+            "",
+            "owner",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(
+            issue.notes,
+            "[2026-01-01T00:02:00Z · owner] Snoozed until 2026-01-01T00:32:00Z (in 30m)."
+        );
+    }
+
+    #[test]
+    fn re_snoozing_appends_a_second_note_naming_the_replaced_wake_time() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(5));
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-one",
+            "hit this too",
+            &[],
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let issue = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-11T00:00:00Z",
+            Some(2),
+            "still waiting",
+            "bryanbugyi34@gmail.com",
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(issue.status, StatusWire::Snoozed);
+        let notes: Vec<&str> = issue.notes.split("\n\n").collect();
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("Snoozed until 2026-01-04T00:00:00Z"));
+        assert_eq!(
+            notes[1],
+            "[2026-01-03T00:00:00Z · bryanbugyi34@gmail.com] Re-snoozed until 2026-01-11T00:00:00Z (in 8d), replacing the wake time 2026-01-04T00:00:00Z. Also wakes at 2 more +1s (3 total). Reason: still waiting"
+        );
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn deferral_length_label_buckets_and_rounds_half_away_from_zero() {
+        assert_eq!(deferral_length_label(1), "1s");
+        assert_eq!(deferral_length_label(59), "59s");
+        assert_eq!(deferral_length_label(60), "1m");
+        assert_eq!(deferral_length_label(90), "2m");
+        assert_eq!(deferral_length_label(89), "1m");
+        assert_eq!(deferral_length_label(59 * 60), "59m");
+        assert_eq!(deferral_length_label(60 * 60), "1h");
+        assert_eq!(deferral_length_label(23 * 3_600), "23h");
+        assert_eq!(deferral_length_label(24 * 3_600), "1d");
+        assert_eq!(deferral_length_label(29 * 86_400), "29d");
+        assert_eq!(deferral_length_label(30 * 86_400), "1mo");
+        assert_eq!(deferral_length_label(364 * 86_400), "12mo");
+        assert_eq!(deferral_length_label(365 * 86_400), "1y");
+        assert_eq!(deferral_length_label(400 * 86_400), "1y");
     }
 
     #[test]
