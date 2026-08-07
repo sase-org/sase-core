@@ -29,7 +29,8 @@ pub use events::{
     merge_bead_event_streams_with_relocation, reduce_event_streams,
     BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
     BeadEventStoreManifestWire, BeadEventStreamMergeWire, BeadEventStreamWire,
-    BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
+    BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
+    BEAD_EVENT_SCHEMA_VERSION,
 };
 pub use history::{
     bead_history, bead_lost_notes, BeadHistoryChangeWire, BeadHistoryEntryWire,
@@ -43,14 +44,15 @@ pub use jsonl::{
 };
 pub use mutation::{
     add_bead_references, add_dependency, add_task_plus_one, append_issue_note,
-    claim_for_agent_launch, claim_for_agent_wait, close_issues,
-    close_issues_with_note, create_issue, export_jsonl, init_store,
-    mark_ready_to_work, open_issue, preclaim_epic_work_plan,
+    cancel_task_snooze, claim_for_agent_launch, claim_for_agent_wait,
+    close_issues, close_issues_with_note, create_issue, export_jsonl,
+    init_store, mark_ready_to_work, open_issue, preclaim_epic_work_plan,
     release_agent_claim, remove_bead_references, remove_dependencies,
-    remove_issue, remove_issues, sync_is_clean, unmark_ready_to_work,
-    update_issue, update_issues, BeadCreateRequestWire,
-    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
-    BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
+    remove_issue, remove_issues, snooze_task, sync_is_clean,
+    unmark_ready_to_work, update_issue, update_issues, wake_due_task_snoozes,
+    BeadCreateRequestWire, BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
+    BeadPreclaimRollbackWire, BeadSnoozeWakeEntryWire,
+    BeadSnoozeWakeOutcomeWire, BeadUpdateFieldsWire,
 };
 pub use read::{
     blocked_issues, doctor, doctor_report, doctor_report_with_contexts,
@@ -68,17 +70,18 @@ pub use schema::{
     needs_issue_type_migration, needs_model_migration,
     needs_plus_one_evidence_migration, needs_refs_migration,
     needs_resolution_migration, needs_size_check_relax_migration,
-    needs_size_migration, needs_task_ready_migration,
-    plus_one_evidence_migration_sql, refs_migration_sql,
-    resolution_migration_sql, size_check_relax_migration_sql,
-    size_migration_sql, task_ready_migration_sql, BEAD_SQLITE_SCHEMA,
+    needs_size_migration, needs_snoozed_status_migration,
+    needs_task_ready_migration, plus_one_evidence_migration_sql,
+    refs_migration_sql, resolution_migration_sql,
+    size_check_relax_migration_sql, size_migration_sql,
+    snoozed_status_migration_sql, task_ready_migration_sql, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{
-    validate_model_value, BeadCloseRecordWire, BeadError, BeadReopenCauseWire,
-    BeadResolutionWire, BeadSearchMatchWire, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    parse_snooze_timestamp, validate_model_value, BeadCloseRecordWire,
+    BeadError, BeadReopenCauseWire, BeadResolutionWire, BeadSearchMatchWire,
+    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,

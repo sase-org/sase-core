@@ -203,12 +203,17 @@
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None) -> dict`
+//! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
+//! - `bead_snooze_cancel(beads_dir: str, issue_id: str, actor: str = "", now: str | None = None) -> dict`
+//! - `bead_wake_due_snoozes(beads_dir: str, now: str) -> dict`
 //! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
 //! - `bead_update_many(beads_dir: str, issue_ids: list[str], fields: dict) -> dict`
 //! - `bead_needs_size_check_relax_migration(create_table_sql: str | None) -> bool`
 //! - `bead_size_check_relax_migration_sql() -> str`
 //! - `bead_needs_task_ready_migration(create_table_sql: str | None) -> bool`
 //! - `bead_task_ready_migration_sql() -> str`
+//! - `bead_needs_snoozed_status_migration(create_table_sql: str | None) -> bool`
+//! - `bead_snoozed_status_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -433,6 +438,7 @@ use sase_core::bead::{
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
+    cancel_task_snooze as core_bead_cancel_task_snooze,
     claim_for_agent_launch as core_bead_claim_for_agent_launch,
     claim_for_agent_wait as core_bead_claim_for_agent_wait,
     close_issues_with_note as core_bead_close_issues_with_note,
@@ -450,6 +456,7 @@ use sase_core::bead::{
     needs_plus_one_evidence_migration as core_bead_needs_plus_one_evidence_migration,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
+    needs_snoozed_status_migration as core_bead_needs_snoozed_status_migration,
     needs_task_ready_migration as core_bead_needs_task_ready_migration,
     open_issue as core_bead_open_issue,
     plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
@@ -470,14 +477,17 @@ use sase_core::bead::{
     show_issue as core_bead_show_issue,
     show_issue_detail as core_bead_show_issue_detail,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
+    snooze_task as core_bead_snooze_task,
+    snoozed_status_migration_sql as core_bead_snoozed_status_migration_sql,
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     task_ready_migration_sql as core_bead_task_ready_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue,
-    update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
-    BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
-    IssueWire,
+    update_issues as core_bead_update_issues,
+    wake_due_task_snoozes as core_bead_wake_due_task_snoozes,
+    BeadCreateRequestWire, BeadError, BeadEventStoreManifestWire,
+    BeadEventStreamWire, BeadPreclaimAssignmentWire, BeadResolutionWire,
+    BeadUpdateFieldsWire, IssueWire,
 };
 use sase_core::commit_footer::{
     parse_commit_footer as core_parse_commit_footer,
@@ -2729,6 +2739,23 @@ fn py_bead_task_ready_migration_sql() -> &'static str {
 
 #[pyfunction]
 #[pyo3(
+    name = "bead_needs_snoozed_status_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_snoozed_status_migration(
+    create_table_sql: Option<&str>,
+) -> bool {
+    core_bead_needs_snoozed_status_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_snoozed_status_migration_sql")]
+fn py_bead_snoozed_status_migration_sql() -> &'static str {
+    core_bead_snoozed_status_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(
     name = "bead_needs_resolution_migration",
     signature = (create_table_sql=None)
 )]
@@ -3927,6 +3954,71 @@ fn py_bead_plus_one<'py>(
                 &beads_dir, issue_id, reporter, note, &refs, now,
             )
         }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_snooze",
+    signature = (beads_dir, issue_id, until, plus_ones=None, reason="", actor="", now=None)
+)]
+// The argument list mirrors `snooze_task`'s signature exactly; bundling it
+// into a struct here would only move the same fields behind a wire type the
+// Python caller would have to build anyway.
+#[allow(clippy::too_many_arguments)]
+fn py_bead_snooze<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    until: &str,
+    plus_ones: Option<u32>,
+    reason: &str,
+    actor: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_snooze_task(
+                &beads_dir, issue_id, until, plus_ones, reason, actor, now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_snooze_cancel",
+    signature = (beads_dir, issue_id, actor="", now=None)
+)]
+fn py_bead_snooze_cancel<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    actor: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_cancel_task_snooze(&beads_dir, issue_id, actor, now)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_wake_due_snoozes", signature = (beads_dir, now))]
+fn py_bead_wake_due_snoozes<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    now: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| core_bead_wake_due_task_snoozes(&beads_dir, now)),
     )
 }
 
@@ -7064,6 +7156,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_task_ready_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_task_ready_migration_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_needs_snoozed_status_migration,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_snoozed_status_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_resolution_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -7171,6 +7268,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_update_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_append_note, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_plus_one, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_snooze, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_snooze_cancel, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_wake_due_snoozes, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_launch, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_claim_for_agent_wait, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_release_agent_claim, m)?)?;
@@ -7669,6 +7769,79 @@ mod tests {
                 result["issue"]["plus_one_evidence"][0]["reporter"],
                 "reporter-agent"
             );
+        });
+    }
+
+    #[test]
+    fn bead_snooze_bindings_round_trip_the_whole_lifecycle() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let task = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                created_by: Some("creator-agent".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let beads_dir = beads_dir.to_str().unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "bead_snooze",
+                "bead_snooze_cancel",
+                "bead_wake_due_snoozes",
+                "bead_needs_snoozed_status_migration",
+                "bead_snoozed_status_migration_sql",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let snoozed = py_bead_snooze(
+                py,
+                beads_dir,
+                &task.id,
+                "2026-01-04T00:00:00Z",
+                Some(2),
+                "waiting on upstream",
+                "owner",
+                Some("2026-01-01T00:02:00Z".to_string()),
+            )
+            .unwrap();
+            let snoozed = py_to_json_value(snoozed.bind(py)).unwrap();
+            assert_eq!(snoozed["issue"]["status"], "snoozed");
+            assert_eq!(
+                snoozed["issue"]["snooze"]["until"],
+                "2026-01-04T00:00:00Z"
+            );
+            assert_eq!(snoozed["issue"]["snooze"]["plus_one_target"], 2);
+
+            let due =
+                py_bead_wake_due_snoozes(py, beads_dir, "2026-01-05T00:00:00Z")
+                    .unwrap();
+            let due = py_to_json_value(due.bind(py)).unwrap();
+            assert_eq!(due["due"][0]["issue_id"], task.id.as_str());
+
+            let canceled = py_bead_snooze_cancel(
+                py,
+                beads_dir,
+                &task.id,
+                "owner",
+                Some("2026-01-02T00:00:00Z".to_string()),
+            )
+            .unwrap();
+            let canceled = py_to_json_value(canceled.bind(py)).unwrap();
+            assert_eq!(canceled["issue"]["status"], "ready");
+            assert!(canceled["issue"].get("snooze").is_none());
         });
     }
 

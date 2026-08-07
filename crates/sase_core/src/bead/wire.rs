@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, FixedOffset};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -14,6 +15,7 @@ pub enum StatusWire {
     Open,
     Claimed,
     Ready,
+    Snoozed,
     InProgress,
     Closed,
 }
@@ -306,6 +308,81 @@ impl BeadCloseRecordWire {
     }
 }
 
+/// The wake conditions a snoozed task bead is currently waiting on.
+///
+/// One embedded record, present exactly while the status is `snoozed` and
+/// cleared on wake, is deliberate: no flat field can drift out of sync with
+/// the status, and `sase bead history` replays the event stream when past
+/// snoozes matter, so no separate history list is needed here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadSnoozeWire {
+    /// Wake time, ISO-8601 with an offset.
+    pub until: String,
+    pub snoozed_at: String,
+    pub snoozed_by: String,
+    /// Absolute total +1 count that wakes the bead early.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus_one_target: Option<u32>,
+    /// +1 count when this snooze started, so surfaces can render progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus_one_baseline: Option<u32>,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub reason: String,
+}
+
+impl BeadSnoozeWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        if self.snoozed_at.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead snooze snoozed_at cannot be empty or blank",
+            ));
+        }
+        if self.snoozed_by.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead snooze snoozed_by cannot be empty or blank",
+            ));
+        }
+        parse_snooze_timestamp(&self.until, "until")?;
+        if let Some(target) = self.plus_one_target {
+            let baseline = self.plus_one_baseline.unwrap_or(0);
+            if target <= baseline {
+                return Err(BeadError::validation(format!(
+                    "bead snooze plus_one_target must exceed plus_one_baseline: {target} <= {baseline}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the wake time as an absolute instant.
+    ///
+    /// Validation already rejects an unparsable `until`, so every stored
+    /// record answers this; the `Result` keeps decoded-from-disk callers
+    /// honest about a record written by something that skipped validation.
+    pub fn until_datetime(&self) -> Result<DateTime<FixedOffset>, BeadError> {
+        parse_snooze_timestamp(&self.until, "until")
+    }
+}
+
+/// Parse one snooze timestamp, requiring an explicit UTC offset.
+///
+/// A snooze is compared against wall-clock time on several surfaces, so an
+/// offset-less timestamp is rejected at write time rather than silently
+/// meaning different instants to different readers.
+pub fn parse_snooze_timestamp(
+    value: &str,
+    field: &str,
+) -> Result<DateTime<FixedOffset>, BeadError> {
+    DateTime::parse_from_rfc3339(value.trim()).map_err(|error| {
+        BeadError::validation(format!(
+            "bead snooze {field} must be an RFC-3339 timestamp with an offset: {value:?} ({error})"
+        ))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWire {
     pub id: String,
@@ -368,6 +445,8 @@ pub struct IssueWire {
     pub refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plus_one_evidence: Vec<TaskPlusOneEvidenceWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze: Option<BeadSnoozeWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -469,6 +548,29 @@ impl IssueWire {
                 "Only task issues can have ready status",
             ));
         }
+        if self.status == StatusWire::Snoozed
+            && self.issue_type != IssueTypeWire::Task
+        {
+            return Err(BeadError::validation(
+                "Only task issues can have snoozed status",
+            ));
+        }
+        match (&self.status, &self.snooze) {
+            (StatusWire::Snoozed, None) => {
+                return Err(BeadError::validation(
+                    "snoozed issues must carry snooze metadata",
+                ));
+            }
+            (status, Some(_)) if *status != StatusWire::Snoozed => {
+                return Err(BeadError::validation(
+                    "Only snoozed issues can carry snooze metadata",
+                ));
+            }
+            _ => {}
+        }
+        if let Some(snooze) = &self.snooze {
+            snooze.validate()?;
+        }
         if !self.changespec_bug_id.is_empty() && self.changespec_name.is_empty()
         {
             return Err(BeadError::validation(
@@ -529,6 +631,7 @@ mod tests {
             design: String::new(),
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,
@@ -827,6 +930,147 @@ mod tests {
         assert_eq!(
             issue.validate().unwrap_err().message,
             "Only task issues can have ready status"
+        );
+    }
+
+    fn snoozed_task(snooze: BeadSnoozeWire) -> IssueWire {
+        let mut issue = phase(None);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.status = StatusWire::Snoozed;
+        issue.snooze = Some(snooze);
+        issue
+    }
+
+    fn snooze_record() -> BeadSnoozeWire {
+        BeadSnoozeWire {
+            until: "2026-08-09T09:00:00-04:00".to_string(),
+            snoozed_at: "2026-08-06T09:00:00-04:00".to_string(),
+            snoozed_by: "bryanbugyi34@gmail.com".to_string(),
+            plus_one_target: None,
+            plus_one_baseline: None,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn snoozed_status_round_trips_with_its_record() {
+        let issue = snoozed_task(BeadSnoozeWire {
+            plus_one_target: Some(3),
+            plus_one_baseline: Some(1),
+            reason: "waiting on upstream".to_string(),
+            ..snooze_record()
+        });
+        issue.validate().unwrap();
+
+        let value = serde_json::to_value(&issue).unwrap();
+        assert_eq!(value["status"], "snoozed");
+        assert_eq!(
+            value["snooze"],
+            json!({
+                "until": "2026-08-09T09:00:00-04:00",
+                "snoozed_at": "2026-08-06T09:00:00-04:00",
+                "snoozed_by": "bryanbugyi34@gmail.com",
+                "plus_one_target": 3,
+                "plus_one_baseline": 1,
+                "reason": "waiting on upstream",
+            })
+        );
+        let round_tripped: IssueWire = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, issue);
+    }
+
+    #[test]
+    fn snooze_key_is_absent_when_the_bead_is_not_snoozed() {
+        let issue = phase(Some("test-0"));
+        let value = serde_json::to_value(&issue).unwrap();
+        assert!(value.get("snooze").is_none());
+        let decoded: IssueWire = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.snooze, None);
+    }
+
+    #[test]
+    fn snoozed_status_requires_a_task_and_a_record() {
+        let mut issue = snoozed_task(snooze_record());
+        issue.issue_type = IssueTypeWire::Phase;
+        issue.parent_id = Some("test-0".to_string());
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only task issues can have snoozed status"
+        );
+
+        let mut issue = snoozed_task(snooze_record());
+        issue.snooze = None;
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "snoozed issues must carry snooze metadata"
+        );
+    }
+
+    #[test]
+    fn snooze_metadata_requires_snoozed_status() {
+        let mut issue = snoozed_task(snooze_record());
+        issue.status = StatusWire::Ready;
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "Only snoozed issues can carry snooze metadata"
+        );
+    }
+
+    #[test]
+    fn snooze_record_validates_its_own_fields() {
+        let issue = snoozed_task(BeadSnoozeWire {
+            snoozed_at: "  ".to_string(),
+            ..snooze_record()
+        });
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("snoozed_at cannot be empty"));
+
+        let issue = snoozed_task(BeadSnoozeWire {
+            snoozed_by: String::new(),
+            ..snooze_record()
+        });
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("snoozed_by cannot be empty"));
+
+        // Offset-less and non-timestamp wake times are both rejected.
+        for until in ["2026-08-09T09:00:00", "soon", ""] {
+            let issue = snoozed_task(BeadSnoozeWire {
+                until: until.to_string(),
+                ..snooze_record()
+            });
+            assert!(issue
+                .validate()
+                .unwrap_err()
+                .message
+                .contains("until must be an RFC-3339 timestamp"));
+        }
+
+        let issue = snoozed_task(BeadSnoozeWire {
+            plus_one_target: Some(2),
+            plus_one_baseline: Some(2),
+            ..snooze_record()
+        });
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("plus_one_target must exceed plus_one_baseline"));
+
+        let issue = snoozed_task(BeadSnoozeWire {
+            plus_one_target: Some(1),
+            plus_one_baseline: None,
+            ..snooze_record()
+        });
+        issue.validate().unwrap();
+        assert_eq!(
+            issue.snooze.unwrap().until_datetime().unwrap().to_rfc3339(),
+            "2026-08-09T09:00:00-04:00"
         );
     }
 

@@ -19,7 +19,8 @@ use super::events::{
     appended_note_text, archive_close_metadata, import_issues_to_event_streams,
     mint_bead_event_id, reduce_event_streams, BeadEventOperationWire,
     BeadEventPayloadWire, BeadEventRecordWire, BeadEventStreamWire,
-    BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
+    BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
+    BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
@@ -27,10 +28,10 @@ use super::jsonl::{
 };
 use super::read::resolve_issue_id_in_issues;
 use super::wire::{
-    deserialize_option_phase_size, validate_model_value, BeadError,
-    BeadReopenCauseWire, BeadResolutionWire, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    deserialize_option_phase_size, parse_snooze_timestamp,
+    validate_model_value, BeadError, BeadReopenCauseWire, BeadResolutionWire,
+    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -161,6 +162,24 @@ pub struct BeadMutationOutcomeWire {
     pub unchanged_ids: Vec<String>,
 }
 
+/// One snoozed task bead whose wake time has arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadSnoozeWakeEntryWire {
+    pub issue_id: String,
+    pub title: String,
+    /// Wake time the bead was snoozed until, echoed so a caller raising a
+    /// gate does not have to re-read the bead to learn it.
+    pub until: String,
+}
+
+/// Snoozed task beads that are due, as of one observation of the clock.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BeadSnoozeWakeOutcomeWire {
+    pub now: String,
+    #[serde(default)]
+    pub due: Vec<BeadSnoozeWakeEntryWire>,
+}
+
 pub fn init_store(
     root_dir: &Path,
     beads_dirname: &str,
@@ -246,6 +265,7 @@ pub fn create_issue(
             design: request.design,
             refs: references.clone(),
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: normalize_model(request.model)?,
             size: request.size,
             is_ready_to_work: false,
@@ -354,7 +374,15 @@ pub fn add_task_plus_one(
                 issue.refs.push(reference.clone());
             }
         }
-        if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
+        // A snoozed bead is deliberately excluded from the open/closed
+        // promotion below: it only leaves `snoozed` when its own +1 target is
+        // reached, and never on an ordinary +1.
+        let wake_note = plus_one_wake_note(issue);
+        if wake_note.is_some() {
+            issue.status = StatusWire::Ready;
+            issue.snooze = None;
+        } else if matches!(issue.status, StatusWire::Open | StatusWire::Closed)
+        {
             issue.status = StatusWire::Ready;
             archive_close_metadata(
                 issue,
@@ -365,7 +393,6 @@ pub fn add_task_plus_one(
         }
         issue.updated_at = timestamp.clone();
         issue.validate()?;
-        let issue = issue.clone();
 
         store.append_issue_event(
             &resolved_id,
@@ -374,12 +401,222 @@ pub fn add_task_plus_one(
             &timestamp,
             &reporter,
         )?;
+        if let Some(note) = &wake_note {
+            store.append_issue_event(
+                &resolved_id,
+                BeadEventOperationWire::TaskSnoozeWoken,
+                BeadEventPayloadWire::TaskSnoozeWoken {
+                    cause: BeadSnoozeWakeCauseWire::PlusOne,
+                },
+                &timestamp,
+                &reporter,
+            )?;
+            append_note_to_store(
+                &mut store, index, note, &reporter, &timestamp,
+            )?;
+        }
+        let issue = store.issues[index].clone();
         store.save()?;
 
         let mut result = outcome("plus_one", true, vec![resolved_id]);
         result.issue = Some(issue);
         result.references = references;
         Ok(result)
+    })
+}
+
+/// Return the preset wake note when this bead just reached its +1 target.
+///
+/// `None` covers every other shape — not snoozed, no target, or short of it
+/// — so the caller has exactly one place to ask "did this +1 wake the bead".
+fn plus_one_wake_note(issue: &IssueWire) -> Option<String> {
+    if issue.status != StatusWire::Snoozed {
+        return None;
+    }
+    let snooze = issue.snooze.as_ref()?;
+    let target = snooze.plus_one_target?;
+    if u32::try_from(issue.plus_one_count()).unwrap_or(u32::MAX) < target {
+        return None;
+    }
+    Some(format!(
+        "Reopened by +1 threshold: reached {target} +1s while snoozed until {}.",
+        snooze.until
+    ))
+}
+
+/// Defer one task bead until a wake time, and optionally a +1 threshold.
+///
+/// Re-snoozing an already-snoozed bead is allowed and replaces the record;
+/// that is the "snooze for longer" path, and it appends a fresh event rather
+/// than editing the old one so the history stays readable.
+pub fn snooze_task(
+    beads_dir: &Path,
+    issue_id: &str,
+    until: &str,
+    plus_ones: Option<u32>,
+    reason: &str,
+    actor: &str,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let actor = actor.trim().to_string();
+    if actor.is_empty() {
+        return Err(BeadError::validation(
+            "bead snooze actor cannot be empty or blank",
+        ));
+    }
+    if plus_ones == Some(0) {
+        return Err(BeadError::validation(
+            "bead snooze +1 target must be at least 1",
+        ));
+    }
+    let until_at = parse_snooze_timestamp(until, "until")?;
+    let reason = reason.trim().to_string();
+
+    with_bead_mutation_lock(beads_dir, "snooze", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let resolved_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
+        let index = store.issue_index(&resolved_id)?;
+        let current = store.issues[index].clone();
+        if current.issue_type != IssueTypeWire::Task {
+            return Err(BeadError::validation(format!(
+                "bead snooze only applies to task beads: {resolved_id}"
+            )));
+        }
+        if !matches!(
+            current.status,
+            StatusWire::Open | StatusWire::Ready | StatusWire::Snoozed
+        ) {
+            return Err(BeadError::validation(format!(
+                "cannot snooze {resolved_id}: only open, ready, and already snoozed task beads can be snoozed (current status is {})",
+                mutation_status_value(&current.status)
+            )));
+        }
+
+        let timestamp = now.unwrap_or_else(now_utc);
+        let now_at = parse_snooze_timestamp(&timestamp, "now")?;
+        if until_at <= now_at {
+            return Err(BeadError::validation(format!(
+                "bead snooze wake time must be in the future: {until} is not after {timestamp}"
+            )));
+        }
+
+        let baseline =
+            u32::try_from(current.plus_one_count()).unwrap_or(u32::MAX);
+        let snooze = BeadSnoozeWire {
+            until: until.trim().to_string(),
+            snoozed_at: timestamp.clone(),
+            snoozed_by: actor.clone(),
+            plus_one_target: plus_ones
+                .map(|count| baseline.saturating_add(count)),
+            plus_one_baseline: plus_ones.map(|_| baseline),
+            reason,
+        };
+        snooze.validate()?;
+
+        let issue = &mut store.issues[index];
+        issue.status = StatusWire::Snoozed;
+        issue.snooze = Some(snooze.clone());
+        issue.updated_at = timestamp.clone();
+        issue.validate()?;
+        let issue = issue.clone();
+
+        store.append_issue_event(
+            &resolved_id,
+            BeadEventOperationWire::TaskSnoozed,
+            BeadEventPayloadWire::TaskSnoozed { snooze },
+            &timestamp,
+            &actor,
+        )?;
+        store.save()?;
+
+        let mut result = outcome("snooze", true, vec![resolved_id]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
+/// Undo a snooze, returning the bead to triage with no record left behind.
+pub fn cancel_task_snooze(
+    beads_dir: &Path,
+    issue_id: &str,
+    actor: &str,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let actor = actor.trim().to_string();
+    if actor.is_empty() {
+        return Err(BeadError::validation(
+            "bead snooze actor cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, "snooze_cancel", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let resolved_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
+        let index = store.issue_index(&resolved_id)?;
+        if store.issues[index].status != StatusWire::Snoozed {
+            return Err(BeadError::validation(format!(
+                "cannot cancel snooze: {resolved_id} is not snoozed"
+            )));
+        }
+
+        let timestamp = now.unwrap_or_else(now_utc);
+        let issue = &mut store.issues[index];
+        issue.status = StatusWire::Ready;
+        issue.snooze = None;
+        issue.updated_at = timestamp.clone();
+        issue.validate()?;
+        let issue = issue.clone();
+
+        store.append_issue_event(
+            &resolved_id,
+            BeadEventOperationWire::TaskSnoozeCanceled,
+            BeadEventPayloadWire::TaskSnoozeCanceled,
+            &timestamp,
+            &actor,
+        )?;
+        store.save()?;
+
+        let mut result = outcome("snooze_cancel", true, vec![resolved_id]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
+/// Select the snoozed task beads whose wake time has arrived.
+///
+/// This deliberately does not mutate: reaching the wake time raises a gate,
+/// and the status changes only once the human answers it, so the store never
+/// claims a decision nobody made.
+pub fn wake_due_task_snoozes(
+    beads_dir: &Path,
+    now: &str,
+) -> Result<BeadSnoozeWakeOutcomeWire, BeadError> {
+    let now_at = parse_snooze_timestamp(now, "now")?;
+    let store = MutableStore::load(beads_dir)?;
+    let mut due = Vec::new();
+    for issue in &store.issues {
+        if issue.status != StatusWire::Snoozed {
+            continue;
+        }
+        let Some(snooze) = issue.snooze.as_ref() else {
+            continue;
+        };
+        if snooze.until_datetime()? <= now_at {
+            due.push(BeadSnoozeWakeEntryWire {
+                issue_id: issue.id.clone(),
+                title: issue.title.clone(),
+                until: snooze.until.clone(),
+            });
+        }
+    }
+    due.sort_by(|left, right| {
+        left.until
+            .cmp(&right.until)
+            .then(left.issue_id.cmp(&right.issue_id))
+    });
+    Ok(BeadSnoozeWakeOutcomeWire {
+        now: now.to_string(),
+        due,
     })
 }
 
@@ -1822,6 +2059,10 @@ fn apply_update_fields(
     if let Some(value) = fields.status {
         issue.status = parse_status(&value)?;
         reopened = issue.status != StatusWire::Closed;
+        // Moving off `snoozed` drops the record, exactly as moving off
+        // `closed` archives the close fields. Without this an ordinary
+        // status update would leave a record the model refuses to store.
+        issue.snooze = None;
     }
     if let Some(value) = fields.assignee {
         issue.assignee = value;
@@ -2175,6 +2416,12 @@ fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
         "open" => Ok(StatusWire::Open),
         "claimed" => Ok(StatusWire::Claimed),
         "ready" => Ok(StatusWire::Ready),
+        // `snoozed` is reachable through `snooze_task` only: the status alone
+        // cannot express a wake time, so accepting it here would produce a
+        // bead the model rejects. The refusal names the command that works.
+        "snoozed" => Err(BeadError::validation(
+            "snoozed requires a wake time; use: sase bead snooze <id> -u <time>",
+        )),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(
@@ -2188,6 +2435,7 @@ fn mutation_status_value(status: &StatusWire) -> &'static str {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
         StatusWire::Ready => "ready",
+        StatusWire::Snoozed => "snoozed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -2376,6 +2624,8 @@ mod tests {
     use std::time::Instant;
     use tempfile::tempdir;
 
+    use super::super::read::read_store_issues;
+
     fn task_plus_one_fixture(
         status: StatusWire,
     ) -> (tempfile::TempDir, PathBuf, String) {
@@ -2408,6 +2658,367 @@ mod tests {
             .unwrap();
         }
         (temp, beads_dir, task.id)
+    }
+
+    /// A snoozed task, snoozed at `2026-01-01T00:02:00Z` until `until`.
+    fn snoozed_task_fixture(
+        until: &str,
+        plus_ones: Option<u32>,
+    ) -> (tempfile::TempDir, PathBuf, String) {
+        let (temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+        snooze_task(
+            &beads_dir,
+            &task_id,
+            until,
+            plus_ones,
+            " needs the upstream fix first ",
+            "bryanbugyi34@gmail.com",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        (temp, beads_dir, task_id)
+    }
+
+    fn reduces_to_store(beads_dir: &Path) -> Vec<IssueWire> {
+        let (_manifest, streams) = read_event_store(beads_dir).unwrap();
+        reduce_event_streams(&streams).unwrap()
+    }
+
+    #[test]
+    fn snooze_task_records_wake_conditions_and_replays_from_events() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T09:00:00-05:00", Some(2));
+
+        let issue = read_store_issues(&beads_dir)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == task_id)
+            .unwrap();
+        assert_eq!(issue.status, StatusWire::Snoozed);
+        let snooze = issue.snooze.clone().unwrap();
+        assert_eq!(snooze.until, "2026-01-04T09:00:00-05:00");
+        assert_eq!(snooze.snoozed_at, "2026-01-01T00:02:00Z");
+        assert_eq!(snooze.snoozed_by, "bryanbugyi34@gmail.com");
+        assert_eq!(snooze.reason, "needs the upstream fix first");
+        assert_eq!(snooze.plus_one_baseline, Some(0));
+        assert_eq!(snooze.plus_one_target, Some(2));
+
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue.clone()]);
+        // The generated projection carries the record too, so a reader that
+        // only has issues.jsonl still sees the wake conditions.
+        let projected =
+            import_issues_from_jsonl(&beads_dir.join("issues.jsonl")).unwrap();
+        assert_eq!(projected.issues, vec![issue]);
+    }
+
+    #[test]
+    fn snooze_task_rejects_bad_targets_times_and_statuses() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+        let now = || Some("2026-01-01T00:02:00Z".to_string());
+
+        let error = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-04T09:00:00",
+            None,
+            "",
+            "owner",
+            now(),
+        )
+        .unwrap_err();
+        assert!(error
+            .message
+            .contains("until must be an RFC-3339 timestamp"));
+
+        let error = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-01T00:01:00Z",
+            None,
+            "",
+            "owner",
+            now(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("wake time must be in the future"));
+
+        let error = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-04T00:00:00Z",
+            Some(0),
+            "",
+            "owner",
+            now(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("+1 target must be at least 1"));
+
+        let error = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-04T00:00:00Z",
+            None,
+            "",
+            "   ",
+            now(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("actor cannot be empty"));
+
+        // An in-progress task is being worked on, so deferring it is a
+        // contradiction rather than a deferral.
+        claim_for_agent_launch(&beads_dir, &task_id, "agent-a", now()).unwrap();
+        let error = snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-04T00:00:00Z",
+            None,
+            "",
+            "owner",
+            now(),
+        )
+        .unwrap_err();
+        assert!(error
+            .message
+            .contains("only open, ready, and already snoozed task beads"));
+        assert!(error.message.contains("current status is in_progress"));
+    }
+
+    #[test]
+    fn snooze_task_rejects_non_task_beads() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let epic = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "An epic".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let error = snooze_task(
+            &beads_dir,
+            &epic.id,
+            "2026-01-04T00:00:00Z",
+            None,
+            "",
+            "owner",
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("only applies to task beads"));
+    }
+
+    #[test]
+    fn re_snoozing_replaces_the_record_and_appends_a_second_event() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(2));
+        snooze_task(
+            &beads_dir,
+            &task_id,
+            "2026-01-09T00:00:00Z",
+            None,
+            "still blocked",
+            "owner",
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let issue = read_store_issues(&beads_dir).unwrap().pop().unwrap();
+        let snooze = issue.snooze.clone().unwrap();
+        assert_eq!(snooze.until, "2026-01-09T00:00:00Z");
+        assert_eq!(snooze.reason, "still blocked");
+        assert_eq!(snooze.plus_one_target, None);
+        assert_eq!(snooze.plus_one_baseline, None);
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let snoozed_events = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| {
+                event.operation == BeadEventOperationWire::TaskSnoozed
+            })
+            .count();
+        assert_eq!(snoozed_events, 2);
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn cancel_task_snooze_returns_the_bead_to_ready() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+
+        let issue = cancel_task_snooze(
+            &beads_dir,
+            &task_id,
+            "owner",
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(issue.status, StatusWire::Ready);
+        assert_eq!(issue.snooze, None);
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+
+        let error = cancel_task_snooze(&beads_dir, &task_id, "owner", None)
+            .unwrap_err();
+        assert!(error.message.contains("is not snoozed"));
+    }
+
+    #[test]
+    fn wake_due_task_snoozes_selects_by_time_without_mutating() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T09:00:00-05:00", None);
+
+        let early =
+            wake_due_task_snoozes(&beads_dir, "2026-01-04T13:59:00Z").unwrap();
+        assert!(early.due.is_empty());
+
+        // 09:00-05:00 is 14:00Z, so the same wall-clock instant is due.
+        let due =
+            wake_due_task_snoozes(&beads_dir, "2026-01-04T14:00:00Z").unwrap();
+        assert_eq!(due.now, "2026-01-04T14:00:00Z");
+        assert_eq!(due.due.len(), 1);
+        assert_eq!(due.due[0].issue_id, task_id);
+        assert_eq!(due.due[0].title, "Corroborated task");
+        assert_eq!(due.due[0].until, "2026-01-04T09:00:00-05:00");
+
+        let issue = read_store_issues(&beads_dir).unwrap().pop().unwrap();
+        assert_eq!(issue.status, StatusWire::Snoozed);
+    }
+
+    #[test]
+    fn plus_one_below_the_target_leaves_a_snoozed_bead_snoozed() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(2));
+
+        let issue = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-one",
+            "hit this too",
+            &[],
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(issue.status, StatusWire::Snoozed);
+        assert_eq!(issue.plus_one_count(), 1);
+        assert!(issue.snooze.is_some());
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn plus_one_at_the_target_wakes_a_snoozed_bead_with_a_preset_note() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(2));
+        add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-one",
+            "hit this too",
+            &[],
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let issue = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-two",
+            "and again",
+            &[],
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(issue.status, StatusWire::Ready);
+        assert_eq!(issue.snooze, None);
+        assert!(issue.notes.contains(
+            "Reopened by +1 threshold: reached 2 +1s while snoozed until 2026-01-04T00:00:00Z."
+        ));
+        assert!(issue.notes.contains("reporter-two"));
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn plus_one_never_wakes_a_snoozed_bead_that_set_no_target() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+
+        for (reporter, timestamp) in [
+            ("reporter-one", "2026-01-02T00:00:00Z"),
+            ("reporter-two", "2026-01-02T01:00:00Z"),
+            ("reporter-three", "2026-01-02T02:00:00Z"),
+        ] {
+            add_task_plus_one(
+                &beads_dir,
+                &task_id,
+                reporter,
+                "me too",
+                &[],
+                Some(timestamp.to_string()),
+            )
+            .unwrap();
+        }
+
+        let issue = read_store_issues(&beads_dir).unwrap().pop().unwrap();
+        assert_eq!(issue.status, StatusWire::Snoozed);
+        assert_eq!(issue.plus_one_count(), 3);
+    }
+
+    #[test]
+    fn updating_a_snoozed_bead_off_snoozed_drops_the_record() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(2));
+
+        let issue = update_issue(
+            &beads_dir,
+            &task_id,
+            BeadUpdateFieldsWire {
+                status: Some("ready".to_string()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(issue.status, StatusWire::Ready);
+        assert_eq!(issue.snooze, None);
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn update_refuses_the_snoozed_status_shortcut() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+
+        let error = update_issue(
+            &beads_dir,
+            &task_id,
+            BeadUpdateFieldsWire {
+                status: Some("snoozed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "snoozed requires a wake time; use: sase bead snooze <id> -u <time>"
+        );
     }
 
     #[test]

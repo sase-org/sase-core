@@ -863,6 +863,7 @@ fn has_active_blocker(
                     StatusWire::Open
                         | StatusWire::Claimed
                         | StatusWire::Ready
+                        | StatusWire::Snoozed
                         | StatusWire::InProgress
                 )
             })
@@ -909,6 +910,7 @@ fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
         "open" => Ok(StatusWire::Open),
         "claimed" => Ok(StatusWire::Claimed),
         "ready" => Ok(StatusWire::Ready),
+        "snoozed" => Ok(StatusWire::Snoozed),
         "in_progress" => Ok(StatusWire::InProgress),
         "closed" => Ok(StatusWire::Closed),
         _ => Err(BeadError::validation(format!(
@@ -953,6 +955,7 @@ fn status_as_str(status: &StatusWire) -> &'static str {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
         StatusWire::Ready => "ready",
+        StatusWire::Snoozed => "snoozed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -996,6 +999,7 @@ mod tests {
             design: String::new(),
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

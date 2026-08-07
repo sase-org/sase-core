@@ -1395,6 +1395,7 @@ fn active_blocker_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
                         StatusWire::Open
                             | StatusWire::Claimed
                             | StatusWire::Ready
+                            | StatusWire::Snoozed
                             | StatusWire::InProgress
                     )
                 })
@@ -1547,6 +1548,7 @@ fn parse_list_filters(args: &[String]) -> Option<ListFilters> {
         statuses.push(StatusWire::Open);
         statuses.push(StatusWire::Claimed);
         statuses.push(StatusWire::Ready);
+        statuses.push(StatusWire::Snoozed);
         statuses.push(StatusWire::InProgress);
     }
     Some(ListFilters {
@@ -2135,6 +2137,7 @@ const ANSI_BRIGHT_CYAN: &str = "\x1b[96m";
 const ANSI_MAGENTA: &str = "\x1b[35m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_BRIGHT_BLACK: &str = "\x1b[90m";
 const ANSI_TYPE_PLAN: &str = "\x1b[38;5;220m";
 const ANSI_TYPE_PHASE: &str = "\x1b[38;5;117m";
 const ANSI_TYPE_TASK: &str = "\x1b[38;5;177m";
@@ -2161,6 +2164,10 @@ fn status_presentation(status: &StatusWire) -> CliPresentation {
         StatusWire::Ready => CliPresentation {
             glyph: "◇",
             cli_style: ANSI_BRIGHT_CYAN,
+        },
+        StatusWire::Snoozed => CliPresentation {
+            glyph: "◈",
+            cli_style: ANSI_BRIGHT_BLACK,
         },
         StatusWire::InProgress => CliPresentation {
             glyph: "◐",
@@ -2357,6 +2364,7 @@ fn has_active_blocker(
                     StatusWire::Open
                         | StatusWire::Claimed
                         | StatusWire::Ready
+                        | StatusWire::Snoozed
                         | StatusWire::InProgress
                 )
             })
@@ -2412,6 +2420,7 @@ fn parse_status(value: &str) -> Option<StatusWire> {
         "open" => Some(StatusWire::Open),
         "claimed" => Some(StatusWire::Claimed),
         "ready" => Some(StatusWire::Ready),
+        "snoozed" => Some(StatusWire::Snoozed),
         "in_progress" => Some(StatusWire::InProgress),
         "closed" => Some(StatusWire::Closed),
         _ => None,
@@ -2444,6 +2453,7 @@ fn status_value(status: &StatusWire) -> &'static str {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
         StatusWire::Ready => "ready",
+        StatusWire::Snoozed => "snoozed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -2454,6 +2464,7 @@ fn status_upper(status: &StatusWire) -> &'static str {
         StatusWire::Open => "OPEN",
         StatusWire::Claimed => "CLAIMED",
         StatusWire::Ready => "READY",
+        StatusWire::Snoozed => "Snoozed",
         StatusWire::InProgress => "IN_PROGRESS",
         StatusWire::Closed => "CLOSED",
     }
@@ -4037,6 +4048,7 @@ mod tests {
             design: String::new(),
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

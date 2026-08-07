@@ -6,7 +6,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'open'
-                  CHECK(status IN ('open', 'claimed', 'ready', 'in_progress', 'closed')),
+                  CHECK(status IN ('open', 'claimed', 'ready', 'snoozed', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
                   CHECK(issue_type IN ('plan', 'phase', 'task')),
     tier        TEXT
@@ -27,6 +27,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     design      TEXT,
     refs        TEXT NOT NULL DEFAULT '',
     plus_one_evidence TEXT NOT NULL DEFAULT '[]',
+    close_history TEXT NOT NULL DEFAULT '[]',
+    snooze      TEXT,
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -46,6 +48,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     CHECK(is_ready_to_work IN (0, 1)),
     CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
     CHECK(status != 'ready' OR issue_type = 'task'),
+    CHECK(status != 'snoozed' OR issue_type = 'task'),
+    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -253,6 +257,101 @@ SELECT
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
     changespec_name, changespec_bug_id
+FROM issues;
+DROP TABLE issues;
+ALTER TABLE _issues_new RENAME TO issues;
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
+CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+PRAGMA foreign_keys=ON;"#
+}
+
+/// Whether a pre-existing `issues` table predates the snoozed task status.
+///
+/// The status is constrained by a CHECK, so admitting it needs a table
+/// rebuild rather than an `ALTER TABLE`; the `snooze` payload column rides
+/// along in the same rebuild.
+pub fn needs_snoozed_status_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("'snoozed'"),
+    }
+}
+
+/// Rebuild `issues` with the snoozed status and its payload column.
+///
+/// The copied column list includes `close_history`, so this migration must
+/// run *after* the close-history column exists; the caller's ordering owns
+/// that, exactly as it already does for the other rebuilding migrations.
+pub fn snoozed_status_migration_sql() -> &'static str {
+    r#"PRAGMA foreign_keys=OFF;
+DROP TABLE IF EXISTS _issues_new;
+CREATE TABLE _issues_new (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open'
+                  CHECK(status IN ('open', 'claimed', 'ready', 'snoozed', 'in_progress', 'closed')),
+    issue_type  TEXT NOT NULL DEFAULT 'phase'
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
+    tier        TEXT
+                  CHECK(tier IN ('plan', 'epic')),
+    parent_id   TEXT
+                  REFERENCES issues(id) ON DELETE CASCADE,
+    owner       TEXT,
+    assignee    TEXT,
+    created_at  TEXT NOT NULL,
+    created_by  TEXT,
+    updated_at  TEXT NOT NULL,
+    closed_at   TEXT,
+    close_reason TEXT,
+    resolution  TEXT
+                  CHECK(resolution IN ('done', 'canceled', 'superseded')),
+    description TEXT,
+    notes       TEXT,
+    design      TEXT,
+    refs        TEXT NOT NULL DEFAULT '',
+    plus_one_evidence TEXT NOT NULL DEFAULT '[]',
+    close_history TEXT NOT NULL DEFAULT '[]',
+    snooze      TEXT,
+    model       TEXT NOT NULL DEFAULT '',
+    size        TEXT
+                  CHECK(
+                    size IS NULL OR
+                    (issue_type IN ('phase', 'task') AND
+                     size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
+                  ),
+    is_ready_to_work INTEGER NOT NULL DEFAULT 0,
+    changespec_name TEXT NOT NULL DEFAULT '',
+    changespec_bug_id TEXT NOT NULL DEFAULT '',
+    CHECK(
+        (issue_type = 'phase' AND parent_id IS NOT NULL) OR
+        (issue_type = 'plan') OR
+        (issue_type = 'task' AND parent_id IS NULL)
+    ),
+    CHECK(issue_type = 'plan' OR tier IS NULL),
+    CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
+    CHECK(status != 'ready' OR issue_type = 'task'),
+    CHECK(status != 'snoozed' OR issue_type = 'task'),
+    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),
+    CHECK(
+        issue_type = 'plan' OR
+        (changespec_name = '' AND changespec_bug_id = '')
+    ),
+    CHECK(changespec_name != '' OR changespec_bug_id = '')
+);
+INSERT INTO _issues_new (
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, plus_one_evidence, close_history,
+    model, size, is_ready_to_work, changespec_name, changespec_bug_id
+)
+SELECT
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, plus_one_evidence, close_history,
+    model, size, is_ready_to_work, changespec_name, changespec_bug_id
 FROM issues;
 DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
@@ -880,6 +979,92 @@ mod tests {
             )
             .unwrap();
         assert!(!needs_task_ready_migration(Some(&migrated_sql)));
+    }
+
+    #[test]
+    fn snoozed_status_migration_admits_snoozed_tasks_and_keeps_close_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let legacy_schema = BEAD_SQLITE_SCHEMA
+            .replace(", 'snoozed'", "")
+            .replace("    snooze      TEXT,\n", "")
+            .replace(
+                "    CHECK(status != 'snoozed' OR issue_type = 'task'),\n",
+                "",
+            )
+            .replace(
+                "    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),\n",
+                "",
+            );
+        conn.execute_batch(&legacy_schema).unwrap();
+        insert_plan_and_phase(&conn, "phase-medium", "medium").unwrap();
+        conn.execute(
+            "UPDATE issues SET close_history='[{\"closed_at\":\"then\"}]'
+             WHERE id='phase-medium'",
+            [],
+        )
+        .unwrap();
+
+        let create_table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(needs_snoozed_status_migration(Some(&create_table_sql)));
+
+        conn.execute_batch(snoozed_status_migration_sql()).unwrap();
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, snooze
+             ) VALUES (
+                'task-snoozed', 'Snoozed task', 'snoozed', 'task',
+                'now', 'now', '{\"until\":\"2026-08-09T09:00:00-04:00\"}'
+             )",
+            [],
+        )
+        .unwrap();
+        // A snoozed row without its record, and a snoozed non-task, are both
+        // unrepresentable rather than merely discouraged.
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, created_at, updated_at
+                 ) VALUES (
+                    'task-bare', 'Bare', 'snoozed', 'task', 'now', 'now'
+                 )",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE issues SET status='snoozed', snooze='{}'
+                 WHERE id='phase-medium'",
+                [],
+            )
+            .is_err());
+
+        let close_history: String = conn
+            .query_row(
+                "SELECT close_history FROM issues WHERE id='phase-medium'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(close_history, "[{\"closed_at\":\"then\"}]");
+
+        let migrated_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!needs_snoozed_status_migration(Some(&migrated_sql)));
     }
 
     #[test]

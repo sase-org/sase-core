@@ -169,6 +169,7 @@ fn status_value(status: &StatusWire) -> &'static str {
         StatusWire::Open => "open",
         StatusWire::Claimed => "claimed",
         StatusWire::Ready => "ready",
+        StatusWire::Snoozed => "snoozed",
         StatusWire::InProgress => "in_progress",
         StatusWire::Closed => "closed",
     }
@@ -667,6 +668,7 @@ mod tests {
             design: String::new(),
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

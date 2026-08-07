@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use super::wire::{
     BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
-    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
-    StatusWire, TaskPlusOneEvidenceWire,
+    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -129,6 +129,28 @@ pub enum BeadEventOperationWire {
     ReadyUnmarked,
     EpicWorkPreclaimed,
     TaskPlusOneRecorded,
+    TaskSnoozed,
+    TaskSnoozeCanceled,
+    TaskSnoozeWoken,
+}
+
+/// Which wake condition ended a snooze.
+///
+/// The wake *time* never changes a bead's status on its own — it raises a
+/// gate the human answers — so every event recorded here comes from a
+/// condition the store itself observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadSnoozeWakeCauseWire {
+    PlusOne,
+}
+
+impl BeadSnoozeWakeCauseWire {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlusOne => "plus_one",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +198,13 @@ pub enum BeadEventPayloadWire {
     },
     TaskPlusOneRecorded {
         evidence: TaskPlusOneEvidenceWire,
+    },
+    TaskSnoozed {
+        snooze: BeadSnoozeWire,
+    },
+    TaskSnoozeCanceled,
+    TaskSnoozeWoken {
+        cause: BeadSnoozeWakeCauseWire,
     },
 }
 
@@ -232,7 +261,19 @@ impl BeadEventPayloadWire {
             | (
                 BeadEventOperationWire::ReadyUnmarked,
                 BeadEventPayloadWire::ReadyUnmarked,
+            )
+            | (
+                BeadEventOperationWire::TaskSnoozeCanceled,
+                BeadEventPayloadWire::TaskSnoozeCanceled,
+            )
+            | (
+                BeadEventOperationWire::TaskSnoozeWoken,
+                BeadEventPayloadWire::TaskSnoozeWoken { .. },
             ) => Ok(()),
+            (
+                BeadEventOperationWire::TaskSnoozed,
+                BeadEventPayloadWire::TaskSnoozed { snooze },
+            ) => snooze.validate(),
             (
                 BeadEventOperationWire::DependencyAdded,
                 BeadEventPayloadWire::DependencyAdded { dependency },
@@ -1261,6 +1302,25 @@ pub(super) fn apply_event(
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
+        BeadEventPayloadWire::TaskSnoozed { snooze } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            issue.status = StatusWire::Snoozed;
+            issue.snooze = Some(snooze.clone());
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
+        // Both wake branches return the bead to triage rather than to its
+        // pre-snooze status: a snooze is only reachable from `open` or
+        // `ready`, and the wake is exactly the moment the bead wants a
+        // decision again.
+        BeadEventPayloadWire::TaskSnoozeCanceled
+        | BeadEventPayloadWire::TaskSnoozeWoken { .. } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            issue.status = StatusWire::Ready;
+            issue.snooze = None;
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
     }
     Ok(())
 }
@@ -1275,6 +1335,9 @@ fn apply_update_event_fields(
     }
     if let Some(value) = &fields.status {
         issue.status = value.clone();
+        // Mirrors `apply_update_fields`, so a bead reprojected from its
+        // events is byte-identical to the same bead mutated in memory.
+        issue.snooze = None;
     }
     if let Some(value) = &fields.assignee {
         issue.assignee = value.clone();
@@ -1532,6 +1595,7 @@ mod tests {
             design: String::new(),
             refs,
             plus_one_evidence: Vec::new(),
+            snooze: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

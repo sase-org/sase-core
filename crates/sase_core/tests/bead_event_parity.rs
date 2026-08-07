@@ -1979,6 +1979,7 @@ fn issue(
         design: String::new(),
         refs: Vec::new(),
         plus_one_evidence: Vec::new(),
+        snooze: None,
         model: String::new(),
         size: None,
         is_ready_to_work: false,
