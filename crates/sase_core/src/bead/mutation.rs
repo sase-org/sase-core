@@ -16,11 +16,11 @@ use crate::store_lock::{
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
-    appended_note_text, archive_close_metadata, import_issues_to_event_streams,
-    mint_bead_event_id, reduce_event_streams, BeadEventOperationWire,
-    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStreamWire,
-    BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
-    BEAD_EVENT_SCHEMA_VERSION,
+    appended_note_text, archive_close_metadata, clear_snooze_record,
+    import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
+    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
+    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
+    BeadSnoozeWakeCauseWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
@@ -160,24 +160,6 @@ pub struct BeadMutationOutcomeWire {
     pub reopened_ancestor_ids: Vec<String>,
     #[serde(default)]
     pub unchanged_ids: Vec<String>,
-}
-
-/// One snoozed task bead whose wake time has arrived.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BeadSnoozeWakeEntryWire {
-    pub issue_id: String,
-    pub title: String,
-    /// Wake time the bead was snoozed until, echoed so a caller raising a
-    /// gate does not have to re-read the bead to learn it.
-    pub until: String,
-}
-
-/// Snoozed task beads that are due, as of one observation of the clock.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct BeadSnoozeWakeOutcomeWire {
-    pub now: String,
-    #[serde(default)]
-    pub due: Vec<BeadSnoozeWakeEntryWire>,
 }
 
 pub fn init_store(
@@ -380,7 +362,7 @@ pub fn add_task_plus_one(
         let wake_note = plus_one_wake_note(issue);
         if wake_note.is_some() {
             issue.status = StatusWire::Ready;
-            issue.snooze = None;
+            clear_snooze_record(issue);
         } else if matches!(issue.status, StatusWire::Open | StatusWire::Closed)
         {
             issue.status = StatusWire::Ready;
@@ -562,7 +544,7 @@ pub fn cancel_task_snooze(
         let timestamp = now.unwrap_or_else(now_utc);
         let issue = &mut store.issues[index];
         issue.status = StatusWire::Ready;
-        issue.snooze = None;
+        clear_snooze_record(issue);
         issue.updated_at = timestamp.clone();
         issue.validate()?;
         let issue = issue.clone();
@@ -579,44 +561,6 @@ pub fn cancel_task_snooze(
         let mut result = outcome("snooze_cancel", true, vec![resolved_id]);
         result.issue = Some(issue);
         Ok(result)
-    })
-}
-
-/// Select the snoozed task beads whose wake time has arrived.
-///
-/// This deliberately does not mutate: reaching the wake time raises a gate,
-/// and the status changes only once the human answers it, so the store never
-/// claims a decision nobody made.
-pub fn wake_due_task_snoozes(
-    beads_dir: &Path,
-    now: &str,
-) -> Result<BeadSnoozeWakeOutcomeWire, BeadError> {
-    let now_at = parse_snooze_timestamp(now, "now")?;
-    let store = MutableStore::load(beads_dir)?;
-    let mut due = Vec::new();
-    for issue in &store.issues {
-        if issue.status != StatusWire::Snoozed {
-            continue;
-        }
-        let Some(snooze) = issue.snooze.as_ref() else {
-            continue;
-        };
-        if snooze.until_datetime()? <= now_at {
-            due.push(BeadSnoozeWakeEntryWire {
-                issue_id: issue.id.clone(),
-                title: issue.title.clone(),
-                until: snooze.until.clone(),
-            });
-        }
-    }
-    due.sort_by(|left, right| {
-        left.until
-            .cmp(&right.until)
-            .then(left.issue_id.cmp(&right.issue_id))
-    });
-    Ok(BeadSnoozeWakeOutcomeWire {
-        now: now.to_string(),
-        due,
     })
 }
 
@@ -838,6 +782,10 @@ pub fn claim_for_agent_launch(
         let now = now.unwrap_or_else(now_utc);
         store.issues[index].status = StatusWire::InProgress;
         store.issues[index].assignee = agent_name.to_string();
+        // The event this appends is an `issue_updated` carrying a status, so
+        // the reducer clears the record through `apply_update_event_fields`;
+        // clearing it here too is what keeps the two projections identical.
+        clear_snooze_record(&mut store.issues[index]);
         store.issues[index].updated_at = now.clone();
         let issue = store.issues[index].clone();
         issue.validate()?;
@@ -1105,6 +1053,7 @@ pub fn preclaim_epic_work_plan(
                 BeadReopenCauseWire::EpicPreclaim,
                 None,
             );
+            clear_snooze_record(issue);
             issue.assignee = assignment.agent_name.clone();
             issue.updated_at = now.clone();
             issue.validate()?;
@@ -1130,6 +1079,7 @@ pub fn preclaim_epic_work_plan(
                 BeadReopenCauseWire::EpicPreclaim,
                 None,
             );
+            clear_snooze_record(issue);
             issue.assignee = agent_name.clone();
             issue.updated_at = now.clone();
             issue.validate()?;
@@ -1175,6 +1125,7 @@ pub fn open_issue(
             BeadReopenCauseWire::Open,
             None,
         );
+        clear_snooze_record(&mut store.issues[index]);
         store.issues[index].updated_at = now.clone();
         let issue = store.issues[index].clone();
         issue.validate()?;
@@ -1607,6 +1558,9 @@ fn reopen_closed_ancestors(
             BeadReopenCauseWire::Open,
             None,
         );
+        // A closed ancestor carries no snooze, so this clears nothing today;
+        // it keeps every `issue_opened` emitter aligned with the reducer arm.
+        clear_snooze_record(&mut store.issues[index]);
         store.issues[index].updated_at = opened_at.to_string();
         let ancestor = store.issues[index].clone();
         ancestor.validate()?;
@@ -2062,7 +2016,7 @@ fn apply_update_fields(
         // Moving off `snoozed` drops the record, exactly as moving off
         // `closed` archives the close fields. Without this an ordinary
         // status update would leave a record the model refuses to store.
-        issue.snooze = None;
+        clear_snooze_record(issue);
     }
     if let Some(value) = fields.assignee {
         issue.assignee = value;
@@ -2219,6 +2173,14 @@ impl MutableStore {
     }
 
     fn save(&self) -> Result<(), BeadError> {
+        // Nothing durable is written until the derived issue set is known to
+        // be valid.  An event stream persisted ahead of the state it derives
+        // is unrecoverable: every later load replays the same event and
+        // re-derives the same invalid record, so the store never opens again.
+        // Rejecting here leaves both files exactly as they were.
+        for issue in &self.issues {
+            issue.validate()?;
+        }
         write_event_store(&self.beads_dir, &self.streams)?;
         save_config(&self.beads_dir, &self.config)?;
         self.save_issues()
@@ -2326,6 +2288,7 @@ impl MutableStore {
         self.issues[index].closed_at = Some(closed_at.to_string());
         self.issues[index].close_reason = reason;
         self.issues[index].resolution = Some(resolution);
+        clear_snooze_record(&mut self.issues[index]);
         self.issues[index].updated_at = closed_at.to_string();
         Ok(Some(self.issues[index].clone()))
     }
@@ -2876,25 +2839,140 @@ mod tests {
     }
 
     #[test]
-    fn wake_due_task_snoozes_selects_by_time_without_mutating() {
+    fn closing_a_snoozed_task_drops_the_record_and_the_store_reloads() {
         let (_temp, beads_dir, task_id) =
-            snoozed_task_fixture("2026-01-04T09:00:00-05:00", None);
+            snoozed_task_fixture("2026-01-04T00:00:00Z", Some(2));
 
-        let early =
-            wake_due_task_snoozes(&beads_dir, "2026-01-04T13:59:00Z").unwrap();
-        assert!(early.due.is_empty());
+        close_issues(
+            &beads_dir,
+            std::slice::from_ref(&task_id),
+            Some("no longer needed".to_string()),
+            Some(BeadResolutionWire::Canceled),
+            false,
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
 
-        // 09:00-05:00 is 14:00Z, so the same wall-clock instant is due.
-        let due =
-            wake_due_task_snoozes(&beads_dir, "2026-01-04T14:00:00Z").unwrap();
-        assert_eq!(due.now, "2026-01-04T14:00:00Z");
-        assert_eq!(due.due.len(), 1);
-        assert_eq!(due.due[0].issue_id, task_id);
-        assert_eq!(due.due[0].title, "Corroborated task");
-        assert_eq!(due.due[0].until, "2026-01-04T09:00:00-05:00");
+        // The reload is the assertion that matters: before the fix the close
+        // itself raised, and every later load raised with it.
+        let issue = read_store_issues(&beads_dir)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == task_id)
+            .unwrap();
+        assert_eq!(issue.status, StatusWire::Closed);
+        assert_eq!(issue.snooze, None);
+        assert_eq!(issue.closed_at.as_deref(), Some("2026-01-02T00:00:00Z"));
+        assert_eq!(issue.resolution, Some(BeadResolutionWire::Canceled));
 
-        let issue = read_store_issues(&beads_dir).unwrap().pop().unwrap();
-        assert_eq!(issue.status, StatusWire::Snoozed);
+        // The reducer and the mutation must not drift; that divergence is the
+        // invariant whose breakage bricked the store.
+        assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+    }
+
+    #[test]
+    fn a_store_bricked_by_a_close_over_a_snooze_loads_again() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+
+        // Build the poisoned stream from raw event records rather than by
+        // calling the fixed close, so this stays a real recovery test: an
+        // `issue_closed` event lands on disk while issues.jsonl still reads
+        // `snoozed`, exactly the shape the old close left behind.
+        let mut store = MutableStore::load(&beads_dir).unwrap();
+        store
+            .append_issue_event(
+                &task_id,
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: Some("bricked by the old close".to_string()),
+                    resolution: Some(BeadResolutionWire::Canceled),
+                    forced_descendant_ids: Vec::new(),
+                },
+                "2026-01-02T00:00:00Z",
+                "owner",
+            )
+            .unwrap();
+        write_event_store(&beads_dir, &store.streams).unwrap();
+
+        let issue = read_store_issues(&beads_dir)
+            .unwrap()
+            .into_iter()
+            .find(|issue| issue.id == task_id)
+            .unwrap();
+        assert_eq!(issue.status, StatusWire::Closed);
+        assert_eq!(issue.snooze, None);
+    }
+
+    #[test]
+    fn an_invalid_derived_state_leaves_the_event_streams_untouched() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+        let before = read_event_store(&beads_dir).unwrap().1;
+
+        let mut store = MutableStore::load(&beads_dir).unwrap();
+        store
+            .append_issue_event(
+                &task_id,
+                BeadEventOperationWire::IssueOpened,
+                BeadEventPayloadWire::IssueOpened,
+                "2026-01-02T00:00:00Z",
+                "owner",
+            )
+            .unwrap();
+        // A non-snoozed issue that still carries snooze metadata: the derived
+        // state the close used to persist an event ahead of.
+        let index = store.issue_index(&task_id).unwrap();
+        store.issues[index].status = StatusWire::Open;
+        let error = store.save().unwrap_err();
+        assert!(error
+            .message
+            .contains("Only snoozed issues can carry snooze metadata"));
+
+        // Nothing durable was written, so the store still opens.
+        assert_eq!(read_event_store(&beads_dir).unwrap().1, before);
+        assert_eq!(
+            read_store_issues(&beads_dir)
+                .unwrap()
+                .into_iter()
+                .find(|issue| issue.id == task_id)
+                .unwrap()
+                .status,
+            StatusWire::Snoozed
+        );
+    }
+
+    #[test]
+    fn reopening_and_launch_claiming_a_snoozed_task_drop_the_record() {
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+        let reopened = open_issue(
+            &beads_dir,
+            &task_id,
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(reopened.status, StatusWire::Open);
+        assert_eq!(reopened.snooze, None);
+        assert_eq!(reduces_to_store(&beads_dir), vec![reopened]);
+
+        let (_temp, beads_dir, task_id) =
+            snoozed_task_fixture("2026-01-04T00:00:00Z", None);
+        let claimed = claim_for_agent_launch(
+            &beads_dir,
+            &task_id,
+            "agent-a",
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(claimed.status, StatusWire::InProgress);
+        assert_eq!(claimed.assignee, "agent-a");
+        assert_eq!(claimed.snooze, None);
+        assert_eq!(reduces_to_store(&beads_dir), vec![claimed]);
     }
 
     #[test]

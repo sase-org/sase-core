@@ -1171,6 +1171,7 @@ pub(super) fn apply_event(
                 BeadReopenCauseWire::Open,
                 None,
             );
+            clear_snooze_record(issue);
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -1185,6 +1186,9 @@ pub(super) fn apply_event(
                 issue.closed_at = Some(event.timestamp.clone());
                 issue.close_reason = close_reason.clone();
                 issue.resolution = resolution.clone();
+                // Replaying an `issue_closed` event over a snoozed bead is
+                // what heals a store the pre-fix close already bricked.
+                clear_snooze_record(issue);
                 issue.updated_at = event.timestamp.clone();
                 issue.validate()?;
             }
@@ -1264,6 +1268,7 @@ pub(super) fn apply_event(
                 BeadReopenCauseWire::EpicPreclaim,
                 None,
             );
+            clear_snooze_record(issue);
             issue.assignee = agent_name.clone();
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
@@ -1317,7 +1322,7 @@ pub(super) fn apply_event(
         | BeadEventPayloadWire::TaskSnoozeWoken { .. } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Ready;
-            issue.snooze = None;
+            clear_snooze_record(issue);
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -1337,7 +1342,7 @@ fn apply_update_event_fields(
         issue.status = value.clone();
         // Mirrors `apply_update_fields`, so a bead reprojected from its
         // events is byte-identical to the same bead mutated in memory.
-        issue.snooze = None;
+        clear_snooze_record(issue);
     }
     if let Some(value) = &fields.assignee {
         issue.assignee = value.clone();
@@ -1418,6 +1423,17 @@ pub(super) fn archive_close_metadata(
     issue.closed_at = None;
     issue.close_reason = None;
     issue.resolution = None;
+}
+
+/// Drop the snooze record a bead leaving `snoozed` no longer owns.
+///
+/// The mirror of [`archive_close_metadata`], and the single chokepoint for
+/// every transition out of `snoozed` on both the reducer and the mutation
+/// side.  `IssueWire::validate` rejects a non-snoozed issue that still carries
+/// snooze metadata, so a path that forgets this derives a record the model
+/// refuses to store.  Clearing an issue that was never snoozed is a no-op.
+pub(super) fn clear_snooze_record(issue: &mut IssueWire) {
+    issue.snooze = None;
 }
 
 pub(super) fn appended_note_text(
