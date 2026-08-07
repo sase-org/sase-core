@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "notification": {
     "id": "custom1234567890",
     "timestamp": "2026-07-16T23:00:00Z",
@@ -46,14 +46,16 @@
             "label": "Proceed safely",
             "icon": "✅",
             "default_selected": true,
-            "feedback": "required"
+            "feedback": "required",
+            "inputs": []
           },
           {
             "id": "open_report",
             "label": "Open the report",
             "icon": "📄",
             "default_selected": true,
-            "feedback": "optional"
+            "feedback": "optional",
+            "inputs": []
           }
         ],
         "submit": {
@@ -68,7 +70,8 @@
             "label": "Cancel",
             "icon": null,
             "default_selected": true,
-            "feedback": "optional"
+            "feedback": "optional",
+            "inputs": []
           }
         ],
         "submit": null

@@ -3,9 +3,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
+use crate::host_bridge::MobileInputChoiceWire;
+
 use super::wire::NotificationWire;
 
-pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 4;
+pub const MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION: u32 = 5;
+
+/// Gate request envelope versions this reader understands. `2` is the legacy
+/// envelope; `3` is what every gate created since 2026-07-18 writes.
+const READABLE_GATE_ENVELOPE_VERSIONS: [u32; 2] = [2, 3];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileNotificationListRequestWire {
@@ -30,7 +36,7 @@ pub struct MobileNotificationListResponseWire {
     pub next_high_water: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MobileNotificationDetailResponseWire {
     pub schema_version: u32,
     pub notification: MobileNotificationCardWire,
@@ -183,7 +189,7 @@ pub enum MobileActionStateWire {
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MobileActionDetailWire {
     PlanApproval {
@@ -250,7 +256,29 @@ pub enum GateFeedbackModeWire {
     Required,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MobileGateInputFieldWire {
+    pub id: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub default: Option<JsonValue>,
+    #[serde(default)]
+    pub choices: Vec<MobileInputChoiceWire>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub help: Option<String>,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default)]
+    pub repeatable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateOptionWire {
     pub id: String,
     pub label: String,
@@ -260,6 +288,8 @@ pub struct GateOptionWire {
     pub default_selected: bool,
     #[serde(default)]
     pub feedback: GateFeedbackModeWire,
+    #[serde(default)]
+    pub inputs: Vec<MobileGateInputFieldWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +299,7 @@ pub struct GateSubmitWire {
     pub icon: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateBranchWire {
     pub options: Vec<GateOptionWire>,
     #[serde(default)]
@@ -324,13 +354,15 @@ pub enum MobileAttachmentKindWire {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateActionRequestWire {
     pub schema_version: u32,
     pub prefix: String,
     pub selected_option_ids: Vec<String>,
     #[serde(default)]
     pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_inputs: Option<BTreeMap<String, JsonValue>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -627,7 +659,7 @@ fn gate_branches_from_notification(
     else {
         return Vec::new();
     };
-    if envelope.schema_version != 2 {
+    if !READABLE_GATE_ENVELOPE_VERSIONS.contains(&envelope.schema_version) {
         return Vec::new();
     }
     let options_by_id: BTreeMap<String, GateOptionWire> = envelope
@@ -1057,7 +1089,7 @@ mod tests {
         write_gate_request(
             &request_path,
             json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "branches": [["approve"], ["reject"], ["feedback"]],
                 "options": [
                     {"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"},
@@ -1243,9 +1275,9 @@ mod tests {
                 "source_surface": "agent",
                 "slot_count": 3,
                 "branches": [
-                    {"options": [{"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled"}], "submit": null},
-                    {"options": [{"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled"}], "submit": null},
-                    {"options": [{"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required"}], "submit": null}
+                    {"options": [{"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled", "inputs": []}], "submit": null},
+                    {"options": [{"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled", "inputs": []}], "submit": null},
+                    {"options": [{"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required", "inputs": []}], "submit": null}
                 ],
             })
         );
@@ -1534,12 +1566,168 @@ mod tests {
                         "label": "Approve",
                         "icon": "✅",
                         "default_selected": true,
-                        "feedback": "disabled"
+                        "feedback": "disabled",
+                        "inputs": []
                     }],
                     "submit": null
                 }]),
                 "{action} did not use the generic branch projection"
             );
         }
+    }
+
+    #[test]
+    fn schema_version_3_envelope_with_declared_inputs_yields_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("request.json");
+        write_gate_request(
+            &request_path,
+            json!({
+                "schema_version": 3,
+                "branches": [["approve"]],
+                "options": [{
+                    "id": "approve",
+                    "label": "Approve",
+                    "icon": "✅",
+                    "default_selected": true,
+                    "feedback": "disabled",
+                    "inputs": [{
+                        "id": "reason",
+                        "label": "Reason",
+                        "type": "enum",
+                        "required": true,
+                        "default": ["a", "b"],
+                        "choices": [
+                            {"value": "a", "label": "Alpha"},
+                            {"value": "b", "label": null}
+                        ],
+                        "placeholder": null,
+                        "help": "Pick one",
+                        "secret": false,
+                        "repeatable": true
+                    }]
+                }],
+                "groups": []
+            }),
+        );
+        let notification = NotificationWire {
+            id: "v3-notification".to_string(),
+            action: Some("CustomGate".to_string()),
+            action_data: _action_data(&[(
+                "request_path",
+                request_path.to_str().unwrap(),
+            )]),
+            ..Default::default()
+        };
+        let branches = gate_branches_from_notification(&notification);
+        assert!(!branches.is_empty());
+        assert_eq!(
+            branches[0].options[0].inputs,
+            vec![MobileGateInputFieldWire {
+                id: "reason".to_string(),
+                label: "Reason".to_string(),
+                r#type: "enum".to_string(),
+                required: true,
+                default: Some(json!(["a", "b"])),
+                choices: vec![
+                    MobileInputChoiceWire {
+                        value: "a".to_string(),
+                        label: Some("Alpha".to_string()),
+                    },
+                    MobileInputChoiceWire {
+                        value: "b".to_string(),
+                        label: None,
+                    },
+                ],
+                placeholder: None,
+                help: Some("Pick one".to_string()),
+                secret: false,
+                repeatable: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn gate_envelope_version_acceptance_is_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let v2_path = tmp.path().join("v2_request.json");
+        write_gate_request(
+            &v2_path,
+            json!({
+                "schema_version": 2,
+                "branches": [["approve"]],
+                "options": [{
+                    "id": "approve",
+                    "label": "Approve",
+                    "default_selected": true,
+                    "feedback": "disabled"
+                }],
+                "groups": []
+            }),
+        );
+        let v2_notification = NotificationWire {
+            id: "v2-notification".to_string(),
+            action: Some("CustomGate".to_string()),
+            action_data: _action_data(&[(
+                "request_path",
+                v2_path.to_str().unwrap(),
+            )]),
+            ..Default::default()
+        };
+        let v2_branches = gate_branches_from_notification(&v2_notification);
+        assert_eq!(v2_branches.len(), 1);
+        assert_eq!(v2_branches[0].options[0].inputs, Vec::new());
+
+        let v4_path = tmp.path().join("v4_request.json");
+        write_gate_request(
+            &v4_path,
+            json!({
+                "schema_version": 4,
+                "branches": [["approve"]],
+                "options": [{
+                    "id": "approve",
+                    "label": "Approve",
+                    "default_selected": true,
+                    "feedback": "disabled"
+                }],
+                "groups": []
+            }),
+        );
+        let v4_notification = NotificationWire {
+            id: "v4-notification".to_string(),
+            action: Some("CustomGate".to_string()),
+            action_data: _action_data(&[(
+                "request_path",
+                v4_path.to_str().unwrap(),
+            )]),
+            ..Default::default()
+        };
+        assert!(gate_branches_from_notification(&v4_notification).is_empty());
+    }
+
+    #[test]
+    fn gate_action_request_option_inputs_round_trips() {
+        let without = GateActionRequestWire {
+            schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+            prefix: "abcdef12".to_string(),
+            selected_option_ids: vec!["approve".to_string()],
+            feedback: None,
+            option_inputs: None,
+        };
+        let value = serde_json::to_value(&without).unwrap();
+        assert!(value.get("option_inputs").is_none());
+
+        let mut option_inputs = BTreeMap::new();
+        option_inputs
+            .insert("approve".to_string(), json!({"reason": "looks good"}));
+        let with = GateActionRequestWire {
+            option_inputs: Some(option_inputs.clone()),
+            ..without
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        let round_tripped: GateActionRequestWire =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped.option_inputs, Some(option_inputs));
     }
 }

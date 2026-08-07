@@ -588,7 +588,12 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "required": "bool",
                 "default_display": "string|null",
                 "position": "u32",
-                "repeatable": "bool; default false when absent"
+                "repeatable": "bool; default false when absent",
+                "choices": "MobileInputChoiceWire[]; default [] when absent"
+            },
+            "MobileInputChoiceWire": {
+                "value": "string",
+                "label": "string|null"
             },
             "MobileXpromptCatalogStatsWire": {
                 "total_count": "u64",
@@ -713,7 +718,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "label": "string",
                 "icon": "string|null",
                 "feedback": "disabled|optional|required",
-                "default_selected": "bool"
+                "default_selected": "bool",
+                "inputs": "MobileGateInputFieldWire[]; default [] when absent"
             },
             "GateSubmitWire": {
                 "defined_by": "sase_core::notifications::mobile",
@@ -724,6 +730,19 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::notifications::mobile",
                 "options": "GateOptionWire[]",
                 "submit": "GateSubmitWire|null"
+            },
+            "MobileGateInputFieldWire": {
+                "defined_by": "sase_core::notifications::mobile",
+                "id": "string",
+                "label": "string",
+                "type": "word|line|text|path|agent|int|bool|float|enum",
+                "required": "bool; default false when absent",
+                "default": "json|null; the declared default value, verbatim",
+                "choices": "MobileInputChoiceWire[]; default [] when absent",
+                "placeholder": "string|null",
+                "help": "string|null",
+                "secret": "bool; default false when absent",
+                "repeatable": "bool; default false when absent"
             },
             "MobileNotificationDetailResponseWire": {
                 "defined_by": "sase_core::notifications::mobile",
@@ -842,7 +861,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "schema_version": "u32",
                 "prefix": "string",
                 "selected_option_ids": "string[]; non-empty subset of one branch",
-                "feedback": "string|null"
+                "feedback": "string|null",
+                "option_inputs": "{option_id: json}|null; per-option submitted values, mutually exclusive with the shared value"
             },
             "QuestionActionRequestWire": {
                 "defined_by": "sase_core::notifications::mobile",

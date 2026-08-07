@@ -3007,6 +3007,7 @@ mod tests {
                         default_display: None,
                         position: 0,
                         repeatable: false,
+                        choices: Vec::new(),
                     },
                     MobileXpromptInputWire {
                         name: "deep".to_string(),
@@ -3016,6 +3017,7 @@ mod tests {
                         default_display: Some("false".to_string()),
                         position: 1,
                         repeatable: false,
+                        choices: Vec::new(),
                     },
                 ],
                 is_skill: false,

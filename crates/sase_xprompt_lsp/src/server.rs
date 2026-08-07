@@ -2661,6 +2661,7 @@ mod tests {
             default_display: None,
             position,
             repeatable: false,
+            choices: Vec::new(),
         }
     }
 

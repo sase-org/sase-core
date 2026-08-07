@@ -113,6 +113,7 @@
     "GateActionRequestWire": {
       "defined_by": "sase_core::notifications::mobile",
       "feedback": "string|null",
+      "option_inputs": "{option_id: json}|null; per-option submitted values, mutually exclusive with the shared value",
       "prefix": "string",
       "schema_version": "u32",
       "selected_option_ids": "string[]; non-empty subset of one branch"
@@ -128,6 +129,7 @@
       "feedback": "disabled|optional|required",
       "icon": "string|null",
       "id": "string",
+      "inputs": "MobileGateInputFieldWire[]; default [] when absent",
       "label": "string"
     },
     "GateSubmitWire": {
@@ -373,6 +375,19 @@
       "tags": "MobileChangeSpecTagEntryWire[]",
       "total_count": "u64"
     },
+    "MobileGateInputFieldWire": {
+      "choices": "MobileInputChoiceWire[]; default [] when absent",
+      "default": "json|null; the declared default value, verbatim",
+      "defined_by": "sase_core::notifications::mobile",
+      "help": "string|null",
+      "id": "string",
+      "label": "string",
+      "placeholder": "string|null",
+      "repeatable": "bool; default false when absent",
+      "required": "bool; default false when absent",
+      "secret": "bool; default false when absent",
+      "type": "word|line|text|path|agent|int|bool|float|enum"
+    },
     "MobileHelperProjectContextWire": {
       "project": "string|null",
       "scope": "explicit|device_default|all_known|unspecified"
@@ -387,6 +402,10 @@
     "MobileHelperSkippedWire": {
       "reason": "string",
       "target": "string|null"
+    },
+    "MobileInputChoiceWire": {
+      "label": "string|null",
+      "value": "string"
     },
     "MobileNotificationCardWire": {
       "action_summary": "MobileActionSummaryWire|null",
@@ -506,6 +525,7 @@
       "total_count": "u64"
     },
     "MobileXpromptInputWire": {
+      "choices": "MobileInputChoiceWire[]; default [] when absent",
       "default_display": "string|null",
       "description": "string|null; default null when absent",
       "name": "string",

@@ -20,8 +20,8 @@ use crate::{
     EditorXpromptCatalogRequestWire, EditorXpromptCatalogResponseWire,
     MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
     MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
-    MobileXpromptCatalogEntryWire, MobileXpromptCatalogStatsWire,
-    MobileXpromptInputWire,
+    MobileInputChoiceWire, MobileXpromptCatalogEntryWire,
+    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
 };
 
 const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
@@ -65,6 +65,7 @@ struct CatalogInput {
     default_snippet_value: Option<String>,
     is_step_input: bool,
     repeatable: bool,
+    choices: Vec<MobileInputChoiceWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,6 +405,7 @@ fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileXpromptInputWire> {
             default_display: input.default_display.clone(),
             position: position as u32,
             repeatable: input.repeatable,
+            choices: input.choices.clone(),
         })
         .collect()
 }
@@ -1970,6 +1972,7 @@ fn workflow_from_mapping(
                 default_snippet_value: None,
                 is_step_input: true,
                 repeatable: false,
+                choices: Vec::new(),
             });
         }
     }
@@ -2091,6 +2094,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     default_snippet_value,
                     is_step_input: false,
                     repeatable: repeatable_input_value(raw),
+                    choices: short_input_choices(raw),
                 })
             })
             .collect();
@@ -2120,6 +2124,9 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    choices: mapping_get(mapping, "choices")
+                        .map(parse_input_choices)
+                        .unwrap_or_default(),
                 })
             })
             .collect();
@@ -2179,6 +2186,35 @@ fn repeatable_input_value(value: &Value) -> bool {
         .and_then(|mapping| mapping_get(mapping, "repeatable"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn short_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping_get(mapping, "choices"))
+        .map(parse_input_choices)
+        .unwrap_or_default()
+}
+
+/// Parse a declared `choices` list, matching the shapes
+/// `validate_input_choices` accepts: a scalar or a `{value, label}` mapping.
+fn parse_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
+    let Some(items) = value.as_sequence() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            if let Some(value) = value_as_string(item) {
+                return Some(MobileInputChoiceWire { value, label: None });
+            }
+            let mapping = item.as_mapping()?;
+            let value =
+                mapping_get(mapping, "value").and_then(value_as_string)?;
+            let label = mapping_get(mapping, "label").and_then(value_as_string);
+            Some(MobileInputChoiceWire { value, label })
+        })
+        .collect()
 }
 
 fn default_display(value: &Value) -> Option<String> {

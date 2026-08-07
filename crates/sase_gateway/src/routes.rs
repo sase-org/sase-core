@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     convert::Infallible,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
@@ -31,6 +31,7 @@ use sase_core::notifications::{
     MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use tower_http::trace::TraceLayer;
 
 #[cfg(test)]
@@ -1446,6 +1447,8 @@ struct GateActionBody {
     selected_option_ids: Vec<String>,
     #[serde(default)]
     feedback: Option<String>,
+    #[serde(default)]
+    option_inputs: Option<BTreeMap<String, JsonValue>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1480,6 +1483,7 @@ async fn gate_action(
         prefix: prefix.clone(),
         selected_option_ids: payload.selected_option_ids,
         feedback: payload.feedback,
+        option_inputs: payload.option_inputs,
     };
     match state.notification_bridge.execute_gate_action(&request) {
         Ok(result) => {
@@ -2973,6 +2977,7 @@ mod tests {
                             default_display: None,
                             position: 0,
                             repeatable: false,
+                            choices: Vec::new(),
                         }],
                         is_skill: false,
                         content_preview: Some("Use gh".to_string()),

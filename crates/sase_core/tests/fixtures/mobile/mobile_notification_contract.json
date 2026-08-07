@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "notification": {
     "id": "abcdef1234567890",
     "timestamp": "2026-05-06T15:30:00Z",
@@ -61,14 +61,16 @@
             "label": "Approve",
             "icon": "✅",
             "default_selected": true,
-            "feedback": "disabled"
+            "feedback": "disabled",
+            "inputs": []
           },
           {
             "id": "commit",
             "label": "Commit plan file to the plans sidecar",
             "icon": "💾",
             "default_selected": true,
-            "feedback": "disabled"
+            "feedback": "disabled",
+            "inputs": []
           }
         ],
         "submit": {
@@ -83,7 +85,8 @@
             "label": "Reject",
             "icon": "❌",
             "default_selected": true,
-            "feedback": "disabled"
+            "feedback": "disabled",
+            "inputs": []
           }
         ],
         "submit": null
@@ -95,7 +98,8 @@
             "label": "Send Feedback",
             "icon": "💬",
             "default_selected": true,
-            "feedback": "required"
+            "feedback": "required",
+            "inputs": []
           }
         ],
         "submit": null

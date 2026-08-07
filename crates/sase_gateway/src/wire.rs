@@ -1344,6 +1344,7 @@ mod tests {
                         default_display: None,
                         position: 0,
                         repeatable: false,
+                        choices: Vec::new(),
                     }],
                     is_skill: false,
                     content_preview: Some("Use this workflow...".to_string()),
@@ -1402,7 +1403,8 @@ mod tests {
                         "required": true,
                         "default_display": null,
                         "position": 0,
-                        "repeatable": false
+                        "repeatable": false,
+                        "choices": []
                     }],
                     "is_skill": false,
                     "content_preview": "Use this workflow...",

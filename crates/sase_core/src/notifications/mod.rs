@@ -15,11 +15,12 @@ pub use mobile::{
     MobileActionDetailWire, MobileActionKindWire,
     MobileActionPlanErrorCodeWire, MobileActionPlanErrorWire,
     MobileActionStateWire, MobileActionSummaryWire, MobileAttachmentKindWire,
-    MobileAttachmentManifestWire, MobileNotificationCardWire,
-    MobileNotificationDetailResponseWire, MobileNotificationListRequestWire,
-    MobileNotificationListResponseWire, PendingActionIdentityWire,
-    PendingActionPrefixResolutionWire, QuestionActionChoiceWire,
-    QuestionActionRequestWire, MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+    MobileAttachmentManifestWire, MobileGateInputFieldWire,
+    MobileNotificationCardWire, MobileNotificationDetailResponseWire,
+    MobileNotificationListRequestWire, MobileNotificationListResponseWire,
+    PendingActionIdentityWire, PendingActionPrefixResolutionWire,
+    QuestionActionChoiceWire, QuestionActionRequestWire,
+    MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
 };
 pub use pending_actions::{
     cleanup_stale_pending_actions, current_unix_time,

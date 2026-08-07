@@ -706,6 +706,13 @@ pub struct MobileXpromptCatalogEntryWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobileInputChoiceWire {
+    pub value: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileXpromptInputWire {
     pub name: String,
     #[serde(rename = "type")]
@@ -717,6 +724,8 @@ pub struct MobileXpromptInputWire {
     pub position: u32,
     #[serde(default)]
     pub repeatable: bool,
+    #[serde(default)]
+    pub choices: Vec<MobileInputChoiceWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,6 +948,7 @@ mod tests {
                         default_display: None,
                         position: 0,
                         repeatable: false,
+                        choices: Vec::new(),
                     }],
                     is_skill: false,
                     content_preview: Some("Complete the bead".to_string()),
@@ -1090,7 +1100,8 @@ mod tests {
                         "required": true,
                         "default_display": null,
                         "position": 0,
-                        "repeatable": false
+                        "repeatable": false,
+                        "choices": []
                     }],
                     "is_skill": false,
                     "content_preview": "Complete the bead",
@@ -1352,7 +1363,8 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
                     "required": true,
                     "default_display": null,
                     "position": 0,
-                    "repeatable": false
+                    "repeatable": false,
+                    "choices": []
                 }],
                 "is_skill": false,
                 "content_preview": null,

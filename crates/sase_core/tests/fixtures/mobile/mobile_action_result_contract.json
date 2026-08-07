@@ -1,6 +1,6 @@
 {
   "gate": {
-    "schema_version": 4,
+    "schema_version": 5,
     "action_kind": "plan_approval",
     "prefix": "abcdef12",
     "notification_id": "abcdef1234567890",
@@ -17,7 +17,7 @@
     "message": "Gate resolved with approve, commit"
   },
   "question": {
-    "schema_version": 4,
+    "schema_version": 5,
     "action_kind": "user_question",
     "prefix": "ques0001",
     "notification_id": null,
