@@ -960,6 +960,7 @@ mod tests {
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "planner".to_string(),
             icon: None,
+            color: None,
             notes: vec!["Plan ready for review".to_string()],
             files: vec!["/tmp/plan.md".to_string()],
             tags: vec!["plan".to_string(), "review".to_string()],
@@ -983,6 +984,7 @@ mod tests {
             timestamp: "2026-07-16T15:30:00Z".to_string(),
             sender: "planner".to_string(),
             icon: None,
+            color: None,
             notes: vec!["Epic ready for review".to_string()],
             files: vec!["/tmp/epic.md".to_string()],
             tags: vec!["epic".to_string(), "review".to_string()],
@@ -1197,6 +1199,7 @@ mod tests {
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "launch".to_string(),
             icon: None,
+            color: None,
             notes: vec!["Launch request ready".to_string()],
             files: vec![
                 "/tmp/launch_preview.md".to_string(),

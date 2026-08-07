@@ -502,6 +502,7 @@ mod tests {
             timestamp: "2026-05-06T12:00:00+00:00".to_string(),
             sender: "test".to_string(),
             icon: None,
+            color: None,
             notes: Vec::new(),
             files: Vec::new(),
             tags: Vec::new(),

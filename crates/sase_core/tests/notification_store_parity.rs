@@ -29,6 +29,7 @@ fn notification(id: &str) -> NotificationWire {
         timestamp: "2026-05-01T01:02:03+00:00".to_string(),
         sender: "test-sender".to_string(),
         icon: None,
+        color: None,
         notes: Vec::new(),
         files: Vec::new(),
         tags: Vec::new(),

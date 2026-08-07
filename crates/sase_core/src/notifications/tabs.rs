@@ -122,6 +122,8 @@ struct TabAccumulator {
     oldest_activity_at: Option<String>,
     next_wake_at: Option<String>,
     color: Option<String>,
+    /// Activity cursor of the row that donated `color`, newest wins.
+    color_cursor: Option<(String, String)>,
 }
 
 fn accumulate(
@@ -151,7 +153,30 @@ fn accumulate(
             accumulator.next_wake_at = Some(until.to_string());
         }
     }
+    if let Some(color) = declared_color(row) {
+        // The panel lists a tab newest first, so the tab wears the color of
+        // the first row a reader would see that declares one.
+        let cursor = (activity_at.to_string(), row.id.clone());
+        let wins = match accumulator.color_cursor.as_ref() {
+            None => true,
+            Some(current) => cursor > *current,
+        };
+        if wins {
+            accumulator.color = Some(color);
+            accumulator.color_cursor = Some(cursor);
+        }
+    }
     key
+}
+
+/// Return a well-formed `#RRGGBB` sender color, ignoring stored junk.
+fn declared_color(notification: &NotificationWire) -> Option<String> {
+    let color = notification.color.as_deref()?.trim();
+    let digits = color.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(color.to_string())
 }
 
 /// Rank tab kinds so a key claimed by two kinds resolves order-independently.
@@ -557,6 +582,68 @@ mod tests {
             snoozed.next_wake_at.as_deref(),
             Some("2026-03-18T10:00:00-04:00"),
         );
+    }
+
+    #[test]
+    fn a_tab_wears_the_newest_declared_color_and_ignores_junk() {
+        let mut older = notification("older");
+        older.tags = vec!["alpha".to_string()];
+        older.timestamp = "2026-03-17T08:00:00-04:00".to_string();
+        older.color = Some("#AABBCC".to_string());
+        let mut newer = notification("newer");
+        newer.tags = vec!["alpha".to_string()];
+        newer.timestamp = "2026-03-17T09:00:00-04:00".to_string();
+        newer.color = Some(" #010203 ".to_string());
+        // A resurfaced row is newer than its sent time says.
+        let mut junk = notification("junk");
+        junk.tags = vec!["alpha".to_string()];
+        junk.timestamp = "2026-03-17T10:00:00-04:00".to_string();
+        junk.color = Some("red".to_string());
+        let mut uncolored = notification("uncolored");
+        uncolored.tags = vec!["beta".to_string()];
+
+        for rows in [
+            vec![
+                older.clone(),
+                newer.clone(),
+                junk.clone(),
+                uncolored.clone(),
+            ],
+            vec![uncolored, junk, newer, older],
+        ] {
+            let tabs = classify_notification_tabs(&rows).tabs;
+            let alpha = tabs.iter().find(|tab| tab.key == "alpha").unwrap();
+            let beta = tabs.iter().find(|tab| tab.key == "beta").unwrap();
+            assert_eq!(alpha.color.as_deref(), Some("#010203"));
+            assert_eq!(beta.color, None);
+        }
+    }
+
+    #[test]
+    fn a_resurfaced_row_donates_its_color_over_a_newer_sent_row() {
+        let mut sent_later = notification("sent-later");
+        sent_later.tags = vec!["alpha".to_string()];
+        sent_later.timestamp = "2026-03-17T09:00:00-04:00".to_string();
+        sent_later.color = Some("#AABBCC".to_string());
+        let mut resurfaced = notification("resurfaced");
+        resurfaced.tags = vec!["alpha".to_string()];
+        resurfaced.timestamp = "2026-03-01T00:00:00-04:00".to_string();
+        resurfaced.resurfaced_at =
+            Some("2026-03-17T12:00:00-04:00".to_string());
+        resurfaced.color = Some("#112233".to_string());
+
+        let tabs = classify_notification_tabs(&[sent_later, resurfaced]).tabs;
+
+        assert_eq!(tabs[0].color.as_deref(), Some("#112233"));
+    }
+
+    #[test]
+    fn an_absent_color_stays_absent_on_the_wire() {
+        let row = notification("plain");
+
+        let encoded = serde_json::to_string(&row).unwrap();
+
+        assert!(!encoded.contains("color"), "{encoded}");
     }
 
     #[test]

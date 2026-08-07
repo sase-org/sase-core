@@ -2668,6 +2668,7 @@ mod tests {
                 "user-workflow".to_string()
             },
             icon: None,
+            color: None,
             notes: vec![format!("note {id}")],
             files: Vec::new(),
             tags: Vec::new(),

@@ -11,6 +11,9 @@ pub struct NotificationWire {
     pub sender: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// Sender-declared `#RRGGBB` accent for the tab this row lands in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default)]
     pub notes: Vec<String>,
     #[serde(default)]
