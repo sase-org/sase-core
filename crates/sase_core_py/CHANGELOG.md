@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.1](https://github.com/sase-org/sase-core/compare/v0.19.0...v0.19.1) - 2026-08-07
+
+### Fixed
+
+- *(core-py)* bind the extension module explicitly in the package init ([#89](https://github.com/sase-org/sase-core/pull/89))
+
 ## [0.19.0](https://github.com/sase-org/sase-core/compare/v0.18.5...v0.19.0) - 2026-08-07
 
 ### Fixed
