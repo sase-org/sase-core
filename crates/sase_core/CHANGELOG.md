@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/sase-org/sase-core/compare/v0.18.5...v0.19.0) - 2026-08-07
+
+### Fixed
+
+- *(bead)* [**breaking**] stop a close from bricking a snoozed bead's store
+
 ## [0.18.5](https://github.com/sase-org/sase-core/compare/v0.18.4...v0.18.5) - 2026-08-07
 
 ### Added
