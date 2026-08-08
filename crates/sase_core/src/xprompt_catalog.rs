@@ -33,6 +33,11 @@ const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
 const SASE_SKILL_PLUGIN_DIRS_JSON_ENV: &str = "SASE_SKILL_PLUGIN_DIRS_JSON";
 
+/// The packaged Jinja frame that generated `SKILL.md` files are rendered
+/// through. It ships beside the bundled skill sources but is a template, not a
+/// skill, so scanning must skip it rather than report it as misplaced.
+const SKILL_FRAME_TEMPLATE_FILENAME: &str = "SKILL.frame.template.md";
+
 #[derive(Debug, Error)]
 pub enum XpromptCatalogLoadError {
     #[error("failed to read xprompt catalog: {0}")]
@@ -1300,6 +1305,13 @@ impl CatalogLoader {
             parent.join("xprompts").to_string_lossy().into_owned()
         });
         for path in files_with_extensions(dir, &["md"])? {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == SKILL_FRAME_TEMPLATE_FILENAME)
+            {
+                continue;
+            }
             let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
                 continue;
             };
@@ -2840,6 +2852,41 @@ mod tests {
             "{warnings}"
         );
         assert!(warnings.contains("config_skill"), "{warnings}");
+    }
+
+    #[test]
+    fn packaged_skill_frame_template_is_not_a_skill_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("package");
+        fs::create_dir_all(package.join("skills")).unwrap();
+        fs::write(
+            package.join("skills/sase_plan.md"),
+            "---\nskill: true\n---\nPlan body",
+        )
+        .unwrap();
+        // The Jinja frame ships beside the sources and has no frontmatter, so
+        // it must be skipped rather than reported as a misplaced definition.
+        fs::write(
+            package.join("skills").join(SKILL_FRAME_TEMPLATE_FILENAME),
+            "{{ frontmatter }}\n\n{{ body }}\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            package_skills_dir: Some(package.join("skills")),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        assert_eq!(
+            xprompts.keys().collect::<Vec<_>>(),
+            vec!["skills/sase_plan"]
+        );
+        assert!(
+            loader.skill_placement_warnings().is_empty(),
+            "{:?}",
+            loader.skill_placement_warnings()
+        );
     }
 
     #[test]
