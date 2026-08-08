@@ -377,7 +377,7 @@ pub use content_layout::{
     ProjectContentLayoutWire, SaseContentLayoutWire, SkillPlacementIssueWire,
     SkillPlacementRuleWire, SkillSourceWire, XpromptSourceWire,
     CONTENT_LAYOUT_SCHEMA_VERSION, MEMORY_NAMESPACE_SEGMENT,
-    MEMORY_README_FILENAME, SKILL_NAMESPACE_SEGMENT,
+    MEMORY_README_FILENAME, SKILL_DIRECTORY_SEGMENT, SKILL_NAMESPACE_SEGMENT,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

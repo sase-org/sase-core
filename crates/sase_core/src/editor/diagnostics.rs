@@ -731,9 +731,9 @@ mod tests {
                 memory_type: None,
             },
             XpromptAssistEntry {
-                name: "skills/plan".to_string(),
-                display_label: "skills/plan".to_string(),
-                insertion: "#skills/plan".to_string(),
+                name: "skill/plan".to_string(),
+                display_label: "skill/plan".to_string(),
+                insertion: "#skill/plan".to_string(),
                 reference_prefix: "#".to_string(),
                 kind: None,
                 source_bucket: "builtin".to_string(),
@@ -1000,8 +1000,8 @@ mod tests {
     #[test]
     fn slash_skills_resolve_by_provider_name_not_xprompt_reference() {
         // `/plan` is the installed skill; its xprompt reference is
-        // `#skills/plan`, and the namespaced form is not a slash skill.
-        let known = DocumentSnapshot::new("/plan #skills/plan");
+        // `#skill/plan`, and the namespaced form is not a slash skill.
+        let known = DocumentSnapshot::new("/plan #skill/plan");
         assert_eq!(
             diagnostic_count(
                 &analyze_document(&known, &catalog()),
@@ -1010,7 +1010,7 @@ mod tests {
             0
         );
         // The xprompt namespace segment is not itself a slash skill.
-        let namespaced = DocumentSnapshot::new("/skills");
+        let namespaced = DocumentSnapshot::new("/skill");
         assert_eq!(
             diagnostic_count(
                 &analyze_document(&namespaced, &catalog()),

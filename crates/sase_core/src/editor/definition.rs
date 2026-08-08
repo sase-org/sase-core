@@ -222,8 +222,8 @@ mod tests {
                 false,
             ),
             entry(
-                "skills/sase_plan",
-                "#skills/sase_plan",
+                "skill/sase_plan",
+                "#skill/sase_plan",
                 Some(skill_path.to_string_lossy().into_owned()),
                 true,
             ),
@@ -244,7 +244,7 @@ mod tests {
 
         // The namespaced xprompt reference navigates to the same source.
         let namespaced_skill = definition_at_position(
-            &DocumentSnapshot::new("#skills/sase_plan"),
+            &DocumentSnapshot::new("#skill/sase_plan"),
             pos(3),
             &entries,
         )

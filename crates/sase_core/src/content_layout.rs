@@ -2,15 +2,20 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 3;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 4;
 
-/// Directory name holding canonical xprompt-backed skill sources, and the
-/// namespace segment every such source carries in its xprompt reference name.
+/// Directory name holding canonical xprompt-backed skill sources.
+///
+/// Skill sources stay in plural `skills/` directories so generated provider
+/// output and source layout keep their established physical names.
+pub const SKILL_DIRECTORY_SEGMENT: &str = "skills";
+
+/// Namespace segment every skill source carries in its xprompt reference name.
 ///
 /// A source declaring `name: foo` under a canonical skill directory is
-/// referenced as `#skills/foo` (or `#<project>/skills/foo`) while its provider
+/// referenced as `#skill/foo` (or `#<project>/skill/foo`) while its provider
 /// skill name stays `foo`, so `/foo` keeps working.
-pub const SKILL_NAMESPACE_SEGMENT: &str = "skills";
+pub const SKILL_NAMESPACE_SEGMENT: &str = "skill";
 
 /// Namespace segment every xprompt memory carries in its reference name.
 ///
@@ -336,7 +341,7 @@ pub struct SkillPlacementIssueWire {
 /// Build the canonical xprompt reference name for a skill source.
 ///
 /// The provider skill name stays `skill_name`; only the xprompt reference is
-/// namespaced, so `#skills/foo` (or `#app/skills/foo`) expands what `/foo`
+/// namespaced, so `#skill/foo` (or `#app/skill/foo`) expands what `/foo`
 /// invokes.
 pub fn skill_reference_name(project: Option<&str>, skill_name: &str) -> String {
     match project.filter(|project| !project.is_empty()) {
@@ -810,7 +815,7 @@ fn skill_sources(
             &mut sources,
             "project_skills",
             "project",
-            root.join("sase").join(SKILL_NAMESPACE_SEGMENT),
+            root.join("sase").join(SKILL_DIRECTORY_SEGMENT),
             true,
         );
     }
@@ -818,7 +823,7 @@ fn skill_sources(
         &mut sources,
         "home_skills",
         "home",
-        home_root.join("sase").join(SKILL_NAMESPACE_SEGMENT),
+        home_root.join("sase").join(SKILL_DIRECTORY_SEGMENT),
         false,
     );
     if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
@@ -828,7 +833,7 @@ fn skill_sources(
             "home_project",
             home_root
                 .join("sase")
-                .join(SKILL_NAMESPACE_SEGMENT)
+                .join(SKILL_DIRECTORY_SEGMENT)
                 .join(project_name),
             true,
         );
@@ -843,7 +848,7 @@ fn skill_sources(
         &mut sources,
         "package_skills",
         "package",
-        "package:skills",
+        "package:xprompts/skills",
     );
 
     for (priority, source) in sources.iter_mut().enumerate() {
@@ -896,7 +901,7 @@ fn push_skill_symbolic_source(
 
 fn skills_layout_path(namespace_root: &Path) -> LayoutPathWire {
     layout_path(
-        namespace_root.join(SKILL_NAMESPACE_SEGMENT),
+        namespace_root.join(SKILL_DIRECTORY_SEGMENT),
         LayoutPathRoleWire::Canonical,
         LayoutTrackingWire::SourceControlled,
     )
@@ -1235,7 +1240,7 @@ mod tests {
             layout.skill_sources[3].locator,
             "entrypoint:sase_xprompts/skills"
         );
-        assert_eq!(layout.skill_sources[4].locator, "package:skills");
+        assert_eq!(layout.skill_sources[4].locator, "package:xprompts/skills");
         assert!(layout.skill_sources[3..]
             .iter()
             .all(|source| source.path.is_none() && !source.writable));
@@ -1248,21 +1253,23 @@ mod tests {
 
     #[test]
     fn skill_reference_names_split_provider_name_from_xprompt_reference() {
-        assert_eq!(skill_reference_name(None, "foo"), "skills/foo");
-        assert_eq!(skill_reference_name(Some("app"), "foo"), "app/skills/foo");
+        assert_eq!(skill_reference_name(None, "foo"), "skill/foo");
+        assert_eq!(skill_reference_name(Some("app"), "foo"), "app/skill/foo");
         assert_eq!(
-            split_skill_reference_name("skills/foo"),
+            split_skill_reference_name("skill/foo"),
             Some((None, "foo"))
         );
         assert_eq!(
-            split_skill_reference_name("app/skills/foo"),
+            split_skill_reference_name("app/skill/foo"),
             Some((Some("app"), "foo"))
         );
         // A bare or oddly shaped reference is not a skill reference.
         assert_eq!(split_skill_reference_name("foo"), None);
         assert_eq!(split_skill_reference_name("app/foo"), None);
-        assert_eq!(split_skill_reference_name("skills/"), None);
-        assert_eq!(split_skill_reference_name("a/skills/b/c"), None);
+        assert_eq!(split_skill_reference_name("skill/"), None);
+        assert_eq!(split_skill_reference_name("skills/foo"), None);
+        assert_eq!(split_skill_reference_name("app/skills/foo"), None);
+        assert_eq!(split_skill_reference_name("a/skill/b/c"), None);
     }
 
     #[test]

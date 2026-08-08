@@ -1213,7 +1213,7 @@ pub fn build_xprompt_completion_candidates(
 
     for entry in entries {
         // Slash completion is keyed on the provider skill name (`/foo`) while
-        // `#` completion is keyed on the xprompt reference (`#skills/foo`).
+        // `#` completion is keyed on the xprompt reference (`#skill/foo`).
         let match_name = if slash_skill {
             let Some(skill_name) = entry.skill_name.as_deref() else {
                 continue;
@@ -3090,9 +3090,9 @@ mod tests {
                 definition_range: None,
             },
             EditorXpromptCatalogEntryWire {
-                name: "skills/plan".to_string(),
-                display_label: "skills/plan".to_string(),
-                insertion: Some("#skills/plan".to_string()),
+                name: "skill/plan".to_string(),
+                display_label: "skill/plan".to_string(),
+                insertion: Some("#skill/plan".to_string()),
                 reference_prefix: Some("#".to_string()),
                 kind: Some("xprompt".to_string()),
                 description: None,
@@ -4536,17 +4536,22 @@ mod tests {
             .candidates
             .is_empty());
 
-        // The same skill is reachable inline only through `#skills/plan`.
+        // The same skill is reachable inline only through `#skill/plan`.
         let namespaced =
-            build_xprompt_completion_candidates("#skills/", None, &catalog);
+            build_xprompt_completion_candidates("#skill/", None, &catalog);
         assert_eq!(
             namespaced
                 .candidates
                 .iter()
                 .map(|c| c.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["#skills/plan"]
+            vec!["#skill/plan"]
         );
+        assert!(build_xprompt_completion_candidates(
+            "#skills/", None, &catalog
+        )
+        .candidates
+        .is_empty());
         assert!(build_xprompt_completion_candidates("#plan", None, &catalog)
             .candidates
             .is_empty());

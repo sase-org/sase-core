@@ -17,6 +17,7 @@ use crate::{
         CompatibleLayoutPathWire, MemorySourceWire, MemoryTierWire,
         MemoryXpromptIssueWire, SkillPlacementIssueWire, SkillSourceWire,
         XpromptSourceWire, MEMORY_NAMESPACE_SEGMENT, MEMORY_README_FILENAME,
+        SKILL_DIRECTORY_SEGMENT,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     list_project_records, DocumentSnapshot, EditorRange,
@@ -948,8 +949,12 @@ impl CatalogLoader {
             .or_else(|| {
                 package_root.as_ref().map(|root| root.join("xprompts"))
             });
-        let package_skills_dir = env_path("SASE_SKILL_BUILTIN_DIR")
-            .or_else(|| package_root.as_ref().map(|root| root.join("skills")));
+        let package_skills_dir =
+            env_path("SASE_SKILL_BUILTIN_DIR").or_else(|| {
+                package_root.as_ref().map(|root| {
+                    root.join("xprompts").join(SKILL_DIRECTORY_SEGMENT)
+                })
+            });
         let default_xprompts_dir = env_path("SASE_XPROMPT_DEFAULT_DIR")
             .or_else(|| {
                 package_root
@@ -1142,7 +1147,7 @@ impl CatalogLoader {
             )?);
         }
 
-        // Skills live in their own `skills/` reference namespace, so they can
+        // Skills live in their own `skill/` reference namespace, so they can
         // never shadow (or be shadowed by) an ordinary xprompt of the same
         // bare name. Lowest priority first, so the canonical directory
         // sources win.
@@ -1359,7 +1364,7 @@ impl CatalogLoader {
         let parent = dir.parent()?;
         Some(
             parent
-                .join(crate::content_layout::SKILL_NAMESPACE_SEGMENT)
+                .join(SKILL_DIRECTORY_SEGMENT)
                 .to_string_lossy()
                 .into_owned(),
         )
@@ -1451,7 +1456,7 @@ impl CatalogLoader {
     /// A definition here must declare a truthy `skill` value; everything else
     /// is rejected with a migration diagnostic rather than being loaded as an
     /// ordinary xprompt. Accepted definitions keep their declared name as the
-    /// provider skill name and take the namespaced `skills/<name>` xprompt
+    /// provider skill name and take the namespaced `skill/<name>` xprompt
     /// reference name.
     fn load_skills_from_dir(
         &self,
@@ -3002,10 +3007,10 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         // A skill source keeps its `/swarm` provider name but is only
-        // reachable inline through the namespaced `#skills/swarm`.
+        // reachable inline through the namespaced `#skill/swarm`.
         assert!(!by_name.contains_key("swarm"));
-        let swarm = by_name["skills/swarm"];
-        assert_eq!(swarm.insertion.as_deref(), Some("#skills/swarm"));
+        let swarm = by_name["skill/swarm"];
+        assert_eq!(swarm.insertion.as_deref(), Some("#skill/swarm"));
         assert_eq!(swarm.reference_prefix.as_deref(), Some("#"));
         assert_eq!(swarm.kind.as_deref(), Some("xprompt"));
         assert!(swarm.is_skill);
@@ -3387,29 +3392,30 @@ mod tests {
     fn packaged_skill_frame_template_is_not_a_skill_source() {
         let temp = tempfile::tempdir().unwrap();
         let package = temp.path().join("package");
-        fs::create_dir_all(package.join("skills")).unwrap();
+        let package_skills = package.join("xprompts/skills");
+        fs::create_dir_all(&package_skills).unwrap();
         fs::write(
-            package.join("skills/sase_plan.md"),
+            package_skills.join("sase_plan.md"),
             "---\nskill: true\n---\nPlan body",
         )
         .unwrap();
         // The Jinja frame ships beside the sources and has no frontmatter, so
         // it must be skipped rather than reported as a misplaced definition.
         fs::write(
-            package.join("skills").join(SKILL_FRAME_TEMPLATE_FILENAME),
+            package_skills.join(SKILL_FRAME_TEMPLATE_FILENAME),
             "{{ frontmatter }}\n\n{{ body }}\n",
         )
         .unwrap();
 
         let loader = CatalogLoader {
-            package_skills_dir: Some(package.join("skills")),
+            package_skills_dir: Some(package_skills),
             ..CatalogLoader::default()
         };
         let xprompts = loader.load_all_xprompts(None).unwrap();
 
         assert_eq!(
             xprompts.keys().collect::<Vec<_>>(),
-            vec!["skills/sase_plan"]
+            vec!["skill/sase_plan"]
         );
         assert!(
             loader.placement_warnings().is_empty(),
@@ -3419,7 +3425,37 @@ mod tests {
     }
 
     #[test]
-    fn home_skills_use_the_skills_namespace_and_project_qualified_form() {
+    fn packaged_skills_load_from_nested_xprompts_skills_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("package");
+        let nested = package.join("xprompts/skills");
+        let legacy = package.join("skills");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            nested.join("sase_plan.md"),
+            "---\nskill: true\n---\nPlan body",
+        )
+        .unwrap();
+        fs::write(
+            legacy.join("legacy_plan.md"),
+            "---\nskill: true\n---\nLegacy body",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            package_skills_dir: Some(package.join("xprompts/skills")),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        assert!(xprompts.contains_key("skill/sase_plan"));
+        assert!(!xprompts.contains_key("skill/legacy_plan"));
+        assert!(!xprompts.contains_key("skills/sase_plan"));
+    }
+
+    #[test]
+    fn home_skills_use_the_skill_namespace_and_project_qualified_form() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let root = temp.path().join("workspace");
@@ -3443,13 +3479,13 @@ mod tests {
         };
         let xprompts = loader.load_all_xprompts(Some("app")).unwrap();
         let names = xprompts.keys().cloned().collect::<Vec<_>>();
-        assert_eq!(names, vec!["app/skills/scoped", "skills/bob_query"]);
+        assert_eq!(names, vec!["app/skill/scoped", "skill/bob_query"]);
         assert_eq!(
-            xprompts["skills/bob_query"].skill_name.as_deref(),
+            xprompts["skill/bob_query"].skill_name.as_deref(),
             Some("bob_query")
         );
         assert_eq!(
-            xprompts["app/skills/scoped"].skill_name.as_deref(),
+            xprompts["app/skill/scoped"].skill_name.as_deref(),
             Some("scoped")
         );
         // The bare names never resolve after the cutover.
@@ -4123,7 +4159,7 @@ mod tests {
         fs::create_dir_all(root.join("sase/skills")).unwrap();
         fs::create_dir_all(home.join("sase/xprompts/app")).unwrap();
         fs::create_dir_all(package.join("xprompts")).unwrap();
-        fs::create_dir_all(package.join("skills")).unwrap();
+        fs::create_dir_all(package.join("xprompts/skills")).unwrap();
         fs::create_dir_all(package.join("default_xprompts")).unwrap();
 
         fs::write(
@@ -4132,7 +4168,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            package.join("skills/sase_plan.md"),
+            package.join("xprompts/skills/sase_plan.md"),
             "---\nskill: true\n---\nPlan skill",
         )
         .unwrap();
@@ -4173,7 +4209,7 @@ mod tests {
             root_dir: Some(root.clone()),
             home_dir: Some(home.clone()),
             package_xprompts_dir: Some(package.join("xprompts")),
-            package_skills_dir: Some(package.join("skills")),
+            package_skills_dir: Some(package.join("xprompts/skills")),
             default_xprompts_dir: Some(package.join("default_xprompts")),
             default_config_path: Some(package.join("default_config.yml")),
             plugin_xprompt_dirs: BTreeMap::new(),
@@ -4197,15 +4233,15 @@ mod tests {
 
         assert_eq!(by_name["builtin"].bucket, "built-in");
         assert!(!by_name["builtin"].is_skill);
-        assert_eq!(by_name["skills/sase_plan"].bucket, "built-in");
-        assert!(by_name["skills/sase_plan"].is_skill);
+        assert_eq!(by_name["skill/sase_plan"].bucket, "built-in");
+        assert!(by_name["skill/sase_plan"].is_skill);
         assert_eq!(
-            by_name["skills/sase_plan"].skill_name.as_deref(),
+            by_name["skill/sase_plan"].skill_name.as_deref(),
             Some("sase_plan")
         );
         // A project skill is namespaced inside its existing project
         // namespace, and a provider list is just as truthy as `true`.
-        let project_skill = by_name["app/skills/local_skill"];
+        let project_skill = by_name["app/skill/local_skill"];
         assert!(project_skill.is_skill);
         assert_eq!(project_skill.skill_name.as_deref(), Some("local_skill"));
         assert_eq!(project_skill.project.as_deref(), Some("app"));
@@ -4250,18 +4286,18 @@ mod tests {
             )
         );
         assert_eq!(
-            wire_by_name["skills/sase_plan"].insertion.as_deref(),
-            Some("#skills/sase_plan")
+            wire_by_name["skill/sase_plan"].insertion.as_deref(),
+            Some("#skill/sase_plan")
         );
         assert_eq!(
-            wire_by_name["app/skills/local_skill"].insertion.as_deref(),
-            Some("#app/skills/local_skill")
+            wire_by_name["app/skill/local_skill"].insertion.as_deref(),
+            Some("#app/skill/local_skill")
         );
         assert_eq!(
-            wire_by_name["skills/sase_plan"].definition_path.as_deref(),
+            wire_by_name["skill/sase_plan"].definition_path.as_deref(),
             Some(
                 package
-                    .join("skills/sase_plan.md")
+                    .join("xprompts/skills/sase_plan.md")
                     .canonicalize()
                     .unwrap()
                     .to_str()

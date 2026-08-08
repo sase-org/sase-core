@@ -195,9 +195,9 @@ mod tests {
     #[test]
     fn hovers_a_skill_through_both_of_its_names() {
         let entries = vec![XpromptAssistEntry {
-            name: "skills/sase_plan".to_string(),
-            display_label: "skills/sase_plan".to_string(),
-            insertion: "#skills/sase_plan".to_string(),
+            name: "skill/sase_plan".to_string(),
+            display_label: "skill/sase_plan".to_string(),
+            insertion: "#skill/sase_plan".to_string(),
             reference_prefix: "#".to_string(),
             kind: None,
             source_bucket: "builtin".to_string(),
@@ -222,7 +222,7 @@ mod tests {
             )
         };
 
-        let namespaced = at("#skills/sase_plan", 3).unwrap();
+        let namespaced = at("#skill/sase_plan", 3).unwrap();
         assert!(namespaced
             .markdown
             .contains("Create an implementation plan"));
@@ -233,7 +233,7 @@ mod tests {
 
         // Neither the bare reference nor the namespaced slash form resolves.
         assert!(at("#sase_plan", 3).is_none());
-        assert!(at("/skills", 3).is_none());
+        assert!(at("/skill", 3).is_none());
     }
 
     #[test]

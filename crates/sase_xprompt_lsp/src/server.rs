@@ -2282,7 +2282,7 @@ fn entry_for_token<'a>(
     }
     if let Some(name) = token.strip_prefix('/') {
         // Slash tokens carry the provider skill name (`/foo`), not the
-        // namespaced xprompt reference (`#skills/foo`).
+        // namespaced xprompt reference (`#skill/foo`).
         return entries.iter().find(|entry| {
             entry.is_skill && entry.skill_name.as_deref() == Some(name)
         });

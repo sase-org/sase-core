@@ -701,7 +701,7 @@ pub struct MobileXpromptCatalogEntryWire {
     pub inputs: Vec<MobileXpromptInputWire>,
     pub is_skill: bool,
     /// Provider skill name for a skill source (`foo` for reference name
-    /// `skills/foo`). Absent for everything that is not a skill; older payloads
+    /// `skill/foo`). Absent for everything that is not a skill; older payloads
     /// that predate the split simply omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,

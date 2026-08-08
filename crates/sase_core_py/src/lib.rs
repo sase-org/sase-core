@@ -6418,7 +6418,7 @@ fn py_resolve_layout_candidates(
     json_value_to_py(py, &json)
 }
 
-/// Return the canonical `skills/<name>` xprompt reference for a skill source.
+/// Return the canonical `skill/<name>` xprompt reference for a skill source.
 #[pyfunction]
 #[pyo3(name = "skill_reference_name")]
 #[pyo3(signature = (skill_name, project = None))]
@@ -8911,7 +8911,7 @@ mod tests {
                 .bind(py),
             )
             .unwrap();
-            assert_eq!(layout["schema_version"], json!(3));
+            assert_eq!(layout["schema_version"], json!(4));
             assert_eq!(
                 layout["memory_sources"][0]["paths"]["canonical"]["path"],
                 json!("/repo/sase/memory")
@@ -8921,6 +8921,11 @@ mod tests {
                 json!("error")
             );
             assert_eq!(layout["memory_sources"][1]["id"], json!("home_memory"));
+            assert_eq!(py_skill_reference_name("plan", None), "skill/plan");
+            assert_eq!(
+                py_skill_reference_name("plan", Some("demo")),
+                "demo/skill/plan"
+            );
 
             let reserved = py_to_json_value(
                 py_reserved_memory_namespace_issue(

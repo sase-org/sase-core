@@ -497,7 +497,7 @@
       "name": "string",
       "project": "string|null",
       "reference_prefix": "string|null",
-      "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skills/<skill_name>` reference",
+      "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
       "source_bucket": "string",
       "source_path_display": "string|null",
       "tags": "string[]"

@@ -578,7 +578,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "input_signature": "string|null",
                 "inputs": "MobileXpromptInputWire[]; default [] when absent",
                 "is_skill": "bool",
-                "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skills/<skill_name>` reference",
+                "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
                 "memory_type": "string|null; `short` or `long` for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
                 "content_preview": "string|null",
                 "source_path_display": "string|null"
