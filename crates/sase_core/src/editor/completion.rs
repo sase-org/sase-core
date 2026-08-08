@@ -15,7 +15,7 @@ use crate::artifact_file::{
 };
 use crate::plan::read::split_frontmatter;
 use crate::{
-    ArtifactRefContextWire, EditorSnippetEntryWire,
+    ArtifactRefContextWire, ArtifactRefError, EditorSnippetEntryWire,
     EditorXpromptCatalogEntryWire,
 };
 
@@ -103,6 +103,7 @@ pub fn assist_entries_from_catalog(
                 is_skill: entry.is_skill,
                 skill_name: entry.skill_name.clone(),
                 memory_type: entry.memory_type,
+                ref_kind: entry.ref_kind.clone(),
             }
         })
         .collect()
@@ -371,6 +372,7 @@ pub fn build_artifact_ref_kind_completion_candidates(
                 row.detail,
                 replacement_range,
                 "artifact_kind",
+                None,
             )
         })
         .collect();
@@ -395,7 +397,10 @@ pub fn build_artifact_ref_payload_completion_candidates(
         return empty_artifact_ref_completion_list();
     }
 
-    let inventory = build_artifact_ref_payload_inventory(kind, context);
+    let Ok(inventory) = build_artifact_ref_payload_inventory(kind, context)
+    else {
+        return empty_artifact_ref_completion_list();
+    };
     let detected = legacy_at_reference_context(trigger);
     let menu = build_at_reference_menu(&detected, &inventory);
     let prefix = format!("@{kind}:");
@@ -412,6 +417,7 @@ pub fn build_artifact_ref_payload_completion_candidates(
                 row.detail,
                 replacement_range,
                 "artifact_payload",
+                Some(kind),
             )
         })
         .collect();
@@ -436,9 +442,10 @@ pub fn build_artifact_ref_payload_completion_candidates(
 pub fn build_artifact_ref_payload_inventory(
     kind: &str,
     context: &ArtifactRefContextWire,
-) -> AtReferenceInventoryWire {
+) -> Result<AtReferenceInventoryWire, ArtifactRefError> {
+    crate::artifact_ref::validate_artifact_ref_context(context)?;
     if kind == "bug" {
-        return AtReferenceInventoryWire::default();
+        return Ok(AtReferenceInventoryWire::default());
     }
 
     let mut payloads = Vec::new();
@@ -454,7 +461,8 @@ pub fn build_artifact_ref_payload_inventory(
                 &mut seen,
                 kind,
                 Path::new(root),
-            );
+                None,
+            )?;
         }
     } else if kind == "bead" {
         truncated_payloads +=
@@ -474,14 +482,15 @@ pub fn build_artifact_ref_payload_inventory(
                 &mut seen,
                 kind,
                 Path::new(&root.root),
-            );
+                root.path_globs.as_deref(),
+            )?;
         }
     }
-    AtReferenceInventoryWire {
+    Ok(AtReferenceInventoryWire {
         payloads,
         truncated_payloads,
         ..Default::default()
-    }
+    })
 }
 
 #[derive(Debug)]
@@ -865,9 +874,15 @@ fn append_artifact_path_candidates(
     seen: &mut BTreeSet<String>,
     kind: &str,
     root: &Path,
-) -> usize {
+    path_globs: Option<&[String]>,
+) -> Result<usize, ArtifactRefError> {
     let scan = bounded_relative_files(root);
-    for path in scan.files {
+    let filtered = crate::artifact_ref::filter_artifact_ref_path_payloads(
+        kind,
+        path_globs,
+        &scan.files,
+    )?;
+    for path in filtered.allowed {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -881,7 +896,7 @@ fn append_artifact_path_candidates(
             body: String::new(),
         });
     }
-    scan.truncated
+    Ok(scan.truncated)
 }
 
 fn append_bead_page_candidates(
@@ -1168,9 +1183,15 @@ fn artifact_ref_candidate(
     detail: String,
     replacement_range: Option<EditorRange>,
     kind: &str,
+    payload_kind: Option<&str>,
 ) -> CompletionCandidate {
+    let display = if kind == "artifact_payload" && !name.is_empty() {
+        name.clone()
+    } else {
+        insertion.clone()
+    };
     CompletionCandidate {
-        display: insertion.clone(),
+        display,
         insertion: insertion.clone(),
         detail: Some(detail),
         documentation: None,
@@ -1183,7 +1204,7 @@ fn artifact_ref_candidate(
         additional_edits: Vec::new(),
         kind: kind.to_string(),
         project: String::new(),
-        status: String::new(),
+        status: payload_kind.unwrap_or_default().to_string(),
     }
 }
 
@@ -1302,6 +1323,56 @@ pub fn build_xprompt_arg_name_candidates(
     CompletionList {
         candidates,
         shared_extension: String::new(),
+    }
+}
+
+pub fn build_xprompt_ref_arg_completion_candidates(
+    entry: &XpromptAssistEntry,
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    context: &ArtifactRefContextWire,
+) -> CompletionList {
+    let Some(kind) = entry.ref_kind.as_deref() else {
+        return empty_artifact_ref_completion_list();
+    };
+    if kind == "bug" {
+        return empty_artifact_ref_completion_list();
+    }
+    let Ok(inventory) = build_artifact_ref_payload_inventory(kind, context)
+    else {
+        return empty_artifact_ref_completion_list();
+    };
+    let detected = AtReferenceContextWire {
+        stage: AtReferenceStage::Payload,
+        candidate_span: (0, token.len()),
+        replacement_span: (0, token.len()),
+        query_span: (0, token.len()),
+        query: token.to_string(),
+        kind: Some(kind.to_string()),
+        path_query: None,
+    };
+    let menu = build_at_reference_menu(&detected, &inventory);
+    let prefix = format!("@{kind}:");
+    let candidates = menu
+        .rows
+        .into_iter()
+        .map(|row| {
+            artifact_ref_candidate(
+                row.title,
+                row.insertion
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&row.insertion)
+                    .to_string(),
+                row.detail,
+                replacement_range,
+                "artifact_payload",
+                Some(kind),
+            )
+        })
+        .collect();
+    CompletionList {
+        candidates,
+        shared_extension: menu.shared_extension,
     }
 }
 
@@ -3036,6 +3107,7 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
+                ref_kind: None,
                 content_preview: Some("review body".to_string()),
                 source_path_display: Some(
                     "sase/xprompts/review.md".to_string(),
@@ -3060,6 +3132,7 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
+                ref_kind: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -3080,6 +3153,7 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: Some(MemoryTierWire::Short),
+                ref_kind: None,
                 content_preview: Some("Glossary body".to_string()),
                 source_path_display: Some(
                     "sase/memory/glossary.md".to_string(),
@@ -3104,6 +3178,7 @@ mod tests {
                 is_skill: true,
                 skill_name: Some("plan".to_string()),
                 memory_type: None,
+                ref_kind: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -3117,6 +3192,7 @@ mod tests {
             document_roots: vec![ArtifactRefDocumentRootWire {
                 kind: "designs".to_string(),
                 root: root.join("designs").to_string_lossy().into_owned(),
+                path_globs: None,
             }],
             chats_root: Some(root.join("chats").to_string_lossy().into_owned()),
             artifact_index_path: Some(
@@ -3356,7 +3432,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert_eq!(inventory.truncated_payloads, 0);
         assert_eq!(inventory.payloads.len(), 3);
@@ -3452,7 +3528,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert_eq!(inventory.truncated_payloads, 0);
         assert_eq!(
@@ -3494,7 +3570,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert!(inventory.payloads.is_empty());
         assert_eq!(inventory.truncated_payloads, 0);
@@ -3535,7 +3611,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert_eq!(inventory.payloads.len(), ARTIFACT_REF_COMMIT_MAX_ROWS);
         assert_eq!(inventory.truncated_payloads, 0);
@@ -3560,7 +3636,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert_eq!(inventory.payloads.len(), 1);
         assert_eq!(inventory.payloads[0].label, subject);
@@ -3586,7 +3662,7 @@ mod tests {
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("commit", &context);
+            build_artifact_ref_payload_inventory("commit", &context).unwrap();
 
         assert_eq!(inventory.payloads.len(), ARTIFACT_REF_COMMIT_SCAN_LIMIT);
         assert_eq!(inventory.payloads[0].label, "commit 200");
@@ -3624,10 +3700,11 @@ mod tests {
         };
 
         assert!(build_artifact_ref_payload_inventory("commit", &context)
+            .unwrap()
             .payloads
             .is_empty());
         assert_eq!(
-            build_artifact_ref_payload_inventory("bug", &context),
+            build_artifact_ref_payload_inventory("bug", &context).unwrap(),
             AtReferenceInventoryWire::default()
         );
     }
@@ -4133,10 +4210,12 @@ mod tests {
                 ArtifactRefDocumentRootWire {
                     kind: "designs".to_string(),
                     root: first.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
                 ArtifactRefDocumentRootWire {
                     kind: "designs".to_string(),
                     root: second.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
             ],
             ..Default::default()
@@ -4174,12 +4253,13 @@ mod tests {
             document_roots: vec![ArtifactRefDocumentRootWire {
                 kind: "designs".to_string(),
                 root: designs.to_string_lossy().into_owned(),
+                path_globs: None,
             }],
             ..Default::default()
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("designs", &context);
+            build_artifact_ref_payload_inventory("designs", &context).unwrap();
         assert_eq!(inventory.payloads.len(), 206);
         assert_eq!(inventory.truncated_payloads, 0);
 
@@ -4195,6 +4275,98 @@ mod tests {
     }
 
     #[test]
+    fn payload_inventory_applies_document_root_path_globs() {
+        let temp = tempfile::tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        fs::create_dir_all(designs.join("allowed/private")).unwrap();
+        fs::write(designs.join("allowed/keep.md"), "keep").unwrap();
+        fs::write(designs.join("allowed/private/skip.md"), "skip").unwrap();
+        fs::write(designs.join("other.md"), "other").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: designs.to_string_lossy().into_owned(),
+                path_globs: Some(vec![
+                    "allowed/**".to_string(),
+                    "!allowed/private/**".to_string(),
+                ]),
+            }],
+            ..Default::default()
+        };
+
+        let inventory =
+            build_artifact_ref_payload_inventory("designs", &context).unwrap();
+
+        assert_eq!(
+            inventory
+                .payloads
+                .iter()
+                .map(|row| row.payload.as_str())
+                .collect::<Vec<_>>(),
+            vec!["allowed/keep.md"]
+        );
+    }
+
+    #[test]
+    fn xprompt_ref_argument_completion_uses_artifact_payload_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let designs = temp.path().join("designs");
+        fs::create_dir_all(&designs).unwrap();
+        fs::write(
+            designs.join("guide.md"),
+            "---\ntitle: Product Guide\n---\nbody",
+        )
+        .unwrap();
+        fs::write(designs.join("notes.md"), "notes").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: designs.to_string_lossy().into_owned(),
+                path_globs: Some(vec!["guide.md".to_string()]),
+            }],
+            ..Default::default()
+        };
+        let entry = XpromptAssistEntry {
+            name: "ref/designs".to_string(),
+            display_label: "ref/designs".to_string(),
+            insertion: "#ref/designs".to_string(),
+            reference_prefix: "#".to_string(),
+            kind: Some("ref".to_string()),
+            source_bucket: "project".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: Some("(file_path: path)".to_string()),
+            inputs: vec![XpromptInputHint {
+                name: "file_path".to_string(),
+                r#type: "path".to_string(),
+                description: None,
+                required: true,
+                default_display: None,
+                position: 0,
+                repeatable: false,
+            }],
+            content_preview: None,
+            description: None,
+            source_path_display: None,
+            definition_path: None,
+            definition_range: None,
+            is_skill: false,
+            skill_name: None,
+            memory_type: None,
+            ref_kind: Some("designs".to_string()),
+        };
+
+        let list = build_xprompt_ref_arg_completion_candidates(
+            &entry, "prod", None, &context,
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].insertion, "guide.md");
+        assert_eq!(list.candidates[0].name, "Product Guide");
+        assert_eq!(list.candidates[0].kind, "artifact_payload");
+    }
+
+    #[test]
     fn payload_inventory_discloses_the_scan_bound() {
         let temp = tempfile::tempdir().unwrap();
         let designs = temp.path().join("designs");
@@ -4206,12 +4378,13 @@ mod tests {
             document_roots: vec![ArtifactRefDocumentRootWire {
                 kind: "designs".to_string(),
                 root: designs.to_string_lossy().into_owned(),
+                path_globs: None,
             }],
             ..Default::default()
         };
 
         let inventory =
-            build_artifact_ref_payload_inventory("designs", &context);
+            build_artifact_ref_payload_inventory("designs", &context).unwrap();
 
         assert_eq!(inventory.payloads.len(), ARTIFACT_REF_MAX_SCAN_RESULTS);
         assert_eq!(inventory.truncated_payloads, 1);
@@ -4704,6 +4877,7 @@ mod tests {
             description: None,
             skill_name: None,
             memory_type: None,
+            ref_kind: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,
@@ -5048,6 +5222,7 @@ mod tests {
             description: None,
             skill_name: None,
             memory_type: None,
+            ref_kind: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,

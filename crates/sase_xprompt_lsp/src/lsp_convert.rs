@@ -571,7 +571,9 @@ fn completion_item(
         .unwrap_or_else(|| candidate.insertion.clone());
     CompletionItem {
         label: candidate.display,
-        kind: Some(if candidate.is_dir {
+        kind: Some(if candidate.kind == "artifact_payload" {
+            payload_completion_item_kind(&candidate.status)
+        } else if candidate.is_dir {
             CompletionItemKind::FOLDER
         } else {
             CompletionItemKind::TEXT

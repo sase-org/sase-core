@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 4;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 5;
 
 /// Directory name holding canonical xprompt-backed skill sources.
 ///
@@ -16,6 +16,19 @@ pub const SKILL_DIRECTORY_SEGMENT: &str = "skills";
 /// referenced as `#skill/foo` (or `#<project>/skill/foo`) while its provider
 /// skill name stays `foo`, so `/foo` keeps working.
 pub const SKILL_NAMESPACE_SEGMENT: &str = "skill";
+
+/// Directory name holding canonical artifact-reference renderer definitions.
+///
+/// Ref sources are physical files in plural `refs/` directories, while their
+/// public xprompt namespace is contextual and singular: `#ref/<kind>`.
+pub const REF_DIRECTORY_SEGMENT: &str = "refs";
+
+/// Namespace segment every artifact-reference renderer carries in its
+/// xprompt reference name.
+///
+/// Ref entries are contextual to the selected project/home/plugin/package
+/// source and never include a project prefix.
+pub const REF_NAMESPACE_SEGMENT: &str = "ref";
 
 /// Namespace segment every xprompt memory carries in its reference name.
 ///
@@ -87,6 +100,7 @@ pub struct ProjectContentLayoutWire {
     pub config: CompatibleLayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
+    pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub repos: LayoutPathWire,
     pub memory_readme: LayoutPathWire,
@@ -99,6 +113,7 @@ pub struct HomeContentLayoutWire {
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
+    pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub global_config: LayoutPathWire,
     pub state_root: LayoutPathWire,
@@ -112,6 +127,7 @@ pub struct ChezmoiContentLayoutWire {
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
+    pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub global_config: LayoutPathWire,
     pub memory_readme: LayoutPathWire,
@@ -144,6 +160,26 @@ pub struct XpromptSourceWire {
 /// readable source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillSourceWire {
+    pub id: String,
+    pub priority: u32,
+    pub scope: String,
+    pub locator: String,
+    pub path: Option<String>,
+    pub formats: Vec<String>,
+    pub tracking: LayoutTrackingWire,
+    pub project_namespaced: bool,
+    pub writable: bool,
+    pub ordering: Option<String>,
+}
+
+/// One canonical source of artifact-reference renderer definitions.
+///
+/// Ref definitions live in physical `refs/` directories and are referenced as
+/// contextual `ref/<kind>` xprompts. There are deliberately no legacy ref
+/// paths: the namespace is reserved from birth, so misplaced files should be
+/// reported instead of discovered by accident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefSourceWire {
     pub id: String,
     pub priority: u32,
     pub scope: String,
@@ -212,6 +248,7 @@ pub struct SaseContentLayoutWire {
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
     pub xprompt_sources: Vec<XpromptSourceWire>,
     pub skill_sources: Vec<SkillSourceWire>,
+    pub ref_sources: Vec<RefSourceWire>,
     pub memory_sources: Vec<MemorySourceWire>,
 }
 
@@ -408,6 +445,130 @@ pub fn skill_placement_issue(
     }
 }
 
+/// Why a definition was rejected by the canonical ref placement rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefPlacementRuleWire {
+    /// Lives in a canonical ref source but declares no truthy `ref` value.
+    MissingRefField,
+    /// Declares a truthy `ref` value from an ordinary xprompt/config/skill
+    /// source instead of a canonical ref source.
+    RefOutsideRefSource,
+    /// A non-ref definition claims the reserved `ref/` namespace.
+    ReservedNamespace,
+    /// A ref filename stem cannot be used as an artifact-reference kind.
+    InvalidKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefPlacementIssueWire {
+    pub source: String,
+    pub rule: RefPlacementRuleWire,
+    pub message: String,
+    pub migrate_to: Option<String>,
+}
+
+/// Build the canonical xprompt reference name for a ref renderer kind.
+///
+/// Ref names are contextual: `sase/refs/research.md` and a home ref of the
+/// same kind are both referenced as `#ref/research`, with source priority
+/// deciding which one wins.
+pub fn ref_reference_name(kind: &str) -> String {
+    format!("{REF_NAMESPACE_SEGMENT}/{kind}")
+}
+
+/// Split a canonical ref reference name back into its kind.
+pub fn ref_reference_kind(name: &str) -> Option<&str> {
+    let kind = name.strip_prefix(REF_NAMESPACE_SEGMENT)?;
+    let kind = kind.strip_prefix('/')?;
+    is_invokable_ref_kind(kind).then_some(kind)
+}
+
+/// Whether `name` claims a reference in the reserved `ref/` namespace.
+pub fn is_reserved_ref_reference(name: &str) -> bool {
+    name.starts_with(&format!("{REF_NAMESPACE_SEGMENT}/"))
+}
+
+/// Whether a filename stem can be an artifact-reference kind.
+pub fn is_invokable_ref_kind(kind: &str) -> bool {
+    let mut bytes = kind.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'-')
+        })
+}
+
+/// Reject a non-ref definition that claims a reserved `ref/` reference.
+pub fn reserved_ref_namespace_issue(
+    source: &str,
+    name: &str,
+) -> Option<RefPlacementIssueWire> {
+    is_reserved_ref_reference(name).then(|| RefPlacementIssueWire {
+        source: source.to_string(),
+        rule: RefPlacementRuleWire::ReservedNamespace,
+        message: format!(
+            "{source} claims the reserved artifact-reference renderer \
+             namespace `#{name}`; move renderer definitions into a canonical \
+             `{REF_DIRECTORY_SEGMENT}/` source and keep ordinary xprompts out \
+             of `#{REF_NAMESPACE_SEGMENT}/`"
+        ),
+        migrate_to: None,
+    })
+}
+
+/// Apply the two-way ref placement rules to one loaded definition.
+pub fn ref_placement_issue(
+    source: &str,
+    in_ref_source: bool,
+    declares_ref: bool,
+    ref_kind: Option<&str>,
+    migrate_to: Option<&str>,
+) -> Option<RefPlacementIssueWire> {
+    if in_ref_source {
+        if let Some(kind) = ref_kind {
+            if !is_invokable_ref_kind(kind) {
+                return Some(RefPlacementIssueWire {
+                    source: source.to_string(),
+                    rule: RefPlacementRuleWire::InvalidKind,
+                    message: format!(
+                        "{source} cannot be referenced as \
+                         `#{}`: rename the file so its stem starts with a \
+                         lowercase letter and contains only lowercase letters, \
+                         digits, '-' and '_'",
+                        ref_reference_name(kind)
+                    ),
+                    migrate_to: None,
+                });
+            }
+        }
+    }
+    match (in_ref_source, declares_ref) {
+        (true, false) => Some(RefPlacementIssueWire {
+            source: source.to_string(),
+            rule: RefPlacementRuleWire::MissingRefField,
+            message: format!(
+                "{source} is a canonical ref source but declares no truthy \
+                 `ref:` value; add `ref: true`, or move it to {}",
+                migrate_to.unwrap_or("the scope's sase/xprompts/ directory")
+            ),
+            migrate_to: migrate_to.map(str::to_string),
+        }),
+        (false, true) => Some(RefPlacementIssueWire {
+            source: source.to_string(),
+            rule: RefPlacementRuleWire::RefOutsideRefSource,
+            message: format!(
+                "{source} declares `ref:` outside a canonical ref source; \
+                 move it to {}",
+                migrate_to.unwrap_or("the scope's sase/refs/ directory")
+            ),
+            migrate_to: migrate_to.map(str::to_string),
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutCandidateResolutionWire {
     pub selected_index: Option<usize>,
@@ -461,6 +622,7 @@ pub fn sase_content_layout(
     let xprompt_sources =
         xprompt_sources(project_root, home_root, project_name);
     let skill_sources = skill_sources(project_root, home_root, project_name);
+    let ref_sources = ref_sources(project_root, home_root, project_name);
     let memory_sources = memory_sources(project_root, home_root);
     SaseContentLayoutWire {
         schema_version: CONTENT_LAYOUT_SCHEMA_VERSION,
@@ -469,6 +631,7 @@ pub fn sase_content_layout(
         chezmoi,
         xprompt_sources,
         skill_sources,
+        ref_sources,
         memory_sources,
     }
 }
@@ -538,6 +701,7 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         config,
         xprompts,
         skills: skills_layout_path(&namespace_root),
+        refs: refs_layout_path(&namespace_root),
         memory,
         repos: layout_path(
             namespace_root.join("repos"),
@@ -571,6 +735,7 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
         ),
         xprompts,
         skills: skills_layout_path(&namespace_root),
+        refs: refs_layout_path(&namespace_root),
         memory,
         global_config: layout_path(
             root.join(".config").join("sase").join("sase.yml"),
@@ -609,6 +774,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
         ),
         xprompts,
         skills: skills_layout_path(&namespace_root),
+        refs: refs_layout_path(&namespace_root),
         memory,
         global_config: layout_path(
             root.join("dot_config").join("sase").join("sase.yml"),
@@ -857,6 +1023,59 @@ fn skill_sources(
     sources
 }
 
+fn ref_sources(
+    project_root: Option<&Path>,
+    home_root: &Path,
+    project_name: Option<&str>,
+) -> Vec<RefSourceWire> {
+    let mut sources = Vec::new();
+    if let Some(root) = project_root {
+        push_ref_directory_source(
+            &mut sources,
+            "project_refs",
+            "project",
+            root.join("sase").join(REF_DIRECTORY_SEGMENT),
+            true,
+        );
+    }
+    push_ref_directory_source(
+        &mut sources,
+        "home_refs",
+        "home",
+        home_root.join("sase").join(REF_DIRECTORY_SEGMENT),
+        false,
+    );
+    if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
+        push_ref_directory_source(
+            &mut sources,
+            "home_project_refs",
+            "home_project",
+            home_root
+                .join("sase")
+                .join(REF_DIRECTORY_SEGMENT)
+                .join(project_name),
+            true,
+        );
+    }
+    push_ref_symbolic_source(
+        &mut sources,
+        "plugin_refs",
+        "plugin",
+        "entrypoint:sase_xprompts/refs",
+    );
+    push_ref_symbolic_source(
+        &mut sources,
+        "package_refs",
+        "package",
+        "package:xprompts/refs",
+    );
+
+    for (priority, source) in sources.iter_mut().enumerate() {
+        source.priority = (priority + 1) as u32;
+    }
+    sources
+}
+
 fn push_skill_directory_source(
     sources: &mut Vec<SkillSourceWire>,
     id: &str,
@@ -899,9 +1118,59 @@ fn push_skill_symbolic_source(
     });
 }
 
+fn push_ref_directory_source(
+    sources: &mut Vec<RefSourceWire>,
+    id: &str,
+    scope: &str,
+    path: PathBuf,
+    project_namespaced: bool,
+) {
+    let path = path_string(&path);
+    sources.push(RefSourceWire {
+        id: id.to_string(),
+        priority: 0,
+        scope: scope.to_string(),
+        locator: path.clone(),
+        path: Some(path),
+        formats: strings(&["md"]),
+        tracking: LayoutTrackingWire::SourceControlled,
+        project_namespaced,
+        writable: true,
+        ordering: Some("first_wins".to_string()),
+    });
+}
+
+fn push_ref_symbolic_source(
+    sources: &mut Vec<RefSourceWire>,
+    id: &str,
+    scope: &str,
+    locator: &str,
+) {
+    sources.push(RefSourceWire {
+        id: id.to_string(),
+        priority: 0,
+        scope: scope.to_string(),
+        locator: locator.to_string(),
+        path: None,
+        formats: strings(&["md"]),
+        tracking: LayoutTrackingWire::PackageOwned,
+        project_namespaced: false,
+        writable: false,
+        ordering: Some("first_wins".to_string()),
+    });
+}
+
 fn skills_layout_path(namespace_root: &Path) -> LayoutPathWire {
     layout_path(
         namespace_root.join(SKILL_DIRECTORY_SEGMENT),
+        LayoutPathRoleWire::Canonical,
+        LayoutTrackingWire::SourceControlled,
+    )
+}
+
+fn refs_layout_path(namespace_root: &Path) -> LayoutPathWire {
+    layout_path(
+        namespace_root.join(REF_DIRECTORY_SEGMENT),
         LayoutPathRoleWire::Canonical,
         LayoutTrackingWire::SourceControlled,
     )
@@ -1270,6 +1539,105 @@ mod tests {
         assert_eq!(split_skill_reference_name("skills/foo"), None);
         assert_eq!(split_skill_reference_name("app/skills/foo"), None);
         assert_eq!(split_skill_reference_name("a/skill/b/c"), None);
+    }
+
+    #[test]
+    fn ref_directories_are_canonical_and_sources_are_ordered() {
+        let layout = sase_content_layout(
+            Some(Path::new("/repo")),
+            Path::new("/home/alice"),
+            Some(Path::new("/dotfiles/home")),
+            Some("demo"),
+        );
+
+        assert_eq!(layout.schema_version, 5);
+        assert_eq!(
+            layout.project.as_ref().unwrap().refs.path,
+            "/repo/sase/refs"
+        );
+        assert_eq!(layout.home.refs.path, "/home/alice/sase/refs");
+        assert_eq!(
+            layout.chezmoi.as_ref().unwrap().refs.path,
+            "/dotfiles/home/sase/refs"
+        );
+
+        let ids = layout
+            .ref_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "project_refs",
+                "home_refs",
+                "home_project_refs",
+                "plugin_refs",
+                "package_refs",
+            ]
+        );
+        assert_eq!(
+            layout
+                .ref_sources
+                .iter()
+                .map(|source| source.priority)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert!(layout
+            .ref_sources
+            .iter()
+            .all(|source| source.formats == strings(&["md"])
+                && source.ordering.as_deref() == Some("first_wins")));
+    }
+
+    #[test]
+    fn ref_reference_names_are_contextual_and_reserved() {
+        assert_eq!(ref_reference_name("research"), "ref/research");
+        assert_eq!(ref_reference_kind("ref/research"), Some("research"));
+        assert_eq!(ref_reference_kind("demo/ref/research"), None);
+        assert!(is_reserved_ref_reference("ref/research"));
+        assert!(!is_reserved_ref_reference("research"));
+        assert!(is_invokable_ref_kind("design_docs"));
+        assert!(!is_invokable_ref_kind("Designs"));
+    }
+
+    #[test]
+    fn ref_placement_rules_reject_both_directions() {
+        let missing = ref_placement_issue(
+            "sase/refs/research.md",
+            true,
+            false,
+            Some("research"),
+            Some("sase/xprompts"),
+        )
+        .unwrap();
+        assert_eq!(missing.rule, RefPlacementRuleWire::MissingRefField);
+
+        let outside = ref_placement_issue(
+            "sase/xprompts/research.md",
+            false,
+            true,
+            Some("research"),
+            Some("sase/refs"),
+        )
+        .unwrap();
+        assert_eq!(outside.rule, RefPlacementRuleWire::RefOutsideRefSource);
+
+        let reserved =
+            reserved_ref_namespace_issue("config xprompt", "ref/research")
+                .unwrap();
+        assert_eq!(reserved.rule, RefPlacementRuleWire::ReservedNamespace);
+
+        let invalid = ref_placement_issue(
+            "sase/refs/Bad.md",
+            true,
+            true,
+            Some("Bad"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(invalid.rule, RefPlacementRuleWire::InvalidKind);
     }
 
     #[test]

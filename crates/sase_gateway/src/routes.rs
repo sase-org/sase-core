@@ -2982,6 +2982,7 @@ mod tests {
                         is_skill: false,
                         skill_name: None,
                         memory_type: None,
+                        ref_kind: None,
                         content_preview: Some("Use gh".to_string()),
                         source_path_display: Some(
                             "sase/xprompts/gh.md".to_string(),

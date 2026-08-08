@@ -831,6 +831,7 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
+                ref_kind: None,
                 content_preview: Some("body".to_string()),
                 source_path_display: None,
                 definition_path: None,

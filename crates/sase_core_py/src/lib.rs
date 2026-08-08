@@ -168,6 +168,9 @@
 //! - `artifact_ref_list_parse(entries: list[str]) -> list[dict]`
 //! - `artifact_ref_list_resolve(entries: list[str], context: dict) -> dict`
 //! - `artifact_ref_list_resolution_wire_schema_version() -> int`
+//! - `artifact_ref_context_wire_schema_version() -> int`
+//! - `artifact_ref_path_filter_wire_schema_version() -> int`
+//! - `artifact_ref_filter_path_payloads(kind: str, candidates: list[str], path_globs: list[str] | None = None) -> dict`
 //! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
 //! - `artifact_ref_wire_schema_version() -> int`
 //! - `prompt_artifact_pool_filename(sha256: str, original_name: str) -> str`
@@ -398,6 +401,7 @@ use sase_core::artifact_file::{
 };
 use sase_core::artifact_ref::{
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
+    filter_artifact_ref_path_payloads as core_filter_artifact_ref_path_payloads,
     normalize_artifact_ref_list as core_normalize_artifact_ref_list,
     parse_artifact_ref as core_parse_artifact_ref,
     parse_artifact_ref_list as core_parse_artifact_ref_list,
@@ -406,8 +410,10 @@ use sase_core::artifact_ref::{
     resolve_artifact_ref_list as core_resolve_artifact_ref_list,
     scan_artifact_refs as core_scan_artifact_refs, ArtifactRefContextWire,
     ArtifactRefError, ParsedArtifactRefWire,
+    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::axe_chop::{
@@ -3211,6 +3217,40 @@ fn py_artifact_ref_list_resolution_wire_schema_version() -> u64 {
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION
 }
 
+/// Return the artifact-reference context wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_context_wire_schema_version")]
+fn py_artifact_ref_context_wire_schema_version() -> u64 {
+    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION
+}
+
+/// Return the artifact-reference path-filter batch wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_path_filter_wire_schema_version")]
+fn py_artifact_ref_path_filter_wire_schema_version() -> u64 {
+    ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION
+}
+
+/// Filter caller-owned repo-relative path payloads with the shared POSIX matcher.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_filter_path_payloads")]
+#[pyo3(signature = (kind, candidates, path_globs = None))]
+fn py_artifact_ref_filter_path_payloads<'py>(
+    py: Python<'py>,
+    kind: &str,
+    candidates: Vec<String>,
+    path_globs: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    artifact_ref_result_to_py(
+        py,
+        core_filter_artifact_ref_path_payloads(
+            kind,
+            path_globs.as_deref(),
+            &candidates,
+        ),
+    )
+}
+
 /// Scan prompt text for kind-tagged artifact-reference candidates.
 #[pyfunction]
 #[pyo3(name = "artifact_ref_scan_prompt")]
@@ -5637,7 +5677,8 @@ fn py_artifact_ref_payload_inventory(
 ) -> PyResult<PyObject> {
     let context = artifact_ref_context_from_pydict(&context)?;
     let inventory =
-        sase_core::editor_build_artifact_ref_payload_inventory(kind, &context);
+        sase_core::editor_build_artifact_ref_payload_inventory(kind, &context)
+            .map_err(artifact_ref_error_to_pyerr)?;
     let value = serde_json::to_value(&inventory).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -7317,6 +7358,15 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_ref_list_resolution_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_context_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_path_filter_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_filter_path_payloads, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_artifact_pool_filename, m)?)?;
@@ -8990,7 +9040,7 @@ MENTORS:
                 .bind(py),
             )
             .unwrap();
-            assert_eq!(layout["schema_version"], json!(4));
+            assert_eq!(layout["schema_version"], json!(5));
             assert_eq!(
                 layout["memory_sources"][0]["paths"]["canonical"]["path"],
                 json!("/repo/sase/memory")
@@ -9255,6 +9305,9 @@ MENTORS:
                 "artifact_ref_list_parse",
                 "artifact_ref_list_resolve",
                 "artifact_ref_list_resolution_wire_schema_version",
+                "artifact_ref_context_wire_schema_version",
+                "artifact_ref_path_filter_wire_schema_version",
+                "artifact_ref_filter_path_payloads",
                 "artifact_ref_scan_prompt",
                 "artifact_ref_wire_schema_version",
             ] {
@@ -9264,7 +9317,7 @@ MENTORS:
             let parsed =
                 py_artifact_ref_parse(py, "plans:202607/plan.md#L2").unwrap();
             let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed_value["schema_version"], json!(3));
+            assert_eq!(parsed_value["schema_version"], json!(4));
             assert_eq!(parsed_value["kind"]["type"], json!("document"));
             assert_eq!(parsed_value["fragment"]["type"], json!("lines"));
             assert_eq!(
@@ -9286,6 +9339,7 @@ MENTORS:
             );
 
             let context_value = json!({
+                "schema_version": 1,
                 "document_roots": [{
                     "kind": "plans",
                     "root": root.to_string_lossy()
@@ -9303,7 +9357,7 @@ MENTORS:
             let resolved =
                 py_artifact_ref_resolve(py, parsed.bind(py), context).unwrap();
             let resolved = py_to_json_value(resolved.bind(py)).unwrap();
-            assert_eq!(resolved["schema_version"], json!(3));
+            assert_eq!(resolved["schema_version"], json!(4));
             assert_eq!(resolved["status"], json!("exact"));
             assert_eq!(
                 resolved["resolved_path"],
@@ -9315,7 +9369,7 @@ MENTORS:
             let scanned = py_to_json_value(scanned.bind(py)).unwrap();
             assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
-            assert_eq!(py_artifact_ref_wire_schema_version(), 3);
+            assert_eq!(py_artifact_ref_wire_schema_version(), 4);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
             assert_eq!(
                 py_artifact_ref_list_normalize(vec![
@@ -9343,7 +9397,7 @@ MENTORS:
             .unwrap();
             let list_resolved =
                 py_to_json_value(list_resolved.bind(py)).unwrap();
-            assert_eq!(list_resolved["schema_version"], json!(1));
+            assert_eq!(list_resolved["schema_version"], json!(2));
             assert_eq!(
                 list_resolved["entries"][0]["resolution"]["status"],
                 json!("exact")
@@ -9354,8 +9408,10 @@ MENTORS:
             );
             assert_eq!(
                 py_artifact_ref_list_resolution_wire_schema_version(),
-                1
+                2
             );
+            assert_eq!(py_artifact_ref_context_wire_schema_version(), 1);
+            assert_eq!(py_artifact_ref_path_filter_wire_schema_version(), 1);
         });
     }
 
@@ -10187,6 +10243,7 @@ MENTORS:
             let context = json_value_to_py(
                 py,
                 &json!({
+                    "schema_version": 1,
                     "repositories": [{
                         "name": "sase-core",
                         "checkout_paths": [repo.to_string_lossy()],
@@ -10215,13 +10272,44 @@ MENTORS:
             assert_eq!(row["rank"], json!(0));
             assert_eq!(row["body"], json!("body line\nsecond line"));
 
-            let bad_context =
-                json_value_to_py(py, &json!({"repositories": "invalid"}))
-                    .unwrap();
+            let bad_context = json_value_to_py(
+                py,
+                &json!({"schema_version": 1, "repositories": "invalid"}),
+            )
+            .unwrap();
             let error = module
                 .getattr("artifact_ref_payload_inventory")
                 .unwrap()
                 .call1(("commit", bad_context.bind(py)))
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn artifact_ref_filter_path_payloads_binding_returns_batch_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let filter =
+                module.getattr("artifact_ref_filter_path_payloads").unwrap();
+
+            let result = filter
+                .call1((
+                    "research",
+                    vec!["README.md", "drafts/a.md", "image.png"],
+                    vec!["**/*.md", "!drafts/**"],
+                ))
+                .unwrap();
+            let result = py_to_json_value(&result).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["kind"], json!("research"));
+            assert_eq!(result["allowed"], json!(["README.md"]));
+            assert_eq!(result["filtered"], json!(["drafts/a.md", "image.png"]));
+
+            let error = filter
+                .call1(("research", vec!["README.md"], vec![""]))
                 .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
         });

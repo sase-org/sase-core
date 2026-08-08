@@ -40,6 +40,7 @@ use sase_core::{
     editor_build_wait_completion_candidates,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
+    editor_build_xprompt_ref_arg_completion_candidates,
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
@@ -262,6 +263,7 @@ impl XpromptLspServer {
                 &config,
                 &document,
                 position,
+                None,
             );
             let prefix = context
                 .token
@@ -335,7 +337,12 @@ impl XpromptLspServer {
             return Some(self.agent_completion(&context).await);
         }
         let list = self.completion_list_for_context(
-            &context, &entries, &config, &document, position,
+            &context,
+            &entries,
+            &config,
+            &document,
+            position,
+            artifact_project,
         );
         if context.kind == CompletionContextKind::Placeholder {
             let prefix = context
@@ -860,8 +867,11 @@ impl XpromptLspServer {
             }
         }
 
-        let inventory =
-            editor_build_artifact_ref_payload_inventory(kind, &project.context);
+        let Ok(inventory) =
+            editor_build_artifact_ref_payload_inventory(kind, &project.context)
+        else {
+            return None;
+        };
         let payload = Arc::new(CachedArtifactRefPayload {
             index: AtReferencePayloadIndex::new(inventory.payloads),
             truncated_payloads: inventory.truncated_payloads,
@@ -977,6 +987,7 @@ impl XpromptLspServer {
         config: &ServerConfig,
         document: &DocumentSnapshot,
         position: Position,
+        artifact_project: Option<&ArtifactRefCatalogProject>,
     ) -> CompletionList {
         let token = context
             .token
@@ -1008,10 +1019,37 @@ impl XpromptLspServer {
             }
             CompletionContextKind::FilePath
             | CompletionContextKind::XpromptArgumentPath => {
-                editor_build_file_completion_candidates_with_base(
-                    token,
-                    config.root_dir.as_deref(),
-                )
+                if context.kind == CompletionContextKind::XpromptArgumentPath {
+                    if let Some(list) = context
+                        .active_xprompt
+                        .as_deref()
+                        .and_then(|name| {
+                            entries.iter().find(|entry| entry.name == name)
+                        })
+                        .filter(|entry| entry.ref_kind.is_some())
+                        .zip(artifact_project)
+                        .map(|(entry, project)| {
+                            editor_build_xprompt_ref_arg_completion_candidates(
+                                entry,
+                                token,
+                                Some(context.replacement_range),
+                                &project.context,
+                            )
+                        })
+                    {
+                        list
+                    } else {
+                        editor_build_file_completion_candidates_with_base(
+                            token,
+                            config.root_dir.as_deref(),
+                        )
+                    }
+                } else {
+                    editor_build_file_completion_candidates_with_base(
+                        token,
+                        config.root_dir.as_deref(),
+                    )
+                }
             }
             CompletionContextKind::FileHistory => {
                 editor_build_file_history_completion_candidates(file_history())
@@ -2667,6 +2705,7 @@ mod tests {
                     .to_string(),
             ),
             memory_type: None,
+            ref_kind: None,
             content_preview: None,
             source_path_display: Some("Cargo.toml".to_string()),
             definition_path,
@@ -4771,6 +4810,7 @@ mod tests {
                 "key": format!("key_{name}"),
                 "aliases": [format!("{name}-alias")],
                 "context": {
+                    "schema_version": 1,
                     "document_roots": [
                         {
                             "kind": "designs",
@@ -5155,7 +5195,7 @@ mod tests {
                     {
                         "name": "sase",
                         "key": "key_sase",
-                        "context": {"document_roots": []}
+                        "context": {"schema_version": 1, "document_roots": []}
                     }
                 ]
             }"#,
@@ -5283,6 +5323,66 @@ mod tests {
         assert_eq!(items[0].label, "@designs:sase.md");
     }
 
+    #[tokio::test]
+    async fn completes_xprompt_ref_arguments_from_artifact_payload_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        let designs = temp.path().join("sase/designs");
+        fs::create_dir_all(&designs).unwrap();
+        fs::write(
+            designs.join("guide.md"),
+            "---\ntitle: Product Guide\n---\nbody",
+        )
+        .unwrap();
+        fs::write(designs.join("notes.md"), "notes").unwrap();
+
+        let mut ref_entry = catalog_entry(
+            "ref/designs",
+            "#ref/designs",
+            Some("(file_path: path)".to_string()),
+            vec![input_hint("file_path", "path", true, 0)],
+            None,
+        );
+        ref_entry.kind = Some("ref".to_string());
+        ref_entry.is_skill = false;
+        ref_entry.skill_name = None;
+        ref_entry.ref_kind = Some("designs".to_string());
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(vec![ref_entry])),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().artifact_ref_catalog =
+            Some(artifact_path);
+
+        let text = "#ref/designs:prod";
+        let items = completion_items(
+            server
+                .completion_for_text(
+                    text.to_string(),
+                    Position::new(0, text.len() as u32),
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Product Guide");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::FILE));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected ref argument text edit");
+        };
+        assert_eq!(edit.new_text, "guide.md");
+        assert_eq!(
+            edit.range,
+            Range::new(Position::new(0, 13), Position::new(0, 17))
+        );
+    }
+
     fn git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
             .arg("-C")
@@ -5339,6 +5439,7 @@ mod tests {
                     "name": "sase",
                     "key": "key_sase",
                     "context": {
+                        "schema_version": 1,
                         "repositories": [{
                             "name": "sase-core",
                             "checkout_paths": [checkout.to_string_lossy()],

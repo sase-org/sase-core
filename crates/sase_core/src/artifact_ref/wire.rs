@@ -3,9 +3,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 3;
-pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 3;
-pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 4;
+pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 4;
+pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
+pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -137,6 +139,13 @@ pub struct ArtifactRefDocumentRootWire {
     pub kind: String,
     #[serde(alias = "path")]
     pub root: String,
+    /// Optional positive/negative POSIX globs applied to this document root.
+    ///
+    /// `None` means the caller omitted a policy and all safe repo-relative
+    /// payloads are allowed. `Some(vec![])` is an explicit empty policy and
+    /// allows nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_globs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,8 +189,10 @@ pub struct ArtifactRefAgentOwnerWire {
     pub machine_name: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefContextWire {
+    #[serde(default = "old_artifact_ref_context_schema_version")]
+    pub schema_version: u64,
     #[serde(default)]
     pub document_roots: Vec<ArtifactRefDocumentRootWire>,
     #[serde(default)]
@@ -200,6 +211,26 @@ pub struct ArtifactRefContextWire {
     pub agent_owner: Option<ArtifactRefAgentOwnerWire>,
 }
 
+impl Default for ArtifactRefContextWire {
+    fn default() -> Self {
+        Self {
+            schema_version: ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+            document_roots: Vec::new(),
+            chats_root: None,
+            artifact_index_path: None,
+            repositories: Vec::new(),
+            projects: Vec::new(),
+            bead_stores: Vec::new(),
+            agent_roots: Vec::new(),
+            agent_owner: None,
+        }
+    }
+}
+
+fn old_artifact_ref_context_schema_version() -> u64 {
+    0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefResolutionWire {
     pub schema_version: u64,
@@ -208,6 +239,16 @@ pub struct ArtifactRefResolutionWire {
     pub locator: Option<String>,
     pub resolved_path: Option<String>,
     pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefPathFilterBatchWire {
+    pub schema_version: u64,
+    pub kind: String,
+    pub allowed: Vec<String>,
+    pub filtered: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

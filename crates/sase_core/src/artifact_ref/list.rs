@@ -60,6 +60,7 @@ pub fn resolve_artifact_ref_list<T: AsRef<str>>(
     entries: &[T],
     context: &ArtifactRefContextWire,
 ) -> Result<ArtifactRefListResolutionWire, ArtifactRefError> {
+    super::validate_artifact_ref_context(context)?;
     resolve_artifact_ref_list_with_loader(entries, context, read_artifact_index)
 }
 
@@ -131,6 +132,7 @@ where
                         locator: None,
                         resolved_path: None,
                         candidates: Vec::new(),
+                        diagnostic: None,
                     },
                 }
             }

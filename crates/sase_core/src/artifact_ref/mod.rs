@@ -1,5 +1,6 @@
 //! Kind-tagged logical references to SASE artifacts.
 
+mod filter;
 mod list;
 mod scanner;
 mod wire;
@@ -18,6 +19,7 @@ use crate::reference_path::{
     RelativePayloadError,
 };
 
+pub use filter::filter_artifact_ref_path_payloads;
 pub use list::{
     normalize_artifact_ref_list, parse_artifact_ref_list,
     resolve_artifact_ref_list,
@@ -28,13 +30,18 @@ pub use wire::{
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
     ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
     ArtifactRefKindWire, ArtifactRefListEntryWire,
-    ArtifactRefListResolutionWire, ArtifactRefPayloadWire,
-    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
-    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
-    ParsedArtifactRefWire, ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
+    ArtifactRefListResolutionWire, ArtifactRefPathFilterBatchWire,
+    ArtifactRefPayloadWire, ArtifactRefProjectWire,
+    ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
+    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
+    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
+
+use filter::ArtifactPathFilter;
 
 /// Parse and validate one canonical `<kind>:<payload>[#<fragment>]` value.
 pub fn parse_artifact_ref(
@@ -167,6 +174,7 @@ pub fn canonicalize_artifact_ref(
     path: &Path,
     context: &ArtifactRefContextWire,
 ) -> Result<Option<String>, ArtifactRefError> {
+    validate_artifact_ref_context(context)?;
     if !path.is_absolute() {
         return Err(ArtifactRefError::validation(
             "artifact path must be absolute",
@@ -177,6 +185,11 @@ pub fn canonicalize_artifact_ref(
         let root = Path::new(&document.root);
         if let Ok(relative) = path.strip_prefix(root) {
             let payload = artifact_path_payload(relative)?;
+            let filter =
+                ArtifactPathFilter::compile(document.path_globs.as_deref())?;
+            if !filter.allows(&payload)? {
+                return Ok(None);
+            }
             let reference = ParsedArtifactRefWire {
                 schema_version: ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
                 kind: ArtifactRefKindWire::Document {
@@ -239,6 +252,7 @@ pub fn resolve_artifact_ref(
     reference: &ParsedArtifactRefWire,
     context: &ArtifactRefContextWire,
 ) -> Result<ArtifactRefResolutionWire, ArtifactRefError> {
+    validate_artifact_ref_context(context)?;
     let rendered = render_artifact_ref(reference)?;
     match (&reference.kind, &reference.payload) {
         (
@@ -276,6 +290,18 @@ pub fn resolve_artifact_ref(
             "artifact reference kind does not match its payload",
         )),
     }
+}
+
+pub fn validate_artifact_ref_context(
+    context: &ArtifactRefContextWire,
+) -> Result<(), ArtifactRefError> {
+    if context.schema_version != ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION {
+        return Err(ArtifactRefError::validation(format!(
+            "unsupported artifact reference context schema_version {}; expected {}",
+            context.schema_version, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION
+        )));
+    }
+    Ok(())
 }
 
 fn classify_kind(kind: &str) -> ArtifactRefKindWire {
@@ -476,11 +502,72 @@ fn resolve_document(
     if matching.is_empty() {
         return Ok(resolution("unknown_kind", rendered));
     }
-    let roots = matching
-        .into_iter()
-        .map(|document| PathBuf::from(&document.root))
-        .collect::<Vec<_>>();
-    resolve_path_reference(path, rendered, &roots)
+    validate_path_payload("artifact", path)?;
+    let payload = Path::new(path);
+    let mut candidates = Vec::new();
+    let mut allowed_roots = Vec::new();
+    for document in matching {
+        let filter =
+            ArtifactPathFilter::compile(document.path_globs.as_deref())?;
+        if !filter.allows(path)? {
+            return Ok(filtered_resolution(
+                role,
+                path,
+                rendered,
+                filter.summary(),
+            ));
+        }
+        let root = PathBuf::from(&document.root);
+        let candidate = root.join(payload);
+        candidates.push(candidate.clone());
+        if candidate.is_file() {
+            return Ok(ArtifactRefResolutionWire {
+                schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+                status: "exact".to_string(),
+                rendered,
+                locator: None,
+                resolved_path: Some(candidate.to_string_lossy().into_owned()),
+                candidates: paths_to_strings(candidates),
+                diagnostic: None,
+            });
+        }
+        allowed_roots.push((root, filter));
+    }
+
+    let drift_matches = document_drift_matches(payload, &allowed_roots)?;
+    if drift_matches.len() == 1 {
+        let path = drift_matches[0].to_string_lossy().into_owned();
+        return Ok(ArtifactRefResolutionWire {
+            schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+            status: "drifted".to_string(),
+            rendered,
+            locator: None,
+            resolved_path: Some(path.clone()),
+            candidates: vec![path],
+            diagnostic: None,
+        });
+    }
+    if drift_matches.len() > 1 {
+        return Ok(ArtifactRefResolutionWire {
+            schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+            status: "ambiguous".to_string(),
+            rendered,
+            locator: None,
+            resolved_path: None,
+            candidates: paths_to_strings(drift_matches),
+            diagnostic: None,
+        });
+    }
+
+    Ok(ArtifactRefResolutionWire {
+        schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+        status: "missing".to_string(),
+        rendered,
+        locator: None,
+        resolved_path: None,
+        candidates: paths_to_strings(candidates),
+        diagnostic: None,
+    })
 }
 
 fn resolve_path_reference(
@@ -504,7 +591,63 @@ fn resolve_path_reference(
             .resolved_path
             .map(|path| path.to_string_lossy().into_owned()),
         candidates: paths_to_strings(outcome.candidates),
+        diagnostic: None,
     })
+}
+
+fn document_drift_matches(
+    payload: &Path,
+    roots: &[(PathBuf, ArtifactPathFilter)],
+) -> Result<Vec<PathBuf>, ArtifactRefError> {
+    let Some(filename) = payload.file_name() else {
+        return Ok(Vec::new());
+    };
+    let mut matches = Vec::new();
+    for (root, filter) in roots {
+        let Ok(children) = std::fs::read_dir(root) else {
+            continue;
+        };
+        let mut child_dirs = children
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        child_dirs.sort();
+        for child_dir in child_dirs {
+            let candidate = child_dir.join(filename);
+            if !candidate.is_file() {
+                continue;
+            }
+            let Ok(relative) = candidate.strip_prefix(root) else {
+                continue;
+            };
+            let relative = artifact_path_payload(relative)?;
+            if filter.allows(&relative)? {
+                matches.push(candidate);
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn filtered_resolution(
+    kind: &str,
+    payload: &str,
+    rendered: String,
+    filter_summary: String,
+) -> ArtifactRefResolutionWire {
+    let diagnostic = format!(
+        "artifact reference filtered: kind={kind}; payload={payload}; {filter_summary}"
+    );
+    ArtifactRefResolutionWire {
+        schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+        status: "filtered".to_string(),
+        rendered,
+        locator: None,
+        resolved_path: None,
+        candidates: Vec::new(),
+        diagnostic: Some(diagnostic),
+    }
 }
 
 fn resolve_file(
@@ -547,6 +690,7 @@ pub(super) fn resolve_file_from_artifacts(
                 locator: Some(locator.clone()),
                 resolved_path: None,
                 candidates: vec![locator],
+                diagnostic: None,
             })
         }
         [artifact] => Ok(ArtifactRefResolutionWire {
@@ -556,6 +700,7 @@ pub(super) fn resolve_file_from_artifacts(
             locator: None,
             resolved_path: artifact.path.clone(),
             candidates: artifact_file_candidates(&matches),
+            diagnostic: None,
         }),
         [] => Ok(resolution("missing", rendered)),
         _ => Ok(ArtifactRefResolutionWire {
@@ -565,6 +710,7 @@ pub(super) fn resolve_file_from_artifacts(
             locator: None,
             resolved_path: None,
             candidates: artifact_file_candidates(&matches),
+            diagnostic: None,
         }),
     }
 }
@@ -620,6 +766,7 @@ fn resolve_commit(
             locator: Some(locator.clone()),
             resolved_path: None,
             candidates: vec![locator],
+            diagnostic: None,
         });
     }
     if matches.len() > 1 {
@@ -633,6 +780,7 @@ fn resolve_commit(
                 .into_iter()
                 .map(|sha| format!("{}@{sha}", repository.name))
                 .collect(),
+            diagnostic: None,
         });
     }
     Ok(resolution("missing", rendered))
@@ -660,6 +808,7 @@ fn resolve_bug(
         locator: Some(locator.clone()),
         resolved_path: None,
         candidates: vec![locator],
+        diagnostic: None,
     })
 }
 
@@ -707,6 +856,7 @@ fn resolve_bead(
                 locator: Some(format!("{}/{}", store.project, id)),
                 resolved_path: Some(path.clone()),
                 candidates: vec![path],
+                diagnostic: None,
             })
         }
         [] => Ok(ArtifactRefResolutionWire {
@@ -716,6 +866,7 @@ fn resolve_bead(
             locator: None,
             resolved_path: None,
             candidates: paths_to_strings(candidates),
+            diagnostic: None,
         }),
         _ => Ok(ArtifactRefResolutionWire {
             schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -727,6 +878,7 @@ fn resolve_bead(
                 .into_iter()
                 .map(|(_, path)| path.to_string_lossy().into_owned())
                 .collect(),
+            diagnostic: None,
         }),
     }
 }
@@ -783,6 +935,7 @@ fn resolve_agent(
                 locator: Some(format!("{}/{}", root.project, matched_name)),
                 resolved_path: Some(path.clone()),
                 candidates: vec![path],
+                diagnostic: None,
             })
         }
         [] => Ok(ArtifactRefResolutionWire {
@@ -792,6 +945,7 @@ fn resolve_agent(
             locator: None,
             resolved_path: None,
             candidates: paths_to_strings(attempted),
+            diagnostic: None,
         }),
         _ => Ok(ArtifactRefResolutionWire {
             schema_version: ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -803,6 +957,7 @@ fn resolve_agent(
                 .into_iter()
                 .map(|(_, _, path)| path.to_string_lossy().into_owned())
                 .collect(),
+            diagnostic: None,
         }),
     }
 }
@@ -861,6 +1016,7 @@ fn resolution(status: &str, rendered: String) -> ArtifactRefResolutionWire {
         locator: None,
         resolved_path: None,
         candidates: Vec::new(),
+        diagnostic: None,
     }
 }
 
@@ -1144,7 +1300,7 @@ mod tests {
 
     #[test]
     fn parsed_references_carry_the_current_wire_schema() {
-        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 3);
+        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 4);
     }
 
     #[test]
@@ -1171,10 +1327,12 @@ mod tests {
                 ArtifactRefDocumentRootWire {
                     kind: "plans".to_string(),
                     root: first.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
                 ArtifactRefDocumentRootWire {
                     kind: "designs".to_string(),
                     root: nested.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
             ],
             chats_root: Some(chat.to_string_lossy().into_owned()),
@@ -1448,10 +1606,12 @@ mod tests {
                 ArtifactRefDocumentRootWire {
                     kind: "plans".to_string(),
                     root: first.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
                 ArtifactRefDocumentRootWire {
                     kind: "plans".to_string(),
                     root: second.to_string_lossy().into_owned(),
+                    path_globs: None,
                 },
             ],
             ..Default::default()
@@ -1492,6 +1652,173 @@ mod tests {
         .unwrap();
         assert_eq!(missing.status, "missing");
         assert_eq!(missing.candidates.len(), 2);
+    }
+
+    #[test]
+    fn context_schema_version_is_required_for_context_operations() {
+        let temp = tempdir().unwrap();
+        let context = ArtifactRefContextWire {
+            schema_version: 0,
+            ..Default::default()
+        };
+        let parsed = parse_artifact_ref("plans:202607/plan.md").unwrap();
+
+        let canonical_error =
+            canonicalize_artifact_ref(&temp.path().join("plan.md"), &context)
+                .unwrap_err();
+        assert!(canonical_error.message.contains("schema_version"));
+
+        let resolve_error =
+            resolve_artifact_ref(&parsed, &context).unwrap_err();
+        assert!(resolve_error.message.contains("schema_version"));
+
+        let list_error =
+            resolve_artifact_ref_list(&["plans:202607/plan.md"], &context)
+                .unwrap_err();
+        assert!(list_error.message.contains("schema_version"));
+    }
+
+    #[test]
+    fn document_path_globs_filter_resolution_and_canonicalization() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("designs");
+        fs::create_dir_all(root.join("allowed/private")).unwrap();
+        fs::write(root.join("allowed/public.md"), "public").unwrap();
+        fs::write(root.join("allowed/private/secret.md"), "secret").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "designs".to_string(),
+                root: root.to_string_lossy().into_owned(),
+                path_globs: Some(vec![
+                    "allowed/**".to_string(),
+                    "!allowed/private/**".to_string(),
+                ]),
+            }],
+            ..Default::default()
+        };
+
+        let exact = resolve_artifact_ref(
+            &parse_artifact_ref("designs:allowed/public.md").unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(exact.status, "exact");
+        assert_eq!(
+            canonicalize_artifact_ref(
+                &root.join("allowed/public.md"),
+                &context
+            )
+            .unwrap()
+            .as_deref(),
+            Some("designs:allowed/public.md")
+        );
+
+        let filtered = resolve_artifact_ref(
+            &parse_artifact_ref("designs:allowed/private/secret.md").unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(filtered.status, "filtered");
+        assert!(filtered.resolved_path.is_none());
+        assert!(filtered.candidates.is_empty());
+        let diagnostic = filtered.diagnostic.as_deref().unwrap();
+        assert!(diagnostic.contains("kind=designs"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("payload=allowed/private/secret.md"),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains(root.to_str().unwrap()), "{diagnostic}");
+        assert_eq!(
+            canonicalize_artifact_ref(
+                &root.join("allowed/private/secret.md"),
+                &context
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn filtered_root_cannot_be_bypassed_by_later_duplicate_roots() {
+        let temp = tempdir().unwrap();
+        let denied = temp.path().join("denied");
+        let allowed = temp.path().join("allowed");
+        fs::create_dir_all(allowed.join("private")).unwrap();
+        fs::write(allowed.join("private/secret.md"), "secret").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![
+                ArtifactRefDocumentRootWire {
+                    kind: "designs".to_string(),
+                    root: denied.to_string_lossy().into_owned(),
+                    path_globs: Some(vec!["public/**".to_string()]),
+                },
+                ArtifactRefDocumentRootWire {
+                    kind: "designs".to_string(),
+                    root: allowed.to_string_lossy().into_owned(),
+                    path_globs: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let result = resolve_artifact_ref(
+            &parse_artifact_ref("designs:private/secret.md").unwrap(),
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(result.status, "filtered");
+        assert!(result.resolved_path.is_none());
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn filtered_drift_candidates_are_not_reported() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plans");
+        fs::create_dir_all(root.join("202607")).unwrap();
+        fs::write(root.join("202607/guide.md"), "filtered").unwrap();
+        let mut context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "plans".to_string(),
+                root: root.to_string_lossy().into_owned(),
+                path_globs: Some(vec![
+                    "**/guide.md".to_string(),
+                    "!202607/**".to_string(),
+                ]),
+            }],
+            ..Default::default()
+        };
+
+        let missing = resolve_artifact_ref(
+            &parse_artifact_ref("plans:202606/guide.md").unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(missing.status, "missing");
+        assert!(!missing
+            .candidates
+            .iter()
+            .any(|path| path.contains("202607/guide.md")));
+
+        fs::create_dir_all(root.join("202608")).unwrap();
+        fs::write(root.join("202608/guide.md"), "allowed").unwrap();
+        context.document_roots[0].path_globs =
+            Some(vec!["**/guide.md".to_string(), "!202607/**".to_string()]);
+        let drifted = resolve_artifact_ref(
+            &parse_artifact_ref("plans:202606/guide.md").unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(drifted.status, "drifted");
+        assert_eq!(
+            drifted.resolved_path.as_deref(),
+            Some(root.join("202608/guide.md").to_str().unwrap())
+        );
+        assert!(!drifted
+            .candidates
+            .iter()
+            .any(|path| path.contains("202607/guide.md")));
     }
 
     #[test]

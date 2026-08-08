@@ -496,6 +496,7 @@
       "memory_type": "string|null; `short` or `long` for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
       "name": "string",
       "project": "string|null",
+      "ref_kind": "string|null; artifact-reference kind for a `#ref/<kind>` renderer, absent otherwise; a non-null value means `kind` is `ref`",
       "reference_prefix": "string|null",
       "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
       "source_bucket": "string",

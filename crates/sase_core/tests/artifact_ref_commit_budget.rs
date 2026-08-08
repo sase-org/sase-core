@@ -35,7 +35,8 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
     // with no commits at all.
     std::env::set_var(BUDGET_ENV, "0.2");
     let starved =
-        editor_build_artifact_ref_payload_inventory("commit", &wedged_context);
+        editor_build_artifact_ref_payload_inventory("commit", &wedged_context)
+            .unwrap();
     assert!(
         starved.payloads.is_empty(),
         "expected an exhausted budget to drop every row, got {:?}",
@@ -44,6 +45,7 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
     // The same budget leaves a responsive repository alone.
     assert_eq!(
         editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
+            .unwrap()
             .payloads
             .len(),
         1
@@ -51,7 +53,8 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
 
     std::env::set_var(BUDGET_ENV, "120");
     let generous =
-        editor_build_artifact_ref_payload_inventory("commit", &healthy_context);
+        editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
+            .unwrap();
     assert_eq!(generous.payloads.len(), 1);
     assert_eq!(generous.payloads[0].label, "only commit");
 
@@ -59,12 +62,14 @@ fn commit_inventory_budget_override_controls_whether_rows_survive() {
     // an absent one.
     std::env::set_var(BUDGET_ENV, "not-a-number");
     let malformed =
-        editor_build_artifact_ref_payload_inventory("commit", &healthy_context);
+        editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
+            .unwrap();
     assert_eq!(malformed.payloads, generous.payloads);
 
     std::env::remove_var(BUDGET_ENV);
     let defaulted =
-        editor_build_artifact_ref_payload_inventory("commit", &healthy_context);
+        editor_build_artifact_ref_payload_inventory("commit", &healthy_context)
+            .unwrap();
     assert_eq!(defaulted.payloads, generous.payloads);
 }
 

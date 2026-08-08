@@ -358,6 +358,10 @@ pub struct XpromptAssistEntry {
     /// never participate in `/` skill completion.
     #[serde(default)]
     pub memory_type: Option<MemoryTierWire>,
+    /// Artifact-reference kind rendered by a `#ref/<kind>` entry. Ref entries
+    /// use the shared artifact payload inventory for their sole input.
+    #[serde(default)]
+    pub ref_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
