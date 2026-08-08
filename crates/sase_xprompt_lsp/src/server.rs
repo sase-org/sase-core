@@ -2480,7 +2480,10 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
     else {
         return false;
     };
-    if matches!(file_name, "xprompts.yml" | "xprompts.yaml" | "sase.yml") {
+    if matches!(
+        file_name,
+        "xprompts.yml" | "xprompts.yaml" | "sase.yml" | "default_config.yml"
+    ) {
         return true;
     }
     if file_name == "file_reference_history.json"
@@ -2502,7 +2505,7 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
     path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts" | "default_xprompts")
+            Some("xprompts" | ".xprompts" | "default_xprompts" | "refs")
         )
     })
 }
@@ -2869,6 +2872,25 @@ mod tests {
                 .join("default_xprompts")
                 .join("research_swarm.md"),
         );
+        let canonical_refs_uri = file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("refs")
+                .join("research.md"),
+        );
+        let home_refs_uri = file_uri(
+            temp.join("home")
+                .join(".config")
+                .join("sase")
+                .join("refs")
+                .join("plans.md"),
+        );
+        let plugin_refs_uri = file_uri(
+            temp.join("plugin")
+                .join("sase_xprompts")
+                .join("refs")
+                .join("designs.md"),
+        );
         let prose_uri = file_uri(
             temp.join("project")
                 .join("sdd")
@@ -2881,6 +2903,12 @@ mod tests {
         assert!(should_invalidate_for_uri(&legacy_xprompts_uri));
         assert!(should_invalidate_for_uri(&dot_xprompts_uri));
         assert!(should_invalidate_for_uri(&default_xprompts_uri));
+        assert!(should_invalidate_for_uri(&canonical_refs_uri));
+        assert!(should_invalidate_for_uri(&home_refs_uri));
+        assert!(should_invalidate_for_uri(&plugin_refs_uri));
+        assert!(should_invalidate_for_uri(&file_uri(
+            temp.join("plugin").join("default_config.yml"),
+        )));
         assert!(!should_invalidate_for_uri(&prose_uri));
 
         // Creating, editing, renaming, or deleting a memory note changes the
