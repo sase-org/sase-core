@@ -6,31 +6,57 @@ use lsp_types::{
 };
 use sase_core::{
     prompt_literal_zone_ranges, scan_artifact_refs, ArtifactRefContextWire,
-    ArtifactRefSpanWire, DocumentSnapshot,
+    ArtifactRefSpanWire, CompiledGlossaryCatalog, DocumentSnapshot,
 };
 
 const KIND_TOKEN_TYPE: u32 = 0;
 const PAYLOAD_TOKEN_TYPE: u32 = 1;
 const FRAGMENT_TOKEN_TYPE: u32 = 2;
+const GLOSSARY_TOKEN_TYPE: u32 = 3;
 const DOCUMENT_ROLE_MODIFIER: u32 = 1;
+const ARTIFACT_PRIORITY: u8 = 0;
+const GLOSSARY_PRIORITY: u8 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawSemanticToken {
+    byte_start: usize,
+    byte_end: usize,
+    token_type: u32,
+    token_modifiers_bitset: u32,
+    priority: u8,
+}
 
 pub(crate) fn legend() -> SemanticTokensLegend {
-    // Keep this legend extensible for future xprompt/directive token emission.
-    // This provider intentionally emits artifact-reference tokens only.
     SemanticTokensLegend {
         token_types: vec![
             SemanticTokenType::NAMESPACE,
             SemanticTokenType::STRING,
             SemanticTokenType::NUMBER,
+            SemanticTokenType::TYPE,
         ],
         token_modifiers: vec![SemanticTokenModifier::DOCUMENTATION],
     }
 }
 
-pub(crate) fn artifact_ref_tokens(
+pub(crate) fn document_semantic_tokens(
+    document: &DocumentSnapshot,
+    artifact_context: Option<&ArtifactRefContextWire>,
+    glossary_catalog: Option<&CompiledGlossaryCatalog>,
+) -> SemanticTokens {
+    let mut raw_tokens = Vec::new();
+    if let Some(context) = artifact_context {
+        raw_tokens.extend(raw_artifact_ref_tokens(document, context));
+    }
+    if let Some(catalog) = glossary_catalog {
+        raw_tokens.extend(raw_glossary_tokens(document, catalog));
+    }
+    encode_tokens(document, non_overlapping_tokens(raw_tokens))
+}
+
+fn raw_artifact_ref_tokens(
     document: &DocumentSnapshot,
     context: &ArtifactRefContextWire,
-) -> SemanticTokens {
+) -> Vec<RawSemanticToken> {
     let literal_ranges = prompt_literal_zone_ranges(document.text());
     let document_roles = context
         .document_roots
@@ -38,8 +64,7 @@ pub(crate) fn artifact_ref_tokens(
         .map(|root| root.kind.as_str())
         .filter(|kind| !is_builtin_kind(kind))
         .collect::<HashSet<_>>();
-    let mut data = Vec::new();
-    let mut previous = None;
+    let mut tokens = Vec::new();
 
     for candidate in scan_artifact_refs(document.text()) {
         let candidate_range =
@@ -59,34 +84,108 @@ pub(crate) fn artifact_ref_tokens(
         } else {
             0
         };
-        push_token(
-            document,
-            &mut data,
-            &mut previous,
+        push_raw_token(
+            &mut tokens,
             candidate.kind_span,
             KIND_TOKEN_TYPE,
             modifiers,
+            ARTIFACT_PRIORITY,
         );
-        push_token(
-            document,
-            &mut data,
-            &mut previous,
+        push_raw_token(
+            &mut tokens,
             candidate.payload_span,
             PAYLOAD_TOKEN_TYPE,
             modifiers,
+            ARTIFACT_PRIORITY,
         );
         if let Some(fragment_span) = candidate.fragment_span {
-            push_token(
-                document,
-                &mut data,
-                &mut previous,
+            push_raw_token(
+                &mut tokens,
                 fragment_span,
                 FRAGMENT_TOKEN_TYPE,
                 modifiers,
+                ARTIFACT_PRIORITY,
             );
         }
     }
 
+    tokens
+}
+
+fn raw_glossary_tokens(
+    document: &DocumentSnapshot,
+    catalog: &CompiledGlossaryCatalog,
+) -> Vec<RawSemanticToken> {
+    catalog
+        .scan(document.text())
+        .into_iter()
+        .map(|span| RawSemanticToken {
+            byte_start: span.byte_start,
+            byte_end: span.byte_end,
+            token_type: GLOSSARY_TOKEN_TYPE,
+            token_modifiers_bitset: 0,
+            priority: GLOSSARY_PRIORITY,
+        })
+        .collect()
+}
+
+fn push_raw_token(
+    tokens: &mut Vec<RawSemanticToken>,
+    span: ArtifactRefSpanWire,
+    token_type: u32,
+    token_modifiers_bitset: u32,
+    priority: u8,
+) {
+    tokens.push(RawSemanticToken {
+        byte_start: span.start,
+        byte_end: span.end,
+        token_type,
+        token_modifiers_bitset,
+        priority,
+    });
+}
+
+fn non_overlapping_tokens(
+    mut tokens: Vec<RawSemanticToken>,
+) -> Vec<RawSemanticToken> {
+    tokens.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.byte_start.cmp(&right.byte_start))
+            .then_with(|| span_len(right).cmp(&span_len(left)))
+            .then_with(|| left.token_type.cmp(&right.token_type))
+    });
+
+    let mut accepted: Vec<RawSemanticToken> = Vec::new();
+    for token in tokens {
+        if accepted.iter().any(|existing| {
+            ranges_intersect(
+                (existing.byte_start, existing.byte_end),
+                (token.byte_start, token.byte_end),
+            )
+        }) {
+            continue;
+        }
+        accepted.push(token);
+    }
+    accepted.sort_by(|left, right| {
+        left.byte_start
+            .cmp(&right.byte_start)
+            .then_with(|| left.byte_end.cmp(&right.byte_end))
+            .then_with(|| left.token_type.cmp(&right.token_type))
+    });
+    accepted
+}
+
+fn encode_tokens(
+    document: &DocumentSnapshot,
+    tokens: Vec<RawSemanticToken>,
+) -> SemanticTokens {
+    let mut data = Vec::new();
+    let mut previous = None;
+    for token in tokens {
+        push_token(document, &mut data, &mut previous, token);
+    }
     SemanticTokens {
         result_id: None,
         data,
@@ -97,11 +196,11 @@ fn push_token(
     document: &DocumentSnapshot,
     data: &mut Vec<SemanticToken>,
     previous: &mut Option<(u32, u32)>,
-    span: ArtifactRefSpanWire,
-    token_type: u32,
-    token_modifiers_bitset: u32,
+    token: RawSemanticToken,
 ) {
-    let Some(range) = document.byte_range_to_range(span.start, span.end) else {
+    let Some(range) =
+        document.byte_range_to_range(token.byte_start, token.byte_end)
+    else {
         return;
     };
     if range.start.line != range.end.line
@@ -120,8 +219,8 @@ fn push_token(
         delta_line,
         delta_start,
         length: range.end.character - range.start.character,
-        token_type,
-        token_modifiers_bitset,
+        token_type: token.token_type,
+        token_modifiers_bitset: token.token_modifiers_bitset,
     });
     *previous = Some((range.start.line, range.start.character));
 }
@@ -132,4 +231,8 @@ fn is_builtin_kind(kind: &str) -> bool {
 
 fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
     left.0 < right.1 && right.0 < left.1
+}
+
+fn span_len(token: &RawSemanticToken) -> usize {
+    token.byte_end.saturating_sub(token.byte_start)
 }

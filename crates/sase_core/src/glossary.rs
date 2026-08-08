@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::editor::{DocumentSnapshot, EditorPosition, EditorRange};
+use crate::prompt_literal_zone_ranges;
 
 pub const GLOSSARY_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -237,7 +238,7 @@ impl CompiledGlossaryCatalog {
             for (alias_index, alias) in
                 entry.effective_aliases.iter().enumerate()
             {
-                let regex = RegexBuilder::new(&regex::escape(alias))
+                let regex = RegexBuilder::new(&alias_regex(alias))
                     .case_insensitive(true)
                     .unicode(true)
                     .build()
@@ -289,9 +290,15 @@ impl CompiledGlossaryCatalog {
     }
 
     fn candidate_spans(&self, text: &str) -> Vec<CandidateSpan> {
+        let literal_ranges = prompt_literal_zone_ranges(text);
         let mut candidates = Vec::new();
         for pattern in &self.patterns {
             for hit in pattern.regex.find_iter(text) {
+                if literal_ranges.iter().any(|literal| {
+                    ranges_intersect((hit.start(), hit.end()), *literal)
+                }) {
+                    continue;
+                }
                 if is_word_boundary(text, hit.start(), hit.end()) {
                     candidates.push(CandidateSpan {
                         entry_index: pattern.entry_index,
@@ -418,6 +425,14 @@ fn normalize_phrase(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn alias_regex(alias: &str) -> String {
+    alias
+        .split_whitespace()
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join("[\\t ]+")
+}
+
 fn case_key(value: &str) -> String {
     value.to_lowercase()
 }
@@ -442,6 +457,10 @@ fn span_len(span: &CandidateSpan) -> usize {
 
 fn overlaps(left: &CandidateSpan, right: &CandidateSpan) -> bool {
     left.byte_start < right.byte_end && right.byte_start < left.byte_end
+}
+
+fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < right.1 && right.0 < left.1
 }
 
 fn error(
@@ -559,8 +578,8 @@ mod tests {
         ])
         .unwrap();
 
-        let spans =
-            catalog.scan("The agent clan joined another agent-clan and clan.");
+        let spans = catalog
+            .scan("The agent \t clan joined another agent-clan and clan.");
         assert_eq!(
             spans
                 .iter()
@@ -571,10 +590,25 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                ("Agent Clan", "Agent Clan", "agent clan"),
+                ("Agent Clan", "Agent Clan", "agent \t clan"),
                 ("Agent Clan", "clan", "clan"),
             ]
         );
+    }
+
+    #[test]
+    fn scan_skips_fenced_and_inline_code_literals() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Workspace",
+            "A checkout.",
+            &[],
+        )])
+        .unwrap();
+
+        let spans = catalog.scan("Workspace `Workspace`\n```\nWorkspace\n```");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].matched_text, "Workspace");
     }
 
     #[test]

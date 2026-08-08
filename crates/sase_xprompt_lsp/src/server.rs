@@ -48,11 +48,12 @@ use sase_core::{
     editor_extract_token_at_position, editor_hover_at_position,
     ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
     AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
-    AtReferencePayloadIndex, AtReferenceStage, CompletionCandidate,
-    CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
-    EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
-    MEMORY_NAMESPACE_SEGMENT,
+    AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
+    CompletionCandidate, CompletionContextKind, CompletionList,
+    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
+    GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
+    XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -69,12 +70,13 @@ use crate::lsp_convert::{
     to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
-use crate::semantic_tokens::{artifact_ref_tokens, legend};
+use crate::semantic_tokens::{document_semantic_tokens, legend};
 
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
 const ARTIFACT_REF_CACHE_TTL: Duration = Duration::from_secs(2);
+const GLOSSARY_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Env var carrying the path to the JSON `vcs_project` completion catalog
 /// (enabled-project entries + known VCS workflow names). Materialized by the
@@ -83,6 +85,7 @@ const ARTIFACT_REF_CACHE_TTL: Duration = Duration::from_secs(2);
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
+const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -103,6 +106,10 @@ struct ServerConfig {
     /// and its enumerated payload inventories are cached briefly; path metadata
     /// changes and explicit refreshes invalidate the cache immediately.
     artifact_ref_catalog: Option<PathBuf>,
+    /// Path to the launcher-materialized project glossary catalog. Parsed
+    /// catalogs are cached briefly and invalidated by file signature, explicit
+    /// refresh, or watched project config changes.
+    glossary_catalog: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -116,6 +123,7 @@ impl Default for ServerConfig {
             vcs_project_catalog: vcs_project_catalog_path(),
             model_catalog: model_catalog_path(),
             artifact_ref_catalog: artifact_ref_catalog_path(),
+            glossary_catalog: glossary_catalog_path(),
         }
     }
 }
@@ -185,6 +193,51 @@ struct ArtifactRefCache {
     payloads: HashMap<(String, String), Arc<CachedArtifactRefPayload>>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct GlossaryCatalog {
+    default_project: Option<String>,
+    projects: Vec<GlossaryCatalogProject>,
+}
+
+#[derive(Debug, Clone)]
+struct GlossaryCatalogProject {
+    key: String,
+    name: String,
+    aliases: Vec<String>,
+    config_path: String,
+    catalog: Arc<CompiledGlossaryCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GlossaryCatalogProjectPayload {
+    schema_version: u32,
+    project: GlossaryCatalogProjectIdentity,
+    config_path: String,
+    entries: Vec<GlossaryEntryWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct GlossaryCatalogProjectIdentity {
+    key: String,
+    name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlossaryCatalogSignature {
+    path: Option<PathBuf>,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Debug, Default)]
+struct GlossaryCache {
+    signature: Option<GlossaryCatalogSignature>,
+    loaded_at: Option<Instant>,
+    catalog: GlossaryCatalog,
+}
+
 #[derive(Debug, Clone)]
 struct OpenDocument {
     text: String,
@@ -198,6 +251,7 @@ pub struct XpromptLspServer {
     documents: RwLock<HashMap<String, OpenDocument>>,
     catalog_cache: Arc<CatalogCache>,
     artifact_ref_cache: RwLock<ArtifactRefCache>,
+    glossary_cache: RwLock<GlossaryCache>,
     config: RwLock<ServerConfig>,
 }
 
@@ -208,6 +262,7 @@ impl XpromptLspServer {
             documents: RwLock::new(HashMap::new()),
             catalog_cache: Arc::new(CatalogCache::command_backed()),
             artifact_ref_cache: RwLock::new(ArtifactRefCache::default()),
+            glossary_cache: RwLock::new(GlossaryCache::default()),
             config: RwLock::new(ServerConfig::default()),
         }
     }
@@ -221,6 +276,7 @@ impl XpromptLspServer {
             documents: RwLock::new(HashMap::new()),
             catalog_cache: Arc::new(CatalogCache::new(bridge)),
             artifact_ref_cache: RwLock::new(ArtifactRefCache::default()),
+            glossary_cache: RwLock::new(GlossaryCache::default()),
             config: RwLock::new(ServerConfig::default()),
         }
     }
@@ -626,11 +682,31 @@ impl XpromptLspServer {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
-        editor_hover_at_position(
+        if let Some(hover) = editor_hover_at_position(
             &document,
             to_editor_position(position),
             entries.as_slice(),
+        ) {
+            return Some(lsp_hover(hover));
+        }
+
+        let vcs_catalog =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let glossary_catalog =
+            self.glossary_catalog(config.glossary_catalog.as_deref());
+        active_glossary_project(
+            &document,
+            &config,
+            &vcs_catalog,
+            &glossary_catalog,
         )
+        .and_then(|project| {
+            glossary_hover_at_position(
+                &document,
+                to_editor_position(position),
+                project,
+            )
+        })
         .map(lsp_hover)
     }
 
@@ -705,14 +781,25 @@ impl XpromptLspServer {
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
             self.artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
-        active_artifact_ref_context(
+        let glossary_catalog =
+            self.glossary_catalog(config.glossary_catalog.as_deref());
+        let artifact_context = active_artifact_ref_context(
             &document,
             &config,
             &vcs_catalog,
             &artifact_catalog,
+        );
+        let glossary_project = active_glossary_project(
+            &document,
+            &config,
+            &vcs_catalog,
+            &glossary_catalog,
+        );
+        document_semantic_tokens(
+            &document,
+            artifact_context,
+            glossary_project.map(|project| project.catalog.as_ref()),
         )
-        .map(|context| artifact_ref_tokens(&document, context))
-        .unwrap_or_default()
     }
 
     pub async fn code_actions_for_text(
@@ -805,16 +892,39 @@ impl XpromptLspServer {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
-        let target = editor_definition_at_position(
+        if let Some(target) = editor_definition_at_position(
             &document,
             to_editor_position(position),
             entries.as_slice(),
-        )?;
-        let uri = Uri::from_file_path(target.path)?;
-        Some(GotoDefinitionResponse::Scalar(Location {
-            uri,
-            range: target.range.map(to_lsp_range).unwrap_or_else(zero_range),
-        }))
+        ) {
+            let uri = Uri::from_file_path(target.path)?;
+            return Some(GotoDefinitionResponse::Scalar(Location {
+                uri,
+                range: target
+                    .range
+                    .map(to_lsp_range)
+                    .unwrap_or_else(zero_range),
+            }));
+        }
+
+        let vcs_catalog =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let glossary_catalog =
+            self.glossary_catalog(config.glossary_catalog.as_deref());
+        active_glossary_project(
+            &document,
+            &config,
+            &vcs_catalog,
+            &glossary_catalog,
+        )
+        .and_then(|project| {
+            glossary_definition_at_position(
+                &document,
+                to_editor_position(position),
+                project,
+            )
+        })
+        .map(GotoDefinitionResponse::Scalar)
     }
 
     fn current_config(&self) -> ServerConfig {
@@ -844,6 +954,29 @@ impl XpromptLspServer {
             cache.loaded_at = Some(now);
             cache.catalog = catalog.clone();
             cache.payloads.clear();
+        }
+        catalog
+    }
+
+    fn glossary_catalog(&self, path: Option<&Path>) -> GlossaryCatalog {
+        let signature = glossary_catalog_signature(path);
+        let now = Instant::now();
+        if let Ok(cache) = self.glossary_cache.read() {
+            let fresh = cache.signature.as_ref() == Some(&signature)
+                && cache.loaded_at.is_some_and(|loaded_at| {
+                    now.saturating_duration_since(loaded_at)
+                        < GLOSSARY_CACHE_TTL
+                });
+            if fresh {
+                return cache.catalog.clone();
+            }
+        }
+
+        let catalog = load_glossary_catalog(path);
+        if let Ok(mut cache) = self.glossary_cache.write() {
+            cache.signature = Some(signature);
+            cache.loaded_at = Some(now);
+            cache.catalog = catalog.clone();
         }
         catalog
     }
@@ -890,6 +1023,12 @@ impl XpromptLspServer {
     fn invalidate_artifact_ref_cache(&self) {
         if let Ok(mut cache) = self.artifact_ref_cache.write() {
             *cache = ArtifactRefCache::default();
+        }
+    }
+
+    fn invalidate_glossary_cache(&self) {
+        if let Ok(mut cache) = self.glossary_cache.write() {
+            *cache = GlossaryCache::default();
         }
     }
 
@@ -1121,6 +1260,7 @@ impl XpromptLspServer {
 
     async fn refresh_catalog_explicit(&self) {
         self.invalidate_artifact_ref_cache();
+        self.invalidate_glossary_cache();
         let config = self.current_config();
         let xprompt_result = self
             .catalog_cache
@@ -1175,6 +1315,7 @@ impl XpromptLspServer {
                 self.warn_once(&snippet_error).await;
             }
         }
+        self.request_semantic_tokens_refresh();
     }
 
     async fn publish_document_diagnostics(
@@ -1199,6 +1340,13 @@ impl XpromptLspServer {
                 .show_message(MessageType::WARNING, error.message.clone())
                 .await;
         }
+    }
+
+    fn request_semantic_tokens_refresh(&self) {
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.semantic_tokens_refresh().await;
+        });
     }
 }
 
@@ -1450,6 +1598,8 @@ impl LanguageServer for XpromptLspServer {
         {
             self.catalog_cache.invalidate_all();
             self.invalidate_artifact_ref_cache();
+            self.invalidate_glossary_cache();
+            self.request_semantic_tokens_refresh();
         }
     }
 }
@@ -1499,6 +1649,7 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         vcs_project_catalog: vcs_project_catalog_path(),
         model_catalog: model_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
+        glossary_catalog: glossary_catalog_path(),
     }
 }
 
@@ -1512,6 +1663,10 @@ fn model_catalog_path() -> Option<PathBuf> {
 
 fn artifact_ref_catalog_path() -> Option<PathBuf> {
     std::env::var_os(ARTIFACT_REF_CATALOG_ENV).map(PathBuf::from)
+}
+
+fn glossary_catalog_path() -> Option<PathBuf> {
+    std::env::var_os(GLOSSARY_CATALOG_ENV).map(PathBuf::from)
 }
 
 fn snippet_support(capabilities: &ClientCapabilities) -> bool {
@@ -2027,6 +2182,88 @@ fn load_artifact_ref_catalog(path: Option<&Path>) -> ArtifactRefCatalog {
     }
 }
 
+fn glossary_catalog_signature(path: Option<&Path>) -> GlossaryCatalogSignature {
+    let metadata = path.and_then(|path| fs::metadata(path).ok());
+    GlossaryCatalogSignature {
+        path: path.map(Path::to_path_buf),
+        modified: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok()),
+        len: metadata.as_ref().map_or(0, fs::Metadata::len),
+    }
+}
+
+/// Load and compile the launcher-generated project glossary catalog.
+///
+/// The schema is version-gated and every failure degrades to no glossary
+/// semantics. [`XpromptLspServer::glossary_catalog`] caches this parsed value
+/// and invalidates it by file signature, TTL, explicit refresh, or watched
+/// config changes.
+fn load_glossary_catalog(path: Option<&Path>) -> GlossaryCatalog {
+    let Some(path) = path else {
+        return GlossaryCatalog::default();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return GlossaryCatalog::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        warn!("failed to parse glossary catalog at {path:?}");
+        return GlossaryCatalog::default();
+    };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64);
+    if schema_version != Some(1) {
+        warn!(
+            "unsupported glossary catalog schema_version {:?} at {path:?}",
+            schema_version
+        );
+        return GlossaryCatalog::default();
+    }
+    GlossaryCatalog {
+        default_project: value
+            .get("default_project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        projects: value
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|project| glossary_catalog_project(project.clone()))
+            .collect(),
+    }
+}
+
+fn glossary_catalog_project(
+    value: serde_json::Value,
+) -> Option<GlossaryCatalogProject> {
+    let payload =
+        serde_json::from_value::<GlossaryCatalogProjectPayload>(value).ok()?;
+    if payload.schema_version != 1
+        || payload.project.key.is_empty()
+        || payload.project.name.is_empty()
+        || payload.entries.is_empty()
+    {
+        return None;
+    }
+    let catalog = CompiledGlossaryCatalog::new(GlossaryCatalogWire {
+        schema_version: payload.schema_version,
+        entries: payload.entries,
+    })
+    .ok()?;
+    if catalog.is_empty() {
+        return None;
+    }
+    Some(GlossaryCatalogProject {
+        key: payload.project.key,
+        name: payload.project.name,
+        aliases: payload.project.aliases,
+        config_path: payload.config_path,
+        catalog: Arc::new(catalog),
+    })
+}
+
 fn known_at_reference_kinds(
     context: Option<&ArtifactRefContextWire>,
 ) -> Vec<String> {
@@ -2165,6 +2402,33 @@ fn active_artifact_ref_context<'a>(
         .map(|project| &project.context)
 }
 
+fn active_glossary_project<'a>(
+    document: &DocumentSnapshot,
+    config: &ServerConfig,
+    vcs_catalog: &VcsProjectCatalog,
+    glossary_catalog: &'a GlossaryCatalog,
+) -> Option<&'a GlossaryCatalogProject> {
+    let leading_project =
+        leading_vcs_project(document.text(), &vcs_catalog.entries);
+    leading_project
+        .and_then(|project| glossary_project(glossary_catalog, project))
+        .or_else(|| {
+            glossary_catalog
+                .default_project
+                .as_deref()
+                .and_then(|project| glossary_project(glossary_catalog, project))
+        })
+        .or_else(|| {
+            config.project.as_deref().and_then(|project| {
+                glossary_project(glossary_catalog, project).or_else(|| {
+                    initialized_project_basename(project).and_then(|basename| {
+                        glossary_project(glossary_catalog, basename)
+                    })
+                })
+            })
+        })
+}
+
 fn leading_vcs_project<'a>(
     text: &str,
     entries: &'a [VcsProjectEntry],
@@ -2199,6 +2463,20 @@ fn artifact_ref_project<'a>(
     catalog: &'a ArtifactRefCatalog,
     identity: &str,
 ) -> Option<&'a ArtifactRefCatalogProject> {
+    catalog.projects.iter().find(|project| {
+        project.name.eq_ignore_ascii_case(identity)
+            || project.key.eq_ignore_ascii_case(identity)
+            || project
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(identity))
+    })
+}
+
+fn glossary_project<'a>(
+    catalog: &'a GlossaryCatalog,
+    identity: &str,
+) -> Option<&'a GlossaryCatalogProject> {
     catalog.projects.iter().find(|project| {
         project.name.eq_ignore_ascii_case(identity)
             || project.key.eq_ignore_ascii_case(identity)
@@ -2401,6 +2679,81 @@ fn definition_uri_at_position(
 ) -> Option<Uri> {
     let target = editor_definition_at_position(document, position, entries)?;
     Uri::from_file_path(target.path)
+}
+
+fn glossary_hover_at_position(
+    document: &DocumentSnapshot,
+    position: sase_core::EditorPosition,
+    project: &GlossaryCatalogProject,
+) -> Option<HoverPayload> {
+    let span = project.catalog.lookup(document.text(), position)?;
+    let entry = glossary_entry_for_span(project, &span)?;
+    Some(HoverPayload {
+        range: span.range,
+        markdown: glossary_hover_markdown(project, entry),
+    })
+}
+
+fn glossary_definition_at_position(
+    document: &DocumentSnapshot,
+    position: sase_core::EditorPosition,
+    project: &GlossaryCatalogProject,
+) -> Option<Location> {
+    let span = project.catalog.lookup(document.text(), position)?;
+    let entry = glossary_entry_for_span(project, &span)?;
+    let source = entry.source.as_ref();
+    let path = source
+        .and_then(|source| source.config_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(project.config_path.as_str());
+    let uri = Uri::from_file_path(Path::new(path))?;
+    Some(Location {
+        uri,
+        range: source
+            .and_then(|source| source.definition_range)
+            .map(to_lsp_range)
+            .unwrap_or_else(zero_range),
+    })
+}
+
+fn glossary_entry_for_span<'a>(
+    project: &'a GlossaryCatalogProject,
+    span: &GlossarySpanWire,
+) -> Option<&'a GlossaryEntryWire> {
+    project.catalog.catalog().entries.get(span.entry_index)
+}
+
+fn glossary_hover_markdown(
+    project: &GlossaryCatalogProject,
+    entry: &GlossaryEntryWire,
+) -> String {
+    let mut lines = vec![format!("**{}**", entry.term)];
+    if !entry.configured_aliases.is_empty() {
+        lines.push(String::new());
+        lines.push(format!(
+            "Aliases: {}",
+            entry
+                .configured_aliases
+                .iter()
+                .map(|alias| markdown_code(alias))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines.push(String::new());
+    lines.push(entry.definition.clone());
+
+    let mut meta = vec![format!("project `{}`", project.name)];
+    if !project.config_path.is_empty() {
+        meta.push(format!("source `{}`", project.config_path));
+    }
+    lines.push(String::new());
+    lines.push(meta.join(" | "));
+    lines.join("\n")
+}
+
+fn markdown_code(value: &str) -> String {
+    format!("`{}`", value.replace('`', "\\`"))
 }
 
 fn zero_range() -> Range {
@@ -4826,6 +5179,84 @@ mod tests {
         .unwrap();
     }
 
+    fn write_glossary_catalog(
+        path: &Path,
+        root: &Path,
+        default_project: Option<&str>,
+    ) {
+        let project = |key: &str,
+                       name: &str,
+                       aliases: Vec<&str>,
+                       term: &str,
+                       alias: &str,
+                       definition: &str| {
+            let config_path = root
+                .join(key)
+                .join("sase")
+                .join("sase.yml")
+                .to_string_lossy()
+                .into_owned();
+            serde_json::json!({
+                "schema_version": 1,
+                "project": {
+                    "key": key,
+                    "name": name,
+                    "aliases": aliases,
+                    "workspace_dir": root.join(key).to_string_lossy().into_owned(),
+                },
+                "config_path": config_path,
+                "config_signature": {
+                    "path": config_path,
+                    "mtime_ns": 1,
+                    "size": 42,
+                },
+                "entries": [{
+                    "index": 0,
+                    "term": term,
+                    "normalized_term": term,
+                    "definition": definition,
+                    "configured_aliases": [alias],
+                    "effective_aliases": [term, alias],
+                    "source": {
+                        "config_path": config_path,
+                        "config_key_path": ["glossary", term],
+                        "definition_range": {
+                            "start": {"line": 4, "character": 16},
+                            "end": {"line": 4, "character": 27}
+                        }
+                    }
+                }]
+            })
+        };
+        fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "default_project": default_project,
+                "projects": [
+                    project(
+                        "sase",
+                        "sase",
+                        vec!["sase-core"],
+                        "Agent Clan",
+                        "clan",
+                        "A named rootless container.",
+                    ),
+                    project(
+                        "local",
+                        "local",
+                        vec![],
+                        "Workspace",
+                        "workspace checkout",
+                        "A numbered project checkout.",
+                    )
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn write_artifact_ref_catalog(
         path: &Path,
         root: &Path,
@@ -4873,6 +5304,31 @@ mod tests {
             CompletionResponse::Array(items) => items,
             CompletionResponse::List(list) => list.items,
         }
+    }
+
+    fn absolute_semantic_tokens(
+        tokens: &[lsp_types::SemanticToken],
+    ) -> Vec<(u32, u32, u32, u32, u32)> {
+        let mut line = 0u32;
+        let mut start = 0u32;
+        tokens
+            .iter()
+            .map(|token| {
+                line += token.delta_line;
+                if token.delta_line == 0 {
+                    start += token.delta_start;
+                } else {
+                    start = token.delta_start;
+                }
+                (
+                    line,
+                    start,
+                    token.length,
+                    token.token_type,
+                    token.token_modifiers_bitset,
+                )
+            })
+            .collect()
     }
 
     fn repo_entry(
@@ -5057,7 +5513,7 @@ mod tests {
                 .iter()
                 .map(|token_type| token_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["namespace", "string", "number"]
+            vec!["namespace", "string", "number", "type"]
         );
         assert_eq!(
             options
@@ -6002,6 +6458,134 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn encodes_glossary_tokens_by_active_project_without_overlaps() {
+        let temp = tempfile::tempdir().unwrap();
+        let glossary_path = temp.path().join("glossary_catalog.json");
+        let artifact_path = temp.path().join("artifact_ref_catalog.json");
+        let vcs_path = temp.path().join("vcs_project_catalog.json");
+        write_glossary_catalog(&glossary_path, temp.path(), Some("sase"));
+        write_artifact_ref_catalog(&artifact_path, temp.path(), Some("sase"));
+        write_vcs_ref_catalog(&vcs_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.glossary_catalog = Some(glossary_path);
+            config.artifact_ref_catalog = Some(artifact_path);
+            config.vcs_project_catalog = Some(vcs_path);
+        }
+
+        let tokens = server.semantic_tokens_for_text(
+            "#gh:sase Agent Clan `clan` @designs:clan".to_string(),
+        );
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(absolute.contains(&(0, 9, 10, 3, 0)), "{absolute:?}");
+        assert!(absolute.iter().any(|token| token.3 == 0));
+        assert!(absolute.iter().any(|token| token.3 == 1));
+        assert_eq!(
+            absolute.iter().filter(|token| token.3 == 3).count(),
+            1,
+            "inline-code and artifact-overlapping aliases must not tokenize: {absolute:?}"
+        );
+
+        let local =
+            server.semantic_tokens_for_text("#git:local Workspace".to_string());
+        assert!(
+            absolute_semantic_tokens(&local.data).contains(&(0, 11, 9, 3, 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn glossary_hover_and_definition_use_source_ranges() {
+        let temp = tempfile::tempdir().unwrap();
+        let glossary_path = temp.path().join("glossary_catalog.json");
+        let vcs_path = temp.path().join("vcs_project_catalog.json");
+        write_glossary_catalog(&glossary_path, temp.path(), Some("sase"));
+        write_vcs_ref_catalog(&vcs_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.glossary_catalog = Some(glossary_path);
+            config.vcs_project_catalog = Some(vcs_path);
+        }
+
+        let text = "#gh:sase ask clan".to_string();
+        let hover = server
+            .hover_for_text(text.clone(), Position::new(0, 14))
+            .await
+            .expect("glossary hover");
+        let contents = hover.contents;
+        let range = hover.range;
+        let lsp_types::HoverContents::Markup(markup) = contents else {
+            panic!("expected markdown hover");
+        };
+        assert!(markup.value.contains("**Agent Clan**"));
+        assert!(markup.value.contains("Aliases: `clan`"));
+        assert!(markup.value.contains("A named rootless container."));
+        assert!(markup.value.contains("project `sase`"));
+        assert_eq!(
+            range,
+            Some(Range::new(Position::new(0, 13), Position::new(0, 17)))
+        );
+
+        let definition = server
+            .definition_for_text(text, Position::new(0, 14))
+            .await
+            .expect("glossary definition");
+        let GotoDefinitionResponse::Scalar(location) = definition else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(
+            location.uri,
+            file_uri(temp.path().join("sase/sase/sase.yml"))
+        );
+        assert_eq!(
+            location.range,
+            Range::new(Position::new(4, 16), Position::new(4, 27))
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_glossary_catalog_degrades_to_no_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let glossary_path = temp.path().join("glossary_catalog.json");
+        fs::write(&glossary_path, r#"{"schema_version": 99, "projects": []}"#)
+            .unwrap();
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        server.config.write().unwrap().glossary_catalog = Some(glossary_path);
+
+        let tokens = server.semantic_tokens_for_text("Agent Clan".to_string());
+        let hover = server
+            .hover_for_text("Agent Clan".to_string(), Position::new(0, 1))
+            .await;
+        let definition = server
+            .definition_for_text("Agent Clan".to_string(), Position::new(0, 1))
+            .await;
+
+        assert!(tokens.data.is_empty());
+        assert!(hover.is_none());
+        assert!(definition.is_none());
     }
 
     #[tokio::test]
