@@ -2,10 +2,10 @@
 
 [![PyPI](https://img.shields.io/pypi/v/sase-core-rs?logo=pypi&logoColor=white)](https://pypi.org/project/sase-core-rs/)
 
-Rust core for the [sase](https://github.com/sase-org/sase) ChangeSpec backend.
+Rust core for the [sase](https://github.com/sase-org/sase) Patch backend.
 
-This repo is the eventual home of the Rust ChangeSpec parser, query engine, graph index, and bead data backend. The
-Python `sase_100` repo remains the product shell; this crate owns deterministic core data operations as they are ported.
+This repo is the eventual home of the Rust Patch parser, query engine, graph index, and bead data backend. The Python
+`sase_100` repo remains the product shell; this crate owns deterministic core data operations as they are ported.
 
 ## Layout
 
@@ -76,21 +76,27 @@ All `rust-*` targets short-circuit with a friendly message when `../sase-core` i
 
 ## Wire contract
 
-`crates/sase_core/src/wire.rs` mirrors `sase_100/src/sase/core/wire.py`:
+`crates/sase_core/src/wire.rs` exposes canonical Patch/Stitch records while preserving the legacy
+`sase_100/src/sase/core/wire.py` ChangeSpec wire shape:
 
-| Rust type              | Python dataclass       |
-| ---------------------- | ---------------------- |
-| `SourceSpanWire`       | `SourceSpanWire`       |
-| `CommitWire`           | `CommitWire`           |
-| `HookStatusLineWire`   | `HookStatusLineWire`   |
-| `HookWire`             | `HookWire`             |
-| `CommentWire`          | `CommentWire`          |
-| `MentorStatusLineWire` | `MentorStatusLineWire` |
-| `MentorWire`           | `MentorWire`           |
-| `TimestampWire`        | `TimestampWire`        |
-| `DeltaWire`            | `DeltaWire`            |
-| `ChangeSpecWire`       | `ChangeSpecWire`       |
-| `ParseErrorWire`       | `ParseErrorWire`       |
+| Rust type                    | Contract role                                      |
+| ---------------------------- | -------------------------------------------------- |
+| `SourceSpanWire`             | Shared source span record                          |
+| `StitchWire`                 | Canonical lightweight Patch entry                  |
+| `CommitWire`                 | Legacy compatibility alias for stitch entries      |
+| `PatchHookStatusLineWire`    | Canonical hook status reference with `stitch_id`   |
+| `HookStatusLineWire`         | Legacy hook status reference with `commit_entry_num` |
+| `PatchHookWire`              | Canonical hook record                              |
+| `HookWire`                   | Legacy-compatible hook record                      |
+| `CommentWire`                | Shared comment record                              |
+| `MentorStatusLineWire`       | Shared mentor status record                        |
+| `PatchMentorWire`            | Canonical mentor record with `stitch_id`           |
+| `MentorWire`                 | Legacy mentor record with `entry_id`               |
+| `TimestampWire`              | Shared timestamp record                            |
+| `DeltaWire`                  | Shared delta record                                |
+| `PatchWire`                  | Canonical parsed Patch record with `stitches`      |
+| `ChangeSpecWire`             | Legacy compatibility record with `commits`         |
+| `ParseErrorWire`             | Shared parser error record                         |
 
 `crates/sase_core/src/agent_scan/wire.rs` mirrors
 `sase_100/src/sase/core/agent_scan_wire.py` (Phase 3B):
@@ -114,9 +120,14 @@ JSON shape rules (enforced by tests):
 
 - `Option<T>::None` → JSON `null` (never omitted).
 - Empty list fields → JSON `[]` (never `null`).
-- `schema_version` is the first field of `ChangeSpecWire` so a Rust parser can refuse to deserialize newer records.
-- Field declaration order matches the Python dataclasses, so byte-for-byte parity is reachable when both sides preserve
-  declaration order.
+- `schema_version` is the first field of `PatchWire` and `ChangeSpecWire` so a Rust parser can refuse to deserialize
+  newer records.
+- `PatchWire` serializes canonical `stitches` / `stitch_id` keys. `ChangeSpecWire` keeps the legacy `commits` /
+  `commit_entry_num` / `entry_id` keys for installed consumers.
+- Canonical records deserialize legacy keys, and legacy records deserialize canonical keys, so mixed-version producers
+  and consumers can overlap during the terminology migration.
+- Field declaration order matches the current Python dataclasses at the legacy boundary, so byte-for-byte parity is
+  reachable when both sides preserve declaration order.
 
 `crates/sase_core/tests/python_wire_parity.rs` checks Rust JSON against a captured Python fixture in both directions.
 
@@ -143,21 +154,26 @@ later phases.
 
 ## Parser status
 
-`crates/sase_core/src/parser.rs` exposes:
+`crates/sase_core/src/parser.rs` exposes both the legacy and canonical parser contracts:
 
 ```rust
 pub fn parse_project_bytes(
     path: &str,
     data: &[u8],
 ) -> Result<Vec<ChangeSpecWire>, ParseErrorWire>;
+
+pub fn parse_patch_project_bytes(
+    path: &str,
+    data: &[u8],
+) -> Result<Vec<PatchWire>, ParseErrorWire>;
 ```
 
-Phase 1C handles ChangeSpec boundaries (`## ChangeSpec` headers, direct `NAME:` starts, two-blank-line / new-NAME
-terminators), the scalar fields `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted), `BUG`, and `STATUS`,
-**and** structured section parsing for `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, and
-`DELTAS`. Suffix-prefix parsing matches `sase.ace.changespec.suffix_utils` (including `~!:`, `~@:`, `~$:`, `?$:`, `!:`,
-`@:`, `$:`, `%:`, `^:`, the legacy `~:` plain form, the standalone `@`/`%`/`^` markers, and the `!: metahook | ...` →
-`metahook_complete` promotion).
+The parser accepts Patch boundaries (`## Patch` headers, legacy `## ChangeSpec` headers, direct `NAME:` starts,
+two-blank-line / new-NAME terminators), the scalar fields `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is
+accepted), `BUG`, and `STATUS`, **and** structured section parsing for canonical `STITCHES`, legacy `COMMITS`, `HOOKS`,
+`COMMENTS`, `MENTORS`, `TIMESTAMPS`, and `DELTAS`. Suffix-prefix parsing matches `sase.ace.changespec.suffix_utils`
+(including `~!:`, `~@:`, `~$:`, `?$:`, `!:`, `@:`, `$:`, `%:`, `^:`, the legacy `~:` plain form, the standalone
+`@`/`%`/`^` markers, and the `!: metahook | ...` → `metahook_complete` promotion).
 
 `source_span.start_line` / `end_line` are inclusive 1-based and reflect the real last non-blank line of the spec, which
 improves on Phase 0's Python placeholder (`end_line == start_line`).
@@ -216,13 +232,15 @@ JSON object) are absorbed silently and counted on
 
 ```python
 sase_core_rs.parse_project_bytes(path: str, data: bytes) -> list[dict]
+sase_core_rs.parse_patch_project_bytes(path: str, data: bytes) -> list[dict]
 sase_core_rs.axe_status_wire_schema_version() -> int
 sase_core_rs.classify_axe_status(request: dict) -> dict
 ```
 
-The result is plain Python `dict`/`list`/`str`/`int`/`bool`/`None` mirroring the `ChangeSpecWire` JSON shape — no PyO3
-classes leak across the boundary in Phase 1. A Rust `ParseErrorWire` is surfaced as a Python `ValueError` whose message
-is the wire error's `Display` form (`"kind: message (file_path)"`).
+The result is plain Python `dict`/`list`/`str`/`int`/`bool`/`None`. `parse_patch_project_bytes` mirrors the canonical
+`PatchWire` JSON shape; `parse_project_bytes` preserves the legacy `ChangeSpecWire` JSON shape. No PyO3 classes leak
+across the boundary. A Rust `ParseErrorWire` is surfaced as a Python `ValueError` whose message is the wire error's
+`Display` form (`"kind: message (file_path)"`).
 
 For AXE status, Python supplies already-collected lock, process, marker,
 runner, and lumberjack observations. Rust performs pure validation,

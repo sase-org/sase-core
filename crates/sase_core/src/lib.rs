@@ -1,11 +1,13 @@
-//! Pure-Rust core for the sase ChangeSpec wire contract.
+//! Pure-Rust core for the sase Patch wire contract.
 //!
 //! Phase 1A modeled the wire types defined in `sase_100/src/sase/core/wire.py`
 //! using owned data only. Phase 1B added a minimal full-file parser for
 //! ChangeSpec boundaries and scalar fields. Phase 1C adds section parity:
 //! structured `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, and
 //! `DELTAS` entries that match the Python parser output for the golden
-//! corpus. The crate is deliberately free of PyO3 types so later
+//! corpus. Patch/Stitch is now the canonical Rust contract while the legacy
+//! ChangeSpec/Commit wire shape remains a compatibility boundary. The crate
+//! is deliberately free of PyO3 types so later
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod agent_archive;
@@ -536,7 +538,7 @@ pub use notifications::{
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
-pub use parser::parse_project_bytes;
+pub use parser::{parse_patch_project_bytes, parse_project_bytes};
 pub use plan::{
     canonicalize_plan_reference, parse_plan_reference, parse_sdd_artifact_link,
     plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
@@ -627,8 +629,10 @@ pub use vcs_log::{
 };
 pub use wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,
-    HookWire, MentorStatusLineWire, MentorWire, ParseErrorWire, SourceSpanWire,
-    TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    HookWire, MentorStatusLineWire, MentorWire, ParseErrorWire,
+    PatchHookStatusLineWire, PatchHookWire, PatchMentorWire, PatchWire,
+    SourceSpanWire, StitchWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    PATCH_WIRE_SCHEMA_VERSION,
 };
 pub use xprompt_catalog::{
     compose_snippet_catalog, load_editor_snippet_catalog,

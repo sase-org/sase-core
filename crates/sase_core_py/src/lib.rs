@@ -5,6 +5,7 @@
 //! scanner. Currently exposed:
 //!
 //! - `parse_project_bytes(path: str, data: bytes) -> list[dict]`
+//! - `parse_patch_project_bytes(path: str, data: bytes) -> list[dict]`
 //! - `tokenize_query(query: str) -> list[dict]`
 //! - `parse_query(query: str) -> dict`
 //! - `canonicalize_query(query: str) -> str`
@@ -1178,6 +1179,33 @@ fn py_parse_project_bytes<'py>(
         // documents; if it ever isn't, replace with a direct serde -> Py
         // visitor.
         let value = serde_json::to_value(spec).map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+        let py_obj = json_value_to_py(py, &value)?;
+        list.append(py_obj)?;
+    }
+    Ok(list)
+}
+
+/// Parse a project file's bytes into canonical PatchWire-shape dicts.
+///
+/// This accepts both canonical `## Patch` / `STITCHES:` and legacy
+/// `## ChangeSpec` / `COMMITS:` text, then emits `stitches` and `stitch_id`
+/// keys for new Python callers.
+#[pyfunction]
+#[pyo3(name = "parse_patch_project_bytes")]
+fn py_parse_patch_project_bytes<'py>(
+    py: Python<'py>,
+    path: &str,
+    data: &Bound<'py, PyBytes>,
+) -> PyResult<Bound<'py, PyList>> {
+    let bytes: &[u8] = data.as_bytes();
+    let patches = sase_core::parse_patch_project_bytes(path, bytes)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+
+    let list = PyList::empty_bound(py);
+    for patch in &patches {
+        let value = serde_json::to_value(patch).map_err(|e| {
             PyValueError::new_err(format!("internal serialize error: {e}"))
         })?;
         let py_obj = json_value_to_py(py, &value)?;
@@ -5200,7 +5228,7 @@ fn changespecs_from_py_list(
         let spec: ChangeSpecWire =
             serde_json::from_value(json).map_err(|e| {
                 PyValueError::new_err(format!(
-                    "specs[{idx}] is not a valid ChangeSpecWire dict: {e}"
+                    "specs[{idx}] is not a valid ChangeSpecWire/PatchWire-compatible dict: {e}"
                 ))
             })?;
         wire_specs.push(spec);
@@ -7128,6 +7156,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
@@ -8886,6 +8915,56 @@ mod tests {
         list.iter()
             .map(|item| item.extract::<bool>().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn parse_patch_project_bytes_binding_emits_canonical_shape_and_query_accepts_it(
+    ) {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+
+            let src = "\
+## Patch
+NAME: alpha
+STATUS: WIP
+STITCHES:
+  (2a) Proposed stitch
+HOOKS:
+  just test
+      | (2a) [260101_120000] PASSED (3s)
+MENTORS:
+  (2a) profileA[1/1]
+";
+            let bytes = PyBytes::new_bound(py, src.as_bytes());
+            let result = module
+                .getattr("parse_patch_project_bytes")
+                .unwrap()
+                .call1(("proj.sase", bytes))
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
+            let patch = &value.as_array().unwrap()[0];
+
+            assert!(patch.get("stitches").is_some());
+            assert!(patch.get("commits").is_none());
+            assert_eq!(patch["stitches"][0]["proposal_letter"], json!("a"));
+            assert_eq!(
+                patch["hooks"][0]["status_lines"][0]["stitch_id"],
+                json!("2a")
+            );
+            assert!(patch["hooks"][0]["status_lines"][0]
+                .get("commit_entry_num")
+                .is_none());
+            assert_eq!(patch["mentors"][0]["stitch_id"], json!("2a"));
+            assert!(patch["mentors"][0].get("entry_id").is_none());
+
+            let specs = PyList::empty_bound(py);
+            append_json(py, &specs, patch.clone());
+            let results =
+                py_evaluate_query_many(py, "name:alpha", &specs).unwrap();
+            assert_eq!(bools_from_py_list(&results), vec![true]);
+        });
     }
 
     #[test]

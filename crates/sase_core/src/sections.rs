@@ -15,21 +15,21 @@ use crate::wire::{
     MentorStatusLineWire, MentorWire, TimestampWire,
 };
 
-// -- COMMITS ----------------------------------------------------------------
+// -- STITCHES ---------------------------------------------------------------
 
 /// Mirrors `parse_commits_line` in `section_parsers.py`.
 ///
 /// Recognized line shapes (in priority order):
 ///
 /// - `(N)` / `(Na) <note>` — a new entry header. Saves any in-progress
-///   entry into `commits` and starts a new `current` with the note (and
+///   entry into `stitches` and starts a new `current` with the note (and
 ///   parsed inline suffix).
 /// - `| CHAT:` / `| DIFF:` / `| PLAN:` — drawer lines that attach to the
 ///   current entry.
 /// - 6-space-indented body lines (not drawers) — appended to the
-///   current entry's `body`. A body line whose stripped form is `.`
-///   becomes an empty string.
-pub fn parse_commits_line(
+///   current entry's `body`. A body line whose stripped form is `.` becomes
+///   an empty string.
+pub fn parse_stitches_line(
     line: &str,
     stripped: &str,
     current: &mut Option<CommitWire>,
@@ -123,6 +123,17 @@ pub fn parse_commits_line(
             }
         }
     }
+}
+
+/// Legacy compatibility wrapper for callers still using the `COMMITS`
+/// section terminology.
+pub fn parse_commits_line(
+    line: &str,
+    stripped: &str,
+    current: &mut Option<CommitWire>,
+    commits: &mut Vec<CommitWire>,
+) {
+    parse_stitches_line(line, stripped, current, commits);
 }
 
 // -- HOOKS ------------------------------------------------------------------
@@ -461,6 +472,18 @@ mod tests {
         let mut commits = vec![];
         let line = "  (2a) proposed work";
         parse_commits_line(line, line.trim(), &mut current, &mut commits);
+        let c = current.as_ref().unwrap();
+        assert_eq!(c.number, 2);
+        assert_eq!(c.proposal_letter.as_deref(), Some("a"));
+        assert_eq!(c.note, "proposed work");
+    }
+
+    #[test]
+    fn stitches_line_uses_same_entry_parser() {
+        let mut current = None;
+        let mut commits = vec![];
+        let line = "  (2a) proposed work";
+        parse_stitches_line(line, line.trim(), &mut current, &mut commits);
         let c = current.as_ref().unwrap();
         assert_eq!(c.number, 2);
         assert_eq!(c.proposal_letter.as_deref(), Some("a"));

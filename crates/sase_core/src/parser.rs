@@ -3,14 +3,16 @@
 //! Mirrors `sase_100/src/sase/ace/changespec/parser.py` and
 //! `section_parsers.py`:
 //!
-//! - ChangeSpec boundaries: `## ChangeSpec` headers, direct `NAME:` starts,
-//!   end-on-next-header, end-on-two-blank-lines, end-on-new-NAME.
+//! - Patch boundaries: canonical `## Patch` and legacy `## ChangeSpec`
+//!   headers, direct `NAME:` starts, end-on-next-header,
+//!   end-on-two-blank-lines, end-on-new-NAME.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
 //! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted), `BUG`,
 //!   `STATUS`.
-//! - Section bodies: `REFS`, `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`,
-//!   `TIMESTAMPS`, `DELTAS`. The wire records produced here match Python
-//!   parser output for the golden corpus.
+//! - Section bodies: `REFS`, canonical `STITCHES`, legacy `COMMITS`,
+//!   `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, `DELTAS`. The legacy
+//!   wire records produced here match Python parser output for the golden
+//!   corpus.
 //! - Whitespace: inline header content stripped, two-space continuation
 //!   strips the first two spaces, blank lines preserved inside
 //!   description before the final trim.
@@ -24,12 +26,12 @@ use crate::project_spec::{
     project_display_name_from_content, project_spec_basename,
 };
 use crate::sections::{
-    parse_comments_line, parse_commits_line, parse_deltas_line,
-    parse_hooks_line, parse_mentors_line, parse_timestamps_line,
+    parse_comments_line, parse_deltas_line, parse_hooks_line,
+    parse_mentors_line, parse_stitches_line, parse_timestamps_line,
 };
 use crate::wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookWire, MentorWire,
-    ParseErrorWire, SourceSpanWire, TimestampWire,
+    ParseErrorWire, PatchWire, SourceSpanWire, TimestampWire,
     CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
@@ -57,7 +59,7 @@ pub fn parse_project_bytes(
 
     while idx < lines.len() {
         let line = lines[idx];
-        if is_changespec_header(line) {
+        if is_patch_header(line) {
             let (spec, next_idx) = parse_one_changespec(
                 &lines,
                 idx + 1,
@@ -87,8 +89,32 @@ pub fn parse_project_bytes(
     Ok(specs)
 }
 
+/// Parse all Patches from a project file's raw bytes.
+///
+/// This canonical entry point accepts both `## Patch` / `STITCHES:` and the
+/// legacy `## ChangeSpec` / `COMMITS:` spellings. It emits `PatchWire`
+/// records with canonical `stitches` and `stitch_id` keys.
+pub fn parse_patch_project_bytes(
+    path: &str,
+    data: &[u8],
+) -> Result<Vec<PatchWire>, ParseErrorWire> {
+    parse_project_bytes(path, data)
+        .map(|specs| specs.into_iter().map(PatchWire::from).collect())
+}
+
+/// Match canonical `## Patch` and legacy `## ChangeSpec` headers.
+fn is_patch_header(line: &str) -> bool {
+    is_patch_header_named(line, "Patch")
+        || is_patch_header_named(line, "ChangeSpec")
+}
+
 /// Match Python's `re.match(r"^##\s+ChangeSpec", line.strip())`.
+#[cfg(test)]
 fn is_changespec_header(line: &str) -> bool {
+    is_patch_header_named(line, "ChangeSpec")
+}
+
+fn is_patch_header_named(line: &str, name: &str) -> bool {
     let trimmed = line.trim();
     if !trimmed.starts_with("##") {
         return false;
@@ -99,7 +125,7 @@ fn is_changespec_header(line: &str) -> bool {
         Some(c) if c.is_whitespace() => {}
         _ => return false,
     }
-    after.trim_start().starts_with("ChangeSpec")
+    after.trim_start().starts_with(name)
 }
 
 #[derive(Default)]
@@ -266,7 +292,7 @@ fn try_section_header(state: &mut ParserState, line: &str) -> bool {
         state.in_refs = true;
         return true;
     }
-    if line.starts_with("COMMITS:") {
+    if line.starts_with("STITCHES:") || line.starts_with("COMMITS:") {
         state.save_pending_entries();
         state.reset_section_flags();
         state.in_commits = true;
@@ -348,7 +374,7 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
         return;
     }
     if state.in_commits {
-        parse_commits_line(
+        parse_stitches_line(
             line,
             stripped,
             &mut state.current_commit,
@@ -387,7 +413,7 @@ fn parse_one_changespec(
         let line = lines[idx];
         let stripped = line.trim();
 
-        if is_changespec_header(line) && idx > start_idx {
+        if is_patch_header(line) && idx > start_idx {
             break;
         }
 
@@ -445,6 +471,10 @@ mod tests {
         parse_project_bytes("myproj.sase", data.as_bytes()).unwrap()
     }
 
+    fn parse_patch(data: &str) -> Vec<PatchWire> {
+        parse_patch_project_bytes("myproj.sase", data.as_bytes()).unwrap()
+    }
+
     #[test]
     fn project_basename_strips_extension_and_archive_suffix() {
         assert_eq!(project_spec_basename("/tmp/myproj.sase"), "myproj");
@@ -489,6 +519,16 @@ mod tests {
         assert!(!is_changespec_header("##ChangeSpec"));
         assert!(!is_changespec_header("# ChangeSpec"));
         assert!(!is_changespec_header("NAME: foo"));
+    }
+
+    #[test]
+    fn patch_header_detection_accepts_canonical_and_legacy_headers() {
+        assert!(is_patch_header("## Patch"));
+        assert!(is_patch_header("##  Patch"));
+        assert!(is_patch_header("## ChangeSpec"));
+        assert!(!is_patch_header("##Patch"));
+        assert!(!is_patch_header("# Patch"));
+        assert!(!is_patch_header("NAME: foo"));
     }
 
     #[test]
@@ -674,7 +714,7 @@ STATUS: Ready
     fn full_section_parity_emits_structured_entries() {
         // The Phase 1B fixture, but now with non-empty section assertions.
         let src = "\
-## ChangeSpec
+## Patch
 NAME: alpha
 DESCRIPTION:
   Initial feature work.
@@ -685,7 +725,7 @@ STATUS: Submitted
 REFS:
   research:202607/report.md
   not a valid reference
-COMMITS:
+STITCHES:
   (1) [run] Initial Commit
       | CHAT: ~/.sase/chats/alpha.md (0s)
 HOOKS:
@@ -734,6 +774,49 @@ DELTAS:
         assert_eq!(s.deltas.len(), 2);
         assert_eq!(s.deltas[0].change_type, "A");
         assert_eq!(s.deltas[1].change_type, "M");
+    }
+
+    #[test]
+    fn legacy_commits_section_still_parses_as_stitches() {
+        let src = "\
+## ChangeSpec
+NAME: alpha
+STATUS: WIP
+COMMITS:
+  (2a) Proposed stitch
+HOOKS:
+  just test
+      | (2a) [260101_120000] PASSED (3s)
+MENTORS:
+  (2a) profileA[1/1]
+";
+        let s = &parse(src)[0];
+        assert_eq!(s.commits.len(), 1);
+        assert_eq!(s.commits[0].proposal_letter.as_deref(), Some("a"));
+        assert_eq!(s.hooks[0].status_lines[0].commit_entry_num, "2a");
+        assert_eq!(s.mentors[0].entry_id, "2a");
+    }
+
+    #[test]
+    fn parse_patch_project_bytes_emits_canonical_patch_wire() {
+        let src = "\
+## Patch
+NAME: alpha
+STATUS: WIP
+STITCHES:
+  (2a) Proposed stitch
+HOOKS:
+  just test
+      | (2a) [260101_120000] PASSED (3s)
+MENTORS:
+  (2a) profileA[1/1]
+";
+        let patch = &parse_patch(src)[0];
+        assert_eq!(patch.name, "alpha");
+        assert_eq!(patch.stitches.len(), 1);
+        assert_eq!(patch.stitches[0].proposal_letter.as_deref(), Some("a"));
+        assert_eq!(patch.hooks[0].status_lines[0].stitch_id, "2a");
+        assert_eq!(patch.mentors[0].stitch_id, "2a");
     }
 
     #[test]

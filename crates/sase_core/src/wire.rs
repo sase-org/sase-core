@@ -6,14 +6,21 @@
 //! - `Option<T>::None` serializes as JSON `null` (not omitted).
 //! - Empty list fields serialize as `[]` (never `null`).
 //! - All field names are lowercase `snake_case` (serde default).
-//! - `schema_version` lives at the top of `ChangeSpecWire` so a Rust parser
-//!   can refuse to deserialize newer records.
+//! - `schema_version` lives at the top of `PatchWire` / `ChangeSpecWire` so a
+//!   Rust parser can refuse to deserialize newer records.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Schema version mirrored from `wire.py::CHANGESPEC_WIRE_SCHEMA_VERSION`.
 pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 5;
+
+/// Canonical Patch/Stitch schema version.
+///
+/// The serialized fields are compatible with `CHANGESPEC_WIRE_SCHEMA_VERSION`;
+/// this alias lets canonical callers stop depending on the legacy constant
+/// name without implying a storage-format bump.
+pub const PATCH_WIRE_SCHEMA_VERSION: u32 = CHANGESPEC_WIRE_SCHEMA_VERSION;
 
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,7 +51,60 @@ pub struct CommitWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StitchWire {
+    pub number: u32,
+    pub note: String,
+    #[serde(default)]
+    pub chat: Option<String>,
+    #[serde(default)]
+    pub diff: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub proposal_letter: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub suffix_type: Option<String>,
+    #[serde(default)]
+    pub body: Vec<String>,
+}
+
+impl From<CommitWire> for StitchWire {
+    fn from(commit: CommitWire) -> Self {
+        Self {
+            number: commit.number,
+            note: commit.note,
+            chat: commit.chat,
+            diff: commit.diff,
+            plan: commit.plan,
+            proposal_letter: commit.proposal_letter,
+            suffix: commit.suffix,
+            suffix_type: commit.suffix_type,
+            body: commit.body,
+        }
+    }
+}
+
+impl From<StitchWire> for CommitWire {
+    fn from(stitch: StitchWire) -> Self {
+        Self {
+            number: stitch.number,
+            note: stitch.note,
+            chat: stitch.chat,
+            diff: stitch.diff,
+            plan: stitch.plan,
+            proposal_letter: stitch.proposal_letter,
+            suffix: stitch.suffix,
+            suffix_type: stitch.suffix_type,
+            body: stitch.body,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookStatusLineWire {
+    #[serde(alias = "stitch_id")]
     pub commit_entry_num: String,
     pub timestamp: String,
     pub status: String,
@@ -59,10 +119,87 @@ pub struct HookStatusLineWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchHookStatusLineWire {
+    #[serde(alias = "commit_entry_num")]
+    pub stitch_id: String,
+    pub timestamp: String,
+    pub status: String,
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub suffix_type: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+impl From<HookStatusLineWire> for PatchHookStatusLineWire {
+    fn from(status_line: HookStatusLineWire) -> Self {
+        Self {
+            stitch_id: status_line.commit_entry_num,
+            timestamp: status_line.timestamp,
+            status: status_line.status,
+            duration: status_line.duration,
+            suffix: status_line.suffix,
+            suffix_type: status_line.suffix_type,
+            summary: status_line.summary,
+        }
+    }
+}
+
+impl From<PatchHookStatusLineWire> for HookStatusLineWire {
+    fn from(status_line: PatchHookStatusLineWire) -> Self {
+        Self {
+            commit_entry_num: status_line.stitch_id,
+            timestamp: status_line.timestamp,
+            status: status_line.status,
+            duration: status_line.duration,
+            suffix: status_line.suffix,
+            suffix_type: status_line.suffix_type,
+            summary: status_line.summary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookWire {
     pub command: String,
     #[serde(default)]
     pub status_lines: Vec<HookStatusLineWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchHookWire {
+    pub command: String,
+    #[serde(default)]
+    pub status_lines: Vec<PatchHookStatusLineWire>,
+}
+
+impl From<HookWire> for PatchHookWire {
+    fn from(hook: HookWire) -> Self {
+        Self {
+            command: hook.command,
+            status_lines: hook
+                .status_lines
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<PatchHookWire> for HookWire {
+    fn from(hook: PatchHookWire) -> Self {
+        Self {
+            command: hook.command,
+            status_lines: hook
+                .status_lines
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +229,7 @@ pub struct MentorStatusLineWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MentorWire {
+    #[serde(alias = "stitch_id")]
     pub entry_id: String,
     #[serde(default)]
     pub profiles: Vec<String>,
@@ -99,6 +237,40 @@ pub struct MentorWire {
     pub status_lines: Vec<MentorStatusLineWire>,
     #[serde(default)]
     pub is_draft: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchMentorWire {
+    #[serde(alias = "entry_id")]
+    pub stitch_id: String,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub status_lines: Vec<MentorStatusLineWire>,
+    #[serde(default)]
+    pub is_draft: bool,
+}
+
+impl From<MentorWire> for PatchMentorWire {
+    fn from(mentor: MentorWire) -> Self {
+        Self {
+            stitch_id: mentor.entry_id,
+            profiles: mentor.profiles,
+            status_lines: mentor.status_lines,
+            is_draft: mentor.is_draft,
+        }
+    }
+}
+
+impl From<PatchMentorWire> for MentorWire {
+    fn from(mentor: PatchMentorWire) -> Self {
+        Self {
+            entry_id: mentor.stitch_id,
+            profiles: mentor.profiles,
+            status_lines: mentor.status_lines,
+            is_draft: mentor.is_draft,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +288,95 @@ pub struct DeltaWire {
     pub change_type: String,
 }
 
-/// The full parsed wire form of one ChangeSpec.
+/// The full parsed wire form of one Patch.
+///
+/// This is the canonical Rust contract for new callers. It serializes
+/// stitch-bearing fields with canonical names while accepting the legacy
+/// `ChangeSpecWire` shape during deserialization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchWire {
+    pub schema_version: u32,
+    pub name: String,
+    pub project_basename: String,
+    /// Configured user-facing project name from the ProjectSpec metadata
+    /// header. Query evaluation falls back to the canonical directory key.
+    #[serde(default)]
+    pub project_display_name: Option<String>,
+    pub file_path: String,
+    pub source_span: SourceSpanWire,
+    pub status: String,
+    pub parent: Option<String>,
+    #[serde(alias = "cl_or_pr")]
+    pub pr_url: Option<String>,
+    pub bug: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub refs: Vec<String>,
+    #[serde(default, alias = "commits")]
+    pub stitches: Vec<StitchWire>,
+    #[serde(default)]
+    pub hooks: Vec<PatchHookWire>,
+    #[serde(default)]
+    pub comments: Vec<CommentWire>,
+    #[serde(default)]
+    pub mentors: Vec<PatchMentorWire>,
+    #[serde(default)]
+    pub timestamps: Vec<TimestampWire>,
+    #[serde(default)]
+    pub deltas: Vec<DeltaWire>,
+}
+
+impl From<ChangeSpecWire> for PatchWire {
+    fn from(spec: ChangeSpecWire) -> Self {
+        Self {
+            schema_version: spec.schema_version,
+            name: spec.name,
+            project_basename: spec.project_basename,
+            project_display_name: spec.project_display_name,
+            file_path: spec.file_path,
+            source_span: spec.source_span,
+            status: spec.status,
+            parent: spec.parent,
+            pr_url: spec.pr_url,
+            bug: spec.bug,
+            description: spec.description,
+            refs: spec.refs,
+            stitches: spec.commits.into_iter().map(Into::into).collect(),
+            hooks: spec.hooks.into_iter().map(Into::into).collect(),
+            comments: spec.comments,
+            mentors: spec.mentors.into_iter().map(Into::into).collect(),
+            timestamps: spec.timestamps,
+            deltas: spec.deltas,
+        }
+    }
+}
+
+impl From<PatchWire> for ChangeSpecWire {
+    fn from(patch: PatchWire) -> Self {
+        Self {
+            schema_version: patch.schema_version,
+            name: patch.name,
+            project_basename: patch.project_basename,
+            project_display_name: patch.project_display_name,
+            file_path: patch.file_path,
+            source_span: patch.source_span,
+            status: patch.status,
+            parent: patch.parent,
+            pr_url: patch.pr_url,
+            bug: patch.bug,
+            description: patch.description,
+            refs: patch.refs,
+            commits: patch.stitches.into_iter().map(Into::into).collect(),
+            hooks: patch.hooks.into_iter().map(Into::into).collect(),
+            comments: patch.comments,
+            mentors: patch.mentors.into_iter().map(Into::into).collect(),
+            timestamps: patch.timestamps,
+            deltas: patch.deltas,
+        }
+    }
+}
+
+/// Legacy parsed wire form of one ChangeSpec.
 ///
 /// Field order matches `wire.py::ChangeSpecWire` so JSON output is identical
 /// when serialized with order-preserving serializers.
@@ -139,7 +399,7 @@ pub struct ChangeSpecWire {
     pub description: String,
     #[serde(default)]
     pub refs: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "stitches")]
     pub commits: Vec<CommitWire>,
     #[serde(default)]
     pub hooks: Vec<HookWire>,
@@ -353,6 +613,172 @@ mod tests {
             });
             cursor += idx + needle.len();
         }
+    }
+
+    #[test]
+    fn patch_wire_serializes_canonical_stitch_keys() {
+        let patch = PatchWire {
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
+            name: "patch_one".to_string(),
+            project_basename: "proj".to_string(),
+            project_display_name: Some("Widgets".to_string()),
+            file_path: "proj.sase".to_string(),
+            source_span: empty_span(),
+            status: "WIP".to_string(),
+            parent: None,
+            pr_url: None,
+            bug: None,
+            description: "work".to_string(),
+            refs: vec![],
+            stitches: vec![StitchWire {
+                number: 2,
+                note: "proposal".to_string(),
+                chat: None,
+                diff: None,
+                plan: None,
+                proposal_letter: Some("a".to_string()),
+                suffix: None,
+                suffix_type: None,
+                body: vec![],
+            }],
+            hooks: vec![PatchHookWire {
+                command: "just test".to_string(),
+                status_lines: vec![PatchHookStatusLineWire {
+                    stitch_id: "2a".to_string(),
+                    timestamp: "260101_120000".to_string(),
+                    status: "PASSED".to_string(),
+                    duration: Some("3s".to_string()),
+                    suffix: None,
+                    suffix_type: None,
+                    summary: None,
+                }],
+            }],
+            comments: vec![],
+            mentors: vec![PatchMentorWire {
+                stitch_id: "2a".to_string(),
+                profiles: vec!["default".to_string()],
+                status_lines: vec![],
+                is_draft: false,
+            }],
+            timestamps: vec![],
+            deltas: vec![],
+        };
+
+        let json = serde_json::to_value(&patch).unwrap();
+        assert!(json.get("stitches").is_some());
+        assert!(json.get("commits").is_none());
+        assert_eq!(json["stitches"][0]["proposal_letter"], json!("a"));
+        assert_eq!(
+            json["hooks"][0]["status_lines"][0]["stitch_id"],
+            json!("2a")
+        );
+        assert!(json["hooks"][0]["status_lines"][0]
+            .get("commit_entry_num")
+            .is_none());
+        assert_eq!(json["mentors"][0]["stitch_id"], json!("2a"));
+        assert!(json["mentors"][0].get("entry_id").is_none());
+    }
+
+    #[test]
+    fn legacy_changespec_wire_deserializes_canonical_patch_shape() {
+        let json = json!({
+            "schema_version": PATCH_WIRE_SCHEMA_VERSION,
+            "name": "patch_one",
+            "project_basename": "proj",
+            "project_display_name": "Widgets",
+            "file_path": "proj.sase",
+            "source_span": {
+                "file_path": "proj.sase",
+                "start_line": 1,
+                "end_line": 10,
+            },
+            "status": "WIP",
+            "parent": null,
+            "pr_url": null,
+            "bug": null,
+            "description": "work",
+            "refs": [],
+            "stitches": [{
+                "number": 2,
+                "note": "proposal",
+                "proposal_letter": "a",
+                "body": [],
+            }],
+            "hooks": [{
+                "command": "just test",
+                "status_lines": [{
+                    "stitch_id": "2a",
+                    "timestamp": "260101_120000",
+                    "status": "PASSED",
+                }],
+            }],
+            "comments": [],
+            "mentors": [{
+                "stitch_id": "2a",
+                "profiles": ["default"],
+                "status_lines": [],
+                "is_draft": false,
+            }],
+            "timestamps": [],
+            "deltas": [],
+        });
+
+        let spec: ChangeSpecWire = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.commits.len(), 1);
+        assert_eq!(spec.commits[0].proposal_letter.as_deref(), Some("a"));
+        assert_eq!(
+            spec.hooks[0].status_lines[0].commit_entry_num,
+            "2a".to_string()
+        );
+        assert_eq!(spec.mentors[0].entry_id, "2a".to_string());
+    }
+
+    #[test]
+    fn patch_wire_deserializes_legacy_changespec_shape() {
+        let json = json!({
+            "schema_version": CHANGESPEC_WIRE_SCHEMA_VERSION,
+            "name": "legacy_spec",
+            "project_basename": "proj",
+            "file_path": "proj.sase",
+            "source_span": {
+                "file_path": "proj.sase",
+                "start_line": 1,
+                "end_line": 10,
+            },
+            "status": "WIP",
+            "parent": null,
+            "pr_url": null,
+            "bug": null,
+            "description": "work",
+            "commits": [{
+                "number": 1,
+                "note": "initial",
+                "body": [],
+            }],
+            "hooks": [{
+                "command": "just test",
+                "status_lines": [{
+                    "commit_entry_num": "1",
+                    "timestamp": "260101_120000",
+                    "status": "PASSED",
+                }],
+            }],
+            "comments": [],
+            "mentors": [{
+                "entry_id": "1",
+                "profiles": ["default"],
+                "status_lines": [],
+                "is_draft": false,
+            }],
+            "timestamps": [],
+            "deltas": [],
+        });
+
+        let patch: PatchWire = serde_json::from_value(json).unwrap();
+        assert_eq!(patch.stitches.len(), 1);
+        assert_eq!(patch.stitches[0].note, "initial");
+        assert_eq!(patch.hooks[0].status_lines[0].stitch_id, "1".to_string());
+        assert_eq!(patch.mentors[0].stitch_id, "1".to_string());
     }
 
     #[test]
