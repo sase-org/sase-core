@@ -149,6 +149,8 @@
 //! - `classify_axe_status(request: dict) -> dict`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
+//! - `skill_reference_name(skill_name: str, project: str | None = None) -> str`
+//! - `skill_placement_issue(source: str, in_skill_source: bool, declares_skill: bool, migrate_to: str | None = None) -> dict | None`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `artifact_consumption_summary(log_path: str, refs: list[str] | None = None) -> dict`
@@ -512,7 +514,10 @@ use sase_core::config::{
 };
 use sase_core::content_layout::{
     resolve_layout_candidates as core_resolve_layout_candidates,
-    sase_content_layout as core_sase_content_layout, LayoutCollisionPolicyWire,
+    sase_content_layout as core_sase_content_layout,
+    skill_placement_issue as core_skill_placement_issue,
+    skill_reference_name as core_skill_reference_name,
+    LayoutCollisionPolicyWire,
 };
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
 use sase_core::effort_override::{
@@ -6405,6 +6410,44 @@ fn py_resolve_layout_candidates(
     json_value_to_py(py, &json)
 }
 
+/// Return the canonical `skills/<name>` xprompt reference for a skill source.
+#[pyfunction]
+#[pyo3(name = "skill_reference_name")]
+#[pyo3(signature = (skill_name, project = None))]
+fn py_skill_reference_name(skill_name: &str, project: Option<&str>) -> String {
+    core_skill_reference_name(project, skill_name)
+}
+
+/// Apply the shared two-way skill placement rules to one loaded definition.
+#[pyfunction]
+#[pyo3(name = "skill_placement_issue")]
+#[pyo3(signature = (
+    source,
+    in_skill_source,
+    declares_skill,
+    migrate_to = None
+))]
+fn py_skill_placement_issue(
+    py: Python<'_>,
+    source: &str,
+    in_skill_source: bool,
+    declares_skill: bool,
+    migrate_to: Option<&str>,
+) -> PyResult<PyObject> {
+    let Some(issue) = core_skill_placement_issue(
+        source,
+        in_skill_source,
+        declares_skill,
+        migrate_to,
+    ) else {
+        return Ok(py.None());
+    };
+    let json = serde_json::to_value(issue).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Return the launch wire schema version pinned by the Rust skeleton structs.
 #[pyfunction]
 #[pyo3(name = "agent_launch_wire_schema_version")]
@@ -7364,6 +7407,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_runner_limit_override_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_skill_placement_issue, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_layout_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;

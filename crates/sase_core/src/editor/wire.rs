@@ -346,6 +346,11 @@ pub struct XpromptAssistEntry {
     #[serde(default)]
     pub definition_range: Option<EditorRange>,
     pub is_skill: bool,
+    /// Provider skill name (`foo`), as opposed to the xprompt reference `name`
+    /// (`skills/foo`). Slash completion, slash diagnostics, hover, and
+    /// definition lookup match this; `#` completion matches `name`.
+    #[serde(default)]
+    pub skill_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

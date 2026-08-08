@@ -2,7 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 1;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 2;
+
+/// Directory name holding canonical xprompt-backed skill sources, and the
+/// namespace segment every such source carries in its xprompt reference name.
+///
+/// A source declaring `name: foo` under a canonical skill directory is
+/// referenced as `#skills/foo` (or `#<project>/skills/foo`) while its provider
+/// skill name stays `foo`, so `/foo` keeps working.
+pub const SKILL_NAMESPACE_SEGMENT: &str = "skills";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +68,7 @@ pub struct ProjectContentLayoutWire {
     pub namespace_root: LayoutPathWire,
     pub config: CompatibleLayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub skills: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub repos: LayoutPathWire,
     pub memory_readme: LayoutPathWire,
@@ -71,6 +80,7 @@ pub struct HomeContentLayoutWire {
     pub root: String,
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub skills: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub global_config: LayoutPathWire,
     pub state_root: LayoutPathWire,
@@ -83,6 +93,7 @@ pub struct ChezmoiContentLayoutWire {
     pub source_root: String,
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub skills: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
     pub global_config: LayoutPathWire,
     pub memory_readme: LayoutPathWire,
@@ -106,6 +117,27 @@ pub struct XpromptSourceWire {
     pub ordering: Option<String>,
 }
 
+/// One canonical source of xprompt-backed skill definitions.
+///
+/// Skill sources are source-controlled and first-wins in the listed priority
+/// order, exactly like ordinary xprompt directory sources. There are
+/// deliberately no legacy skill paths: skills moved to this layout in a single
+/// hard cutover, so an old location is a migration diagnostic rather than a
+/// readable source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSourceWire {
+    pub id: String,
+    pub priority: u32,
+    pub scope: String,
+    pub locator: String,
+    pub path: Option<String>,
+    pub formats: Vec<String>,
+    pub tracking: LayoutTrackingWire,
+    pub project_namespaced: bool,
+    pub writable: bool,
+    pub ordering: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaseContentLayoutWire {
     pub schema_version: u32,
@@ -113,6 +145,96 @@ pub struct SaseContentLayoutWire {
     pub home: HomeContentLayoutWire,
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
     pub xprompt_sources: Vec<XpromptSourceWire>,
+    pub skill_sources: Vec<SkillSourceWire>,
+}
+
+/// Why a definition was rejected by the canonical skill placement rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillPlacementRuleWire {
+    /// Lives in a canonical skill source but declares no truthy `skill` value.
+    MissingSkillField,
+    /// Declares a truthy `skill` value from an ordinary xprompt or config
+    /// source instead of a canonical skill source.
+    SkillOutsideSkillSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillPlacementIssueWire {
+    pub source: String,
+    pub rule: SkillPlacementRuleWire,
+    pub message: String,
+    pub migrate_to: Option<String>,
+}
+
+/// Build the canonical xprompt reference name for a skill source.
+///
+/// The provider skill name stays `skill_name`; only the xprompt reference is
+/// namespaced, so `#skills/foo` (or `#app/skills/foo`) expands what `/foo`
+/// invokes.
+pub fn skill_reference_name(project: Option<&str>, skill_name: &str) -> String {
+    match project.filter(|project| !project.is_empty()) {
+        Some(project) => {
+            format!("{project}/{SKILL_NAMESPACE_SEGMENT}/{skill_name}")
+        }
+        None => format!("{SKILL_NAMESPACE_SEGMENT}/{skill_name}"),
+    }
+}
+
+/// Split a canonical skill reference name back into project and skill name.
+pub fn split_skill_reference_name(name: &str) -> Option<(Option<&str>, &str)> {
+    let prefix = format!("{SKILL_NAMESPACE_SEGMENT}/");
+    if let Some(skill) = name.strip_prefix(&prefix) {
+        return (!skill.is_empty() && !skill.contains('/'))
+            .then_some((None, skill));
+    }
+    let (project, rest) = name.split_once('/')?;
+    let skill = rest.strip_prefix(&prefix)?;
+    (!project.is_empty() && !skill.is_empty() && !skill.contains('/'))
+        .then_some((Some(project), skill))
+}
+
+/// Apply the two-way skill placement rules to one loaded definition.
+///
+/// `migrate_to` is the destination the caller should offer for a misplaced
+/// source: the scope's canonical skill directory when a skill declaration was
+/// found outside one, and the scope's ordinary xprompt directory when a
+/// canonical skill source holds a definition that is not a skill.
+pub fn skill_placement_issue(
+    source: &str,
+    in_skill_source: bool,
+    declares_skill: bool,
+    migrate_to: Option<&str>,
+) -> Option<SkillPlacementIssueWire> {
+    let destination = |fallback: &str| {
+        migrate_to
+            .map(str::to_string)
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    match (in_skill_source, declares_skill) {
+        (true, false) => Some(SkillPlacementIssueWire {
+            source: source.to_string(),
+            rule: SkillPlacementRuleWire::MissingSkillField,
+            message: format!(
+                "{source} is a canonical skill source but declares no truthy \
+                 `skill:` value; add `skill: true` (or a provider list), or \
+                 move it to {}",
+                destination("the scope's sase/xprompts/ directory")
+            ),
+            migrate_to: migrate_to.map(str::to_string),
+        }),
+        (false, true) => Some(SkillPlacementIssueWire {
+            source: source.to_string(),
+            rule: SkillPlacementRuleWire::SkillOutsideSkillSource,
+            message: format!(
+                "{source} declares `skill:` outside a canonical skill source; \
+                 move it to {}",
+                destination("the scope's sase/skills/ directory")
+            ),
+            migrate_to: migrate_to.map(str::to_string),
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,12 +289,14 @@ pub fn sase_content_layout(
     let chezmoi = chezmoi_source_root.map(chezmoi_content_layout);
     let xprompt_sources =
         xprompt_sources(project_root, home_root, project_name);
+    let skill_sources = skill_sources(project_root, home_root, project_name);
     SaseContentLayoutWire {
         schema_version: CONTENT_LAYOUT_SCHEMA_VERSION,
         project,
         home,
         chezmoi,
         xprompt_sources,
+        skill_sources,
     }
 }
 
@@ -206,6 +330,7 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         ),
         config,
         xprompts,
+        skills: skills_layout_path(&namespace_root),
         memory,
         repos: layout_path(
             namespace_root.join("repos"),
@@ -243,6 +368,7 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
             LayoutTrackingWire::SourceControlled,
         ),
         xprompts,
+        skills: skills_layout_path(&namespace_root),
         memory,
         global_config: layout_path(
             root.join(".config").join("sase").join("sase.yml"),
@@ -285,6 +411,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
             LayoutTrackingWire::SourceControlled,
         ),
         xprompts,
+        skills: skills_layout_path(&namespace_root),
         memory,
         global_config: layout_path(
             root.join("dot_config").join("sase").join("sase.yml"),
@@ -478,6 +605,109 @@ fn xprompt_sources(
         source.priority = (priority + 1) as u32;
     }
     sources
+}
+
+fn skill_sources(
+    project_root: Option<&Path>,
+    home_root: &Path,
+    project_name: Option<&str>,
+) -> Vec<SkillSourceWire> {
+    let mut sources = Vec::new();
+    if let Some(root) = project_root {
+        push_skill_directory_source(
+            &mut sources,
+            "project_skills",
+            "project",
+            root.join("sase").join(SKILL_NAMESPACE_SEGMENT),
+            true,
+        );
+    }
+    push_skill_directory_source(
+        &mut sources,
+        "home_skills",
+        "home",
+        home_root.join("sase").join(SKILL_NAMESPACE_SEGMENT),
+        false,
+    );
+    if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
+        push_skill_directory_source(
+            &mut sources,
+            "home_project_skills",
+            "home_project",
+            home_root
+                .join("sase")
+                .join(SKILL_NAMESPACE_SEGMENT)
+                .join(project_name),
+            true,
+        );
+    }
+    push_skill_symbolic_source(
+        &mut sources,
+        "plugin_skills",
+        "plugin",
+        "entrypoint:sase_xprompts/skills",
+    );
+    push_skill_symbolic_source(
+        &mut sources,
+        "package_skills",
+        "package",
+        "package:skills",
+    );
+
+    for (priority, source) in sources.iter_mut().enumerate() {
+        source.priority = (priority + 1) as u32;
+    }
+    sources
+}
+
+fn push_skill_directory_source(
+    sources: &mut Vec<SkillSourceWire>,
+    id: &str,
+    scope: &str,
+    path: PathBuf,
+    project_namespaced: bool,
+) {
+    let path = path_string(&path);
+    sources.push(SkillSourceWire {
+        id: id.to_string(),
+        priority: 0,
+        scope: scope.to_string(),
+        locator: path.clone(),
+        path: Some(path),
+        formats: strings(&["md"]),
+        tracking: LayoutTrackingWire::SourceControlled,
+        project_namespaced,
+        writable: true,
+        ordering: Some("first_wins".to_string()),
+    });
+}
+
+fn push_skill_symbolic_source(
+    sources: &mut Vec<SkillSourceWire>,
+    id: &str,
+    scope: &str,
+    locator: &str,
+) {
+    sources.push(SkillSourceWire {
+        id: id.to_string(),
+        priority: 0,
+        scope: scope.to_string(),
+        locator: locator.to_string(),
+        path: None,
+        formats: strings(&["md"]),
+        tracking: LayoutTrackingWire::PackageOwned,
+        project_namespaced: false,
+        writable: false,
+        ordering: Some("first_wins".to_string()),
+    });
+}
+
+fn skills_layout_path(namespace_root: &Path) -> LayoutPathWire {
+    layout_path(
+        namespace_root.join(SKILL_NAMESPACE_SEGMENT),
+        LayoutPathRoleWire::Canonical,
+        LayoutTrackingWire::SourceControlled,
+    )
 }
 
 fn push_directory_source(
@@ -742,6 +972,141 @@ mod tests {
     }
 
     #[test]
+    fn skill_directories_are_canonical_in_every_scope() {
+        let layout = sase_content_layout(
+            Some(Path::new("/workspace/project")),
+            Path::new("/home/alice"),
+            Some(Path::new("/dotfiles/home")),
+            Some("project"),
+        );
+        let project = layout.project.unwrap();
+        assert_eq!(project.skills.path, "/workspace/project/sase/skills");
+        assert_eq!(project.skills.role, LayoutPathRoleWire::Canonical);
+        assert_eq!(
+            project.skills.tracking,
+            LayoutTrackingWire::SourceControlled
+        );
+        assert_eq!(layout.home.skills.path, "/home/alice/sase/skills");
+        assert_eq!(
+            layout.chezmoi.unwrap().skills.path,
+            "/dotfiles/home/sase/skills"
+        );
+    }
+
+    #[test]
+    fn skill_sources_are_ordered_first_wins_with_no_legacy_paths() {
+        let layout = sase_content_layout(
+            Some(Path::new("/repo")),
+            Path::new("/home/alice"),
+            None,
+            Some("demo"),
+        );
+        let ids = layout
+            .skill_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "project_skills",
+                "home_skills",
+                "home_project_skills",
+                "plugin_skills",
+                "package_skills",
+            ]
+        );
+        assert_eq!(
+            layout
+                .skill_sources
+                .iter()
+                .map(|source| source.priority)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            layout.skill_sources[0].path.as_deref(),
+            Some("/repo/sase/skills")
+        );
+        assert_eq!(
+            layout.skill_sources[1].path.as_deref(),
+            Some("/home/alice/sase/skills")
+        );
+        assert_eq!(
+            layout.skill_sources[2].path.as_deref(),
+            Some("/home/alice/sase/skills/demo")
+        );
+        assert!(layout.skill_sources[2].project_namespaced);
+        assert!(!layout.skill_sources[1].project_namespaced);
+        // Package and plugin sources are symbolic and read-only.
+        assert_eq!(
+            layout.skill_sources[3].locator,
+            "entrypoint:sase_xprompts/skills"
+        );
+        assert_eq!(layout.skill_sources[4].locator, "package:skills");
+        assert!(layout.skill_sources[3..]
+            .iter()
+            .all(|source| source.path.is_none() && !source.writable));
+        assert!(layout
+            .skill_sources
+            .iter()
+            .all(|source| source.formats == strings(&["md"])
+                && source.ordering.as_deref() == Some("first_wins")));
+    }
+
+    #[test]
+    fn skill_reference_names_split_provider_name_from_xprompt_reference() {
+        assert_eq!(skill_reference_name(None, "foo"), "skills/foo");
+        assert_eq!(skill_reference_name(Some("app"), "foo"), "app/skills/foo");
+        assert_eq!(
+            split_skill_reference_name("skills/foo"),
+            Some((None, "foo"))
+        );
+        assert_eq!(
+            split_skill_reference_name("app/skills/foo"),
+            Some((Some("app"), "foo"))
+        );
+        // A bare or oddly shaped reference is not a skill reference.
+        assert_eq!(split_skill_reference_name("foo"), None);
+        assert_eq!(split_skill_reference_name("app/foo"), None);
+        assert_eq!(split_skill_reference_name("skills/"), None);
+        assert_eq!(split_skill_reference_name("a/skills/b/c"), None);
+    }
+
+    #[test]
+    fn skill_placement_issues_name_the_move_in_both_directions() {
+        assert_eq!(
+            skill_placement_issue("sase/skills/foo.md", true, true, None),
+            None
+        );
+        assert_eq!(
+            skill_placement_issue("sase/xprompts/foo.md", false, false, None),
+            None
+        );
+
+        let orphan =
+            skill_placement_issue("sase/skills/foo.md", true, false, None)
+                .unwrap();
+        assert_eq!(orphan.rule, SkillPlacementRuleWire::MissingSkillField);
+        assert!(orphan.message.contains("sase/skills/foo.md"));
+        assert!(orphan.message.contains("skill: true"));
+
+        let misplaced = skill_placement_issue(
+            "sase/xprompts/foo.md",
+            false,
+            true,
+            Some("/repo/sase/skills"),
+        )
+        .unwrap();
+        assert_eq!(
+            misplaced.rule,
+            SkillPlacementRuleWire::SkillOutsideSkillSource
+        );
+        assert_eq!(misplaced.migrate_to.as_deref(), Some("/repo/sase/skills"));
+        assert!(misplaced.message.contains("/repo/sase/skills"));
+    }
+
+    #[test]
     fn missing_project_root_still_returns_complete_home_contract() {
         let layout =
             sase_content_layout(None, Path::new("/home/alice"), None, None);
@@ -751,5 +1116,14 @@ mod tests {
             .iter()
             .all(|source| !source.id.starts_with("project_")));
         assert_eq!(layout.xprompt_sources[0].id, "home_canonical");
+        assert_eq!(layout.home.skills.path, "/home/alice/sase/skills");
+        assert_eq!(
+            layout
+                .skill_sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["home_skills", "plugin_skills", "package_skills"]
+        );
     }
 }

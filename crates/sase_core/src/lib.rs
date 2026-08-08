@@ -365,12 +365,14 @@ pub use config::{
     ListStrategy as ConfigListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
 };
 pub use content_layout::{
-    resolve_layout_candidates, sase_content_layout, ChezmoiContentLayoutWire,
+    resolve_layout_candidates, sase_content_layout, skill_placement_issue,
+    skill_reference_name, split_skill_reference_name, ChezmoiContentLayoutWire,
     CompatibleLayoutPathWire, HomeContentLayoutWire,
     LayoutCandidateResolutionWire, LayoutCollisionPolicyWire,
     LayoutPathRoleWire, LayoutPathWire, LayoutTrackingWire,
-    ProjectContentLayoutWire, SaseContentLayoutWire, XpromptSourceWire,
-    CONTENT_LAYOUT_SCHEMA_VERSION,
+    ProjectContentLayoutWire, SaseContentLayoutWire, SkillPlacementIssueWire,
+    SkillPlacementRuleWire, SkillSourceWire, XpromptSourceWire,
+    CONTENT_LAYOUT_SCHEMA_VERSION, SKILL_NAMESPACE_SEGMENT,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

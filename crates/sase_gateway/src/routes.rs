@@ -2980,6 +2980,7 @@ mod tests {
                             choices: Vec::new(),
                         }],
                         is_skill: false,
+                        skill_name: None,
                         content_preview: Some("Use gh".to_string()),
                         source_path_display: Some(
                             "sase/xprompts/gh.md".to_string(),

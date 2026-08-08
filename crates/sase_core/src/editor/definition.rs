@@ -34,9 +34,9 @@ fn entry_for_token<'a>(
         return entries.iter().find(|entry| entry.name == name);
     }
     if let Some(name) = slash_skill_reference_name(token) {
-        return entries
-            .iter()
-            .find(|entry| entry.is_skill && entry.name == name);
+        return entries.iter().find(|entry| {
+            entry.is_skill && entry.skill_name.as_deref() == Some(name)
+        });
     }
     None
 }
@@ -116,6 +116,11 @@ mod tests {
             definition_path,
             definition_range: None,
             is_skill,
+            skill_name: is_skill.then(|| {
+                name.rsplit_once('/')
+                    .map_or(name, |(_, tail)| tail)
+                    .to_string()
+            }),
         }
     }
 
@@ -185,8 +190,8 @@ mod tests {
                 false,
             ),
             entry(
-                "sase_plan",
-                "#sase_plan",
+                "skills/sase_plan",
+                "#skills/sase_plan",
                 Some(skill_path.to_string_lossy().into_owned()),
                 true,
             ),
@@ -205,8 +210,26 @@ mod tests {
         )
         .unwrap();
 
+        // The namespaced xprompt reference navigates to the same source.
+        let namespaced_skill = definition_at_position(
+            &DocumentSnapshot::new("#skills/sase_plan"),
+            pos(3),
+            &entries,
+        )
+        .unwrap();
+
         assert_eq!(namespaced.path, namespaced_path.canonicalize().unwrap());
         assert_eq!(slash.path, skill_path.canonicalize().unwrap());
+        assert_eq!(namespaced_skill.path, skill_path.canonicalize().unwrap());
+        // The pre-cutover bare reference does not resolve.
+        assert_eq!(
+            definition_at_position(
+                &DocumentSnapshot::new("#sase_plan"),
+                pos(3),
+                &entries,
+            ),
+            None
+        );
     }
 
     #[test]

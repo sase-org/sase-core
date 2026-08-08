@@ -697,6 +697,11 @@ pub struct MobileXpromptCatalogEntryWire {
     #[serde(default)]
     pub inputs: Vec<MobileXpromptInputWire>,
     pub is_skill: bool,
+    /// Provider skill name for a skill source (`foo` for reference name
+    /// `skills/foo`). Absent for everything that is not a skill; older payloads
+    /// that predate the split simply omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_name: Option<String>,
     pub content_preview: Option<String>,
     pub source_path_display: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -951,6 +956,7 @@ mod tests {
                         choices: Vec::new(),
                     }],
                     is_skill: false,
+                    skill_name: None,
                     content_preview: Some("Complete the bead".to_string()),
                     source_path_display: Some(
                         "xprompts/bd/work_phase_bead.md".to_string(),

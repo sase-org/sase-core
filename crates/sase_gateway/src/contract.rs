@@ -578,6 +578,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "input_signature": "string|null",
                 "inputs": "MobileXpromptInputWire[]; default [] when absent",
                 "is_skill": "bool",
+                "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skills/<skill_name>` reference",
                 "content_preview": "string|null",
                 "source_path_display": "string|null"
             },

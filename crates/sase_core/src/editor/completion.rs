@@ -101,6 +101,7 @@ pub fn assist_entries_from_catalog(
                 definition_path: entry.definition_path.clone(),
                 definition_range: entry.definition_range,
                 is_skill: entry.is_skill,
+                skill_name: entry.skill_name.clone(),
             }
         })
         .collect()
@@ -1210,17 +1211,27 @@ pub fn build_xprompt_completion_candidates(
     let mut candidates = Vec::new();
 
     for entry in entries {
+        // Slash completion is keyed on the provider skill name (`/foo`) while
+        // `#` completion is keyed on the xprompt reference (`#skills/foo`).
+        let match_name = if slash_skill {
+            let Some(skill_name) = entry.skill_name.as_deref() else {
+                continue;
+            };
+            skill_name
+        } else {
+            entry.name.as_str()
+        };
         if slash_skill && !entry.is_skill {
             continue;
         }
         if standalone_only && entry.reference_prefix != "#!" {
             continue;
         }
-        if !entry.name.to_lowercase().starts_with(&partial_lower) {
+        if !match_name.to_lowercase().starts_with(&partial_lower) {
             continue;
         }
         let insertion = if slash_skill {
-            format!("/{}", entry.name)
+            format!("/{match_name}")
         } else {
             entry.insertion.clone()
         };
@@ -1236,7 +1247,7 @@ pub fn build_xprompt_completion_candidates(
                 .clone()
                 .or_else(|| entry.content_preview.clone()),
             is_dir: false,
-            name: entry.name.clone(),
+            name: match_name.to_string(),
             replacement: replacement_range.map(|range| EditorTextEdit {
                 range,
                 new_text: insertion,
@@ -3021,6 +3032,7 @@ mod tests {
                     },
                 ],
                 is_skill: false,
+                skill_name: None,
                 content_preview: Some("review body".to_string()),
                 source_path_display: Some(
                     "sase/xprompts/review.md".to_string(),
@@ -3042,7 +3054,27 @@ mod tests {
                 tags: vec![],
                 input_signature: None,
                 inputs: vec![],
+                is_skill: false,
+                skill_name: None,
+                content_preview: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+            },
+            EditorXpromptCatalogEntryWire {
+                name: "skills/plan".to_string(),
+                display_label: "skills/plan".to_string(),
+                insertion: Some("#skills/plan".to_string()),
+                reference_prefix: Some("#".to_string()),
+                kind: Some("xprompt".to_string()),
+                description: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: vec![],
+                input_signature: None,
+                inputs: vec![],
                 is_skill: true,
+                skill_name: Some("plan".to_string()),
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -4459,8 +4491,36 @@ mod tests {
             build_xprompt_completion_candidates("#!r", None, &catalog);
         assert_eq!(standalone.candidates[0].insertion, "#!run");
 
-        let skill = build_xprompt_completion_candidates("/r", None, &catalog);
-        assert_eq!(skill.candidates[0].insertion, "/run");
+        // Slash completion offers the provider skill name, never the
+        // namespaced xprompt reference, and a non-skill workflow that happens
+        // to share the prefix is not a slash candidate.
+        let skill = build_xprompt_completion_candidates("/p", None, &catalog);
+        assert_eq!(
+            skill
+                .candidates
+                .iter()
+                .map(|c| c.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/plan"]
+        );
+        assert!(build_xprompt_completion_candidates("/r", None, &catalog)
+            .candidates
+            .is_empty());
+
+        // The same skill is reachable inline only through `#skills/plan`.
+        let namespaced =
+            build_xprompt_completion_candidates("#skills/", None, &catalog);
+        assert_eq!(
+            namespaced
+                .candidates
+                .iter()
+                .map(|c| c.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#skills/plan"]
+        );
+        assert!(build_xprompt_completion_candidates("#plan", None, &catalog)
+            .candidates
+            .is_empty());
     }
 
     #[test]
@@ -4571,6 +4631,7 @@ mod tests {
             }],
             content_preview: None,
             description: None,
+            skill_name: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,
@@ -4913,6 +4974,7 @@ mod tests {
             }],
             content_preview: None,
             description: None,
+            skill_name: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,

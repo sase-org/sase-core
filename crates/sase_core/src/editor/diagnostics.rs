@@ -188,10 +188,10 @@ fn slash_skill_diagnostics(
         let Some(skill) = caps.name("skill") else {
             continue;
         };
-        if entries
-            .iter()
-            .any(|entry| entry.is_skill && entry.name == skill.as_str())
-        {
+        if entries.iter().any(|entry| {
+            entry.is_skill
+                && entry.skill_name.as_deref() == Some(skill.as_str())
+        }) {
             continue;
         }
         if let Some(range) =
@@ -453,6 +453,7 @@ fn local_xprompt_entry_from_config(
         definition_path: None,
         definition_range: None,
         is_skill: false,
+        skill_name: None,
     })
 }
 
@@ -701,6 +702,7 @@ mod tests {
                 definition_path: None,
                 definition_range: None,
                 is_skill: false,
+                skill_name: None,
             },
             XpromptAssistEntry {
                 name: "run".to_string(),
@@ -718,7 +720,27 @@ mod tests {
                 source_path_display: None,
                 definition_path: None,
                 definition_range: None,
+                is_skill: false,
+                skill_name: None,
+            },
+            XpromptAssistEntry {
+                name: "skills/plan".to_string(),
+                display_label: "skills/plan".to_string(),
+                insertion: "#skills/plan".to_string(),
+                reference_prefix: "#".to_string(),
+                kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: vec![],
+                content_preview: None,
+                description: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
                 is_skill: true,
+                skill_name: Some("plan".to_string()),
             },
             XpromptAssistEntry {
                 name: "typed".to_string(),
@@ -741,6 +763,7 @@ mod tests {
                 definition_path: None,
                 definition_range: None,
                 is_skill: false,
+                skill_name: None,
             },
             XpromptAssistEntry {
                 name: "ns/foo".to_string(),
@@ -759,6 +782,7 @@ mod tests {
                 definition_path: None,
                 definition_range: None,
                 is_skill: false,
+                skill_name: None,
             },
             XpromptAssistEntry {
                 name: "merge".to_string(),
@@ -777,6 +801,7 @@ mod tests {
                 definition_path: None,
                 definition_range: None,
                 is_skill: false,
+                skill_name: None,
             },
         ]
     }
@@ -958,6 +983,38 @@ mod tests {
         assert_eq!(
             diagnostic_count(&diagnostics, "unresolved_artifact_ref"),
             0
+        );
+    }
+
+    #[test]
+    fn slash_skills_resolve_by_provider_name_not_xprompt_reference() {
+        // `/plan` is the installed skill; its xprompt reference is
+        // `#skills/plan`, and the namespaced form is not a slash skill.
+        let known = DocumentSnapshot::new("/plan #skills/plan");
+        assert_eq!(
+            diagnostic_count(
+                &analyze_document(&known, &catalog()),
+                "unknown_slash_skill"
+            ),
+            0
+        );
+        // The xprompt namespace segment is not itself a slash skill.
+        let namespaced = DocumentSnapshot::new("/skills");
+        assert_eq!(
+            diagnostic_count(
+                &analyze_document(&namespaced, &catalog()),
+                "unknown_slash_skill"
+            ),
+            1
+        );
+        // `#plan` never falls back to the skill source.
+        let unnamespaced = DocumentSnapshot::new("#plan");
+        assert_eq!(
+            diagnostic_count(
+                &analyze_document(&unnamespaced, &catalog()),
+                "unknown_xprompt"
+            ),
+            1
         );
     }
 

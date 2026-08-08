@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
@@ -10,8 +11,9 @@ use thiserror::Error;
 
 use crate::{
     content_layout::{
-        resolve_layout_candidates, sase_content_layout,
-        CompatibleLayoutPathWire, XpromptSourceWire,
+        resolve_layout_candidates, sase_content_layout, skill_placement_issue,
+        skill_reference_name, CompatibleLayoutPathWire,
+        SkillPlacementIssueWire, SkillSourceWire, XpromptSourceWire,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     list_project_records, DocumentSnapshot, EditorRange,
@@ -29,6 +31,7 @@ const SCHEMA_VERSION: u32 = 1;
 const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
+const SASE_SKILL_PLUGIN_DIRS_JSON_ENV: &str = "SASE_SKILL_PLUGIN_DIRS_JSON";
 
 #[derive(Debug, Error)]
 pub enum XpromptCatalogLoadError {
@@ -106,6 +109,7 @@ struct CatalogXprompt {
     tags: BTreeSet<String>,
     description: Option<String>,
     is_skill: bool,
+    skill_name: Option<String>,
     snippet: Option<CatalogSnippet>,
 }
 
@@ -129,6 +133,7 @@ struct StructuredSource {
     project: Option<String>,
     description: Option<String>,
     is_skill: bool,
+    skill_name: Option<String>,
     content: String,
     definition_section: DefinitionSection,
 }
@@ -183,7 +188,7 @@ pub fn load_editor_xprompt_catalog(
         result: MobileHelperResultWire {
             status: MobileHelperStatusWire::Success,
             message: Some(format!("loaded {} xprompt(s)", wire_entries.len())),
-            warnings: Vec::new(),
+            warnings: loader.skill_placement_warnings(),
             skipped: Vec::<MobileHelperSkippedWire>::new(),
             partial_failure_count: None,
         },
@@ -385,6 +390,7 @@ fn structured_entry(
         input_signature: format_inputs(&entry.workflow.inputs),
         inputs: structured_inputs(&entry.workflow.inputs),
         is_skill: entry.is_skill,
+        skill_name: entry.skill_name.clone(),
         content_preview: content_preview(&entry.content),
         source_path_display: loader.source_path_display(entry),
         definition_path: loader.definition_path(entry),
@@ -879,17 +885,23 @@ fn is_escaped(text: &str, index: usize) -> bool {
     backslashes % 2 == 1
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct CatalogLoader {
     root_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     package_xprompts_dir: Option<PathBuf>,
+    package_skills_dir: Option<PathBuf>,
     default_xprompts_dir: Option<PathBuf>,
     default_config_path: Option<PathBuf>,
     plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    plugin_skill_dirs: BTreeMap<String, PathBuf>,
     plugin_config_paths: BTreeMap<String, PathBuf>,
     known_workspaces: BTreeMap<String, PathBuf>,
     canonical_project_refs: BTreeMap<String, String>,
+    /// Definitions dropped by the canonical skill placement rules, recorded so
+    /// the catalog can name the offending source and its migration
+    /// destination instead of silently losing it.
+    skill_issues: RefCell<Vec<SkillPlacementIssueWire>>,
 }
 
 impl CatalogLoader {
@@ -901,6 +913,8 @@ impl CatalogLoader {
             .or_else(|| {
                 package_root.as_ref().map(|root| root.join("xprompts"))
             });
+        let package_skills_dir = env_path("SASE_SKILL_BUILTIN_DIR")
+            .or_else(|| package_root.as_ref().map(|root| root.join("skills")));
         let default_xprompts_dir = env_path("SASE_XPROMPT_DEFAULT_DIR")
             .or_else(|| {
                 package_root
@@ -915,6 +929,8 @@ impl CatalogLoader {
             });
         let plugin_xprompt_dirs =
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV);
+        let plugin_skill_dirs =
+            plugin_path_map_from_env(SASE_SKILL_PLUGIN_DIRS_JSON_ENV);
         let plugin_config_paths =
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV);
         let known_projects = known_projects(home_dir.as_deref());
@@ -922,12 +938,15 @@ impl CatalogLoader {
             root_dir,
             home_dir,
             package_xprompts_dir,
+            package_skills_dir,
             default_xprompts_dir,
             default_config_path,
             plugin_xprompt_dirs,
+            plugin_skill_dirs,
             plugin_config_paths,
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
+            skill_issues: RefCell::new(Vec::new()),
         }
     }
 
@@ -976,6 +995,7 @@ impl CatalogLoader {
                     bucket,
                     project: source_project,
                     is_skill: false,
+                    skill_name: None,
                     content,
                     definition_section: DefinitionSection::Workflows,
                 });
@@ -1000,6 +1020,7 @@ impl CatalogLoader {
                 project: source_project,
                 description: xprompt.description,
                 is_skill: xprompt.is_skill,
+                skill_name: xprompt.skill_name,
                 content: xprompt.content,
                 definition_section: DefinitionSection::Xprompts,
             });
@@ -1032,6 +1053,7 @@ impl CatalogLoader {
                     project: Some(project_name.clone()),
                     description: xprompt.description,
                     is_skill: xprompt.is_skill,
+                    skill_name: xprompt.skill_name,
                     content: xprompt.content,
                     definition_section: DefinitionSection::Xprompts,
                 });
@@ -1060,11 +1082,6 @@ impl CatalogLoader {
         let mut all = BTreeMap::new();
         if let Some(dir) = &self.package_xprompts_dir {
             all.extend(self.load_xprompts_from_dir(dir, None, false)?);
-            all.extend(self.load_xprompts_from_dir(
-                &dir.join("skills"),
-                None,
-                false,
-            )?);
         }
         if let Some(dir) = &self.default_xprompts_dir {
             all.extend(self.load_xprompts_from_dir(dir, None, false)?);
@@ -1080,6 +1097,29 @@ impl CatalogLoader {
                 continue;
             };
             all.extend(self.load_xprompts_from_dir(
+                path,
+                project,
+                source.project_namespaced,
+            )?);
+        }
+
+        // Skills live in their own `skills/` reference namespace, so they can
+        // never shadow (or be shadowed by) an ordinary xprompt of the same
+        // bare name. Lowest priority first, so the canonical directory
+        // sources win.
+        if let Some(dir) = &self.package_skills_dir {
+            all.extend(self.load_skills_from_dir(dir, None, false)?);
+        }
+        all.extend(self.load_plugin_skills()?);
+        for source in self
+            .skill_directory_sources(self.root_dir.as_deref(), project)
+            .into_iter()
+            .rev()
+        {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            all.extend(self.load_skills_from_dir(
                 path,
                 project,
                 source.project_namespaced,
@@ -1155,6 +1195,62 @@ impl CatalogLoader {
             .collect()
     }
 
+    fn skill_directory_sources(
+        &self,
+        project_root: Option<&Path>,
+        project: Option<&str>,
+    ) -> Vec<SkillSourceWire> {
+        let home_root =
+            self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        sase_content_layout(project_root, home_root, None, project)
+            .skill_sources
+            .into_iter()
+            .filter(|source| {
+                matches!(
+                    source.scope.as_str(),
+                    "project" | "home" | "home_project"
+                ) && (self.home_dir.is_some()
+                    || !matches!(
+                        source.scope.as_str(),
+                        "home" | "home_project"
+                    ))
+            })
+            .collect()
+    }
+
+    /// Canonical skill directory for the scope owning `dir`, used as the
+    /// migration destination when a skill declaration turns up in an ordinary
+    /// xprompt directory.
+    fn skill_destination_for_xprompt_dir(&self, dir: &Path) -> Option<String> {
+        let parent = dir.parent()?;
+        Some(
+            parent
+                .join(crate::content_layout::SKILL_NAMESPACE_SEGMENT)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    fn record_skill_issue(&self, issue: Option<SkillPlacementIssueWire>) {
+        if let Some(issue) = issue {
+            self.skill_issues.borrow_mut().push(issue);
+        }
+    }
+
+    /// Migration diagnostics for every definition the placement rules dropped,
+    /// so a misplaced source is reported rather than silently missing.
+    fn skill_placement_warnings(&self) -> Vec<String> {
+        let mut warnings = self
+            .skill_issues
+            .borrow()
+            .iter()
+            .map(|issue| issue.message.clone())
+            .collect::<Vec<_>>();
+        warnings.sort();
+        warnings.dedup();
+        warnings
+    }
+
     fn load_xprompts_from_dir(
         &self,
         dir: &Path,
@@ -1162,15 +1258,63 @@ impl CatalogLoader {
         namespace_local: bool,
     ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
         let mut result = BTreeMap::new();
+        let destination = self.skill_destination_for_xprompt_dir(dir);
         for path in files_with_extensions(dir, &["md"])? {
             let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
                 continue;
             };
+            if xprompt.is_skill {
+                self.record_skill_issue(skill_placement_issue(
+                    &path.to_string_lossy(),
+                    false,
+                    true,
+                    destination.as_deref(),
+                ));
+                continue;
+            }
             if namespace_local {
                 if let Some(project) = project {
                     xprompt.name = format!("{project}/{}", xprompt.name);
                 }
             }
+            result.insert(xprompt.name.clone(), xprompt);
+        }
+        Ok(result)
+    }
+
+    /// Load one canonical skill directory.
+    ///
+    /// A definition here must declare a truthy `skill` value; everything else
+    /// is rejected with a migration diagnostic rather than being loaded as an
+    /// ordinary xprompt. Accepted definitions keep their declared name as the
+    /// provider skill name and take the namespaced `skills/<name>` xprompt
+    /// reference name.
+    fn load_skills_from_dir(
+        &self,
+        dir: &Path,
+        project: Option<&str>,
+        namespace_local: bool,
+    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        let destination = dir.parent().map(|parent| {
+            parent.join("xprompts").to_string_lossy().into_owned()
+        });
+        for path in files_with_extensions(dir, &["md"])? {
+            let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
+                continue;
+            };
+            if !xprompt.is_skill {
+                self.record_skill_issue(skill_placement_issue(
+                    &path.to_string_lossy(),
+                    true,
+                    false,
+                    destination.as_deref(),
+                ));
+                continue;
+            }
+            let namespace = namespace_local.then_some(project).flatten();
+            xprompt.skill_name = Some(xprompt.name.clone());
+            xprompt.name = skill_reference_name(namespace, &xprompt.name);
             result.insert(xprompt.name.clone(), xprompt);
         }
         Ok(result)
@@ -1214,8 +1358,52 @@ impl CatalogLoader {
                 else {
                     continue;
                 };
-                xprompt.source_path =
-                    Some(format!("plugin:{module}/{filename}"));
+                let source = format!("plugin:{module}/{filename}");
+                if xprompt.is_skill {
+                    self.record_skill_issue(skill_placement_issue(
+                        &source,
+                        false,
+                        true,
+                        Some("the plugin's skills/ resource directory"),
+                    ));
+                    continue;
+                }
+                xprompt.source_path = Some(source);
+                result.insert(xprompt.name.clone(), xprompt);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Load skills from plugins' sibling `skills/` resource directories.
+    fn load_plugin_skills(
+        &self,
+    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        for (module, dir) in &self.plugin_skill_dirs {
+            for path in files_with_extensions(dir, &["md"])? {
+                let Some(mut xprompt) = load_xprompt_from_markdown(&path)?
+                else {
+                    continue;
+                };
+                let Some(filename) =
+                    path.file_name().and_then(|name| name.to_str())
+                else {
+                    continue;
+                };
+                let source = format!("plugin:{module}/{filename}");
+                if !xprompt.is_skill {
+                    self.record_skill_issue(skill_placement_issue(
+                        &source,
+                        true,
+                        false,
+                        Some("the plugin's xprompts/ resource directory"),
+                    ));
+                    continue;
+                }
+                xprompt.source_path = Some(source);
+                xprompt.skill_name = Some(xprompt.name.clone());
+                xprompt.name = skill_reference_name(None, &xprompt.name);
                 result.insert(xprompt.name.clone(), xprompt);
             }
         }
@@ -1246,6 +1434,25 @@ impl CatalogLoader {
         Ok(result)
     }
 
+    /// Config-defined xprompts can never be skills: a skill must be a file in
+    /// a canonical skill directory so it has a source to generate from.
+    fn reject_config_skill(
+        &self,
+        xprompt: &CatalogXprompt,
+        source: &str,
+    ) -> bool {
+        if !xprompt.is_skill {
+            return false;
+        }
+        self.record_skill_issue(skill_placement_issue(
+            &format!("{source} xprompt `{}`", xprompt.name),
+            false,
+            true,
+            Some("a Markdown file in the scope's sase/skills/ directory"),
+        ));
+        true
+    }
+
     fn load_config_xprompts(
         &self,
         project: Option<&str>,
@@ -1270,6 +1477,9 @@ impl CatalogLoader {
                 else {
                     continue;
                 };
+                if self.reject_config_skill(&xprompt, &source) {
+                    continue;
+                }
                 if source == "local_config" {
                     if let Some(project) = project {
                         xprompt.name = format!("{project}/{}", xprompt.name);
@@ -1365,6 +1575,9 @@ impl CatalogLoader {
             else {
                 continue;
             };
+            if self.reject_config_skill(&xprompt, &source) {
+                continue;
+            }
             xprompt.name = format!("{project}/{}", xprompt.name);
             result.insert(xprompt.name.clone(), xprompt);
         }
@@ -1387,6 +1600,21 @@ impl CatalogLoader {
                 continue;
             };
             result.extend(self.load_xprompts_from_dir(
+                path,
+                Some(project),
+                true,
+            )?);
+        }
+        for source in self
+            .skill_directory_sources(Some(workspace), Some(project))
+            .into_iter()
+            .rev()
+            .filter(|source| source.scope == "project")
+        {
+            let Some(path) = source.path.as_deref().map(Path::new) else {
+                continue;
+            };
+            result.extend(self.load_skills_from_dir(
                 path,
                 Some(project),
                 true,
@@ -1652,6 +1880,7 @@ impl CatalogLoader {
     fn package_dirs(&self) -> Vec<PathBuf> {
         [
             self.package_xprompts_dir.clone(),
+            self.package_skills_dir.clone(),
             self.default_xprompts_dir.clone(),
         ]
         .into_iter()
@@ -1848,6 +2077,7 @@ fn load_xprompt_from_markdown(
         tags,
         description,
         is_skill,
+        skill_name: None,
         snippet,
     }))
 }
@@ -2031,6 +2261,7 @@ fn xprompt_from_config_entry(
             tags: BTreeSet::new(),
             description: None,
             is_skill: false,
+            skill_name: None,
             snippet: None,
         });
     }
@@ -2051,6 +2282,7 @@ fn xprompt_from_config_entry(
         is_skill: mapping_get(data, "skill")
             .map(value_is_truthy)
             .unwrap_or(false),
+        skill_name: None,
         snippet: mapping_get(data, "snippet").and_then(parse_snippet),
     })
 }
@@ -2514,9 +2746,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let xprompts = root.join("sase/xprompts");
+        let skills = root.join("sase/skills");
         fs::create_dir_all(&xprompts).unwrap();
+        fs::create_dir_all(&skills).unwrap();
         fs::write(
-            xprompts.join("swarm.md"),
+            skills.join("swarm.md"),
             "---\nname: swarm\ninput:\n  target: word\ntags: [mentor]\nskill: true\n---\nfirst\n---\nsecond",
         )
         .unwrap();
@@ -2537,19 +2771,114 @@ mod tests {
             .map(|entry| (entry.name.as_str(), entry))
             .collect::<BTreeMap<_, _>>();
 
-        assert_eq!(by_name["swarm"].insertion.as_deref(), Some("#swarm"));
-        assert_eq!(by_name["swarm"].reference_prefix.as_deref(), Some("#"));
-        assert_eq!(by_name["swarm"].kind.as_deref(), Some("xprompt"));
-        assert!(by_name["swarm"].is_skill);
-        assert_eq!(
-            by_name["swarm"].input_signature.as_deref(),
-            Some("(target: word)")
-        );
+        // A skill source keeps its `/swarm` provider name but is only
+        // reachable inline through the namespaced `#skills/swarm`.
+        assert!(!by_name.contains_key("swarm"));
+        let swarm = by_name["skills/swarm"];
+        assert_eq!(swarm.insertion.as_deref(), Some("#skills/swarm"));
+        assert_eq!(swarm.reference_prefix.as_deref(), Some("#"));
+        assert_eq!(swarm.kind.as_deref(), Some("xprompt"));
+        assert!(swarm.is_skill);
+        assert_eq!(swarm.skill_name.as_deref(), Some("swarm"));
+        assert_eq!(swarm.input_signature.as_deref(), Some("(target: word)"));
         assert_eq!(by_name["ship"].insertion.as_deref(), Some("#!ship"));
         assert_eq!(
             by_name["ship"].kind.as_deref(),
             Some("standalone_workflow")
         );
+    }
+
+    #[test]
+    fn rejects_misplaced_skill_definitions_in_both_directions() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("sase/xprompts")).unwrap();
+        fs::create_dir_all(root.join("sase/skills")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        // A skill declaration in the ordinary xprompt directory.
+        fs::write(
+            root.join("sase/xprompts/stale_skill.md"),
+            "---\nskill: true\n---\nOld location",
+        )
+        .unwrap();
+        // An ordinary prompt parked in the canonical skill directory.
+        fs::write(
+            root.join("sase/skills/not_a_skill.md"),
+            "---\ndescription: Plain prompt\n---\nBody",
+        )
+        .unwrap();
+        // A config-defined skill, which no longer exists as a concept.
+        fs::write(
+            root.join("sase/sase.yml"),
+            "xprompts:\n  config_skill:\n    content: Body\n    skill: true\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root.clone()),
+            home_dir: Some(home),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+        assert!(xprompts.is_empty(), "{:?}", xprompts.keys());
+
+        // Nothing is dropped silently: each rejection names the source and
+        // the move it needs.
+        let warnings = loader.skill_placement_warnings().join("\n");
+        assert!(warnings.contains("stale_skill.md"), "{warnings}");
+        assert!(
+            warnings
+                .contains(root.join("sase/skills").to_string_lossy().as_ref()),
+            "{warnings}"
+        );
+        assert!(warnings.contains("not_a_skill.md"), "{warnings}");
+        assert!(
+            warnings.contains(
+                root.join("sase/xprompts").to_string_lossy().as_ref()
+            ),
+            "{warnings}"
+        );
+        assert!(warnings.contains("config_skill"), "{warnings}");
+    }
+
+    #[test]
+    fn home_skills_use_the_skills_namespace_and_project_qualified_form() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(home.join("sase/skills/app")).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            home.join("sase/skills/bob_query.md"),
+            "---\nskill: true\n---\nQuery body",
+        )
+        .unwrap();
+        fs::write(
+            home.join("sase/skills/app/scoped.md"),
+            "---\nskill: true\n---\nScoped body",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            home_dir: Some(home),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(Some("app")).unwrap();
+        let names = xprompts.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(names, vec!["app/skills/scoped", "skills/bob_query"]);
+        assert_eq!(
+            xprompts["skills/bob_query"].skill_name.as_deref(),
+            Some("bob_query")
+        );
+        assert_eq!(
+            xprompts["app/skills/scoped"].skill_name.as_deref(),
+            Some("scoped")
+        );
+        // The bare names never resolve after the cutover.
+        assert!(!xprompts.contains_key("bob_query"));
+        assert!(!xprompts.contains_key("app/scoped"));
     }
 
     #[test]
@@ -3139,6 +3468,7 @@ mod tests {
                 "app".to_string(),
                 "app".to_string(),
             )]),
+            ..CatalogLoader::default()
         };
 
         let entries = loader.gather_structured_sources(Some("app")).unwrap();
@@ -3194,6 +3524,7 @@ mod tests {
             plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::new(),
             canonical_project_refs: BTreeMap::new(),
+            ..CatalogLoader::default()
         };
 
         let error = loader.gather_structured_sources(None).unwrap_err();
@@ -3213,19 +3544,25 @@ mod tests {
         let home = temp.path().join("home");
         let package = temp.path().join("package");
         fs::create_dir_all(root.join("sase/xprompts")).unwrap();
+        fs::create_dir_all(root.join("sase/skills")).unwrap();
         fs::create_dir_all(home.join("sase/xprompts/app")).unwrap();
         fs::create_dir_all(package.join("xprompts")).unwrap();
-        fs::create_dir_all(package.join("xprompts/skills")).unwrap();
+        fs::create_dir_all(package.join("skills")).unwrap();
         fs::create_dir_all(package.join("default_xprompts")).unwrap();
 
         fs::write(
             package.join("xprompts/builtin.md"),
-            "---\nskill: true\ntags: [mentor]\n---\nBuilt in",
+            "---\ntags: [mentor]\n---\nBuilt in",
         )
         .unwrap();
         fs::write(
-            package.join("xprompts/skills/sase_plan.md"),
+            package.join("skills/sase_plan.md"),
             "---\nskill: true\n---\nPlan skill",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase/skills/local_skill.md"),
+            "---\nskill: [claude]\n---\nProject skill",
         )
         .unwrap();
         fs::write(
@@ -3260,6 +3597,7 @@ mod tests {
             root_dir: Some(root.clone()),
             home_dir: Some(home.clone()),
             package_xprompts_dir: Some(package.join("xprompts")),
+            package_skills_dir: Some(package.join("skills")),
             default_xprompts_dir: Some(package.join("default_xprompts")),
             default_config_path: Some(package.join("default_config.yml")),
             plugin_xprompt_dirs: BTreeMap::new(),
@@ -3272,6 +3610,7 @@ mod tests {
                 "app".to_string(),
                 "app".to_string(),
             )]),
+            ..CatalogLoader::default()
         };
 
         let entries = loader.gather_structured_sources(Some("app")).unwrap();
@@ -3281,9 +3620,19 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(by_name["builtin"].bucket, "built-in");
-        assert!(by_name["builtin"].is_skill);
-        assert_eq!(by_name["sase_plan"].bucket, "built-in");
-        assert!(by_name["sase_plan"].is_skill);
+        assert!(!by_name["builtin"].is_skill);
+        assert_eq!(by_name["skills/sase_plan"].bucket, "built-in");
+        assert!(by_name["skills/sase_plan"].is_skill);
+        assert_eq!(
+            by_name["skills/sase_plan"].skill_name.as_deref(),
+            Some("sase_plan")
+        );
+        // A project skill is namespaced inside its existing project
+        // namespace, and a provider list is just as truthy as `true`.
+        let project_skill = by_name["app/skills/local_skill"];
+        assert!(project_skill.is_skill);
+        assert_eq!(project_skill.skill_name.as_deref(), Some("local_skill"));
+        assert_eq!(project_skill.project.as_deref(), Some("app"));
         assert_eq!(by_name["defaulted"].bucket, "built-in");
         assert_eq!(by_name["cfg"].bucket, "config");
         assert_eq!(by_name["app/local"].project.as_deref(), Some("app"));
@@ -3325,10 +3674,18 @@ mod tests {
             )
         );
         assert_eq!(
-            wire_by_name["sase_plan"].definition_path.as_deref(),
+            wire_by_name["skills/sase_plan"].insertion.as_deref(),
+            Some("#skills/sase_plan")
+        );
+        assert_eq!(
+            wire_by_name["app/skills/local_skill"].insertion.as_deref(),
+            Some("#app/skills/local_skill")
+        );
+        assert_eq!(
+            wire_by_name["skills/sase_plan"].definition_path.as_deref(),
             Some(
                 package
-                    .join("xprompts/skills/sase_plan.md")
+                    .join("skills/sase_plan.md")
                     .canonicalize()
                     .unwrap()
                     .to_str()
@@ -3432,6 +3789,7 @@ mod tests {
             )]),
             known_workspaces: BTreeMap::new(),
             canonical_project_refs: BTreeMap::new(),
+            ..CatalogLoader::default()
         };
 
         let entries = loader.gather_structured_sources(None).unwrap();
@@ -3531,6 +3889,7 @@ mod tests {
                 "app".to_string(),
                 "app".to_string(),
             )]),
+            ..CatalogLoader::default()
         };
 
         let entries = loader.gather_structured_sources(Some("app")).unwrap();
@@ -3596,6 +3955,7 @@ mod tests {
                 "app".to_string(),
                 "app".to_string(),
             )]),
+            ..CatalogLoader::default()
         };
 
         let entries = loader.gather_structured_sources(None).unwrap();
@@ -3741,6 +4101,7 @@ mod tests {
             plugin_config_paths: BTreeMap::new(),
             known_workspaces: known.workspaces,
             canonical_project_refs: known.canonical_refs,
+            ..CatalogLoader::default()
         };
         let entries = loader.gather_structured_sources(None).unwrap();
 
@@ -3794,6 +4155,7 @@ mod tests {
             plugin_config_paths: BTreeMap::new(),
             known_workspaces: BTreeMap::new(),
             canonical_project_refs: BTreeMap::new(),
+            ..CatalogLoader::default()
         };
         let entry = StructuredSource {
             name: "plugin".to_string(),
@@ -3815,6 +4177,7 @@ mod tests {
             project: None,
             description: None,
             is_skill: false,
+            skill_name: None,
             content: "body".to_string(),
             definition_section: DefinitionSection::Xprompts,
         };

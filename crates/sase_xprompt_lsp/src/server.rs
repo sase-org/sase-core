@@ -2280,9 +2280,11 @@ fn entry_for_token<'a>(
         return entries.iter().find(|entry| entry.name == normalized);
     }
     if let Some(name) = token.strip_prefix('/') {
-        return entries
-            .iter()
-            .find(|entry| entry.is_skill && entry.name == name);
+        // Slash tokens carry the provider skill name (`/foo`), not the
+        // namespaced xprompt reference (`#skills/foo`).
+        return entries.iter().find(|entry| {
+            entry.is_skill && entry.skill_name.as_deref() == Some(name)
+        });
     }
     None
 }
@@ -2640,6 +2642,11 @@ mod tests {
             input_signature,
             inputs,
             is_skill: true,
+            skill_name: Some(
+                name.rsplit_once('/')
+                    .map_or(name, |(_, tail)| tail)
+                    .to_string(),
+            ),
             content_preview: None,
             source_path_display: Some("Cargo.toml".to_string()),
             definition_path,

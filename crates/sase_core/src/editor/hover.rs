@@ -66,9 +66,9 @@ pub fn hover_at_position(
         });
     }
     if let Some(name) = slash_skill_reference_name(&token.text) {
-        let entry = entries
-            .iter()
-            .find(|entry| entry.is_skill && entry.name == name)?;
+        let entry = entries.iter().find(|entry| {
+            entry.is_skill && entry.skill_name.as_deref() == Some(name)
+        })?;
         return Some(HoverPayload {
             range: token.range,
             markdown: xprompt_markdown(entry),
@@ -84,6 +84,9 @@ fn xprompt_markdown(entry: &XpromptAssistEntry) -> String {
         meta.push(kind.clone());
     }
     meta.push(format!("canonical `{}`", entry.reference_prefix));
+    if let Some(skill_name) = &entry.skill_name {
+        meta.push(format!("skill `/{skill_name}`"));
+    }
     if !entry.source_bucket.is_empty() {
         meta.push(entry.source_bucket.clone());
     }
@@ -185,6 +188,49 @@ mod tests {
     use crate::editor::wire::XpromptInputHint;
 
     #[test]
+    fn hovers_a_skill_through_both_of_its_names() {
+        let entries = vec![XpromptAssistEntry {
+            name: "skills/sase_plan".to_string(),
+            display_label: "skills/sase_plan".to_string(),
+            insertion: "#skills/sase_plan".to_string(),
+            reference_prefix: "#".to_string(),
+            kind: None,
+            source_bucket: "builtin".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: None,
+            inputs: Vec::new(),
+            content_preview: None,
+            description: Some("Create an implementation plan".to_string()),
+            source_path_display: Some("sase/skills/sase_plan.md".to_string()),
+            definition_path: None,
+            definition_range: None,
+            is_skill: true,
+            skill_name: Some("sase_plan".to_string()),
+        }];
+        let at = |text: &str, character: u32| {
+            hover_at_position(
+                &DocumentSnapshot::new(text),
+                EditorPosition { line: 0, character },
+                &entries,
+            )
+        };
+
+        let namespaced = at("#skills/sase_plan", 3).unwrap();
+        assert!(namespaced
+            .markdown
+            .contains("Create an implementation plan"));
+        assert!(namespaced.markdown.contains("skill `/sase_plan`"));
+
+        let slash = at("/sase_plan", 3).unwrap();
+        assert_eq!(slash.markdown, namespaced.markdown);
+
+        // Neither the bare reference nor the namespaced slash form resolves.
+        assert!(at("#sase_plan", 3).is_none());
+        assert!(at("/skills", 3).is_none());
+    }
+
+    #[test]
     fn builds_xprompt_and_argument_hover() {
         let entries = vec![XpromptAssistEntry {
             name: "review".to_string(),
@@ -211,6 +257,7 @@ mod tests {
             definition_path: Some("/tmp/sase/xprompts/review.md".to_string()),
             definition_range: None,
             is_skill: false,
+            skill_name: None,
         }];
         let doc = DocumentSnapshot::new("#review:");
         let hover = hover_at_position(

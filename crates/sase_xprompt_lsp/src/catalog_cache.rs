@@ -829,6 +829,7 @@ mod tests {
                 input_signature: None,
                 inputs: Vec::new(),
                 is_skill: false,
+                skill_name: None,
                 content_preview: Some("body".to_string()),
                 source_path_display: None,
                 definition_path: None,

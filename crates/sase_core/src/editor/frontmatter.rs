@@ -1069,7 +1069,12 @@ fn validate_longform_unknown_keys(
     for field in source.fields {
         if matches!(
             field.key.as_str(),
-            "name" | "type" | "default" | "description" | "repeatable" | "choices"
+            "name"
+                | "type"
+                | "default"
+                | "description"
+                | "repeatable"
+                | "choices"
         ) {
             continue;
         }
@@ -2508,8 +2513,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "word", "agent", "line", "text", "path", "int", "float", "bool",
-                "enum"
+                "word", "agent", "line", "text", "path", "int", "float",
+                "bool", "enum"
             ]
         );
         for input in &schema {
@@ -2587,7 +2592,8 @@ mod tests {
 
     #[test]
     fn validate_flags_enum_without_choices() {
-        let diagnostics = validate("---\ninput:\n  mode:\n    type: enum\n---\n");
+        let diagnostics =
+            validate("---\ninput:\n  mode:\n    type: enum\n---\n");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
         }));
