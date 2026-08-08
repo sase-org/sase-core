@@ -6,6 +6,8 @@
 //! remaining tests cover the field-model flattener, the schema validator, the
 //! inventory provenance, and the edit planner.
 
+use std::collections::BTreeMap;
+
 use sase_core::config::merge::merge_layers;
 use sase_core::{
     compose_axe_config, config_field_model, config_inventory, config_plan_edit,
@@ -293,6 +295,59 @@ fn inventory_reports_effective_value_and_provenance() {
         d.code == "deprecated_key"
             && d.layer.as_deref() == Some("user")
             && d.path.as_deref() == Some("sibling_repos")
+    }));
+}
+
+#[test]
+fn inventory_diagnoses_glossary_outside_local_layer() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user",
+            "kind": "user",
+            "path": "/home/u/.config/sase/sase.yml",
+            "list_strategy": "concatenate",
+            "writable": true,
+            "value": {
+                "glossary": {
+                    "Agent Clan": {"definition": "A named rootless container."}
+                }
+            }
+        },
+        {
+            "name": "local",
+            "kind": "local",
+            "path": "/repo/sase.yml",
+            "list_strategy": "concatenate",
+            "writable": true,
+            "value": {
+                "glossary": {
+                    "Workspace": {"definition": "A numbered checkout."}
+                }
+            }
+        }
+    ]))
+    .unwrap();
+    let request = ConfigInventoryRequestWire {
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "glossary": {"type": "object"}
+            }
+        }),
+        layers,
+        deprecations: BTreeMap::new(),
+        unsupported: Vec::new(),
+    };
+    let inventory = config_inventory(&request).unwrap();
+
+    assert!(inventory.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "glossary_scope"
+            && diagnostic.layer.as_deref() == Some("user")
+            && diagnostic.path.as_deref() == Some("glossary")
+    }));
+    assert!(!inventory.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "glossary_scope"
+            && diagnostic.layer.as_deref() == Some("local")
     }));
 }
 

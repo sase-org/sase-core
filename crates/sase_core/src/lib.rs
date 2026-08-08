@@ -36,6 +36,7 @@ pub mod editor;
 pub mod effort;
 pub mod effort_override;
 pub mod git_query;
+pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
 pub mod notifications;
@@ -484,6 +485,13 @@ pub use git_query::{
     parse_git_conflicted_files, parse_git_local_changes,
     parse_git_name_status_z, GitNameStatusEntryWire,
     GIT_QUERY_WIRE_SCHEMA_VERSION,
+};
+pub use glossary::{
+    build_glossary_catalog, compile_glossary_catalog,
+    validate_glossary_entries, CompiledGlossaryCatalog, GlossaryCatalogWire,
+    GlossaryDiagnosticWire, GlossaryEntryWire, GlossaryError,
+    GlossaryInputEntryWire, GlossarySourceWire, GlossarySpanWire,
+    GLOSSARY_WIRE_SCHEMA_VERSION,
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,

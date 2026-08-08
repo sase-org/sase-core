@@ -549,6 +549,13 @@ use sase_core::git_query::{
     parse_git_local_changes as core_parse_git_local_changes,
     parse_git_name_status_z as core_parse_git_name_status_z,
 };
+use sase_core::glossary::{
+    build_glossary_catalog as core_build_glossary_catalog,
+    compile_glossary_catalog as core_compile_glossary_catalog,
+    validate_glossary_entries as core_validate_glossary_entries,
+    CompiledGlossaryCatalog as CoreCompiledGlossaryCatalog, GlossaryError,
+    GlossaryInputEntryWire,
+};
 use sase_core::inline_code_ranges as core_inline_code_ranges;
 use sase_core::machine_hood::{
     machine_hood_of as core_machine_hood_of,
@@ -680,6 +687,13 @@ struct PyAtReferenceInventory {
     payloads: sase_core::AtReferencePayloadIndex,
 }
 
+/// Immutable compiled glossary matcher catalog.
+#[pyclass(name = "GlossaryCatalogHandle", module = "sase_core_rs", frozen)]
+#[derive(Clone, Debug)]
+struct PyGlossaryCatalogHandle {
+    catalog: CoreCompiledGlossaryCatalog,
+}
+
 #[pymethods]
 impl PyAtReferenceInventory {
     #[new]
@@ -701,6 +715,34 @@ impl PyAtReferenceInventory {
 
     fn __len__(&self) -> usize {
         self.payloads.len()
+    }
+}
+
+#[pymethods]
+impl PyGlossaryCatalogHandle {
+    fn __len__(&self) -> usize {
+        self.catalog.len()
+    }
+
+    fn catalog(&self, py: Python<'_>) -> PyResult<PyObject> {
+        glossary_to_py(py, self.catalog.catalog())
+    }
+
+    fn scan(&self, py: Python<'_>, text: &str) -> PyResult<PyObject> {
+        glossary_to_py(py, &self.catalog.scan(text))
+    }
+
+    fn lookup(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        line: u32,
+        character: u32,
+    ) -> PyResult<PyObject> {
+        let span = self
+            .catalog
+            .lookup(text, sase_core::EditorPosition { line, character });
+        glossary_to_py(py, &span)
     }
 }
 
@@ -6033,6 +6075,68 @@ fn py_validate_axe_config<'py>(
     chop_result_to_py(py, &result)
 }
 
+// --- Glossary catalog bindings -------------------------------------------
+
+fn glossary_error_to_pyerr(error: GlossaryError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn glossary_entries_from_pylist(
+    entries: &Bound<'_, PyList>,
+) -> PyResult<Vec<GlossaryInputEntryWire>> {
+    serde_json::from_value(py_to_json_value(entries.as_any())?).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "entries are not valid GlossaryInputEntryWire dicts: {error}"
+            ))
+        },
+    )
+}
+
+fn glossary_to_py<T>(py: Python<'_>, value: &T) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(value).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "glossary_validate")]
+fn py_glossary_validate(
+    py: Python<'_>,
+    entries: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let entries = glossary_entries_from_pylist(entries)?;
+    let diagnostics = core_validate_glossary_entries(&entries);
+    glossary_to_py(py, &diagnostics)
+}
+
+#[pyfunction]
+#[pyo3(name = "glossary_catalog")]
+fn py_glossary_catalog(
+    py: Python<'_>,
+    entries: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let entries = glossary_entries_from_pylist(entries)?;
+    let catalog = core_build_glossary_catalog(entries)
+        .map_err(glossary_error_to_pyerr)?;
+    glossary_to_py(py, &catalog)
+}
+
+#[pyfunction]
+#[pyo3(name = "compile_glossary_catalog")]
+fn py_compile_glossary_catalog(
+    entries: &Bound<'_, PyList>,
+) -> PyResult<PyGlossaryCatalogHandle> {
+    let entries = glossary_entries_from_pylist(entries)?;
+    let catalog = core_compile_glossary_catalog(entries)
+        .map_err(glossary_error_to_pyerr)?;
+    Ok(PyGlossaryCatalogHandle { catalog })
+}
+
 // --- Config Center backend bindings ---------------------------------------
 //
 // JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
@@ -7493,6 +7597,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_frontmatter, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_frontmatter_field, m)?)?;
     m.add_class::<PyAtReferenceInventory>()?;
+    m.add_class::<PyGlossaryCatalogHandle>()?;
     m.add_function(wrap_pyfunction!(py_at_reference_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_payload_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_at_reference_menu, m)?)?;
@@ -7519,6 +7624,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_parse_chop_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_split_axe_description, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_axe_config, m)?)?;
+    m.add_function(wrap_pyfunction!(py_glossary_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_glossary_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_glossary_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;

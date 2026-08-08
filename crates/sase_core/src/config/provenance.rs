@@ -129,6 +129,16 @@ fn build_sources(
                 layer: Some(layer.name.clone()),
             });
         }
+        if keys.iter().any(|key| key == "glossary") && layer.kind != "local" {
+            diagnostics.push(ConfigDiagnosticWire {
+                severity: "error".to_string(),
+                code: "glossary_scope".to_string(),
+                message: "`glossary` is only valid in project-local sase.yml"
+                    .to_string(),
+                path: Some("glossary".to_string()),
+                layer: Some(layer.name.clone()),
+            });
+        }
         if let Some(err) = &layer.error {
             diagnostics.push(ConfigDiagnosticWire {
                 severity: "error".to_string(),
