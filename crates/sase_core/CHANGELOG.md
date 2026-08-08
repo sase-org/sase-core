@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0](https://github.com/sase-org/sase-core/compare/v0.19.3...v0.20.0) - 2026-08-08
+
+### Added
+
+- *(skills)* [**breaking**] define the canonical skill layout and editor contract
+- *(mobile)* [**breaking**] carry declared gate inputs on the mobile wire
+- *(xprompt)* add enum input type with declared choices
+
+### Fixed
+
+- *(xprompt)* skip the packaged skill frame template when scanning skills
+
 ## [0.19.3](https://github.com/sase-org/sase-core/compare/v0.19.2...v0.19.3) - 2026-08-07
 
 ### Added
