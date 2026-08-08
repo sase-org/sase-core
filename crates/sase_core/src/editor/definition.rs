@@ -121,6 +121,7 @@ mod tests {
                     .map_or(name, |(_, tail)| tail)
                     .to_string()
             }),
+            memory_type: None,
         }
     }
 
@@ -173,6 +174,37 @@ mod tests {
         assert_eq!(inline.path, inline_path.canonicalize().unwrap());
         assert_eq!(standalone.path, standalone_path.canonicalize().unwrap());
         assert_eq!(inline.range, None);
+    }
+
+    #[test]
+    fn navigates_from_a_memory_reference_to_the_memory_note() {
+        let temp = tempdir().unwrap();
+        let note_path = temp.path().join("glossary.md");
+        fs::write(&note_path, "---\ntype: long\n---\nGlossary body").unwrap();
+        let mut memory = entry(
+            "memory/glossary",
+            "#memory/glossary",
+            Some(note_path.to_string_lossy().into_owned()),
+            false,
+        );
+        memory.memory_type = Some(crate::content_layout::MemoryTierWire::Long);
+        let entries = vec![memory];
+
+        let target = definition_at_position(
+            &DocumentSnapshot::new("see #memory/glossary"),
+            pos(8),
+            &entries,
+        )
+        .unwrap();
+
+        assert_eq!(target.path, note_path.canonicalize().unwrap());
+        // The bare name is not a reference, so it navigates nowhere.
+        assert!(definition_at_position(
+            &DocumentSnapshot::new("see #glossary"),
+            pos(8),
+            &entries,
+        )
+        .is_none());
     }
 
     #[test]

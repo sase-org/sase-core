@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::{
-    parse_artifact_ref, prompt_literal_zone_ranges, resolve_artifact_ref,
-    scan_artifact_refs, ArtifactRefContextWire, ArtifactRefKindWire,
+    content_layout::is_reserved_memory_reference, parse_artifact_ref,
+    prompt_literal_zone_ranges, resolve_artifact_ref, scan_artifact_refs,
+    ArtifactRefContextWire, ArtifactRefKindWire,
 };
 
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
@@ -454,6 +455,7 @@ fn local_xprompt_entry_from_config(
         definition_range: None,
         is_skill: false,
         skill_name: None,
+        memory_type: None,
     })
 }
 
@@ -617,8 +619,11 @@ fn value_as_string(value: &Value) -> Option<String> {
     }
 }
 
+/// Document-local xprompt names follow the ordinary reference grammar and may
+/// never claim the reserved xprompt-memory namespace.
 fn is_referenceable_xprompt_name(name: &str) -> bool {
-    name.split('/').all(is_jinja_identifier)
+    !is_reserved_memory_reference(name)
+        && name.split('/').all(is_jinja_identifier)
 }
 
 fn is_jinja_identifier(name: &str) -> bool {
@@ -703,6 +708,7 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
             },
             XpromptAssistEntry {
                 name: "run".to_string(),
@@ -722,6 +728,7 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
             },
             XpromptAssistEntry {
                 name: "skills/plan".to_string(),
@@ -741,6 +748,7 @@ mod tests {
                 definition_range: None,
                 is_skill: true,
                 skill_name: Some("plan".to_string()),
+                memory_type: None,
             },
             XpromptAssistEntry {
                 name: "typed".to_string(),
@@ -764,6 +772,7 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
             },
             XpromptAssistEntry {
                 name: "ns/foo".to_string(),
@@ -783,6 +792,7 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
             },
             XpromptAssistEntry {
                 name: "merge".to_string(),
@@ -802,6 +812,7 @@ mod tests {
                 definition_range: None,
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
             },
         ]
     }

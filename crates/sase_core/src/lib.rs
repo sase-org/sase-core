@@ -365,14 +365,19 @@ pub use config::{
     ListStrategy as ConfigListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
 };
 pub use content_layout::{
-    resolve_layout_candidates, sase_content_layout, skill_placement_issue,
-    skill_reference_name, split_skill_reference_name, ChezmoiContentLayoutWire,
+    is_invokable_memory_stem, is_reserved_memory_reference, memory_note_issue,
+    memory_reference_name, memory_reference_stem,
+    reserved_memory_namespace_issue, resolve_layout_candidates,
+    sase_content_layout, skill_placement_issue, skill_reference_name,
+    split_skill_reference_name, ChezmoiContentLayoutWire,
     CompatibleLayoutPathWire, HomeContentLayoutWire,
     LayoutCandidateResolutionWire, LayoutCollisionPolicyWire,
-    LayoutPathRoleWire, LayoutPathWire, LayoutTrackingWire,
+    LayoutPathRoleWire, LayoutPathWire, LayoutTrackingWire, MemorySourceWire,
+    MemoryTierWire, MemoryXpromptIssueWire, MemoryXpromptRuleWire,
     ProjectContentLayoutWire, SaseContentLayoutWire, SkillPlacementIssueWire,
     SkillPlacementRuleWire, SkillSourceWire, XpromptSourceWire,
-    CONTENT_LAYOUT_SCHEMA_VERSION, SKILL_NAMESPACE_SEGMENT,
+    CONTENT_LAYOUT_SCHEMA_VERSION, MEMORY_NAMESPACE_SEGMENT,
+    MEMORY_README_FILENAME, SKILL_NAMESPACE_SEGMENT,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

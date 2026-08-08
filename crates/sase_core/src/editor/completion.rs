@@ -102,6 +102,7 @@ pub fn assist_entries_from_catalog(
                 definition_range: entry.definition_range,
                 is_skill: entry.is_skill,
                 skill_name: entry.skill_name.clone(),
+                memory_type: entry.memory_type,
             }
         })
         .collect()
@@ -2969,6 +2970,7 @@ mod tests {
     use super::*;
     use crate::editor::directive::directive_argument_candidates;
     use crate::effort::EFFORT_LEVELS_ORDERED;
+    use crate::MemoryTierWire;
     use crate::{
         ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire,
         ArtifactRefDocumentRootWire, ArtifactRefPayloadWire,
@@ -3033,6 +3035,7 @@ mod tests {
                 ],
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
                 content_preview: Some("review body".to_string()),
                 source_path_display: Some(
                     "sase/xprompts/review.md".to_string(),
@@ -3056,9 +3059,34 @@ mod tests {
                 inputs: vec![],
                 is_skill: false,
                 skill_name: None,
+                memory_type: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
+                definition_range: None,
+            },
+            EditorXpromptCatalogEntryWire {
+                name: "memory/glossary".to_string(),
+                display_label: "memory/glossary".to_string(),
+                insertion: Some("#memory/glossary".to_string()),
+                reference_prefix: Some("#".to_string()),
+                kind: Some("memory".to_string()),
+                description: Some("SASE terms".to_string()),
+                source_bucket: "project".to_string(),
+                project: None,
+                tags: vec![],
+                input_signature: None,
+                inputs: vec![],
+                is_skill: false,
+                skill_name: None,
+                memory_type: Some(MemoryTierWire::Short),
+                content_preview: Some("Glossary body".to_string()),
+                source_path_display: Some(
+                    "sase/memory/glossary.md".to_string(),
+                ),
+                definition_path: Some(
+                    "/tmp/sase/memory/glossary.md".to_string(),
+                ),
                 definition_range: None,
             },
             EditorXpromptCatalogEntryWire {
@@ -3075,6 +3103,7 @@ mod tests {
                 inputs: vec![],
                 is_skill: true,
                 skill_name: Some("plan".to_string()),
+                memory_type: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -4524,6 +4553,43 @@ mod tests {
     }
 
     #[test]
+    fn memory_completes_only_through_the_memory_namespace() {
+        let catalog = entries();
+
+        let namespaced =
+            build_xprompt_completion_candidates("#memory/", None, &catalog);
+        assert_eq!(
+            namespaced
+                .candidates
+                .iter()
+                .map(|c| c.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#memory/glossary"]
+        );
+        // No bare alias exists, and a memory note is never a slash skill.
+        assert!(build_xprompt_completion_candidates(
+            "#glossary",
+            None,
+            &catalog
+        )
+        .candidates
+        .is_empty());
+        assert!(build_xprompt_completion_candidates(
+            "/glossary",
+            None,
+            &catalog
+        )
+        .candidates
+        .is_empty());
+        // The tier survives the catalog-to-assist projection.
+        let entry = catalog
+            .iter()
+            .find(|entry| entry.name == "memory/glossary")
+            .unwrap();
+        assert_eq!(entry.memory_type, Some(MemoryTierWire::Short));
+    }
+
+    #[test]
     fn snippet_context_does_not_steal_higher_priority_tokens() {
         let catalog = entries();
         for text in ["#foo", "/foo", "@foo", "%model", "./foo", ""] {
@@ -4632,6 +4698,7 @@ mod tests {
             content_preview: None,
             description: None,
             skill_name: None,
+            memory_type: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,
@@ -4975,6 +5042,7 @@ mod tests {
             content_preview: None,
             description: None,
             skill_name: None,
+            memory_type: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,

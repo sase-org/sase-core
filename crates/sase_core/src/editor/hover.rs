@@ -87,6 +87,9 @@ fn xprompt_markdown(entry: &XpromptAssistEntry) -> String {
     if let Some(skill_name) = &entry.skill_name {
         meta.push(format!("skill `/{skill_name}`"));
     }
+    if let Some(memory_type) = entry.memory_type {
+        meta.push(format!("tier `{}`", memory_type.as_str()));
+    }
     if !entry.source_bucket.is_empty() {
         meta.push(entry.source_bucket.clone());
     }
@@ -185,7 +188,9 @@ fn active_input_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::wire::XpromptInputHint;
+    use crate::{
+        content_layout::MemoryTierWire, editor::wire::XpromptInputHint,
+    };
 
     #[test]
     fn hovers_a_skill_through_both_of_its_names() {
@@ -207,6 +212,7 @@ mod tests {
             definition_range: None,
             is_skill: true,
             skill_name: Some("sase_plan".to_string()),
+            memory_type: None,
         }];
         let at = |text: &str, character: u32| {
             hover_at_position(
@@ -228,6 +234,45 @@ mod tests {
         // Neither the bare reference nor the namespaced slash form resolves.
         assert!(at("#sase_plan", 3).is_none());
         assert!(at("/skills", 3).is_none());
+    }
+
+    #[test]
+    fn hovers_an_xprompt_memory_with_its_kind_and_tier() {
+        let entries = vec![XpromptAssistEntry {
+            name: "memory/glossary".to_string(),
+            display_label: "memory/glossary".to_string(),
+            insertion: "#memory/glossary".to_string(),
+            reference_prefix: "#".to_string(),
+            kind: Some("memory".to_string()),
+            source_bucket: "project".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: None,
+            inputs: Vec::new(),
+            content_preview: Some("Glossary body".to_string()),
+            description: Some("SASE terms".to_string()),
+            source_path_display: Some("sase/memory/glossary.md".to_string()),
+            definition_path: None,
+            definition_range: None,
+            is_skill: false,
+            skill_name: None,
+            memory_type: Some(MemoryTierWire::Long),
+        }];
+        let at = |text: &str, character: u32| {
+            hover_at_position(
+                &DocumentSnapshot::new(text),
+                EditorPosition { line: 0, character },
+                &entries,
+            )
+        };
+
+        let hover = at("#memory/glossary", 3).unwrap();
+        assert!(hover.markdown.contains("memory"), "{}", hover.markdown);
+        assert!(hover.markdown.contains("tier `long`"), "{}", hover.markdown);
+        assert!(hover.markdown.contains("SASE terms"));
+        // No bare alias and no slash form.
+        assert!(at("#glossary", 3).is_none());
+        assert!(at("/glossary", 3).is_none());
     }
 
     #[test]
@@ -258,6 +303,7 @@ mod tests {
             definition_range: None,
             is_skill: false,
             skill_name: None,
+            memory_type: None,
         }];
         let doc = DocumentSnapshot::new("#review:");
         let hover = hover_at_position(

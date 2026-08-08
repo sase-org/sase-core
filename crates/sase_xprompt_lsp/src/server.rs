@@ -51,6 +51,7 @@ use sase_core::{
     CompletionContextKind, CompletionList, DocumentSnapshot, EditorRange,
     EditorSnippetEntryWire, HelperHostBridge, VcsNamespaceEntry,
     VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -2404,11 +2405,25 @@ fn markdown_uri_eligible(uri: &Uri) -> bool {
     }) {
         return true;
     }
+    if is_memory_note_path(&path) {
+        return true;
+    }
     let Some(file_name) = path.file_name().and_then(|name| name.to_str())
     else {
         return false;
     };
     is_prompt_temp_markdown_name(file_name)
+}
+
+/// Whether `path` is a flat note in a canonical or legacy memory root.
+///
+/// Memory notes are xprompt memories, so editing one must refresh the catalog
+/// and the note itself gets prompt assistance for the references it holds.
+fn is_memory_note_path(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        == Some(MEMORY_NAMESPACE_SEGMENT)
 }
 
 fn is_prompt_temp_markdown_name(file_name: &str) -> bool {
@@ -2442,6 +2457,9 @@ fn should_invalidate_for_uri(uri: &Uri) -> bool {
     let extension = path.extension().and_then(|ext| ext.to_str());
     if !matches!(extension, Some("md" | "yml" | "yaml")) {
         return false;
+    }
+    if is_memory_note_path(&path) {
+        return true;
     }
     path.components().any(|component| {
         matches!(
@@ -2538,6 +2556,7 @@ mod tests {
                     total_count,
                     project_count: 0,
                     skill_count: total_count,
+                    memory_count: 0,
                     pdf_requested: false,
                 },
                 catalog_attachment: None,
@@ -2647,6 +2666,7 @@ mod tests {
                     .map_or(name, |(_, tail)| tail)
                     .to_string(),
             ),
+            memory_type: None,
             content_preview: None,
             source_path_display: Some("Cargo.toml".to_string()),
             definition_path,
@@ -2759,6 +2779,35 @@ mod tests {
         assert!(document_eligible(&prose_uri, "gitcommit", &config));
         assert!(document_eligible(&prose_uri, "sase", &config));
         assert!(document_eligible(&prose_uri, "sase_prompt", &config));
+
+        // Memory notes are xprompt memories, so a flat note in a canonical or
+        // legacy memory root gets prompt assistance too.
+        let canonical_memory_uri = file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("memory")
+                .join("glossary.md"),
+        );
+        let legacy_memory_uri =
+            file_uri(temp.join("project").join("memory").join("glossary.md"));
+        let nested_memory_asset_uri = file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("memory")
+                .join("assets")
+                .join("diagram.md"),
+        );
+        assert!(document_eligible(
+            &canonical_memory_uri,
+            "markdown",
+            &config
+        ));
+        assert!(document_eligible(&legacy_memory_uri, "markdown", &config));
+        assert!(!document_eligible(
+            &nested_memory_asset_uri,
+            "markdown",
+            &config
+        ));
     }
 
     #[test]
@@ -2794,6 +2843,25 @@ mod tests {
         assert!(should_invalidate_for_uri(&dot_xprompts_uri));
         assert!(should_invalidate_for_uri(&default_xprompts_uri));
         assert!(!should_invalidate_for_uri(&prose_uri));
+
+        // Creating, editing, renaming, or deleting a memory note changes the
+        // xprompt-memory catalog, so it must invalidate too.
+        assert!(should_invalidate_for_uri(&file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("memory")
+                .join("glossary.md"),
+        )));
+        assert!(should_invalidate_for_uri(&file_uri(
+            temp.join("home").join("memory").join("glossary.md"),
+        )));
+        assert!(!should_invalidate_for_uri(&file_uri(
+            temp.join("project")
+                .join("sase")
+                .join("memory")
+                .join("assets")
+                .join("diagram.md"),
+        )));
     }
 
     #[tokio::test]

@@ -15,9 +15,12 @@ use std::{
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::editor::wire::{
-    AgentCatalogRequest, AgentCatalogResponse, EditorRange,
-    VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+use crate::{
+    content_layout::MemoryTierWire,
+    editor::wire::{
+        AgentCatalogRequest, AgentCatalogResponse, EditorRange,
+        VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    },
 };
 
 #[derive(Clone)]
@@ -702,6 +705,12 @@ pub struct MobileXpromptCatalogEntryWire {
     /// that predate the split simply omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
+    /// Tier of the SASE memory note behind an xprompt memory (`short` or
+    /// `long`), absent for every other entry. A non-null value is the
+    /// authoritative marker that `kind` is `memory`; older payloads that
+    /// predate xprompt memories simply omit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_type: Option<MemoryTierWire>,
     pub content_preview: Option<String>,
     pub source_path_display: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -738,6 +747,10 @@ pub struct MobileXpromptCatalogStatsWire {
     pub total_count: u64,
     pub project_count: u64,
     pub skill_count: u64,
+    /// How many entries are xprompt memories. Additive: payloads written
+    /// before xprompt memories existed deserialize as zero.
+    #[serde(default)]
+    pub memory_count: u64,
     pub pdf_requested: bool,
 }
 
@@ -957,6 +970,7 @@ mod tests {
                     }],
                     is_skill: false,
                     skill_name: None,
+                    memory_type: None,
                     content_preview: Some("Complete the bead".to_string()),
                     source_path_display: Some(
                         "xprompts/bd/work_phase_bead.md".to_string(),
@@ -970,6 +984,7 @@ mod tests {
                     total_count: 1,
                     project_count: 0,
                     skill_count: 0,
+                    memory_count: 0,
                     pdf_requested: false,
                 },
                 catalog_attachment: None,
@@ -1118,6 +1133,7 @@ mod tests {
                     "total_count": 1,
                     "project_count": 0,
                     "skill_count": 0,
+                    "memory_count": 0,
                     "pdf_requested": false
                 },
                 "catalog_attachment": null

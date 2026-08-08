@@ -11,9 +11,12 @@ use thiserror::Error;
 
 use crate::{
     content_layout::{
-        resolve_layout_candidates, sase_content_layout, skill_placement_issue,
-        skill_reference_name, CompatibleLayoutPathWire,
-        SkillPlacementIssueWire, SkillSourceWire, XpromptSourceWire,
+        memory_note_issue, memory_reference_name,
+        reserved_memory_namespace_issue, resolve_layout_candidates,
+        sase_content_layout, skill_placement_issue, skill_reference_name,
+        CompatibleLayoutPathWire, MemorySourceWire, MemoryTierWire,
+        MemoryXpromptIssueWire, SkillPlacementIssueWire, SkillSourceWire,
+        XpromptSourceWire, MEMORY_NAMESPACE_SEGMENT, MEMORY_README_FILENAME,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     list_project_records, DocumentSnapshot, EditorRange,
@@ -115,6 +118,9 @@ struct CatalogXprompt {
     description: Option<String>,
     is_skill: bool,
     skill_name: Option<String>,
+    /// Tier of the SASE memory note this entry was loaded from. A non-null
+    /// value is the authoritative marker that the entry is an xprompt memory.
+    memory_type: Option<MemoryTierWire>,
     snippet: Option<CatalogSnippet>,
 }
 
@@ -139,6 +145,7 @@ struct StructuredSource {
     description: Option<String>,
     is_skill: bool,
     skill_name: Option<String>,
+    memory_type: Option<MemoryTierWire>,
     content: String,
     definition_section: DefinitionSection,
 }
@@ -193,7 +200,7 @@ pub fn load_editor_xprompt_catalog(
         result: MobileHelperResultWire {
             status: MobileHelperStatusWire::Success,
             message: Some(format!("loaded {} xprompt(s)", wire_entries.len())),
-            warnings: loader.skill_placement_warnings(),
+            warnings: loader.placement_warnings(),
             skipped: Vec::<MobileHelperSkippedWire>::new(),
             partial_failure_count: None,
         },
@@ -214,6 +221,10 @@ pub fn load_editor_xprompt_catalog(
                 .len() as u64,
             skill_count: entries.iter().filter(|entry| entry.is_skill).count()
                 as u64,
+            memory_count: entries
+                .iter()
+                .filter(|entry| entry.memory_type.is_some())
+                .count() as u64,
             pdf_requested: request.include_pdf,
         },
         entries: wire_entries,
@@ -387,7 +398,7 @@ fn structured_entry(
         display_label: display_label(&entry.name),
         insertion: Some(format!("{reference_prefix}{}", entry.name)),
         reference_prefix: Some(reference_prefix.to_string()),
-        kind: Some(workflow_kind_value(kind).to_string()),
+        kind: Some(entry_kind_value(entry, kind).to_string()),
         description: entry.description.clone(),
         source_bucket: entry.bucket.clone(),
         project: entry.project.clone(),
@@ -396,6 +407,7 @@ fn structured_entry(
         inputs: structured_inputs(&entry.workflow.inputs),
         is_skill: entry.is_skill,
         skill_name: entry.skill_name.clone(),
+        memory_type: entry.memory_type,
         content_preview: content_preview(&entry.content),
         source_path_display: loader.source_path_display(entry),
         definition_path: loader.definition_path(entry),
@@ -477,6 +489,20 @@ fn workflow_kind(workflow: &CatalogWorkflow) -> WorkflowKind {
     } else {
         WorkflowKind::StandaloneWorkflow
     }
+}
+
+/// User-facing kind for one catalog entry.
+///
+/// An xprompt memory renders as `memory` rather than as an ordinary xprompt;
+/// `source_bucket` still carries provenance.
+fn entry_kind_value(
+    entry: &StructuredSource,
+    kind: WorkflowKind,
+) -> &'static str {
+    if entry.memory_type.is_some() {
+        return MEMORY_NAMESPACE_SEGMENT;
+    }
+    workflow_kind_value(kind)
 }
 
 fn workflow_kind_value(kind: WorkflowKind) -> &'static str {
@@ -907,6 +933,10 @@ struct CatalogLoader {
     /// the catalog can name the offending source and its migration
     /// destination instead of silently losing it.
     skill_issues: RefCell<Vec<SkillPlacementIssueWire>>,
+    /// Definitions dropped by the xprompt-memory rules: a reserved `memory/`
+    /// reference claimed by an ordinary definition, an unreachable note stem,
+    /// or a file in a memory root that is not a valid memory note.
+    memory_issues: RefCell<Vec<MemoryXpromptIssueWire>>,
 }
 
 impl CatalogLoader {
@@ -952,6 +982,7 @@ impl CatalogLoader {
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
             skill_issues: RefCell::new(Vec::new()),
+            memory_issues: RefCell::new(Vec::new()),
         }
     }
 
@@ -1001,6 +1032,7 @@ impl CatalogLoader {
                     project: source_project,
                     is_skill: false,
                     skill_name: None,
+                    memory_type: None,
                     content,
                     definition_section: DefinitionSection::Workflows,
                 });
@@ -1026,6 +1058,7 @@ impl CatalogLoader {
                 description: xprompt.description,
                 is_skill: xprompt.is_skill,
                 skill_name: xprompt.skill_name,
+                memory_type: xprompt.memory_type,
                 content: xprompt.content,
                 definition_section: DefinitionSection::Xprompts,
             });
@@ -1059,6 +1092,7 @@ impl CatalogLoader {
                     description: xprompt.description,
                     is_skill: xprompt.is_skill,
                     skill_name: xprompt.skill_name,
+                    memory_type: xprompt.memory_type,
                     content: xprompt.content,
                     definition_section: DefinitionSection::Xprompts,
                 });
@@ -1129,6 +1163,13 @@ impl CatalogLoader {
                 project,
                 source.project_namespaced,
             )?);
+        }
+
+        // Xprompt memories own the reserved `memory/` namespace, so they never
+        // collide with an ordinary xprompt or a skill. Home first, so the
+        // selected project's note shadows a same-stem home note.
+        for source in self.memory_sources(project).into_iter().rev() {
+            all.extend(self.load_memory_notes(&source)?);
         }
         Ok(all)
     }
@@ -1223,6 +1264,94 @@ impl CatalogLoader {
             .collect()
     }
 
+    /// Ordered xprompt-memory sources for the selected project and home.
+    ///
+    /// The project scope follows the selection rather than the reference name:
+    /// an explicitly requested registered project contributes its own
+    /// workspace's memory, and no other project's memory is ever mixed in.
+    fn memory_sources(&self, project: Option<&str>) -> Vec<MemorySourceWire> {
+        let project_root = match project {
+            Some(project) if self.root_project() != Some(project) => self
+                .known_workspaces
+                .get(project)
+                .cloned()
+                .or_else(|| self.root_dir.clone()),
+            _ => self.root_dir.clone(),
+        };
+        let home_root =
+            self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        sase_content_layout(project_root.as_deref(), home_root, None, project)
+            .memory_sources
+            .into_iter()
+            .filter(|source| source.scope != "home" || self.home_dir.is_some())
+            .collect()
+    }
+
+    /// Load one scope's flat memory notes as no-argument xprompt memories.
+    ///
+    /// Split canonical/legacy memory state stays an error, `README.md` and
+    /// nested assets are not catalog entries, and a file that is not a valid
+    /// memory note becomes a diagnostic instead of an ordinary xprompt.
+    fn load_memory_notes(
+        &self,
+        source: &MemorySourceWire,
+    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+        let label = format!("{} memory", source.scope);
+        let Some(root) = resolve_compatible_read_path(&source.paths, &label)?
+        else {
+            return Ok(BTreeMap::new());
+        };
+        let mut result = BTreeMap::new();
+        for path in files_with_extensions(&root, &["md"])? {
+            let Some(filename) =
+                path.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            if filename == MEMORY_README_FILENAME {
+                continue;
+            }
+            let Some(note) = load_memory_note(&path)? else {
+                continue;
+            };
+            let display = path.to_string_lossy();
+            let issue = memory_note_issue(
+                &display,
+                &note.stem,
+                note.declared_type.as_deref(),
+            );
+            if issue.is_some() {
+                self.record_memory_issue(issue);
+                continue;
+            }
+            let Some(memory_type) = note
+                .declared_type
+                .as_deref()
+                .and_then(MemoryTierWire::parse)
+            else {
+                continue;
+            };
+            let name = memory_reference_name(&note.stem);
+            result.insert(
+                name.clone(),
+                CatalogXprompt {
+                    name,
+                    content: note.body,
+                    inputs: Vec::new(),
+                    local_xprompts: Vec::new(),
+                    source_path: Some(display.into_owned()),
+                    tags: BTreeSet::new(),
+                    description: note.description,
+                    is_skill: false,
+                    skill_name: None,
+                    memory_type: Some(memory_type),
+                    snippet: None,
+                },
+            );
+        }
+        Ok(result)
+    }
+
     /// Canonical skill directory for the scope owning `dir`, used as the
     /// migration destination when a skill declaration turns up in an ordinary
     /// xprompt directory.
@@ -1242,14 +1371,38 @@ impl CatalogLoader {
         }
     }
 
+    fn record_memory_issue(&self, issue: Option<MemoryXpromptIssueWire>) {
+        if let Some(issue) = issue {
+            self.memory_issues.borrow_mut().push(issue);
+        }
+    }
+
+    /// Drop an ordinary definition that claims a reserved `memory/` reference.
+    ///
+    /// Load order must never decide whether the colliding definition or the
+    /// memory note wins, so the reserved namespace is enforced at every
+    /// non-memory load site instead.
+    fn reject_reserved_memory_name(&self, source: &str, name: &str) -> bool {
+        let issue = reserved_memory_namespace_issue(source, name);
+        let rejected = issue.is_some();
+        self.record_memory_issue(issue);
+        rejected
+    }
+
     /// Migration diagnostics for every definition the placement rules dropped,
     /// so a misplaced source is reported rather than silently missing.
-    fn skill_placement_warnings(&self) -> Vec<String> {
+    fn placement_warnings(&self) -> Vec<String> {
         let mut warnings = self
             .skill_issues
             .borrow()
             .iter()
             .map(|issue| issue.message.clone())
+            .chain(
+                self.memory_issues
+                    .borrow()
+                    .iter()
+                    .map(|issue| issue.message.clone()),
+            )
             .collect::<Vec<_>>();
         warnings.sort();
         warnings.dedup();
@@ -1275,6 +1428,12 @@ impl CatalogLoader {
                     true,
                     destination.as_deref(),
                 ));
+                continue;
+            }
+            if self.reject_reserved_memory_name(
+                &path.to_string_lossy(),
+                &xprompt.name,
+            ) {
                 continue;
             }
             if namespace_local {
@@ -1378,6 +1537,9 @@ impl CatalogLoader {
                         true,
                         Some("the plugin's skills/ resource directory"),
                     ));
+                    continue;
+                }
+                if self.reject_reserved_memory_name(&source, &xprompt.name) {
                     continue;
                 }
                 xprompt.source_path = Some(source);
@@ -1492,6 +1654,12 @@ impl CatalogLoader {
                 if self.reject_config_skill(&xprompt, &source) {
                     continue;
                 }
+                if self.reject_reserved_memory_name(
+                    &format!("{source} xprompt `{}`", xprompt.name),
+                    &xprompt.name,
+                ) {
+                    continue;
+                }
                 if source == "local_config" {
                     if let Some(project) = project {
                         xprompt.name = format!("{project}/{}", xprompt.name);
@@ -1588,6 +1756,12 @@ impl CatalogLoader {
                 continue;
             };
             if self.reject_config_skill(&xprompt, &source) {
+                continue;
+            }
+            if self.reject_reserved_memory_name(
+                &format!("{source} xprompt `{}`", xprompt.name),
+                &xprompt.name,
+            ) {
                 continue;
             }
             xprompt.name = format!("{project}/{}", xprompt.name);
@@ -2090,7 +2264,49 @@ fn load_xprompt_from_markdown(
         description,
         is_skill,
         skill_name: None,
+        memory_type: None,
         snippet,
+    }))
+}
+
+/// One file read from a memory root, before the xprompt-memory rules run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadedMemoryNote {
+    stem: String,
+    declared_type: Option<String>,
+    description: Option<String>,
+    body: String,
+}
+
+/// Read a memory note, stripping its frontmatter from the prompt body.
+fn load_memory_note(
+    path: &Path,
+) -> Result<Option<LoadedMemoryNote>, XpromptCatalogLoadError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return Ok(None),
+    };
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(None);
+    };
+    let (front_matter, body) = parse_front_matter(&text);
+    let declared_type = front_matter
+        .as_ref()
+        .and_then(|data| mapping_get(data, "type"))
+        .and_then(value_as_string);
+    let description = front_matter
+        .as_ref()
+        .and_then(|data| mapping_get(data, "description"))
+        .and_then(value_as_string)
+        .map(|description| {
+            description.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|description| !description.is_empty());
+    Ok(Some(LoadedMemoryNote {
+        stem: stem.to_string(),
+        declared_type,
+        description,
+        body,
     }))
 }
 
@@ -2274,6 +2490,7 @@ fn xprompt_from_config_entry(
             description: None,
             is_skill: false,
             skill_name: None,
+            memory_type: None,
             snippet: None,
         });
     }
@@ -2295,6 +2512,7 @@ fn xprompt_from_config_entry(
             .map(value_is_truthy)
             .unwrap_or(false),
         skill_name: None,
+        memory_type: None,
         snippet: mapping_get(data, "snippet").and_then(parse_snippet),
     })
 }
@@ -2800,6 +3018,317 @@ mod tests {
         );
     }
 
+    fn write_memory_note(root: &Path, name: &str, contents: &str) {
+        let memory = root.join("sase/memory");
+        fs::create_dir_all(&memory).unwrap();
+        fs::write(memory.join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn memory_notes_load_as_namespaced_no_argument_xprompt_memories() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(&home).unwrap();
+        write_memory_note(
+            &root,
+            "glossary.md",
+            "---\ntype: short\nparent: AGENTS.md\ndescription: SASE terms\n---\nGlossary body\n",
+        );
+        write_memory_note(
+            &root,
+            "tui_perf.md",
+            "---\ntype: long\ndescription: TUI performance\n---\nPerf body\n",
+        );
+        // Generated documentation and nested assets are not catalog entries.
+        write_memory_note(&root, "README.md", "---\ntype: long\n---\nIndex\n");
+        fs::create_dir_all(root.join("sase/memory/assets")).unwrap();
+        fs::write(
+            root.join("sase/memory/assets/nested.md"),
+            "---\ntype: long\n---\nNested\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root.clone()),
+            home_dir: Some(home),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        assert_eq!(
+            xprompts.keys().collect::<Vec<_>>(),
+            vec!["memory/glossary", "memory/tui_perf"]
+        );
+        let glossary = &xprompts["memory/glossary"];
+        // Frontmatter is stripped, description and tier are preserved, and an
+        // xprompt memory takes no arguments.
+        assert_eq!(glossary.content, "Glossary body");
+        assert_eq!(glossary.description.as_deref(), Some("SASE terms"));
+        assert_eq!(glossary.memory_type, Some(MemoryTierWire::Short));
+        assert!(glossary.inputs.is_empty());
+        assert!(!glossary.is_skill && glossary.skill_name.is_none());
+        assert_eq!(
+            xprompts["memory/tui_perf"].memory_type,
+            Some(MemoryTierWire::Long)
+        );
+        // The `memory/` prefix is mandatory: there is no bare alias.
+        assert!(!xprompts.contains_key("glossary"));
+        assert!(loader.placement_warnings().is_empty());
+    }
+
+    #[test]
+    fn memory_entries_render_as_memory_with_a_navigable_definition() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_memory_note(
+            root,
+            "glossary.md",
+            "---\ntype: long\ndescription: SASE terms\n---\nGlossary body\n",
+        );
+
+        let response = load_editor_xprompt_catalog(
+            &request(),
+            &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        )
+        .unwrap();
+        let entry = response
+            .entries
+            .iter()
+            .find(|entry| entry.name == "memory/glossary")
+            .unwrap();
+
+        assert_eq!(entry.kind.as_deref(), Some("memory"));
+        assert_eq!(entry.memory_type, Some(MemoryTierWire::Long));
+        assert_eq!(entry.insertion.as_deref(), Some("#memory/glossary"));
+        assert_eq!(entry.input_signature, None);
+        // A memory entry is never a slash skill.
+        assert!(!entry.is_skill && entry.skill_name.is_none());
+        // Definition navigation lands on the note itself.
+        assert_eq!(
+            entry.definition_path.as_deref().map(Path::new),
+            Some(
+                root.join("sase/memory/glossary.md")
+                    .canonicalize()
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        // The stats projection counts every xprompt memory in the catalog,
+        // including whatever the ambient home root contributes.
+        assert_eq!(
+            response.stats.memory_count,
+            response
+                .entries
+                .iter()
+                .filter(|entry| entry.memory_type.is_some())
+                .count() as u64
+        );
+        assert!(response.stats.memory_count >= 1);
+    }
+
+    #[test]
+    fn project_memory_shadows_home_memory_of_the_same_stem() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("workspace");
+        write_memory_note(
+            &home,
+            "glossary.md",
+            "---\ntype: short\n---\nHome\n",
+        );
+        write_memory_note(
+            &home,
+            "obsidian.md",
+            "---\ntype: long\n---\nHome only\n",
+        );
+        write_memory_note(
+            &root,
+            "glossary.md",
+            "---\ntype: short\n---\nProject\n",
+        );
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            home_dir: Some(home),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        assert_eq!(xprompts["memory/glossary"].content, "Project");
+        // Home still supplies notes the project does not define.
+        assert_eq!(xprompts["memory/obsidian"].content, "Home only");
+    }
+
+    #[test]
+    fn explicit_project_selection_picks_that_projects_memory_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let root = temp.path().join("workspace");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&home).unwrap();
+        write_memory_note(
+            &root,
+            "glossary.md",
+            "---\ntype: short\n---\nRoot\n",
+        );
+        write_memory_note(
+            &other,
+            "glossary.md",
+            "---\ntype: short\n---\nOther\n",
+        );
+        write_memory_note(
+            &other,
+            "only.md",
+            "---\ntype: long\n---\nOther only\n",
+        );
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            home_dir: Some(home),
+            known_workspaces: BTreeMap::from([(
+                "other".to_string(),
+                other.clone(),
+            )]),
+            ..CatalogLoader::default()
+        };
+
+        // Selecting a registered project changes which root supplies
+        // `#memory/foo`; the reference name never gains a project prefix.
+        let selected = loader.load_all_xprompts(Some("other")).unwrap();
+        assert_eq!(selected["memory/glossary"].content, "Other");
+        assert!(selected.contains_key("memory/only"));
+
+        // The ambient catalog never mixes another project's memory in.
+        let ambient = loader.load_all_xprompts(None).unwrap();
+        assert_eq!(ambient["memory/glossary"].content, "Root");
+        assert!(!ambient.contains_key("memory/only"));
+    }
+
+    #[test]
+    fn split_canonical_and_legacy_memory_state_is_a_collision_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        write_memory_note(
+            &root,
+            "glossary.md",
+            "---\ntype: short\n---\nBody\n",
+        );
+        fs::create_dir_all(root.join("memory")).unwrap();
+        fs::write(
+            root.join("memory/glossary.md"),
+            "---\ntype: short\n---\nLegacy\n",
+        )
+        .unwrap();
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            ..CatalogLoader::default()
+        };
+        let error = loader.load_all_xprompts(None).unwrap_err();
+
+        let XpromptCatalogLoadError::LayoutCollision(message) = error else {
+            panic!("expected a memory layout collision");
+        };
+        assert!(message.contains("project memory"), "{message}");
+        assert!(
+            message.contains("migrate to the canonical path"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn invalid_memory_notes_become_diagnostics_instead_of_silent_gaps() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        write_memory_note(
+            &root,
+            "untyped.md",
+            "---\nparent: AGENTS.md\n---\nBody",
+        );
+        write_memory_note(
+            &root,
+            "keyworded.md",
+            "---\ntype: dynamic\n---\nBody",
+        );
+        write_memory_note(&root, "bad-stem.md", "---\ntype: long\n---\nBody");
+        write_memory_note(&root, "ok.md", "---\ntype: long\n---\nBody");
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        assert_eq!(xprompts.keys().collect::<Vec<_>>(), vec!["memory/ok"]);
+        let warnings = loader.placement_warnings().join("\n");
+        assert!(warnings.contains("untyped.md"), "{warnings}");
+        assert!(warnings.contains("keyworded.md"), "{warnings}");
+        assert!(warnings.contains("#memory/bad-stem"), "{warnings}");
+    }
+
+    #[test]
+    fn ordinary_definitions_cannot_claim_the_reserved_memory_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("sase/xprompts")).unwrap();
+        fs::write(
+            root.join("sase/xprompts/imposter.md"),
+            "---\nname: memory/glossary\n---\nNot a memory note",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sase/sase.yml"),
+            "xprompts:\n  memory/tui_perf:\n    content: Also not a memory note\n",
+        )
+        .unwrap();
+        write_memory_note(
+            &root,
+            "glossary.md",
+            "---\ntype: short\n---\nReal\n",
+        );
+
+        let loader = CatalogLoader {
+            root_dir: Some(root),
+            ..CatalogLoader::default()
+        };
+        let xprompts = loader.load_all_xprompts(None).unwrap();
+
+        // Load order never decides the winner: the colliding definitions are
+        // rejected outright, and only the real memory note is reachable.
+        assert_eq!(
+            xprompts.keys().collect::<Vec<_>>(),
+            vec!["memory/glossary"]
+        );
+        assert_eq!(xprompts["memory/glossary"].content, "Real");
+        let warnings = loader.placement_warnings().join("\n");
+        assert!(warnings.contains("imposter.md"), "{warnings}");
+        assert!(warnings.contains("memory/tui_perf"), "{warnings}");
+    }
+
+    #[test]
+    fn catalog_payloads_without_memory_fields_still_deserialize() {
+        // Helper payloads written before xprompt memories existed omit the
+        // additive fields entirely.
+        let entry: MobileXpromptCatalogEntryWire = serde_json::from_str(
+            r##"{"name":"foo","display_label":"foo","insertion":"#foo","reference_prefix":"#","kind":"xprompt","description":null,"source_bucket":"config","project":null,"tags":[],"input_signature":null,"is_skill":false,"content_preview":null,"source_path_display":null}"##,
+        )
+        .unwrap();
+        assert_eq!(entry.memory_type, None);
+        let stats: MobileXpromptCatalogStatsWire = serde_json::from_str(
+            r#"{"total_count":1,"project_count":0,"skill_count":0,"pdf_requested":false}"#,
+        )
+        .unwrap();
+        assert_eq!(stats.memory_count, 0);
+        // A memory entry serializes its tier as the note's `type:` value.
+        let rendered = serde_json::to_value(MobileXpromptCatalogEntryWire {
+            memory_type: Some(MemoryTierWire::Long),
+            ..entry
+        })
+        .unwrap();
+        assert_eq!(rendered["memory_type"], "long");
+    }
+
     #[test]
     fn rejects_misplaced_skill_definitions_in_both_directions() {
         let temp = tempfile::tempdir().unwrap();
@@ -2837,7 +3366,7 @@ mod tests {
 
         // Nothing is dropped silently: each rejection names the source and
         // the move it needs.
-        let warnings = loader.skill_placement_warnings().join("\n");
+        let warnings = loader.placement_warnings().join("\n");
         assert!(warnings.contains("stale_skill.md"), "{warnings}");
         assert!(
             warnings
@@ -2883,9 +3412,9 @@ mod tests {
             vec!["skills/sase_plan"]
         );
         assert!(
-            loader.skill_placement_warnings().is_empty(),
+            loader.placement_warnings().is_empty(),
             "{:?}",
-            loader.skill_placement_warnings()
+            loader.placement_warnings()
         );
     }
 
@@ -4225,6 +4754,7 @@ mod tests {
             description: None,
             is_skill: false,
             skill_name: None,
+            memory_type: None,
             content: "body".to_string(),
             definition_section: DefinitionSection::Xprompts,
         };

@@ -151,6 +151,10 @@
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `skill_reference_name(skill_name: str, project: str | None = None) -> str`
 //! - `skill_placement_issue(source: str, in_skill_source: bool, declares_skill: bool, migrate_to: str | None = None) -> dict | None`
+//! - `memory_reference_name(stem: str) -> str`
+//! - `memory_reference_stem(name: str) -> str | None`
+//! - `reserved_memory_namespace_issue(source: str, name: str) -> dict | None`
+//! - `memory_note_issue(source: str, stem: str, note_type: str | None = None) -> dict | None`
 //! - `plan_validate(content: str, tier: str, mode: str = "authoring") -> dict`
 //! - `plan_frontmatter_schema(tier: str) -> list[dict]`
 //! - `artifact_consumption_summary(log_path: str, refs: list[str] | None = None) -> dict`
@@ -513,6 +517,10 @@ use sase_core::config::{
     ConfigInventoryRequestWire, ConfigValidateRequestWire,
 };
 use sase_core::content_layout::{
+    memory_note_issue as core_memory_note_issue,
+    memory_reference_name as core_memory_reference_name,
+    memory_reference_stem as core_memory_reference_stem,
+    reserved_memory_namespace_issue as core_reserved_memory_namespace_issue,
     resolve_layout_candidates as core_resolve_layout_candidates,
     sase_content_layout as core_sase_content_layout,
     skill_placement_issue as core_skill_placement_issue,
@@ -6418,6 +6426,58 @@ fn py_skill_reference_name(skill_name: &str, project: Option<&str>) -> String {
     core_skill_reference_name(project, skill_name)
 }
 
+/// Serialize an optional wire record to Python, or `None`.
+fn optional_wire_to_py<T: serde::Serialize>(
+    py: Python<'_>,
+    value: Option<T>,
+) -> PyResult<PyObject> {
+    let Some(value) = value else {
+        return Ok(py.None());
+    };
+    let json = serde_json::to_value(value).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Return the canonical `memory/<stem>` xprompt reference for a memory note.
+#[pyfunction]
+#[pyo3(name = "memory_reference_name")]
+fn py_memory_reference_name(stem: &str) -> String {
+    core_memory_reference_name(stem)
+}
+
+/// Split a canonical `memory/<stem>` reference back into its note stem.
+#[pyfunction]
+#[pyo3(name = "memory_reference_stem")]
+fn py_memory_reference_stem(name: &str) -> Option<String> {
+    core_memory_reference_stem(name).map(str::to_string)
+}
+
+/// Reject a non-memory definition that claims a reserved `memory/` reference.
+#[pyfunction]
+#[pyo3(name = "reserved_memory_namespace_issue")]
+fn py_reserved_memory_namespace_issue(
+    py: Python<'_>,
+    source: &str,
+    name: &str,
+) -> PyResult<PyObject> {
+    optional_wire_to_py(py, core_reserved_memory_namespace_issue(source, name))
+}
+
+/// Apply the shared xprompt-memory note rules to one file in a memory root.
+#[pyfunction]
+#[pyo3(name = "memory_note_issue")]
+#[pyo3(signature = (source, stem, note_type = None))]
+fn py_memory_note_issue(
+    py: Python<'_>,
+    source: &str,
+    stem: &str,
+    note_type: Option<&str>,
+) -> PyResult<PyObject> {
+    optional_wire_to_py(py, core_memory_note_issue(source, stem, note_type))
+}
+
 /// Apply the shared two-way skill placement rules to one loaded definition.
 #[pyfunction]
 #[pyo3(name = "skill_placement_issue")]
@@ -7408,6 +7468,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_reference_stem, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reserved_memory_namespace_issue, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_note_issue, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_placement_issue, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_layout_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
@@ -8822,6 +8886,78 @@ mod tests {
         list.iter()
             .map(|item| item.extract::<bool>().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn memory_xprompt_bindings_expose_the_shared_contract() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(py_memory_reference_name("glossary"), "memory/glossary");
+            assert_eq!(
+                py_memory_reference_stem("memory/glossary").as_deref(),
+                Some("glossary")
+            );
+            assert_eq!(py_memory_reference_stem("glossary"), None);
+
+            let layout = py_to_json_value(
+                py_sase_content_layout(
+                    py,
+                    "/home/alice",
+                    Some("/repo"),
+                    None,
+                    Some("demo"),
+                )
+                .unwrap()
+                .bind(py),
+            )
+            .unwrap();
+            assert_eq!(layout["schema_version"], json!(3));
+            assert_eq!(
+                layout["memory_sources"][0]["paths"]["canonical"]["path"],
+                json!("/repo/sase/memory")
+            );
+            assert_eq!(
+                layout["memory_sources"][0]["paths"]["read_policy"],
+                json!("error")
+            );
+            assert_eq!(layout["memory_sources"][1]["id"], json!("home_memory"));
+
+            let reserved = py_to_json_value(
+                py_reserved_memory_namespace_issue(
+                    py,
+                    "config xprompt",
+                    "memory/glossary",
+                )
+                .unwrap()
+                .bind(py),
+            )
+            .unwrap();
+            assert_eq!(reserved["rule"], json!("reserved_namespace"));
+            assert!(py_reserved_memory_namespace_issue(py, "src", "foo")
+                .unwrap()
+                .is_none(py));
+
+            let bad_type = py_to_json_value(
+                py_memory_note_issue(
+                    py,
+                    "sase/memory/notes.md",
+                    "notes",
+                    Some("dynamic"),
+                )
+                .unwrap()
+                .bind(py),
+            )
+            .unwrap();
+            assert_eq!(bad_type["rule"], json!("invalid_note_type"));
+            assert!(py_memory_note_issue(
+                py,
+                "sase/memory/glossary.md",
+                "glossary",
+                Some("short")
+            )
+            .unwrap()
+            .is_none(py));
+        });
     }
 
     #[test]

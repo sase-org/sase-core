@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 2;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 3;
 
 /// Directory name holding canonical xprompt-backed skill sources, and the
 /// namespace segment every such source carries in its xprompt reference name.
@@ -11,6 +11,19 @@ pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 2;
 /// referenced as `#skills/foo` (or `#<project>/skills/foo`) while its provider
 /// skill name stays `foo`, so `/foo` keeps working.
 pub const SKILL_NAMESPACE_SEGMENT: &str = "skills";
+
+/// Namespace segment every xprompt memory carries in its reference name.
+///
+/// A flat memory note `sase/memory/glossary.md` is referenced as
+/// `#memory/glossary`. The prefix is mandatory: there is no bare `#glossary`
+/// alias, and the whole `memory/` reference namespace is reserved so an
+/// ordinary xprompt, workflow, config entry, plugin, or skill cannot
+/// masquerade as an xprompt memory.
+pub const MEMORY_NAMESPACE_SEGMENT: &str = "memory";
+
+/// Filename that a memory root holds as generated documentation rather than as
+/// a memory note, so catalog scanning must skip it.
+pub const MEMORY_README_FILENAME: &str = "README.md";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +151,54 @@ pub struct SkillSourceWire {
     pub ordering: Option<String>,
 }
 
+/// Tier declared by a memory note's `type:` frontmatter.
+///
+/// A note that declares neither tier is not a memory note at all, so it is
+/// never an xprompt memory either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryTierWire {
+    Short,
+    Long,
+}
+
+impl MemoryTierWire {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "short" => Some(Self::Short),
+            "long" => Some(Self::Long),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Long => "long",
+        }
+    }
+}
+
+/// One scope's source of xprompt memories.
+///
+/// Memory keeps its existing compatible canonical/legacy contract, including
+/// the exclusive read policy that makes split canonical/legacy state an error
+/// instead of a merge. Sources are ordered project-before-home and are
+/// first-wins across scopes, so the selected project's note shadows the
+/// same-named home note. There are deliberately no plugin or package memory
+/// sources: memory notes are source-controlled, human-reviewed content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySourceWire {
+    pub id: String,
+    pub priority: u32,
+    pub scope: String,
+    pub paths: CompatibleLayoutPathWire,
+    pub formats: Vec<String>,
+    pub tracking: LayoutTrackingWire,
+    pub writable: bool,
+    pub ordering: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SaseContentLayoutWire {
     pub schema_version: u32,
@@ -146,6 +207,111 @@ pub struct SaseContentLayoutWire {
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
     pub xprompt_sources: Vec<XpromptSourceWire>,
     pub skill_sources: Vec<SkillSourceWire>,
+    pub memory_sources: Vec<MemorySourceWire>,
+}
+
+/// Why a definition was rejected by the xprompt-memory rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryXpromptRuleWire {
+    /// A definition that is not a memory note claims a name in the reserved
+    /// `memory/` reference namespace.
+    ReservedNamespace,
+    /// A memory note's filename stem cannot appear in an xprompt reference.
+    InvalidStem,
+    /// A file in a memory root declares no valid `type: short|long`.
+    InvalidNoteType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryXpromptIssueWire {
+    pub source: String,
+    pub rule: MemoryXpromptRuleWire,
+    pub message: String,
+}
+
+/// Build the canonical xprompt reference name for a memory note.
+///
+/// The note's flat filename stays its identity: `sase/memory/glossary.md` is
+/// always `memory/glossary`, in every scope. The selected project is
+/// contextual, so it is never part of the reference name.
+pub fn memory_reference_name(stem: &str) -> String {
+    format!("{MEMORY_NAMESPACE_SEGMENT}/{stem}")
+}
+
+/// Split a canonical memory reference name back into its note stem.
+pub fn memory_reference_stem(name: &str) -> Option<&str> {
+    let stem = name.strip_prefix(MEMORY_NAMESPACE_SEGMENT)?;
+    let stem = stem.strip_prefix('/')?;
+    (!stem.is_empty() && !stem.contains('/')).then_some(stem)
+}
+
+/// Whether `name` claims a reference in the reserved `memory/` namespace.
+pub fn is_reserved_memory_reference(name: &str) -> bool {
+    name.starts_with(&format!("{MEMORY_NAMESPACE_SEGMENT}/"))
+}
+
+/// Whether a memory note's filename stem can appear in an xprompt reference.
+///
+/// This is the ordinary xprompt reference-segment grammar, so an unreachable
+/// name becomes an actionable diagnostic instead of a silently missing entry.
+pub fn is_invokable_memory_stem(stem: &str) -> bool {
+    let mut chars = stem.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Reject a non-memory definition that claims a reserved `memory/` reference.
+pub fn reserved_memory_namespace_issue(
+    source: &str,
+    name: &str,
+) -> Option<MemoryXpromptIssueWire> {
+    is_reserved_memory_reference(name).then(|| MemoryXpromptIssueWire {
+        source: source.to_string(),
+        rule: MemoryXpromptRuleWire::ReservedNamespace,
+        message: format!(
+            "{source} claims the reserved xprompt-memory reference \
+             `#{name}`; the `{MEMORY_NAMESPACE_SEGMENT}/` namespace only names \
+             flat SASE memory notes, so rename this definition"
+        ),
+    })
+}
+
+/// Apply the xprompt-memory note rules to one file found in a memory root.
+///
+/// `note_type` is the raw `type:` frontmatter value, absent when the file
+/// declares none. A rejected file is reported rather than silently skipped.
+pub fn memory_note_issue(
+    source: &str,
+    stem: &str,
+    note_type: Option<&str>,
+) -> Option<MemoryXpromptIssueWire> {
+    if note_type.and_then(MemoryTierWire::parse).is_none() {
+        let declared = note_type
+            .map(|value| format!("`{value}`"))
+            .unwrap_or_else(|| "no `type:` value".to_string());
+        return Some(MemoryXpromptIssueWire {
+            source: source.to_string(),
+            rule: MemoryXpromptRuleWire::InvalidNoteType,
+            message: format!(
+                "{source} declares {declared}; a SASE memory note must declare \
+                 `type: short` or `type: long` to be an xprompt memory"
+            ),
+        });
+    }
+    (!is_invokable_memory_stem(stem)).then(|| MemoryXpromptIssueWire {
+        source: source.to_string(),
+        rule: MemoryXpromptRuleWire::InvalidStem,
+        message: format!(
+            "{source} cannot be referenced as \
+             `#{}`: rename the note so its filename stem starts with a letter \
+             or underscore and holds only letters, digits, and underscores",
+            memory_reference_name(stem)
+        ),
+    })
 }
 
 /// Why a definition was rejected by the canonical skill placement rules.
@@ -290,6 +456,7 @@ pub fn sase_content_layout(
     let xprompt_sources =
         xprompt_sources(project_root, home_root, project_name);
     let skill_sources = skill_sources(project_root, home_root, project_name);
+    let memory_sources = memory_sources(project_root, home_root);
     SaseContentLayoutWire {
         schema_version: CONTENT_LAYOUT_SCHEMA_VERSION,
         project,
@@ -297,7 +464,47 @@ pub fn sase_content_layout(
         chezmoi,
         xprompt_sources,
         skill_sources,
+        memory_sources,
     }
+}
+
+/// Ordered xprompt-memory sources, project before home.
+fn memory_sources(
+    project_root: Option<&Path>,
+    home_root: &Path,
+) -> Vec<MemorySourceWire> {
+    let mut sources = Vec::new();
+    if let Some(root) = project_root {
+        sources.push(memory_source("project_memory", "project", root));
+    }
+    sources.push(memory_source("home_memory", "home", home_root));
+    for (priority, source) in sources.iter_mut().enumerate() {
+        source.priority = (priority + 1) as u32;
+    }
+    sources
+}
+
+fn memory_source(id: &str, scope: &str, root: &Path) -> MemorySourceWire {
+    MemorySourceWire {
+        id: id.to_string(),
+        priority: 0,
+        scope: scope.to_string(),
+        paths: memory_compatible_path(root),
+        formats: strings(&["md"]),
+        tracking: LayoutTrackingWire::SourceControlled,
+        writable: true,
+        ordering: Some("first_wins".to_string()),
+    }
+}
+
+/// The one canonical/legacy memory contract every scope shares.
+fn memory_compatible_path(root: &Path) -> CompatibleLayoutPathWire {
+    compatible_path(
+        root.join("sase").join("memory"),
+        [root.join("memory")],
+        LayoutTrackingWire::SourceControlled,
+        LayoutCollisionPolicyWire::Error,
+    )
 }
 
 fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
@@ -314,12 +521,7 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
-    let memory = compatible_path(
-        namespace_root.join("memory"),
-        [root.join("memory")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::Error,
-    );
+    let memory = memory_compatible_path(root);
     let memory_readme = namespace_root.join("memory").join("README.md");
     ProjectContentLayoutWire {
         root: path_string(root),
@@ -354,12 +556,7 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
-    let memory = compatible_path(
-        namespace_root.join("memory"),
-        [root.join("memory")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::Error,
-    );
+    let memory = memory_compatible_path(root);
     HomeContentLayoutWire {
         root: path_string(root),
         namespace_root: layout_path(
@@ -397,12 +594,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
-    let memory = compatible_path(
-        namespace_root.join("memory"),
-        [root.join("memory")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::Error,
-    );
+    let memory = memory_compatible_path(root);
     ChezmoiContentLayoutWire {
         source_root: path_string(root),
         namespace_root: layout_path(
@@ -1125,5 +1317,129 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["home_skills", "plugin_skills", "package_skills"]
         );
+        assert_eq!(
+            layout
+                .memory_sources
+                .iter()
+                .map(|source| source.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["home_memory"]
+        );
+    }
+
+    #[test]
+    fn memory_sources_are_project_before_home_with_exclusive_read_policy() {
+        let layout = sase_content_layout(
+            Some(Path::new("/repo")),
+            Path::new("/home/alice"),
+            None,
+            Some("demo"),
+        );
+
+        let ids = layout
+            .memory_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["project_memory", "home_memory"]);
+        assert_eq!(
+            layout
+                .memory_sources
+                .iter()
+                .map(|source| source.priority)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let project = &layout.memory_sources[0];
+        assert_eq!(project.paths.canonical.path, "/repo/sase/memory");
+        assert_eq!(project.paths.legacy[0].path, "/repo/memory");
+        assert_eq!(project.paths.write_path, "/repo/sase/memory");
+        // Split canonical/legacy memory state stays an error, exactly as the
+        // memory subsystem already reports it.
+        assert_eq!(project.paths.read_policy, LayoutCollisionPolicyWire::Error);
+        assert_eq!(project.formats, strings(&["md"]));
+        assert_eq!(project.tracking, LayoutTrackingWire::SourceControlled);
+        assert_eq!(
+            layout.memory_sources[1].paths.canonical.path,
+            "/home/alice/sase/memory"
+        );
+        // The selected project is contextual, so no source is project
+        // namespaced and no plugin or package scope contributes memory.
+        assert!(layout.memory_sources.iter().all(|source| matches!(
+            source.scope.as_str(),
+            "project" | "home"
+        ) && source
+            .ordering
+            .as_deref()
+            == Some("first_wins")));
+    }
+
+    #[test]
+    fn memory_references_are_always_the_flat_namespaced_filename() {
+        assert_eq!(memory_reference_name("glossary"), "memory/glossary");
+        assert_eq!(memory_reference_stem("memory/glossary"), Some("glossary"));
+        // There is no bare alias, no historical `memory/long/<name>` form, and
+        // no project-qualified memory reference.
+        assert_eq!(memory_reference_stem("glossary"), None);
+        assert_eq!(memory_reference_stem("memory/long/glossary"), None);
+        assert_eq!(memory_reference_stem("app/memory/glossary"), None);
+        assert_eq!(memory_reference_stem("memory/"), None);
+        assert!(is_reserved_memory_reference("memory/glossary"));
+        assert!(!is_reserved_memory_reference("memories/glossary"));
+        assert!(is_invokable_memory_stem("_tui_perf2"));
+        assert!(!is_invokable_memory_stem("build-and-run"));
+        assert!(!is_invokable_memory_stem("2fast"));
+        assert!(!is_invokable_memory_stem(""));
+    }
+
+    #[test]
+    fn memory_rules_reject_reserved_names_bad_stems_and_bad_tiers() {
+        let reserved = reserved_memory_namespace_issue(
+            "config xprompt `memory/glossary`",
+            "memory/glossary",
+        )
+        .unwrap();
+        assert_eq!(reserved.rule, MemoryXpromptRuleWire::ReservedNamespace);
+        assert!(
+            reserved.message.contains("#memory/glossary"),
+            "{reserved:?}"
+        );
+        assert_eq!(
+            reserved_memory_namespace_issue("sase/xprompts/foo.md", "foo"),
+            None
+        );
+
+        assert_eq!(
+            memory_note_issue(
+                "sase/memory/glossary.md",
+                "glossary",
+                Some("short")
+            ),
+            None
+        );
+        assert_eq!(
+            memory_note_issue("sase/memory/sase.md", "sase", Some("long")),
+            None
+        );
+        let bad_type =
+            memory_note_issue("sase/memory/notes.md", "notes", Some("medium"))
+                .unwrap();
+        assert_eq!(bad_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
+        let missing_type =
+            memory_note_issue("sase/memory/notes.md", "notes", None).unwrap();
+        assert_eq!(missing_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
+        let bad_stem =
+            memory_note_issue("sase/memory/a-b.md", "a-b", Some("long"))
+                .unwrap();
+        assert_eq!(bad_stem.rule, MemoryXpromptRuleWire::InvalidStem);
+        assert!(bad_stem.message.contains("#memory/a-b"), "{bad_stem:?}");
+    }
+
+    #[test]
+    fn memory_tier_parses_only_the_two_supported_note_types() {
+        assert_eq!(MemoryTierWire::parse("short"), Some(MemoryTierWire::Short));
+        assert_eq!(MemoryTierWire::parse(" long "), Some(MemoryTierWire::Long));
+        assert_eq!(MemoryTierWire::parse("dynamic"), None);
+        assert_eq!(MemoryTierWire::Long.as_str(), "long");
     }
 }

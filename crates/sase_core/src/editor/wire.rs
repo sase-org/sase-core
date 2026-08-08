@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::content_layout::MemoryTierWire;
+
 pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -351,6 +353,11 @@ pub struct XpromptAssistEntry {
     /// definition lookup match this; `#` completion matches `name`.
     #[serde(default)]
     pub skill_name: Option<String>,
+    /// Tier of the SASE memory note behind an xprompt memory, absent for every
+    /// other entry. Memory entries are reachable only as `#memory/<stem>` and
+    /// never participate in `/` skill completion.
+    #[serde(default)]
+    pub memory_type: Option<MemoryTierWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

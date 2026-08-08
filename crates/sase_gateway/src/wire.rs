@@ -1348,6 +1348,7 @@ mod tests {
                     }],
                     is_skill: false,
                     skill_name: None,
+                    memory_type: None,
                     content_preview: Some("Use this workflow...".to_string()),
                     source_path_display: Some(
                         "sase/xprompts/gh.md".to_string(),
@@ -1359,6 +1360,7 @@ mod tests {
                     total_count: 1,
                     project_count: 1,
                     skill_count: 0,
+                    memory_count: 0,
                     pdf_requested: true,
                 },
                 catalog_attachment: Some(MobileXpromptCatalogAttachmentWire {
@@ -1415,6 +1417,7 @@ mod tests {
                     "total_count": 1,
                     "project_count": 1,
                     "skill_count": 0,
+                    "memory_count": 0,
                     "pdf_requested": true
                 },
                 "catalog_attachment": {

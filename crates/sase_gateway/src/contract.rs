@@ -579,6 +579,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "inputs": "MobileXpromptInputWire[]; default [] when absent",
                 "is_skill": "bool",
                 "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skills/<skill_name>` reference",
+                "memory_type": "string|null; `short` or `long` for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
                 "content_preview": "string|null",
                 "source_path_display": "string|null"
             },
@@ -600,6 +601,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "total_count": "u64",
                 "project_count": "u64",
                 "skill_count": "u64",
+                "memory_count": "u64; default 0 when absent",
                 "pdf_requested": "bool"
             },
             "MobileXpromptCatalogAttachmentWire": {
