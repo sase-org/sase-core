@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0](https://github.com/sase-org/sase-core/compare/v0.20.1...v0.21.0) - 2026-08-08
+
+### Added
+
+- *(core)* [**breaking**] add reference artifact contract
+- *(core)* add Patch and stitch wire contract
+- [**breaking**] use singular skill xprompt references
+
 ## [0.20.1](https://github.com/sase-org/sase-core/compare/v0.20.0...v0.20.1) - 2026-08-08
 
 ### Added
