@@ -73,7 +73,7 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     ),
     (
         "tags",
-        "Adds tags for catalog filtering and dynamic-memory matching.",
+        "Adds tags for catalog filtering.",
     ),
     (
         "description",
@@ -93,7 +93,7 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     ),
     (
         "keywords",
-        "Defines dynamic-memory keywords. They are matched when tags include `memory` or the file is under `sase/memory/`.",
+        "Legacy xprompt metadata retained for compatibility; it does not trigger memory matching.",
     ),
     (
         "xprompts",
@@ -1309,16 +1309,6 @@ fn validate_keywords(
             "Xprompt keyword entries must be non-empty scalars",
         );
     }
-    if !tags_contain_memory(mapping)
-        && !builder.document.has_implicit_memory_tag()
-    {
-        builder.push(
-            builder.field_key_range("keywords"),
-            DiagnosticSeverity::Warning,
-            "missing_xprompt_memory_tag",
-            "Xprompt keywords are only matched dynamically when tags include `memory`",
-        );
-    }
 }
 
 fn scan_top_level_fields(
@@ -2428,22 +2418,6 @@ fn is_valid_snippet_trigger(trigger: &str) -> bool {
         && trigger
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn tags_contain_memory(mapping: &Mapping) -> bool {
-    let Some(tags) = yaml_mapping_get(mapping, "tags") else {
-        return false;
-    };
-    if let Some(raw) = tags.as_str() {
-        return raw.split(',').map(str::trim).any(|tag| tag == "memory");
-    }
-    tags.as_sequence().is_some_and(|items| {
-        items.iter().any(|item| {
-            item.as_str()
-                .map(|tag| tag.trim() == "memory")
-                .unwrap_or(false)
-        })
-    })
 }
 
 fn value_is_truthy(value: &Value) -> bool {

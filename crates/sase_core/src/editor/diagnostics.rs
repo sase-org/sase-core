@@ -1397,9 +1397,12 @@ mod tests {
                 .severity,
             DiagnosticSeverity::Error
         );
-        assert_eq!(
-            diagnostic(&diagnostics, "missing_xprompt_memory_tag").severity,
-            DiagnosticSeverity::Warning
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    != "missing_xprompt_memory_tag"),
+            "{diagnostics:?}"
         );
         assert_eq!(
             diagnostic(&diagnostics, "missing_xprompt_skill_description")
@@ -1409,12 +1412,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_memory_source_path_supplies_implicit_memory_tag() {
+    fn keywords_do_not_restore_dynamic_memory_matching() {
         let text = "---\nkeywords: [topic]\n---\nBody";
         let diagnostics = diagnostics_for(text);
-        assert_eq!(
-            diagnostic(&diagnostics, "missing_xprompt_memory_tag").severity,
-            DiagnosticSeverity::Warning
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    != "missing_xprompt_memory_tag"),
+            "{diagnostics:?}"
         );
 
         let doc = DocumentSnapshot::with_source_path(
@@ -1422,6 +1428,18 @@ mod tests {
             "/repo/sase/memory/generated_skills.md",
         );
         let diagnostics = analyze_document(&doc, &catalog());
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    != "missing_xprompt_memory_tag"),
+            "{diagnostics:?}"
+        );
+
+        let tagged_doc = DocumentSnapshot::new(
+            "---\ntags: [memory]\nkeywords: [topic]\n---\nBody",
+        );
+        let diagnostics = analyze_document(&tagged_doc, &catalog());
         assert!(
             diagnostics
                 .iter()

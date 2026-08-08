@@ -3882,7 +3882,7 @@ mod tests {
         let normal_diagnostics =
             server.diagnostics_for_uri_text(&normal_uri, text).await;
         assert!(
-            diagnostics_contain_code(
+            !diagnostics_contain_code(
                 &normal_diagnostics,
                 "missing_xprompt_memory_tag"
             ),

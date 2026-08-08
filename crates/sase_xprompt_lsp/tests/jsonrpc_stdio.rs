@@ -639,7 +639,6 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
                         "unknown_xprompt_frontmatter_field",
                         "invalid_xprompt_frontmatter_input_type",
                         "invalid_xprompt_frontmatter_snippet_trigger",
-                        "missing_xprompt_memory_tag",
                         "missing_xprompt_skill_description",
                     ];
                     expected_codes.iter().all(|code| {
