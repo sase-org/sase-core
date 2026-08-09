@@ -46,6 +46,7 @@ mod tests {
             author_name: "A".to_string(),
             author_email: "a@x".to_string(),
             timestamp: 1,
+            parent_ids: Vec::new(),
             subject: format!("subject {full}"),
             body: String::new(),
             presence: CommitPresenceWire::Unknown,

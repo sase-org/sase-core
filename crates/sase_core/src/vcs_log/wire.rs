@@ -14,7 +14,7 @@
 //! - [`AggregatedCommitWire`] flattens a [`VcsCommitWire`] and prefixes it
 //!   with the `repo` label, so its JSON object is the flat shape
 //!   `{"repo", "full_id", "short_id", "author_name", "author_email",
-//!   "timestamp", "subject", "body", "presence"}`.
+//!   "timestamp", "parent_ids", "subject", "body", "presence"}`.
 //! - Schema-version pinning is provided by
 //!   [`VCS_LOG_WIRE_SCHEMA_VERSION`].
 
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version mirrored from
 /// `vcs_log_wire.py::VCS_LOG_WIRE_SCHEMA_VERSION`.
-pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 3;
 
 /// Where a commit is present relative to the local checkout and the
 /// compared remote ref.
@@ -62,6 +62,9 @@ pub struct VcsCommitWire {
     /// Epoch author time in seconds. Used for timezone-independent
     /// sorting; the host formats wall-clock time from this.
     pub timestamp: i64,
+    /// Full parent commit identifiers, in provider order.
+    #[serde(default)]
+    pub parent_ids: Vec<String>,
     /// First line of the commit message.
     pub subject: String,
     /// Remaining commit-message body (may be empty or multi-line).
@@ -69,6 +72,13 @@ pub struct VcsCommitWire {
     /// Local/remote presence classification.
     #[serde(default)]
     pub presence: CommitPresenceWire,
+}
+
+impl VcsCommitWire {
+    /// Whether this commit has more than one parent.
+    pub fn is_merge(&self) -> bool {
+        self.parent_ids.len() > 1
+    }
 }
 
 /// A [`VcsCommitWire`] tagged with the label of the repo it came from.

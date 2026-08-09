@@ -18,15 +18,18 @@ pub const UNIT_SEP: char = '\u{1f}';
 /// Record separator emitted by `%x1e` in the pinned `git log` format.
 pub const RECORD_SEP: char = '\u{1e}';
 
-/// Number of fields per record in the pinned format:
+/// Number of fields per record in the legacy pinned format:
 /// `%H %h %an %ae %at %s %b`.
-const FIELD_COUNT: usize = 7;
+const LEGACY_FIELD_COUNT: usize = 7;
+/// Number of fields per record in the current pinned format:
+/// `%H %h %an %ae %at %P %s %b`.
+const CURRENT_FIELD_COUNT: usize = 8;
 
 /// Parse the separator-delimited output of the pinned `git log` format
 /// into a list of [`VcsCommitWire`], newest-first (git's natural order).
 ///
 /// The expected per-commit format string is
-/// `%H<US>%h<US>%an<US>%ae<US>%at<US>%s<US>%b<RS>` where `<US>` is
+/// `%H<US>%h<US>%an<US>%ae<US>%at<US>%P<US>%s<US>%b<RS>` where `<US>` is
 /// [`UNIT_SEP`] and `<RS>` is [`RECORD_SEP`]. git appends a newline after
 /// each record, so every chunk after the first record separator starts
 /// with a leading `\n` that is stripped here.
@@ -36,7 +39,9 @@ const FIELD_COUNT: usize = 7;
 /// - An empty stream returns an empty list.
 /// - A trailing record separator (and the newline git appends after it)
 ///   yields a blank final chunk that is skipped.
-/// - A record that does not split into exactly [`FIELD_COUNT`] fields is
+/// - Current 8-field records carry `%P` parent ids before the subject.
+/// - Legacy 7-field records are still accepted with no parent ids.
+/// - A record that does not split into one of those field counts is
 ///   dropped so one malformed record cannot poison the list.
 /// - A record whose `%at` timestamp field does not parse as an integer is
 ///   dropped for the same reason.
@@ -52,13 +57,29 @@ pub fn parse_git_log(stdout: &str) -> Vec<VcsCommitWire> {
         if chunk.trim().is_empty() {
             continue;
         }
-        let fields: Vec<&str> = chunk.splitn(FIELD_COUNT, UNIT_SEP).collect();
-        if fields.len() != FIELD_COUNT {
+        let fields: Vec<&str> =
+            chunk.splitn(CURRENT_FIELD_COUNT, UNIT_SEP).collect();
+        if fields.len() != CURRENT_FIELD_COUNT
+            && fields.len() != LEGACY_FIELD_COUNT
+        {
             continue;
         }
         let timestamp: i64 = match fields[4].trim().parse() {
             Ok(value) => value,
             Err(_) => continue,
+        };
+        let (parent_ids, subject, body) = match fields.len() {
+            CURRENT_FIELD_COUNT => (
+                parse_parent_ids(fields[5]),
+                fields[6].to_string(),
+                fields[7].to_string(),
+            ),
+            LEGACY_FIELD_COUNT => {
+                (Vec::new(), fields[5].to_string(), fields[6].to_string())
+            }
+            _ => {
+                unreachable!("field count was validated before timestamp parse")
+            }
         };
         commits.push(VcsCommitWire {
             full_id: fields[0].trim().to_string(),
@@ -66,12 +87,24 @@ pub fn parse_git_log(stdout: &str) -> Vec<VcsCommitWire> {
             author_name: fields[2].to_string(),
             author_email: fields[3].to_string(),
             timestamp,
-            subject: fields[5].to_string(),
-            body: fields[6].to_string(),
+            parent_ids,
+            subject,
+            body,
             presence: CommitPresenceWire::Unknown,
         });
     }
     commits
+}
+
+fn parse_parent_ids(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(' ')
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -81,12 +114,29 @@ mod tests {
     fn record(
         full: &str,
         short: &str,
-        name: &str,
-        email: &str,
+        ts: &str,
+        parents: &str,
+        subject: &str,
+        body: &str,
+    ) -> String {
+        let name = "Bryan";
+        let email = "bryan@example.com";
+        format!(
+            "{full}{US}{short}{US}{name}{US}{email}{US}{ts}{US}{parents}{US}{subject}{US}{body}{RS}",
+            US = UNIT_SEP,
+            RS = RECORD_SEP,
+        )
+    }
+
+    fn legacy_record(
+        full: &str,
+        short: &str,
         ts: &str,
         subject: &str,
         body: &str,
     ) -> String {
+        let name = "Bryan";
+        let email = "bryan@example.com";
         format!(
             "{full}{US}{short}{US}{name}{US}{email}{US}{ts}{US}{subject}{US}{body}{RS}",
             US = UNIT_SEP,
@@ -97,18 +147,18 @@ mod tests {
     fn commit(
         full: &str,
         short: &str,
-        name: &str,
-        email: &str,
         ts: i64,
+        parents: &[&str],
         subject: &str,
         body: &str,
     ) -> VcsCommitWire {
         VcsCommitWire {
             full_id: full.to_string(),
             short_id: short.to_string(),
-            author_name: name.to_string(),
-            author_email: email.to_string(),
+            author_name: "Bryan".to_string(),
+            author_email: "bryan@example.com".to_string(),
             timestamp: ts,
+            parent_ids: parents.iter().map(|value| value.to_string()).collect(),
             subject: subject.to_string(),
             body: body.to_string(),
             presence: CommitPresenceWire::Unknown,
@@ -125,9 +175,8 @@ mod tests {
         let stream = record(
             "a1b2c3d4e5",
             "a1b2c3d",
-            "Bryan",
-            "bryan@example.com",
             "1700000000",
+            "p1",
             "fix: thing",
             "",
         );
@@ -136,9 +185,8 @@ mod tests {
             vec![commit(
                 "a1b2c3d4e5",
                 "a1b2c3d",
-                "Bryan",
-                "bryan@example.com",
                 1700000000,
+                &["p1"],
                 "fix: thing",
                 "",
             )]
@@ -146,11 +194,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_seven_field_commit_has_no_parents() {
+        let stream = legacy_record(
+            "a1b2c3d4e5",
+            "a1b2c3d",
+            "1700000000",
+            "fix: legacy",
+            "",
+        );
+        assert_eq!(
+            parse_git_log(&stream),
+            vec![commit(
+                "a1b2c3d4e5",
+                "a1b2c3d",
+                1700000000,
+                &[],
+                "fix: legacy",
+                "",
+            )]
+        );
+    }
+
+    #[test]
+    fn root_commit_empty_parent_field_has_no_parents() {
+        let stream =
+            record("a1b2c3d4e5", "a1b2c3d", "1700000000", "", "initial", "");
+        let parsed = parse_git_log(&stream);
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].parent_ids.is_empty());
+    }
+
+    #[test]
+    fn octopus_merge_parses_all_parent_ids() {
+        let stream = record(
+            "merge",
+            "merge",
+            "1700000000",
+            "p1 p2 p3",
+            "Merge branches",
+            "",
+        );
+        let parsed = parse_git_log(&stream);
+        assert_eq!(
+            parsed[0].parent_ids,
+            vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]
+        );
+        assert!(parsed[0].is_merge());
+    }
+
+    #[test]
     fn multiple_commits_preserve_order() {
         let stream = format!(
             "{}{}",
-            record("h1", "s1", "A", "a@x", "300", "first", ""),
-            record("h2", "s2", "B", "b@x", "200", "second", ""),
+            record("h1", "s1", "300", "p0", "first", ""),
+            record("h2", "s2", "200", "p1", "second", ""),
         );
         let parsed = parse_git_log(&stream);
         assert_eq!(parsed.len(), 2);
@@ -164,8 +261,8 @@ mod tests {
         // each subsequent chunk must not leak into the full_id.
         let stream = format!(
             "{}\n{}\n",
-            record("h1", "s1", "A", "a@x", "300", "first", ""),
-            record("h2", "s2", "B", "b@x", "200", "second", ""),
+            record("h1", "s1", "300", "p0", "first", ""),
+            record("h2", "s2", "200", "p1", "second", ""),
         );
         let parsed = parse_git_log(&stream);
         assert_eq!(parsed.len(), 2);
@@ -175,15 +272,14 @@ mod tests {
 
     #[test]
     fn trailing_record_separator_yields_no_blank_commit() {
-        let stream = record("h1", "s1", "A", "a@x", "300", "only", "");
+        let stream = record("h1", "s1", "300", "p0", "only", "");
         assert_eq!(parse_git_log(&stream).len(), 1);
     }
 
     #[test]
     fn multiline_body_is_preserved_verbatim() {
         let body = "line one\nline two\n\nline four";
-        let stream =
-            record("h1", "s1", "A", "a@x", "300", "subject here", body);
+        let stream = record("h1", "s1", "300", "p0", "subject here", body);
         let parsed = parse_git_log(&stream);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].body, body);
@@ -192,13 +288,13 @@ mod tests {
 
     #[test]
     fn record_with_too_few_fields_is_dropped() {
-        // Missing the body separator -> only 6 fields.
+        // Missing the subject and body separators -> only 6 fields.
         let malformed = format!(
-            "h1{US}s1{US}A{US}a@x{US}300{US}subject{RS}",
+            "h1{US}s1{US}A{US}a@x{US}300{US}p0{RS}",
             US = UNIT_SEP,
             RS = RECORD_SEP,
         );
-        let good = record("h2", "s2", "B", "b@x", "200", "ok", "");
+        let good = record("h2", "s2", "200", "p1", "ok", "");
         let parsed = parse_git_log(&format!("{malformed}{good}"));
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].full_id, "h2");
@@ -206,20 +302,20 @@ mod tests {
 
     #[test]
     fn record_with_unparseable_timestamp_is_dropped() {
-        let bad = record("h1", "s1", "A", "a@x", "not-a-number", "x", "");
-        let good = record("h2", "s2", "B", "b@x", "200", "ok", "");
+        let bad = record("h1", "s1", "not-a-number", "p0", "x", "");
+        let good = record("h2", "s2", "200", "p1", "ok", "");
         let parsed = parse_git_log(&format!("{bad}{good}"));
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].full_id, "h2");
     }
 
     #[test]
-    fn subject_containing_unit_separator_keeps_body_intact() {
-        // splitn(7) means any extra unit separators fold into the body,
-        // which is the last field. A pathological subject cannot corrupt
+    fn body_containing_unit_separator_stays_in_body() {
+        // splitn(8) means any extra unit separators fold into the body,
+        // which is the last field. A pathological body cannot corrupt
         // the record count.
         let stream = format!(
-            "h1{US}s1{US}A{US}a@x{US}300{US}subj{US}bo{US}dy{RS}",
+            "h1{US}s1{US}A{US}a@x{US}300{US}p0{US}subj{US}bo{US}dy{RS}",
             US = UNIT_SEP,
             RS = RECORD_SEP,
         );

@@ -50,9 +50,11 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `vcs_log_wire_schema_version() -> int`
 //! - `parse_git_log(stdout: str) -> list[dict]`
 //! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
 //! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
+//! - `parse_merge_summary(subject: str, body: str) -> dict | None`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
@@ -655,7 +657,9 @@ use sase_core::telemetry::{
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
     classify_commit_presence as core_classify_commit_presence,
-    parse_git_log as core_parse_git_log, CommitPresenceWire, VcsCommitWire,
+    parse_git_log as core_parse_git_log,
+    parse_merge_summary as core_parse_merge_summary, CommitPresenceWire,
+    VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
@@ -2624,6 +2628,7 @@ fn vcs_commit_wire_to_py<'py>(
     dict.set_item("author_name", &commit.author_name)?;
     dict.set_item("author_email", &commit.author_email)?;
     dict.set_item("timestamp", commit.timestamp)?;
+    dict.set_item("parent_ids", PyList::new_bound(py, &commit.parent_ids))?;
     dict.set_item("subject", &commit.subject)?;
     dict.set_item("body", &commit.body)?;
     dict.set_item("presence", commit_presence_to_str(commit.presence))?;
@@ -2637,6 +2642,13 @@ fn commit_presence_to_str(presence: CommitPresenceWire) -> &'static str {
         CommitPresenceWire::RemoteOnly => "remote_only",
         CommitPresenceWire::LocalOnly => "local_only",
     }
+}
+
+/// Return the VCS-log wire schema version expected by this binding.
+#[pyfunction]
+#[pyo3(name = "vcs_log_wire_schema_version")]
+fn py_vcs_log_wire_schema_version() -> u32 {
+    VCS_LOG_WIRE_SCHEMA_VERSION
 }
 
 /// Parse a pinned, separator-delimited `git log --format=...` stream into
@@ -2711,6 +2723,25 @@ fn py_aggregate_commit_log<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &out)
+}
+
+/// Strictly summarize a recognized merge commit subject.
+#[pyfunction]
+#[pyo3(name = "parse_merge_summary")]
+fn py_parse_merge_summary<'py>(
+    py: Python<'py>,
+    subject: &str,
+    body: &str,
+) -> PyResult<PyObject> {
+    match core_parse_merge_summary(subject, body) {
+        Some(summary) => {
+            let value = serde_json::to_value(&summary).map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+            json_value_to_py(py, &value)
+        }
+        None => Ok(py.None()),
+    }
 }
 
 // --- Project lifecycle bindings ------------------------------------------
@@ -7401,9 +7432,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_merge_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_read_project_lifecycle_from_content,
         m
@@ -7740,6 +7773,66 @@ mod tests {
         git(repo, &["config", "user.name", "Binding Test"]);
         git(repo, &["config", "user.email", "binding@example.com"]);
         git(repo, &["config", "core.abbrev", "7"]);
+    }
+
+    #[test]
+    fn vcs_log_binding_exposes_schema_and_parent_ids() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            use sase_core::vcs_log::parsers::{RECORD_SEP, UNIT_SEP};
+
+            assert_eq!(py_vcs_log_wire_schema_version(), 3);
+
+            let stdout = format!(
+                "full{US}short{US}A{US}a@example.com{US}42{US}p1 p2{US}subject{US}body{RS}",
+                US = UNIT_SEP,
+                RS = RECORD_SEP,
+            );
+            let parsed = py_parse_git_log(py, &stdout).unwrap();
+            let value = py_to_json_value(parsed.as_any()).unwrap();
+            assert_eq!(
+                value,
+                json!([{
+                    "full_id": "full",
+                    "short_id": "short",
+                    "author_name": "A",
+                    "author_email": "a@example.com",
+                    "timestamp": 42,
+                    "parent_ids": ["p1", "p2"],
+                    "subject": "subject",
+                    "body": "body",
+                    "presence": "unknown",
+                }])
+            );
+        });
+    }
+
+    #[test]
+    fn parse_merge_summary_binding_returns_dict_or_none() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let summary = py_parse_merge_summary(
+                py,
+                "Merge pull request #123 from org/feature",
+                "\nFeature title\n\nDetails",
+            )
+            .unwrap();
+            let value = py_to_json_value(summary.bind(py)).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "kind": "pull_request",
+                    "reference": "123",
+                    "source": "org/feature",
+                    "target": null,
+                    "headline": "Feature title",
+                })
+            );
+
+            assert!(py_parse_merge_summary(py, "Merge unknown shape", "")
+                .unwrap()
+                .is_none(py));
+        });
     }
 
     fn commit_at(

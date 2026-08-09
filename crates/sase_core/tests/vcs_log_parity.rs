@@ -17,12 +17,29 @@ use serde_json::json;
 fn record(
     full: &str,
     short: &str,
-    name: &str,
-    email: &str,
+    ts: &str,
+    parents: &str,
+    subject: &str,
+    body: &str,
+) -> String {
+    let name = "bryan";
+    let email = "bryan@example.com";
+    format!(
+        "{full}{US}{short}{US}{name}{US}{email}{US}{ts}{US}{parents}{US}{subject}{US}{body}{RS}",
+        US = UNIT_SEP,
+        RS = RECORD_SEP,
+    )
+}
+
+fn legacy_record(
+    full: &str,
+    short: &str,
     ts: &str,
     subject: &str,
     body: &str,
 ) -> String {
+    let name = "bryan";
+    let email = "bryan@example.com";
     format!(
         "{full}{US}{short}{US}{name}{US}{email}{US}{ts}{US}{subject}{US}{body}{RS}",
         US = UNIT_SEP,
@@ -37,6 +54,7 @@ fn commit(full: &str, ts: i64, subject: &str) -> VcsCommitWire {
         author_name: "bryan".to_string(),
         author_email: "bryan@example.com".to_string(),
         timestamp: ts,
+        parent_ids: Vec::new(),
         subject: subject.to_string(),
         body: String::new(),
         presence: CommitPresenceWire::Unknown,
@@ -55,9 +73,8 @@ fn parse_single_commit_all_fields() {
     let stream = record(
         "a1b2c3d4e5f6",
         "a1b2c3d",
-        "bryan",
-        "bryan@example.com",
         "1700000000",
+        "p0",
         "fix(sdd): link store",
         "",
     );
@@ -69,6 +86,7 @@ fn parse_single_commit_all_fields() {
             author_name: "bryan".to_string(),
             author_email: "bryan@example.com".to_string(),
             timestamp: 1700000000,
+            parent_ids: vec!["p0".to_string()],
             subject: "fix(sdd): link store".to_string(),
             body: String::new(),
             presence: CommitPresenceWire::Unknown,
@@ -77,19 +95,59 @@ fn parse_single_commit_all_fields() {
 }
 
 #[test]
+fn parse_legacy_single_commit_defaults_parent_ids() {
+    let stream = legacy_record(
+        "a1b2c3d4e5f6",
+        "a1b2c3d",
+        "1700000000",
+        "fix(sdd): link store",
+        "",
+    );
+    let parsed = parse_git_log(&stream);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].parent_ids, Vec::<String>::new());
+    assert_eq!(parsed[0].subject, "fix(sdd): link store");
+}
+
+#[test]
+fn parse_root_commit_empty_parent_field() {
+    let stream = record(
+        "a1b2c3d4e5f6",
+        "a1b2c3d",
+        "1700000000",
+        "",
+        "initial commit",
+        "",
+    );
+    let parsed = parse_git_log(&stream);
+    assert_eq!(parsed.len(), 1);
+    assert!(parsed[0].parent_ids.is_empty());
+}
+
+#[test]
+fn parse_octopus_commit_parent_ids() {
+    let stream = record(
+        "a1b2c3d4e5f6",
+        "a1b2c3d",
+        "1700000000",
+        "p1 p2 p3",
+        "Merge branches",
+        "",
+    );
+    let parsed = parse_git_log(&stream);
+    assert_eq!(
+        parsed[0].parent_ids,
+        vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]
+    );
+    assert!(parsed[0].is_merge());
+}
+
+#[test]
 fn parse_strips_newline_git_inserts_between_records() {
     let stream = format!(
         "{}\n{}\n",
-        record("h1", "s1", "bryan", "bryan@example.com", "300", "first", ""),
-        record(
-            "h2",
-            "s2",
-            "bryan",
-            "bryan@example.com",
-            "200",
-            "second",
-            ""
-        ),
+        record("h1", "s1", "300", "p0", "first", ""),
+        record("h2", "s2", "200", "p1", "second", ""),
     );
     let parsed = parse_git_log(&stream);
     assert_eq!(parsed.len(), 2);
@@ -99,23 +157,14 @@ fn parse_strips_newline_git_inserts_between_records() {
 
 #[test]
 fn parse_trailing_record_separator_yields_no_blank() {
-    let stream =
-        record("h1", "s1", "bryan", "bryan@example.com", "300", "only", "");
+    let stream = record("h1", "s1", "300", "p0", "only", "");
     assert_eq!(parse_git_log(&stream).len(), 1);
 }
 
 #[test]
 fn parse_multiline_body_preserved() {
     let body = "detail line one\ndetail line two";
-    let stream = record(
-        "h1",
-        "s1",
-        "bryan",
-        "bryan@example.com",
-        "300",
-        "subject",
-        body,
-    );
+    let stream = record("h1", "s1", "300", "p0", "subject", body);
     let parsed = parse_git_log(&stream);
     assert_eq!(parsed[0].body, body);
 }
@@ -127,8 +176,7 @@ fn parse_drops_record_with_too_few_fields() {
         US = UNIT_SEP,
         RS = RECORD_SEP,
     );
-    let good =
-        record("h2", "s2", "bryan", "bryan@example.com", "200", "ok", "");
+    let good = record("h2", "s2", "200", "p0", "ok", "");
     let parsed = parse_git_log(&format!("{malformed}{good}"));
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].full_id, "h2");
@@ -136,17 +184,8 @@ fn parse_drops_record_with_too_few_fields() {
 
 #[test]
 fn parse_drops_record_with_bad_timestamp() {
-    let bad = record(
-        "h1",
-        "s1",
-        "bryan",
-        "bryan@example.com",
-        "not-a-number",
-        "x",
-        "",
-    );
-    let good =
-        record("h2", "s2", "bryan", "bryan@example.com", "200", "ok", "");
+    let bad = record("h1", "s1", "not-a-number", "p0", "x", "");
+    let good = record("h2", "s2", "200", "p1", "ok", "");
     let parsed = parse_git_log(&format!("{bad}{good}"));
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].full_id, "h2");
@@ -218,8 +257,8 @@ fn aggregate_truncates_to_limit() {
 // -- Wire helpers ---------------------------------------------------------
 
 #[test]
-fn vcs_log_wire_schema_version_is_two() {
-    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 2);
+fn vcs_log_wire_schema_version_is_three() {
+    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 3);
 }
 
 #[test]
@@ -230,6 +269,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
         author_name: "bryan".to_string(),
         author_email: "bryan@example.com".to_string(),
         timestamp: 1700000000,
+        parent_ids: vec!["p1".to_string(), "p2".to_string()],
         subject: "fix: thing".to_string(),
         body: "body text".to_string(),
         presence: CommitPresenceWire::LocalOnly,
@@ -243,6 +283,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
             "author_name": "bryan",
             "author_email": "bryan@example.com",
             "timestamp": 1700000000,
+            "parent_ids": ["p1", "p2"],
             "subject": "fix: thing",
             "body": "body text",
             "presence": "local_only",
@@ -260,6 +301,7 @@ fn aggregated_commit_wire_serializes_flat() {
             author_name: "bryan".to_string(),
             author_email: "bryan@example.com".to_string(),
             timestamp: 1700000000,
+            parent_ids: vec!["p1".to_string(), "p2".to_string()],
             subject: "fix: thing".to_string(),
             body: String::new(),
             presence: CommitPresenceWire::RemoteOnly,
@@ -275,6 +317,7 @@ fn aggregated_commit_wire_serializes_flat() {
             "author_name": "bryan",
             "author_email": "bryan@example.com",
             "timestamp": 1700000000,
+            "parent_ids": ["p1", "p2"],
             "subject": "fix: thing",
             "body": "",
             "presence": "remote_only",
@@ -306,6 +349,7 @@ fn vcs_commit_wire_defaults_presence_to_unknown() {
     });
     let row: VcsCommitWire = serde_json::from_value(value).unwrap();
     assert_eq!(row.presence, CommitPresenceWire::Unknown);
+    assert!(row.parent_ids.is_empty());
 }
 
 // -- classify_commit_presence --------------------------------------------
