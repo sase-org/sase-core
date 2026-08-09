@@ -54,7 +54,12 @@ pub struct GlossaryEntryWire {
     pub term: String,
     pub normalized_term: String,
     pub definition: String,
+    /// Normalized aliases authored in project config.
     pub configured_aliases: Vec<String>,
+    /// Normalized configured aliases that should be rendered in generated docs.
+    #[serde(default)]
+    pub display_aliases: Vec<String>,
+    /// Normalized aliases used for matching, including accepted derived plurals.
     pub effective_aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<GlossarySourceWire>,
@@ -159,8 +164,7 @@ pub fn validate_glossary_entries(
         }
 
         let mut local_aliases = BTreeSet::new();
-        for (alias_index, alias) in effective_aliases(entry).iter().enumerate()
-        {
+        for (alias_index, alias) in authored_aliases(entry).iter().enumerate() {
             let normalized_alias = normalize_phrase(alias);
             if normalized_alias.is_empty() {
                 diagnostics.push(error(
@@ -379,25 +383,44 @@ fn ensure_valid(
 fn catalog_from_entries(
     entries: &[GlossaryInputEntryWire],
 ) -> GlossaryCatalogWire {
+    let authored_aliases_by_entry =
+        entries.iter().map(authored_aliases).collect::<Vec<_>>();
+    let configured_aliases_by_entry =
+        entries.iter().map(configured_aliases).collect::<Vec<_>>();
+    let authored_claims = authored_aliases_by_entry
+        .iter()
+        .flat_map(|aliases| aliases.iter())
+        .filter(|alias| !alias.is_empty())
+        .map(|alias| case_key(alias))
+        .collect::<BTreeSet<_>>();
+    let mut accepted_derived_claims = BTreeSet::new();
+
     GlossaryCatalogWire {
         schema_version: GLOSSARY_WIRE_SCHEMA_VERSION,
         entries: entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let configured_aliases = entry
-                    .aliases
-                    .iter()
-                    .map(|alias| normalize_phrase(alias))
-                    .filter(|alias| !alias.is_empty())
-                    .collect::<Vec<_>>();
+                let normalized_term = normalize_phrase(&entry.term);
+                let configured_aliases =
+                    configured_aliases_by_entry[index].clone();
+                let display_aliases = derive_display_aliases(
+                    &normalized_term,
+                    &configured_aliases,
+                );
+                let effective_aliases = effective_aliases(
+                    &authored_aliases_by_entry[index],
+                    &authored_claims,
+                    &mut accepted_derived_claims,
+                );
                 GlossaryEntryWire {
                     index,
-                    term: normalize_phrase(&entry.term),
-                    normalized_term: normalize_phrase(&entry.term),
+                    term: normalized_term.clone(),
+                    normalized_term,
                     definition: entry.definition.trim().to_string(),
                     configured_aliases,
-                    effective_aliases: effective_aliases(entry),
+                    display_aliases,
+                    effective_aliases,
                     source: entry.source.clone(),
                 }
             })
@@ -405,7 +428,16 @@ fn catalog_from_entries(
     }
 }
 
-fn effective_aliases(entry: &GlossaryInputEntryWire) -> Vec<String> {
+fn configured_aliases(entry: &GlossaryInputEntryWire) -> Vec<String> {
+    entry
+        .aliases
+        .iter()
+        .map(|alias| normalize_phrase(alias))
+        .filter(|alias| !alias.is_empty())
+        .collect()
+}
+
+fn authored_aliases(entry: &GlossaryInputEntryWire) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut aliases = Vec::new();
     for alias in std::iter::once(&entry.term).chain(entry.aliases.iter()) {
@@ -421,8 +453,130 @@ fn effective_aliases(entry: &GlossaryInputEntryWire) -> Vec<String> {
     aliases
 }
 
+fn effective_aliases(
+    authored_aliases: &[String],
+    authored_claims: &BTreeSet<String>,
+    accepted_derived_claims: &mut BTreeSet<String>,
+) -> Vec<String> {
+    let mut aliases = authored_aliases
+        .iter()
+        .filter(|alias| !alias.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for alias in authored_aliases.iter().filter(|alias| !alias.is_empty()) {
+        let Some(plural) = pluralize_phrase(alias) else {
+            continue;
+        };
+        let key = case_key(&plural);
+        if authored_claims.contains(&key) {
+            continue;
+        }
+        if accepted_derived_claims.insert(key) {
+            aliases.push(plural);
+        }
+    }
+
+    aliases
+}
+
+fn derive_display_aliases(
+    term: &str,
+    configured_aliases: &[String],
+) -> Vec<String> {
+    configured_aliases
+        .iter()
+        .enumerate()
+        .filter_map(|(alias_index, alias)| {
+            if alias_is_derivable_from_other_source(
+                alias,
+                alias_index,
+                term,
+                configured_aliases,
+            ) {
+                None
+            } else {
+                Some(alias.clone())
+            }
+        })
+        .collect()
+}
+
+fn alias_is_derivable_from_other_source(
+    alias: &str,
+    alias_index: usize,
+    term: &str,
+    configured_aliases: &[String],
+) -> bool {
+    let alias_key = case_key(alias);
+    if pluralize_phrase(term)
+        .is_some_and(|plural| case_key(&plural) == alias_key)
+    {
+        return true;
+    }
+
+    configured_aliases
+        .iter()
+        .enumerate()
+        .any(|(source_index, source)| {
+            source_index != alias_index
+                && pluralize_phrase(source)
+                    .is_some_and(|plural| case_key(&plural) == alias_key)
+        })
+}
+
 fn normalize_phrase(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pluralize_phrase(phrase: &str) -> Option<String> {
+    let phrase = phrase.trim();
+    if phrase.is_empty() {
+        return None;
+    }
+    let (prefix, last_word) = phrase
+        .rsplit_once(' ')
+        .map_or(("", phrase), |(prefix, word)| (prefix, word));
+    let final_char = last_word.chars().next_back()?;
+    if !last_word.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+
+    let lower = last_word.to_ascii_lowercase();
+    if lower.ends_with('s') {
+        return None;
+    }
+
+    let plural_word = if lower.ends_with('x')
+        || lower.ends_with('z')
+        || lower.ends_with("ch")
+        || lower.ends_with("sh")
+    {
+        format!("{last_word}es")
+    } else if lower.ends_with('y') && has_consonant_before_final_y(last_word) {
+        let stem = &last_word[..last_word.len() - final_char.len_utf8()];
+        format!("{stem}ies")
+    } else {
+        format!("{last_word}s")
+    };
+
+    if prefix.is_empty() {
+        Some(plural_word)
+    } else {
+        Some(format!("{prefix} {plural_word}"))
+    }
+}
+
+fn has_consonant_before_final_y(word: &str) -> bool {
+    let mut chars = word.chars().rev();
+    let Some(_) = chars.next() else {
+        return false;
+    };
+    let Some(previous) = chars.next() else {
+        return false;
+    };
+    previous.is_ascii_alphabetic()
+        && !matches!(previous.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')
 }
 
 fn alias_regex(alias: &str) -> String {
@@ -529,24 +683,66 @@ mod tests {
     }
 
     #[test]
-    fn validates_blank_and_conflicting_aliases() {
+    fn pluralizes_phrases_with_conservative_ascii_rules() {
+        let cases = [
+            ("", None),
+            ("Status", None),
+            ("README.md", None),
+            ("Box", Some("Boxes")),
+            ("Buzz", Some("Buzzes")),
+            ("Patch", Some("Patches")),
+            ("Brush", Some("Brushes")),
+            ("Family", Some("Families")),
+            ("Play", Some("Plays")),
+            ("Repo", Some("Repos")),
+            ("agents.md file", Some("agents.md files")),
+        ];
+
+        for (phrase, expected) in cases {
+            assert_eq!(pluralize_phrase(phrase).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn validation_diagnostics_stay_authored_for_alias_edge_cases() {
         let diagnostics = validate_glossary_entries(&[
-            entry("Agent Clan", "A named rootless container.", &["clan"]),
+            entry("Blank Alias", "Definition.", &[""]),
+            entry("Repeated Alias", "Definition.", &["dup", " DUP "]),
+            entry("Workspace", "Definition.", &["two\nlines"]),
+            entry("Agent Clan", "A named rootless container.", &[]),
             entry("Clan", "Another thing.", &["agent clan"]),
-            entry("Workspace", "", &["two\nlines"]),
         ]);
 
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "alias_conflict"
-                && diagnostic.path.as_deref()
-                    == Some("glossary.Clan.aliases[0]")
-        }));
-        assert!(diagnostics
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| (
+                    diagnostic.code.as_str(),
+                    diagnostic.path.as_deref(),
+                    diagnostic.message.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "blank_alias",
+                    Some("glossary.Blank Alias.aliases[0]"),
+                    "Glossary alias 1 for `Blank Alias` must not be blank",
+                ),
+                (
+                    "multiline_alias",
+                    Some("glossary.Workspace.aliases[0]"),
+                    "Glossary alias `two lines` for `Workspace` must stay on one line",
+                ),
+                (
+                    "alias_conflict",
+                    Some("glossary.Clan.aliases[0]"),
+                    "Glossary alias `agent clan` is used by more than one entry",
+                ),
+            ]
+        );
+        assert!(!diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "blank_definition"));
-        assert!(diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "multiline_alias"));
+            .any(|diagnostic| diagnostic.code == "duplicate_alias"));
     }
 
     #[test]
@@ -564,10 +760,85 @@ mod tests {
             catalog.entries[0].configured_aliases,
             vec!["agent clans", "Agent Clan"]
         );
+        assert_eq!(catalog.entries[0].display_aliases, vec!["Agent Clan"]);
         assert_eq!(
             catalog.entries[0].effective_aliases,
             vec!["Agent Clan", "agent clans"]
         );
+    }
+
+    #[test]
+    fn builds_effective_aliases_with_derived_plurals() {
+        let catalog = build_glossary_catalog(vec![entry(
+            "Agent Clan",
+            "A named rootless container.",
+            &["clan"],
+        )])
+        .unwrap();
+
+        assert_eq!(
+            catalog.entries[0].effective_aliases,
+            vec!["Agent Clan", "clan", "Agent Clans", "clans"]
+        );
+    }
+
+    #[test]
+    fn skips_derived_plural_claimed_by_authored_alias_without_diagnostic() {
+        let entries = vec![
+            entry("Agent Clan", "A named rootless container.", &[]),
+            entry("Group", "Another name.", &["agent clans"]),
+        ];
+
+        assert!(validate_glossary_entries(&entries).is_empty());
+        let catalog = build_glossary_catalog(entries).unwrap();
+
+        assert_eq!(catalog.entries[0].effective_aliases, vec!["Agent Clan"]);
+        assert_eq!(
+            catalog.entries[1].effective_aliases,
+            vec!["Group", "agent clans", "Groups"]
+        );
+    }
+
+    #[test]
+    fn filters_display_aliases_to_non_derivable_configured_aliases() {
+        let catalog = build_glossary_catalog(vec![
+            entry(
+                "Agent Clan",
+                "A named rootless container.",
+                &["agent clans", "clan"],
+            ),
+            entry(
+                "Widget",
+                "A test fixture.",
+                &["widget boxes", "widget box", "bespoke"],
+            ),
+            entry("Patch", "A local unit of change.", &["patches"]),
+        ])
+        .unwrap();
+
+        assert_eq!(catalog.entries[0].display_aliases, vec!["clan"]);
+        assert_eq!(
+            catalog.entries[1].display_aliases,
+            vec!["widget box", "bespoke"]
+        );
+        assert!(catalog.entries[2].display_aliases.is_empty());
+    }
+
+    #[test]
+    fn scans_derived_plural_for_term_without_configured_aliases() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Agent Clan",
+            "A named rootless container.",
+            &[],
+        )])
+        .unwrap();
+
+        let spans = catalog.scan("Two Agent Clans coordinated.");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].term, "Agent Clan");
+        assert_eq!(spans[0].alias, "Agent Clans");
+        assert_eq!(spans[0].matched_text, "Agent Clans");
     }
 
     #[test]
