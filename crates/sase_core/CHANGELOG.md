@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/sase-org/sase-core/compare/v0.22.0...v0.23.0) - 2026-08-09
+
+### Added
+
+- [**breaking**] require tale size in core plan validation
+
 ### Added
 
 - *(plan)* [**breaking**] require tale `size` frontmatter and expose normalized plan size
