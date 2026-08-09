@@ -537,6 +537,7 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -568,6 +569,7 @@ jobs:
         if: steps.resolve.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.resolve.outputs.number }}
         run: |
           set -euo pipefail
@@ -593,6 +595,7 @@ jobs:
         if: steps.resolve.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.resolve.outputs.number }}
         run: gh pr checks "${PR_NUMBER}" --watch --fail-fast
 
@@ -600,5 +603,6 @@ jobs:
         if: steps.resolve.outputs.number != ''
         env:
           GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.resolve.outputs.number }}
         run: gh pr merge "${PR_NUMBER}" --squash --delete-branch
