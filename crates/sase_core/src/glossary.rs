@@ -2,7 +2,9 @@
 //!
 //! Python owns config discovery and source-preserving YAML parsing. This
 //! module owns the deterministic glossary domain contract that editor, memory,
-//! and generated-document callers can share.
+//! and generated-document callers can share. Multiword phrases match across
+//! horizontal whitespace or one line break with surrounding indentation, but
+//! never across a blank line.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -72,6 +74,13 @@ pub struct GlossaryCatalogWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlossarySegmentWire {
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub range: EditorRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlossarySpanWire {
     pub term: String,
     pub entry_index: usize,
@@ -81,6 +90,8 @@ pub struct GlossarySpanWire {
     pub byte_start: usize,
     pub byte_end: usize,
     pub range: EditorRange,
+    #[serde(default)]
+    pub segments: Vec<GlossarySegmentWire>,
 }
 
 #[derive(Debug, Error)]
@@ -344,6 +355,8 @@ impl CandidateSpan {
         let entry = catalog.entries.get(self.entry_index)?;
         let range =
             document.byte_range_to_range(self.byte_start, self.byte_end)?;
+        let segments =
+            glossary_segments(document, self.byte_start, self.byte_end)?;
         Some(GlossarySpanWire {
             term: entry.term.clone(),
             entry_index: self.entry_index,
@@ -356,6 +369,7 @@ impl CandidateSpan {
             byte_start: self.byte_start,
             byte_end: self.byte_end,
             range,
+            segments,
         })
     }
 }
@@ -579,12 +593,65 @@ fn has_consonant_before_final_y(word: &str) -> bool {
         && !matches!(previous.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')
 }
 
+const PHRASE_GAP: &str = r"(?:[\t ]*\r?\n[\t ]*|[\t ]+)";
+
 fn alias_regex(alias: &str) -> String {
     alias
         .split_whitespace()
         .map(regex::escape)
         .collect::<Vec<_>>()
-        .join("[\\t ]+")
+        .join(PHRASE_GAP)
+}
+
+fn glossary_segments(
+    document: &DocumentSnapshot,
+    byte_start: usize,
+    byte_end: usize,
+) -> Option<Vec<GlossarySegmentWire>> {
+    document.text().get(byte_start..byte_end)?;
+    let mut segments = Vec::new();
+    let mut line_start = byte_start;
+
+    loop {
+        let line_end = document.text()[line_start..byte_end]
+            .find('\n')
+            .map_or(byte_end, |relative| line_start + relative);
+        let (segment_start, segment_end) =
+            trim_segment_edges(document.text(), line_start, line_end);
+        if segment_start < segment_end {
+            segments.push(GlossarySegmentWire {
+                byte_start: segment_start,
+                byte_end: segment_end,
+                range: document
+                    .byte_range_to_range(segment_start, segment_end)?,
+            });
+        }
+        if line_end == byte_end {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+
+    Some(segments)
+}
+
+fn trim_segment_edges(
+    text: &str,
+    mut byte_start: usize,
+    mut byte_end: usize,
+) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    while byte_start < byte_end && is_segment_edge_byte(bytes[byte_start]) {
+        byte_start += 1;
+    }
+    while byte_start < byte_end && is_segment_edge_byte(bytes[byte_end - 1]) {
+        byte_end -= 1;
+    }
+    (byte_start, byte_end)
+}
+
+fn is_segment_edge_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r')
 }
 
 fn case_key(value: &str) -> String {
@@ -914,5 +981,206 @@ mod tests {
             ),
             None
         );
+    }
+
+    fn range(
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+    ) -> EditorRange {
+        EditorRange {
+            start: EditorPosition {
+                line: start_line,
+                character: start_character,
+            },
+            end: EditorPosition {
+                line: end_line,
+                character: end_character,
+            },
+        }
+    }
+
+    fn segment_texts<'a>(
+        text: &'a str,
+        span: &'a GlossarySpanWire,
+    ) -> Vec<&'a str> {
+        span.segments
+            .iter()
+            .map(|segment| &text[segment.byte_start..segment.byte_end])
+            .collect()
+    }
+
+    #[test]
+    fn scans_wrapped_phrase_with_trimmed_segments() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Xprompt Memory",
+            "A generated memory note.",
+            &[],
+        )])
+        .unwrap();
+        let text = "Start xprompt\n  memory file";
+        let spans = catalog.scan(text);
+
+        assert_eq!(spans.len(), 1);
+        let span = &spans[0];
+        assert_eq!(span.term, "Xprompt Memory");
+        assert_eq!(span.matched_text, "xprompt\n  memory");
+        assert_eq!(span.range, range(0, 6, 1, 8));
+        assert_eq!(segment_texts(text, span), vec!["xprompt", "memory"]);
+        assert_eq!(
+            span.segments
+                .iter()
+                .map(|segment| segment.range)
+                .collect::<Vec<_>>(),
+            vec![range(0, 6, 0, 13), range(1, 2, 1, 8)]
+        );
+    }
+
+    #[test]
+    fn wrapped_phrase_does_not_cross_block_boundaries() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Xprompt Memory",
+            "A generated memory note.",
+            &[],
+        )])
+        .unwrap();
+
+        for text in [
+            "xprompt\n\nmemory",
+            "xprompt\n- memory",
+            "xprompt\n> memory",
+            "xprompt\n## Memory",
+            "xprompt\n---\nmemory",
+        ] {
+            assert_eq!(catalog.scan(text), Vec::new(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn wrapped_longer_match_wins_over_shorter_at_same_start() {
+        let catalog = compile_glossary_catalog(vec![
+            entry("Xprompt", "A prompt template.", &[]),
+            entry("Xprompt Memory", "A generated memory note.", &[]),
+        ])
+        .unwrap();
+
+        let spans = catalog.scan("Create an xprompt\n  memory file.");
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].term, "Xprompt Memory");
+        assert_eq!(spans[0].matched_text, "xprompt\n  memory");
+    }
+
+    #[test]
+    fn wrapped_phrase_accepts_crlf_without_segment_carriage_returns() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Xprompt Memory",
+            "A generated memory note.",
+            &[],
+        )])
+        .unwrap();
+        let text = "xprompt\r\n\tmemory";
+        let spans = catalog.scan(text);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].matched_text, "xprompt\r\n\tmemory");
+        assert_eq!(segment_texts(text, &spans[0]), vec!["xprompt", "memory"]);
+        assert!(spans[0]
+            .segments
+            .iter()
+            .all(|segment| !text[segment.byte_start..segment.byte_end]
+                .contains('\r')));
+    }
+
+    #[test]
+    fn three_word_term_wraps_across_three_lines() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Agent Instruction File",
+            "An agents.md file.",
+            &[],
+        )])
+        .unwrap();
+        let text = "agent\n  instruction\n\tfile";
+        let spans = catalog.scan(text);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].term, "Agent Instruction File");
+        assert_eq!(
+            segment_texts(text, &spans[0]),
+            vec!["agent", "instruction", "file"]
+        );
+        assert_eq!(
+            spans[0]
+                .segments
+                .iter()
+                .map(|segment| segment.range)
+                .collect::<Vec<_>>(),
+            vec![range(0, 0, 0, 5), range(1, 2, 1, 13), range(2, 1, 2, 5)]
+        );
+    }
+
+    #[test]
+    fn single_line_match_has_one_span_equal_segment() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Agent Clan",
+            "A named rootless container.",
+            &[],
+        )])
+        .unwrap();
+        let text = "See agent clan here.";
+        let span = catalog.scan(text).pop().unwrap();
+
+        assert_eq!(span.segments.len(), 1);
+        assert_eq!(span.segments[0].byte_start, span.byte_start);
+        assert_eq!(span.segments[0].byte_end, span.byte_end);
+        assert_eq!(span.segments[0].range, span.range);
+    }
+
+    #[test]
+    fn literal_zone_filter_skips_candidates_but_keeps_prose_match() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Xprompt Memory",
+            "A generated memory note.",
+            &[],
+        )])
+        .unwrap();
+        let text = concat!(
+            "`xprompt memory`\n",
+            "Prose xprompt\n",
+            "  memory\n",
+            "```\n",
+            "xprompt\n",
+            "  memory\n",
+            "```\n",
+        );
+        let spans = catalog.scan(text);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].matched_text, "xprompt\n  memory");
+    }
+
+    #[test]
+    fn lookup_on_continuation_word_returns_wrapped_span() {
+        let catalog = compile_glossary_catalog(vec![entry(
+            "Xprompt Memory",
+            "A generated memory note.",
+            &[],
+        )])
+        .unwrap();
+        let text = "See xprompt\n  memory here.";
+        let span = catalog
+            .lookup(
+                text,
+                EditorPosition {
+                    line: 1,
+                    character: 4,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(span.term, "Xprompt Memory");
+        assert_eq!(span.matched_text, "xprompt\n  memory");
+        assert_eq!(segment_texts(text, &span), vec!["xprompt", "memory"]);
     }
 }

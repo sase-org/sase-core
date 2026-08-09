@@ -119,12 +119,14 @@ fn raw_glossary_tokens(
     catalog
         .scan(document.text())
         .into_iter()
-        .map(|span| RawSemanticToken {
-            byte_start: span.byte_start,
-            byte_end: span.byte_end,
-            token_type: GLOSSARY_TOKEN_TYPE,
-            token_modifiers_bitset: 0,
-            priority: GLOSSARY_PRIORITY,
+        .flat_map(|span| {
+            span.segments.into_iter().map(|segment| RawSemanticToken {
+                byte_start: segment.byte_start,
+                byte_end: segment.byte_end,
+                token_type: GLOSSARY_TOKEN_TYPE,
+                token_modifiers_bitset: 0,
+                priority: GLOSSARY_PRIORITY,
+            })
         })
         .collect()
 }
@@ -235,4 +237,68 @@ fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
 
 fn span_len(token: &RawSemanticToken) -> usize {
     token.byte_end.saturating_sub(token.byte_start)
+}
+
+#[cfg(test)]
+mod tests {
+    use lsp_types::SemanticToken;
+    use sase_core::{compile_glossary_catalog, GlossaryInputEntryWire};
+
+    use super::*;
+
+    fn entry(term: &str) -> GlossaryInputEntryWire {
+        GlossaryInputEntryWire {
+            term: term.to_string(),
+            definition: "Definition.".to_string(),
+            aliases: Vec::new(),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn glossary_tokens_split_wrapped_segments_and_keep_artifacts() {
+        let document =
+            DocumentSnapshot::new("xprompt\n  memory @file:README.md");
+        let catalog =
+            compile_glossary_catalog(vec![entry("Xprompt Memory")]).unwrap();
+        let tokens = document_semantic_tokens(
+            &document,
+            Some(&ArtifactRefContextWire::default()),
+            Some(&catalog),
+        );
+
+        assert_eq!(
+            tokens.data,
+            vec![
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 0,
+                    length: 7,
+                    token_type: GLOSSARY_TOKEN_TYPE,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 1,
+                    delta_start: 2,
+                    length: 6,
+                    token_type: GLOSSARY_TOKEN_TYPE,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 8,
+                    length: 4,
+                    token_type: KIND_TOKEN_TYPE,
+                    token_modifiers_bitset: 0,
+                },
+                SemanticToken {
+                    delta_line: 0,
+                    delta_start: 5,
+                    length: 9,
+                    token_type: PAYLOAD_TOKEN_TYPE,
+                    token_modifiers_bitset: 0,
+                },
+            ]
+        );
+    }
 }

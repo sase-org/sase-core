@@ -493,8 +493,8 @@ pub use glossary::{
     build_glossary_catalog, compile_glossary_catalog,
     validate_glossary_entries, CompiledGlossaryCatalog, GlossaryCatalogWire,
     GlossaryDiagnosticWire, GlossaryEntryWire, GlossaryError,
-    GlossaryInputEntryWire, GlossarySourceWire, GlossarySpanWire,
-    GLOSSARY_WIRE_SCHEMA_VERSION,
+    GlossaryInputEntryWire, GlossarySegmentWire, GlossarySourceWire,
+    GlossarySpanWire, GLOSSARY_WIRE_SCHEMA_VERSION,
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,
