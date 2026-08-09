@@ -17,7 +17,7 @@ pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 5;
 
 /// Canonical Patch/Stitch schema version.
 ///
-/// The serialized fields are compatible with `CHANGESPEC_WIRE_SCHEMA_VERSION`;
+/// The serialized fields are compatible with `PATCH_WIRE_SCHEMA_VERSION`;
 /// this alias lets canonical callers stop depending on the legacy constant
 /// name without implying a storage-format bump.
 pub const PATCH_WIRE_SCHEMA_VERSION: u32 = CHANGESPEC_WIRE_SCHEMA_VERSION;
@@ -463,7 +463,7 @@ mod tests {
     fn empty_lists_serialize_as_arrays_not_null() {
         // Mirrors the Python invariant: empty list fields are `[]`, not `null`.
         let cs = ChangeSpecWire {
-            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
             name: "my_cl".to_string(),
             project_basename: "myproj".to_string(),
             project_display_name: None,
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn none_fields_serialize_as_json_null() {
         let cs = ChangeSpecWire {
-            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             project_display_name: None,
@@ -561,11 +561,11 @@ mod tests {
     }
 
     #[test]
-    fn changespec_field_order_matches_python() {
+    fn legacy_wire_field_order_matches_python() {
         // Python uses `dataclasses.asdict`, which preserves declaration order.
         // We replicate that order so byte-for-byte JSON parity is reachable.
         let cs = ChangeSpecWire {
-            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
             name: "n".to_string(),
             project_basename: "p".to_string(),
             project_display_name: None,
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn patch_wire_deserializes_legacy_changespec_shape() {
         let json = json!({
-            "schema_version": CHANGESPEC_WIRE_SCHEMA_VERSION,
+            "schema_version": PATCH_WIRE_SCHEMA_VERSION,
             "name": "legacy_spec",
             "project_basename": "proj",
             "file_path": "proj.sase",
@@ -782,9 +782,9 @@ mod tests {
     }
 
     #[test]
-    fn populated_changespec_round_trips() {
+    fn populated_patch_round_trips() {
         let cs = ChangeSpecWire {
-            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
             name: "rust_workspace".to_string(),
             project_basename: "myproj".to_string(),
             project_display_name: Some("widgets".to_string()),

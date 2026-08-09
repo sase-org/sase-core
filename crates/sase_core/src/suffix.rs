@@ -1,5 +1,5 @@
 //! Suffix prefix parsing — mirrors
-//! `sase_100/src/sase/ace/changespec/suffix_utils.py` and the
+//! `sase_100/src/sase/ace/patch/suffix_utils.py` and the
 //! `is_entry_ref_suffix` helper from
 //! `sase_100/src/sase/ace/display_helpers.py`.
 

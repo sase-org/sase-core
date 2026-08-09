@@ -18,7 +18,7 @@ use super::runner::{
     HostRunnerLivenessProbe, RunnerLivenessProbe, RunnerStatsBuilder,
 };
 use super::wire::{
-    AgentChangeSpecWorkStatsWire, AgentCommitStatsWire, AgentPlanStatsWire,
+    AgentCommitStatsWire, AgentPatchWorkStatsWire, AgentPlanStatsWire,
     AgentProjectWorkStatsWire, AgentProviderStatsWire, AgentQuestionStatsWire,
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
     AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRuntimeGroupStatsWire,
@@ -30,7 +30,7 @@ use super::wire::{
 const INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BUCKETS: u64 = 1_000_000;
 const UNKNOWN: &str = "unknown";
-const NO_CHANGESPEC: &str = "(no changespec)";
+const NO_PATCH: &str = "(no patch)";
 const DEFAULT_EFFORT: &str = "default";
 
 #[derive(Debug)]
@@ -78,7 +78,7 @@ struct ProjectWorkAccumulator {
     in_progress: u64,
     waiting: u64,
     commits: u64,
-    changespecs: BTreeSet<String>,
+    patches: BTreeSet<String>,
     unattributed_runs: u64,
     total_runtime_seconds: f64,
     last_run_ts: f64,
@@ -86,7 +86,7 @@ struct ProjectWorkAccumulator {
 }
 
 #[derive(Debug, Default)]
-struct ChangespecWorkAccumulator {
+struct PatchWorkAccumulator {
     runs: u64,
     agents: BTreeSet<String>,
     commits: u64,
@@ -98,7 +98,7 @@ struct ChangespecWorkAccumulator {
 #[derive(Debug, Default)]
 struct WorkAccumulators {
     projects: BTreeMap<String, ProjectWorkAccumulator>,
-    changespecs: BTreeMap<(String, String), ChangespecWorkAccumulator>,
+    patches: BTreeMap<(String, String), PatchWorkAccumulator>,
 }
 
 #[derive(Debug, Default)]
@@ -143,19 +143,19 @@ struct RunXPrompt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AttributedChangespec {
+struct AttributedPatch {
     name: String,
     commits: u64,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RunAttribution {
-    changespecs: Vec<AttributedChangespec>,
+    patches: Vec<AttributedPatch>,
     total_commits: u64,
 }
 
 #[derive(Debug, Clone)]
-struct ChangespecMetadata {
+struct PatchMetadata {
     status: String,
     has_pr: bool,
 }
@@ -598,12 +598,12 @@ fn runtime_group_values(
     row: &IndexRunRow,
     attribution: &RunAttribution,
 ) -> Vec<String> {
-    if group_by == AgentStatsRuntimeGroupByWire::Changespec {
-        if attribution.changespecs.is_empty() {
-            return vec![NO_CHANGESPEC.to_string()];
+    if group_by == AgentStatsRuntimeGroupByWire::Patch {
+        if attribution.patches.is_empty() {
+            return vec![NO_PATCH.to_string()];
         }
         return attribution
-            .changespecs
+            .patches
             .iter()
             .map(|value| value.name.clone())
             .collect();
@@ -639,11 +639,11 @@ fn runtime_group_value(
         AgentStatsRuntimeGroupByWire::Project => {
             Some(row.project_name.as_str())
         }
-        AgentStatsRuntimeGroupByWire::Changespec => attribution
-            .changespecs
+        AgentStatsRuntimeGroupByWire::Patch => attribution
+            .patches
             .first()
             .map(|value| value.name.as_str())
-            .or(Some(NO_CHANGESPEC)),
+            .or(Some(NO_PATCH)),
     };
     normalized(value)
 }
@@ -966,29 +966,39 @@ fn resolve_run_attribution(
         .and_then(|output| output.get("meta_commits"))
         .and_then(|value| value.as_array());
     let mut total_commits = 0u64;
-    let mut commit_changespecs = BTreeMap::<String, u64>::new();
+    let mut commit_patches = BTreeMap::<String, u64>::new();
     if let Some(meta_commits) = meta_commits {
         for commit in meta_commits.iter().filter_map(|value| value.as_object())
         {
             total_commits += 1;
             let name = commit
-                .get("changespec_name")
+                .get("patch_name")
                 .and_then(|value| value.as_str())
+                .or_else(|| {
+                    commit
+                        .get("changespec_name")
+                        .and_then(|value| value.as_str())
+                })
+                .or_else(|| {
+                    commit
+                        .get("commit_patch_name")
+                        .and_then(|value| value.as_str())
+                })
                 .or_else(|| {
                     commit
                         .get("commit_changespec_name")
                         .and_then(|value| value.as_str())
                 });
-            if let Some(name) = real_changespec_name(name, record, row) {
-                *commit_changespecs.entry(name).or_default() += 1;
+            if let Some(name) = real_patch_name(name, record, row) {
+                *commit_patches.entry(name).or_default() += 1;
             }
         }
     }
-    if !commit_changespecs.is_empty() {
+    if !commit_patches.is_empty() {
         return RunAttribution {
-            changespecs: commit_changespecs
+            patches: commit_patches
                 .into_iter()
-                .map(|(name, commits)| AttributedChangespec { name, commits })
+                .map(|(name, commits)| AttributedPatch { name, commits })
                 .collect(),
             total_commits,
         };
@@ -998,20 +1008,18 @@ fn resolve_run_attribution(
         .agent_meta
         .as_ref()
         .and_then(|meta| meta.commit_changespec_name.as_deref());
-    if let Some(name) = real_changespec_name(commit_name, record, row) {
+    if let Some(name) = real_patch_name(commit_name, record, row) {
         return RunAttribution {
-            changespecs: vec![AttributedChangespec {
+            patches: vec![AttributedPatch {
                 name,
                 commits: total_commits,
             }],
             total_commits,
         };
     }
-    if let Some(name) =
-        real_changespec_name(row.cl_name.as_deref(), record, row)
-    {
+    if let Some(name) = real_patch_name(row.cl_name.as_deref(), record, row) {
         return RunAttribution {
-            changespecs: vec![AttributedChangespec {
+            patches: vec![AttributedPatch {
                 name,
                 commits: total_commits,
             }],
@@ -1019,12 +1027,12 @@ fn resolve_run_attribution(
         };
     }
     RunAttribution {
-        changespecs: Vec::new(),
+        patches: Vec::new(),
         total_commits,
     }
 }
 
-fn real_changespec_name(
+fn real_patch_name(
     name: Option<&str>,
     record: &AgentArtifactRecordWire,
     row: &IndexRunRow,
@@ -1088,7 +1096,7 @@ fn fold_work(
     if let Some(duration) = duration {
         project.total_runtime_seconds += duration;
     }
-    if attribution.changespecs.is_empty() {
+    if attribution.patches.is_empty() {
         project.unattributed_runs += 1;
         return;
     }
@@ -1100,24 +1108,24 @@ fn fold_work(
             .and_then(|meta| meta.name.as_deref())
             .or(row.agent_name.as_deref()),
     );
-    for attributed in &attribution.changespecs {
-        project.changespecs.insert(attributed.name.clone());
-        let changespec = work
-            .changespecs
+    for attributed in &attribution.patches {
+        project.patches.insert(attributed.name.clone());
+        let patch = work
+            .patches
             .entry((row.project_name.clone(), attributed.name.clone()))
             .or_default();
-        let first_changespec_run = changespec.runs == 0;
-        changespec.runs += 1;
-        changespec.agents.insert(agent.clone());
-        changespec.commits += attributed.commits;
+        let first_patch_run = patch.runs == 0;
+        patch.runs += 1;
+        patch.agents.insert(agent.clone());
+        patch.commits += attributed.commits;
         if let Some(duration) = duration {
-            changespec.total_runtime_seconds += duration;
+            patch.total_runtime_seconds += duration;
         }
-        if first_changespec_run || launch_ts < changespec.first_run_ts {
-            changespec.first_run_ts = launch_ts;
+        if first_patch_run || launch_ts < patch.first_run_ts {
+            patch.first_run_ts = launch_ts;
         }
-        if first_changespec_run || launch_ts > changespec.last_run_ts {
-            changespec.last_run_ts = launch_ts;
+        if first_patch_run || launch_ts > patch.last_run_ts {
+            patch.last_run_ts = launch_ts;
         }
     }
 }
@@ -1126,12 +1134,9 @@ fn finish_work(
     work: WorkAccumulators,
     work_top_n: usize,
 ) -> AgentWorkStatsWire {
-    let WorkAccumulators {
-        projects,
-        changespecs,
-    } = work;
+    let WorkAccumulators { projects, patches } = work;
     let (metadata, malformed_spec_files_skipped) =
-        load_changespec_metadata(&projects);
+        load_patch_metadata(&projects);
     let unattributed_runs = projects
         .values()
         .map(|project| project.unattributed_runs)
@@ -1148,7 +1153,7 @@ fn finish_work(
             waiting: value.waiting,
             success_rate: ratio(value.completed, value.runs),
             commits: value.commits,
-            distinct_changespecs: value.changespecs.len() as u64,
+            distinct_patches: value.patches.len() as u64,
             unattributed_runs: value.unattributed_runs,
             total_runtime_seconds: value.total_runtime_seconds,
             last_run_ts: value.last_run_ts,
@@ -1161,11 +1166,11 @@ fn finish_work(
             .then_with(|| left.project.cmp(&right.project))
     });
 
-    let mut changespec_rows = changespecs
+    let mut patch_rows = patches
         .into_iter()
         .map(|((project, name), value)| {
             let metadata = metadata.get(&(project.clone(), name.clone()));
-            AgentChangeSpecWorkStatsWire {
+            AgentPatchWorkStatsWire {
                 project,
                 name,
                 status: metadata
@@ -1181,33 +1186,33 @@ fn finish_work(
             }
         })
         .collect::<Vec<_>>();
-    changespec_rows.sort_by(|left, right| {
+    patch_rows.sort_by(|left, right| {
         right
             .runs
             .cmp(&left.runs)
             .then_with(|| left.project.cmp(&right.project))
             .then_with(|| left.name.cmp(&right.name))
     });
-    let truncated_changespec_rows =
-        changespec_rows.len().saturating_sub(work_top_n) as u64;
-    changespec_rows.truncate(work_top_n);
+    let truncated_patch_rows =
+        patch_rows.len().saturating_sub(work_top_n) as u64;
+    patch_rows.truncate(work_top_n);
 
     AgentWorkStatsWire {
         projects: project_rows,
-        changespecs: changespec_rows,
+        patches: patch_rows,
         unattributed_runs,
-        truncated_changespec_rows,
+        truncated_patch_rows,
         malformed_spec_files_skipped,
     }
 }
 
-fn load_changespec_metadata(
+fn load_patch_metadata(
     projects: &BTreeMap<String, ProjectWorkAccumulator>,
-) -> (BTreeMap<(String, String), ChangespecMetadata>, u64) {
+) -> (BTreeMap<(String, String), PatchMetadata>, u64) {
     let mut metadata = BTreeMap::new();
     let mut malformed = 0u64;
     for (project, value) in projects {
-        if value.changespecs.is_empty() {
+        if value.patches.is_empty() {
             continue;
         }
         let active = value.project_file.as_path();
@@ -1232,7 +1237,7 @@ fn load_changespec_metadata(
             };
             for spec in specs {
                 metadata.entry((project.clone(), spec.name)).or_insert_with(
-                    || ChangespecMetadata {
+                    || PatchMetadata {
                         status: spec.status,
                         has_pr: spec
                             .pr_url
@@ -2111,7 +2116,7 @@ mod tests {
     }
 
     #[test]
-    fn attributes_project_and_changespec_work_with_filters_and_statuses() {
+    fn attributes_project_and_patch_work_with_filters_and_statuses() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let project = "gh_sase-org__sase";
@@ -2151,9 +2156,9 @@ mod tests {
                 "outcome": "completed",
                 "finished_at": finish_at(multi_start, 60.0),
                 "step_output": {"meta_commits": [
-                    {"sha": "1", "changespec_name": "commit-spec"},
-                    {"sha": "2", "changespec_name": "commit-spec"},
-                    {"sha": "3", "changespec_name": "archived-spec"}
+                    {"sha": "1", "patch_name": "commit-spec"},
+                    {"sha": "2", "patch_name": "commit-spec"},
+                    {"sha": "3", "patch_name": "archived-spec"}
                 ]}
             })),
             false,
@@ -2279,7 +2284,7 @@ mod tests {
 
         let mut filtered = request();
         filtered.project = Some(project.to_string());
-        filtered.runtime_group_by = AgentStatsRuntimeGroupByWire::Changespec;
+        filtered.runtime_group_by = AgentStatsRuntimeGroupByWire::Patch;
         let result = query_run_stats(&index, filtered.clone()).unwrap();
         assert_eq!(result.totals.runs, 7);
         assert_eq!(result.work.projects.len(), 1);
@@ -2292,7 +2297,7 @@ mod tests {
         assert_eq!(project_row.in_progress, 1);
         assert_eq!(project_row.waiting, 1);
         assert_eq!(project_row.commits, 4);
-        assert_eq!(project_row.distinct_changespecs, 3);
+        assert_eq!(project_row.distinct_patches, 3);
         assert_eq!(project_row.unattributed_runs, 4);
         assert_eq!(project_row.total_runtime_seconds, 125.0);
         assert_eq!(result.work.unattributed_runs, 4);
@@ -2300,7 +2305,7 @@ mod tests {
 
         let archived = result
             .work
-            .changespecs
+            .patches
             .iter()
             .find(|row| row.name == "archived-spec")
             .unwrap();
@@ -2311,7 +2316,7 @@ mod tests {
         assert_eq!(archived.total_runtime_seconds, 90.0);
         let committed = result
             .work
-            .changespecs
+            .patches
             .iter()
             .find(|row| row.name == "commit-spec")
             .unwrap();
@@ -2320,12 +2325,12 @@ mod tests {
         assert_eq!(committed.commits, 2);
         assert!(result
             .work
-            .changespecs
+            .patches
             .iter()
             .all(|row| row.name != "launch-spec"));
         let orphan = result
             .work
-            .changespecs
+            .patches
             .iter()
             .find(|row| row.name == "orphan-spec")
             .unwrap();
@@ -2342,12 +2347,12 @@ mod tests {
         assert_eq!(runtime("archived-spec"), 90.0);
         assert_eq!(runtime("commit-spec"), 60.0);
         assert_eq!(runtime("orphan-spec"), 20.0);
-        assert_eq!(runtime(NO_CHANGESPEC), 15.0);
+        assert_eq!(runtime(NO_PATCH), 15.0);
 
         filtered.work_top_n = 2;
         let truncated = query_run_stats(&index, filtered).unwrap();
-        assert_eq!(truncated.work.changespecs.len(), 2);
-        assert_eq!(truncated.work.truncated_changespec_rows, 1);
+        assert_eq!(truncated.work.patches.len(), 2);
+        assert_eq!(truncated.work.truncated_patch_rows, 1);
 
         let mut by_project = request();
         by_project.runtime_group_by = AgentStatsRuntimeGroupByWire::Project;

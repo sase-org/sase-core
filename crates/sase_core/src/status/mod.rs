@@ -1,4 +1,4 @@
-//! Phase 4C: pure-Rust ChangeSpec status state machine.
+//! Phase 4C: pure-Rust Patch status state machine.
 //!
 //! Mirrors the Phase 4B Python wire contract in
 //! `sase_100/src/sase/core/status_wire.py` and the pure-Python planner in

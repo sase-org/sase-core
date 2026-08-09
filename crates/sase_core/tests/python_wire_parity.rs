@@ -137,7 +137,7 @@ const PYTHON_FIXTURE: &str = r#"{
     ]
 }"#;
 
-fn rust_changespec() -> ChangeSpecWire {
+fn rust_patch() -> ChangeSpecWire {
     ChangeSpecWire {
         schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
         name: "rust_workspace".to_string(),
@@ -215,7 +215,7 @@ fn rust_changespec() -> ChangeSpecWire {
 
 #[test]
 fn rust_json_equals_python_fixture() {
-    let rust_value: Value = serde_json::to_value(rust_changespec()).unwrap();
+    let rust_value: Value = serde_json::to_value(rust_patch()).unwrap();
     let python_value: Value = serde_json::from_str(PYTHON_FIXTURE).unwrap();
     assert_eq!(rust_value, python_value);
 }
@@ -238,7 +238,7 @@ fn python_fixture_deserializes_into_rust_type() {
     // The reverse direction: a Rust parser must accept Python-shaped JSON
     // (modulo defaults) without losing information.
     let cs: ChangeSpecWire = serde_json::from_str(PYTHON_FIXTURE).unwrap();
-    assert_eq!(cs, rust_changespec());
+    assert_eq!(cs, rust_patch());
 }
 
 #[test]

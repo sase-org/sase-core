@@ -1,6 +1,6 @@
 //! Phase 1C full-file parser with section parity.
 //!
-//! Mirrors `sase_100/src/sase/ace/changespec/parser.py` and
+//! Mirrors `sase_100/src/sase/ace/patch/parser.py` and
 //! `section_parsers.py`:
 //!
 //! - Patch boundaries: canonical `## Patch` and legacy `## ChangeSpec`
@@ -16,7 +16,7 @@
 //! - Whitespace: inline header content stripped, two-space continuation
 //!   strips the first two spaces, blank lines preserved inside
 //!   description before the final trim.
-//! - `project_basename` matches Python's `ChangeSpec.project_basename`
+//! - `project_basename` matches Python's `Patch.project_basename`
 //!   (basename minus extension, with a trailing `-archive` suffix removed).
 //! - `source_span.start_line` and `end_line` are inclusive 1-based. Unlike
 //!   the Python facade's placeholder, `end_line` here is the real last
@@ -35,7 +35,7 @@ use crate::wire::{
     CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
-/// Parse all ChangeSpecs from a project file's raw bytes.
+/// Parse all Patches from a project file's raw bytes.
 ///
 /// The Python equivalent is `parse_project_file_python`, which reads the
 /// file from disk via `f.readlines()`. This Rust entry point takes bytes
@@ -60,7 +60,7 @@ pub fn parse_project_bytes(
     while idx < lines.len() {
         let line = lines[idx];
         if is_patch_header(line) {
-            let (spec, next_idx) = parse_one_changespec(
+            let (spec, next_idx) = parse_one_patch(
                 &lines,
                 idx + 1,
                 path,
@@ -71,7 +71,7 @@ pub fn parse_project_bytes(
             }
             idx = next_idx;
         } else if line.starts_with("NAME: ") {
-            let (spec, next_idx) = parse_one_changespec(
+            let (spec, next_idx) = parse_one_patch(
                 &lines,
                 idx,
                 path,
@@ -105,12 +105,13 @@ pub fn parse_patch_project_bytes(
 /// Match canonical `## Patch` and legacy `## ChangeSpec` headers.
 fn is_patch_header(line: &str) -> bool {
     is_patch_header_named(line, "Patch")
+        // Legacy project files used `## ChangeSpec` section headers.
         || is_patch_header_named(line, "ChangeSpec")
 }
 
-/// Match Python's `re.match(r"^##\s+ChangeSpec", line.strip())`.
+/// Match the legacy `## ChangeSpec` header spelling accepted for compatibility.
 #[cfg(test)]
-fn is_changespec_header(line: &str) -> bool {
+fn is_legacy_changespec_header(line: &str) -> bool {
     is_patch_header_named(line, "ChangeSpec")
 }
 
@@ -398,7 +399,7 @@ fn parse_section_content(state: &mut ParserState, line: &str) {
     }
 }
 
-fn parse_one_changespec(
+fn parse_one_patch(
     lines: &[&str],
     start_idx: usize,
     file_path: &str,
@@ -488,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn project_name_metadata_is_stamped_on_every_changespec() {
+    fn project_name_metadata_is_stamped_on_every_patch() {
         let specs = parse(
             "PROJECT_NAME: Widgets\n\
              NAME: first\nSTATUS: WIP\n\n\
@@ -511,14 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn changespec_header_detection_requires_whitespace_then_word() {
-        assert!(is_changespec_header("## ChangeSpec"));
-        assert!(is_changespec_header("##  ChangeSpec"));
-        assert!(is_changespec_header("##\tChangeSpec"));
-        assert!(is_changespec_header("   ## ChangeSpec   "));
-        assert!(!is_changespec_header("##ChangeSpec"));
-        assert!(!is_changespec_header("# ChangeSpec"));
-        assert!(!is_changespec_header("NAME: foo"));
+    fn legacy_changespec_header_detection_requires_whitespace_then_word() {
+        assert!(is_legacy_changespec_header("## ChangeSpec"));
+        assert!(is_legacy_changespec_header("##  ChangeSpec"));
+        assert!(is_legacy_changespec_header("##\tChangeSpec"));
+        assert!(is_legacy_changespec_header("   ## ChangeSpec   "));
+        assert!(!is_legacy_changespec_header("##ChangeSpec"));
+        assert!(!is_legacy_changespec_header("# ChangeSpec"));
+        assert!(!is_legacy_changespec_header("NAME: foo"));
     }
 
     #[test]
@@ -654,7 +655,7 @@ STATUS: Ready
     }
 
     #[test]
-    fn changespec_header_separates_specs_without_blank_lines() {
+    fn legacy_changespec_header_separates_specs_without_blank_lines() {
         let src = "\
 ## ChangeSpec
 NAME: alpha
@@ -888,6 +889,6 @@ REFS:
     fn empty_input_yields_no_specs() {
         assert!(parse("").is_empty());
         assert!(parse("\n\n\n").is_empty());
-        assert!(parse("not a changespec\n").is_empty());
+        assert!(parse("not a patch\n").is_empty());
     }
 }

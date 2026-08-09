@@ -11,7 +11,7 @@
 //! ## Regex semantics
 //!
 //! The query language uses substring matching (case-insensitive via
-//! lowercasing) on `ChangeSpec` text — **not** user-supplied regex
+//! lowercasing) on `Patch` text — **not** user-supplied regex
 //! matching. The two `re` helpers in the Python evaluator only exist to
 //! strip status suffixes; they are not exposed to query authors. The Rust
 //! port follows suit: `regex::Regex` is used internally for status

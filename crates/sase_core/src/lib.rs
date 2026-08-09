@@ -2,7 +2,7 @@
 //!
 //! Phase 1A modeled the wire types defined in `sase_100/src/sase/core/wire.py`
 //! using owned data only. Phase 1B added a minimal full-file parser for
-//! ChangeSpec boundaries and scalar fields. Phase 1C adds section parity:
+//! Patch boundaries and scalar fields. Phase 1C adds section parity:
 //! structured `COMMITS`, `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, and
 //! `DELTAS` entries that match the Python parser output for the golden
 //! corpus. Patch/Stitch is now the canonical Rust contract while the legacy
@@ -196,16 +196,17 @@ pub use agent_scan::{
     DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
 };
+/// Legacy Rust alias retained for compatibility with older stats callers.
+pub use agent_stats::AgentChangeSpecWorkStatsWire;
 pub use agent_stats::{
     query_activity_stats, query_run_stats, AgentActivityCountWire,
     AgentActivityStatsRequestWire, AgentActivityStatsResponseWire,
-    AgentChangeSpecWorkStatsWire, AgentCommitDistributionWire,
-    AgentCommitStatsWire, AgentPlanActivityStatsWire, AgentPlanStatsWire,
-    AgentProjectWorkStatsWire, AgentProviderStatsWire,
-    AgentQuestionActivityStatsWire, AgentQuestionStatsWire,
-    AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
-    AgentRunStatsResponseWire, AgentRunTotalsWire, AgentRunnerOccupancyWire,
-    AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
+    AgentCommitDistributionWire, AgentCommitStatsWire, AgentPatchWorkStatsWire,
+    AgentPlanActivityStatsWire, AgentPlanStatsWire, AgentProjectWorkStatsWire,
+    AgentProviderStatsWire, AgentQuestionActivityStatsWire,
+    AgentQuestionStatsWire, AgentRetryStatsWire, AgentRunBucketWire,
+    AgentRunStatsRequestWire, AgentRunStatsResponseWire, AgentRunTotalsWire,
+    AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
     AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
@@ -261,14 +262,16 @@ pub use artifact_ref::{
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
+/// Legacy Rust alias retained for compatibility with older AXE callers.
+pub use axe_chop::ChopChangespecSnapshotWire;
 pub use axe_chop::{
     apply_checkpoint_update, check_and_record_once_per, derive_chop_agent_name,
     evaluate_chop_decision, expand_chop_targets, parse_chop_duration,
     parse_chop_result, release_chop_once_per, split_axe_description,
     validate_axe_config, validate_chop_proposal, validate_chop_result,
     AxeConfigValidationRequestWire, ChopAgentSnapshotWire,
-    ChopChangespecSnapshotWire, ChopCheckpointDocumentWire,
-    ChopCheckpointEntryWire, ChopCheckpointEventWire, ChopCheckpointPolicyWire,
+    ChopCheckpointDocumentWire, ChopCheckpointEntryWire,
+    ChopCheckpointEventWire, ChopCheckpointPolicyWire,
     ChopCheckpointUpdateRequestWire, ChopDecisionRequestWire, ChopDecisionWire,
     ChopEngineError, ChopForEachConfigWire, ChopGitSnapshotWire,
     ChopGuardConfigWire, ChopLaunchProposalWire, ChopOncePerConfigWire,
@@ -604,9 +607,11 @@ pub use runner_limit_override::{
     RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
     RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
 };
+/// Legacy Rust alias retained for compatibility with older status callers.
+pub use status::has_suffix as has_changespec_suffix;
 pub use status::{
     apply_status_update as apply_status_update_lines, get_next_suffix_number,
-    has_suffix as has_changespec_suffix, is_valid_transition,
+    has_suffix as has_patch_suffix, is_valid_transition,
     plan_status_transition, read_status_from_lines, remove_workspace_suffix,
     status_plan_from_json_value, status_request_from_json_value,
     valid_transitions_from, ChangespecChildWire, StatusFieldReadWire,

@@ -2944,7 +2944,7 @@ mod tests {
                     tags: vec![crate::wire::MobileChangeSpecTagEntryWire {
                         tag: "#gh:feature".to_string(),
                         project: Some("sase".to_string()),
-                        changespec: "feature".to_string(),
+                        patch: "feature".to_string(),
                         title: Some("Feature".to_string()),
                         status: "WIP".to_string(),
                         workflow: Some("gh".to_string()),
@@ -4312,6 +4312,7 @@ exit 4
         let (catalog_status, catalog) = json_response_with_state(
             state.clone(),
             Request::builder()
+                // Legacy `changespec` tag filters remain accepted for compatibility.
                 .uri("/api/v1/xprompts/catalog?project=sase&tag=changespec")
                 .header("authorization", auth.clone())
                 .body(Body::empty())

@@ -1,6 +1,6 @@
-//! ChangeSpec name helpers needed by the status planner.
+//! Patch name helpers needed by the status planner.
 //!
-//! Mirrors the subset of `sase_100/src/sase/core/changespec.py` that the
+//! Mirrors the subset of `sase_100/src/sase/core/patch.py` that the
 //! status state machine consumes:
 //!
 //! - [`has_suffix`] — `^.+(?:__|_)\d+$` predicate.
@@ -29,7 +29,7 @@ fn single_underscore_re() -> &'static Regex {
 }
 
 /// Whether *name* carries a `_<N>` (or legacy `__<N>`) reverted suffix.
-/// Mirrors `has_suffix` in `changespec.py`.
+/// Mirrors `has_suffix` in `patch.py`.
 pub fn has_suffix(name: &str) -> bool {
     double_underscore_re().is_match(name)
         || single_underscore_re().is_match(name)
@@ -38,7 +38,7 @@ pub fn has_suffix(name: &str) -> bool {
 /// Find the lowest positive integer N such that neither `<base>_<N>` nor
 /// `<base>__<N>` appears in *existing*.
 ///
-/// Mirrors `get_next_suffix_number` in `changespec.py`. The legacy
+/// Mirrors `get_next_suffix_number` in `patch.py`. The legacy
 /// double-underscore namespace is reserved alongside the current single-
 /// underscore one so the two cannot collide on the same N.
 pub fn get_next_suffix_number(

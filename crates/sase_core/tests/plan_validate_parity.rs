@@ -12,7 +12,7 @@ tier: epic
 title: Workspace GC rewrite
 goal: Stale workspaces are collected safely
 model: claude/opus
-changespec: workspace_gc
+patch: workspace_gc
 bug_id: 123
 parent_bead: sase-7z.1
 bead: sase-88.1

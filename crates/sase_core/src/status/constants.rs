@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-/// All valid STATUS values for ChangeSpecs. Mirrors
+/// All valid STATUS values for Patches. Mirrors
 /// `VALID_STATUSES` in `constants.py`.
 pub const VALID_STATUSES: &[&str] = &[
     "WIP",
@@ -22,7 +22,7 @@ pub const VALID_STATUSES: &[&str] = &[
     "Archived",
 ];
 
-/// Statuses that move a ChangeSpec to the archive file. Mirrors
+/// Statuses that move a Patch to the archive file. Mirrors
 /// `ARCHIVE_STATUSES` in `constants.py`.
 pub const ARCHIVE_STATUSES: &[&str] = &["Submitted", "Archived", "Reverted"];
 

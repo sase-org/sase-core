@@ -246,13 +246,16 @@ fn default_checkpoint_policy() -> ChopCheckpointPolicyWire {
     ChopCheckpointPolicyWire::OnObservation
 }
 
-/// One ChangeSpec row supplied by the Python host.
+/// One Patch row supplied by the Python host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ChopChangespecSnapshotWire {
+pub struct ChopPatchSnapshotWire {
     pub name: String,
     pub status: String,
 }
+
+/// Backward-compatible Rust alias for older callers naming ChangeSpec rows.
+pub type ChopChangespecSnapshotWire = ChopPatchSnapshotWire;
 
 /// One agent row supplied by the Python host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,8 +292,8 @@ pub struct ChopDecisionRequestWire {
     pub inhibit_if: Vec<ChopGuardConfigWire>,
     #[serde(default)]
     pub trigger: ChopTriggerConfigWire,
-    #[serde(default)]
-    pub changespecs: Vec<ChopChangespecSnapshotWire>,
+    #[serde(default, rename = "changespecs", alias = "patches")]
+    pub patches: Vec<ChopPatchSnapshotWire>,
     #[serde(default)]
     pub agents: Vec<ChopAgentSnapshotWire>,
     #[serde(default)]

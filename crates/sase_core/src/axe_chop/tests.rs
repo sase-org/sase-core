@@ -653,7 +653,7 @@ fn guards_short_circuit_triggers() {
             "statuses": ["WIP"]
         }],
         "trigger": {"provider": "always"},
-        "changespecs": [{"name": "fix_just_rollout", "status": "WIP"}],
+        "patches": [{"name": "fix_just_rollout", "status": "WIP"}],
         "now": "2026-07-18T12:00:00Z"
     }))
     .unwrap();
@@ -667,11 +667,13 @@ fn legacy_changespec_guard_provider_deserializes_as_patch() {
     let request: ChopDecisionRequestWire = serde_json::from_value(json!({
         "schema_version": 1,
         "inhibit_if": [{
+            // Legacy provider name remains accepted for compatibility.
             "provider": "changespec",
             "name_prefix": "fix_just",
             "statuses": ["WIP"]
         }],
         "trigger": {"provider": "always"},
+        // Legacy request key remains accepted for compatibility.
         "changespecs": [{"name": "fix_just_rollout", "status": "WIP"}],
         "now": "2026-07-18T12:00:00Z"
     }))

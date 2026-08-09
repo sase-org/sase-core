@@ -11,7 +11,7 @@ const CURRENT_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/current_schema.jsonl");
 const PRE_READY_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/pre_is_ready_to_work_schema.jsonl");
-const PRE_CHANGESPEC_SCHEMA: &str =
+const PRE_PATCH_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
 const CORRUPT_LINES: &str =
     include_str!("fixtures/bead/jsonl/corrupt_lines.jsonl");
@@ -52,11 +52,11 @@ fn legacy_jsonl_fixtures_get_python_defaults() {
     assert_eq!(pre_ready.issues[0].id, "legacy-ready-1");
     assert!(!pre_ready.issues[0].is_ready_to_work);
 
-    let pre_changespec = parse_issues_jsonl(PRE_CHANGESPEC_SCHEMA);
-    assert_eq!(pre_changespec.issues[0].id, "legacy-meta-1");
-    assert_eq!(pre_changespec.issues[0].changespec_name, "");
-    assert_eq!(pre_changespec.issues[0].changespec_bug_id, "");
-    assert_eq!(pre_changespec.issues[0].model, "");
+    let pre_patch = parse_issues_jsonl(PRE_PATCH_SCHEMA);
+    assert_eq!(pre_patch.issues[0].id, "legacy-meta-1");
+    assert_eq!(pre_patch.issues[0].changespec_name, "");
+    assert_eq!(pre_patch.issues[0].changespec_bug_id, "");
+    assert_eq!(pre_patch.issues[0].model, "");
 }
 
 #[test]

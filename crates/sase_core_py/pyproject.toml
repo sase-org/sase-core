@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "sase-core-rs"
 dynamic = ["version"]
-description = "Rust core for the sase TUI/CLI: PyO3 bindings exposing the ChangeSpec parser, query language, agent-artifact scan, status state machine, and git-query parsers."
+description = "Rust core for the sase TUI/CLI: PyO3 bindings exposing the Patch parser, query language, agent-artifact scan, status state machine, and git-query parsers."
 readme = "PYPI_README.md"
 requires-python = ">=3.12"
 license = { text = "MIT OR Apache-2.0" }

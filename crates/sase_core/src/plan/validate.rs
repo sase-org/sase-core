@@ -31,7 +31,8 @@ const SYSTEM_FIELDS: &[&str] = &[
     "parent",
     "bead_id",
 ];
-const EPIC_FIELDS: &[&str] = &["phases", "changespec", "bug_id", "parent_bead"];
+const EPIC_FIELDS: &[&str] =
+    &["phases", "patch", "changespec", "bug_id", "parent_bead"];
 const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
 
@@ -125,7 +126,8 @@ pub struct ValidatedPlanWire {
     pub model: Option<String>,
     pub title: Option<String>,
     pub phases: Vec<PlanPhaseWire>,
-    pub changespec: Option<String>,
+    #[serde(rename = "changespec", alias = "patch")]
+    pub patch: Option<String>,
     pub bug_id: Option<i64>,
     pub parent_bead: Option<String>,
     pub bead: Option<String>,
@@ -260,17 +262,17 @@ pub fn plan_frontmatter_schema(
                 json!("claude/haiku"),
             ),
             field_spec(
-                "changespec",
+                "patch",
                 "non-empty string",
                 false,
-                "ChangeSpec metadata forwarded to the epic bead.",
+                "Patch metadata forwarded to the epic bead.",
                 json!("workspace_gc"),
             ),
             field_spec(
                 "bug_id",
                 "integer",
                 false,
-                "Bug metadata forwarded to the epic bead; requires `changespec`.",
+                "Bug metadata forwarded to the epic bead; requires `patch`.",
                 json!(12345),
             ),
             field_spec(
@@ -425,23 +427,26 @@ impl<'a> Validator<'a> {
             );
         }
 
-        let (phases, changespec, bug_id, parent_bead) = match self.tier {
+        let (phases, patch, bug_id, parent_bead) = match self.tier {
             PlanTier::Tale => (Vec::new(), None, None, None),
             PlanTier::Epic => {
-                let changespec = self.optional_non_empty_string(
-                    mapping,
-                    "changespec",
-                    &index,
-                );
+                let patch = self
+                    .optional_non_empty_string(mapping, "patch", &index)
+                    .or_else(|| {
+                        self.optional_non_empty_string(
+                            mapping,
+                            "changespec",
+                            &index,
+                        )
+                    });
                 let bug_id = self.optional_integer(mapping, "bug_id", &index);
-                if mapping_value(mapping, "bug_id").is_some()
-                    && changespec.is_none()
+                if mapping_value(mapping, "bug_id").is_some() && patch.is_none()
                 {
                     self.push(
                         "error",
-                        "bug-id-without-changespec",
+                        "bug-id-without-patch",
                         "bug_id",
-                        "`bug_id` requires a non-empty `changespec`",
+                        "`bug_id` requires a non-empty `patch`",
                         &index,
                     );
                 }
@@ -451,7 +456,7 @@ impl<'a> Validator<'a> {
                     &index,
                 );
                 let phases = self.validate_phases(mapping, &index);
-                (phases, changespec, bug_id, parent_bead)
+                (phases, patch, bug_id, parent_bead)
             }
         };
 
@@ -465,7 +470,7 @@ impl<'a> Validator<'a> {
             model,
             title,
             phases,
-            changespec,
+            patch,
             bug_id,
             parent_bead,
             bead,
@@ -1281,7 +1286,7 @@ mod tests {
     }
 
     fn valid_epic() -> &'static str {
-        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\nchangespec: plan_validate\nbug_id: 61\nparent_bead: ' sase-7z.1 '\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n    size: medium\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    size: small\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
+        "---\ntier: epic\ntitle: Validation engine\ngoal: Plans validate deterministically\nmodel: claude/opus\npatch: plan_validate\nbug_id: 61\nparent_bead: ' sase-7z.1 '\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nphases:\n  - id: core\n    title: Core validator\n    depends_on: []\n    description: Core validator section builds the shared validation engine.\n    size: medium\n  - id: parity\n    title: Parity coverage\n    depends_on: [core]\n    description: Parity coverage section exercises the binding.\n    size: small\n    model: claude/haiku\n---\n# Plan\nImplement it.\n"
     }
 
     #[test]
@@ -1299,7 +1304,7 @@ mod tests {
                 model: Some("codex/gpt-5.6-sol".to_string()),
                 title: Some("Ship the feature".to_string()),
                 phases: Vec::new(),
-                changespec: None,
+                patch: None,
                 bug_id: None,
                 parent_bead: None,
                 bead: Some("sase-88.1".to_string()),
@@ -1371,7 +1376,7 @@ mod tests {
 
     #[test]
     fn tale_epic_fields_are_inert_warnings() {
-        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\nchangespec: ''\nbug_id: nope\nparent_bead: sase-7z.1\n---\nbody\n";
+        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\npatch: ''\nbug_id: nope\nparent_bead: sase-7z.1\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert_eq!(
@@ -1425,7 +1430,7 @@ mod tests {
         assert_eq!(codes(&result), ["parent-frontmatter-deprecated"]);
         let plan = result.plan.unwrap();
         assert_eq!(plan.title.as_deref(), Some("Validation engine"));
-        assert_eq!(plan.changespec.as_deref(), Some("plan_validate"));
+        assert_eq!(plan.patch.as_deref(), Some("plan_validate"));
         assert_eq!(plan.bug_id, Some(61));
         assert_eq!(plan.parent_bead.as_deref(), Some("sase-7z.1"));
         assert_eq!(plan.bead.as_deref(), Some("sase-88.1"));
@@ -1437,6 +1442,21 @@ mod tests {
         assert_eq!(plan.phases[0].size, "medium");
         assert_eq!(plan.phases[1].depends_on, ["core"]);
         assert_eq!(plan.phases[1].model.as_deref(), Some("claude/haiku"));
+    }
+
+    #[test]
+    fn legacy_changespec_frontmatter_key_validates_as_patch() {
+        // Legacy plan frontmatter remains accepted for compatibility.
+        let content = valid_epic().replace(
+            "patch: plan_validate",
+            "changespec: plan_validate", // legacy frontmatter key
+        );
+        let result = plan_validate(&content, "epic").unwrap();
+        assert!(result.ok, "{:?}", result.diagnostics);
+        assert_eq!(
+            result.plan.unwrap().patch.as_deref(),
+            Some("plan_validate")
+        );
     }
 
     #[test]
@@ -1471,7 +1491,7 @@ mod tests {
                     size: "small".to_string(),
                     model: None,
                 }],
-                changespec: None,
+                patch: None,
                 bug_id: None,
                 parent_bead: None,
                 bead: None,
@@ -1483,7 +1503,7 @@ mod tests {
 
     #[test]
     fn epic_top_level_rules_all_report() {
-        let content = "---\ntier: epic\ngoal: outcome\ntitle: 42\nchangespec: ''\nbug_id: nope\nphases: []\n---\nbody\n";
+        let content = "---\ntier: epic\ngoal: outcome\ntitle: 42\npatch: ''\nbug_id: nope\nphases: []\n---\nbody\n";
         let result = plan_validate(content, "epic").unwrap();
         assert_eq!(
             codes(&result),
@@ -1491,16 +1511,14 @@ mod tests {
                 "type-mismatch",
                 "value-empty",
                 "type-mismatch",
-                "bug-id-without-changespec",
+                "bug-id-without-patch",
                 "phases-empty"
             ]
         );
 
-        let bug_without_changespec = "---\ntier: epic\ngoal: outcome\ntitle: title\nbug_id: 7\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    size: small\n---\nbody\n";
-        assert!(
-            codes(&plan_validate(bug_without_changespec, "epic").unwrap())
-                .contains(&"bug-id-without-changespec")
-        );
+        let bug_without_patch = "---\ntier: epic\ngoal: outcome\ntitle: title\nbug_id: 7\nphases:\n  - id: core\n    title: Core\n    depends_on: []\n    size: small\n---\nbody\n";
+        assert!(codes(&plan_validate(bug_without_patch, "epic").unwrap())
+            .contains(&"bug-id-without-patch"));
     }
 
     #[test]
@@ -1778,7 +1796,7 @@ mod tests {
                 "phases[].description",
                 "phases[].size",
                 "phases[].model",
-                "changespec",
+                "patch",
                 "bug_id",
                 "parent_bead",
                 "create_time",

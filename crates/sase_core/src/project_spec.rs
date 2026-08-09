@@ -693,7 +693,7 @@ fn read_project_name_from_content(content: &str) -> ProjectNameParse {
 
 /// Return the valid configured project display name from the metadata header.
 ///
-/// ChangeSpec parsing uses this narrow helper so query metadata follows the
+/// Patch parsing uses this narrow helper so query metadata follows the
 /// same validation and first-value semantics as lifecycle discovery.
 pub(crate) fn project_display_name_from_content(
     content: &str,

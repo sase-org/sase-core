@@ -479,7 +479,7 @@ pub fn changespec_metadata_migration_sql(
             "changespec_bug_id" => {
                 "ALTER TABLE issues ADD COLUMN changespec_bug_id TEXT NOT NULL DEFAULT ''"
             }
-            _ => unreachable!("unknown changespec metadata column"),
+            _ => unreachable!("unknown patch metadata column"),
         })
         .collect()
 }

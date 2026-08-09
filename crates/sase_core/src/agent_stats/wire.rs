@@ -37,7 +37,8 @@ pub enum AgentStatsRuntimeGroupByWire {
     Model,
     Workflow,
     Project,
-    Changespec,
+    #[serde(alias = "changespec")]
+    Patch,
 }
 
 /// Query controls for one composite agent-run statistics snapshot.
@@ -56,7 +57,7 @@ pub struct AgentRunStatsRequestWire {
     /// Exact artifact-index project name to include, or every project.
     #[serde(default)]
     pub project: Option<String>,
-    /// Maximum number of ChangeSpec work rows returned.
+    /// Maximum number of Patch work rows returned.
     #[serde(default = "default_work_top_n")]
     pub work_top_n: u32,
     /// Maximum number of ranked xprompt rows returned.
@@ -207,15 +208,16 @@ pub struct AgentProjectWorkStatsWire {
     pub waiting: u64,
     pub success_rate: f64,
     pub commits: u64,
-    pub distinct_changespecs: u64,
+    #[serde(rename = "distinct_changespecs", alias = "distinct_patches")]
+    pub distinct_patches: u64,
     pub unattributed_runs: u64,
     pub total_runtime_seconds: f64,
     pub last_run_ts: f64,
 }
 
-/// Work attributed to one ChangeSpec in one project.
+/// Work attributed to one Patch in one project.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct AgentChangeSpecWorkStatsWire {
+pub struct AgentPatchWorkStatsWire {
     pub project: String,
     pub name: String,
     pub status: String,
@@ -228,15 +230,22 @@ pub struct AgentChangeSpecWorkStatsWire {
     pub last_run_ts: f64,
 }
 
-/// Per-project and per-ChangeSpec work attribution for a run snapshot.
+/// Backward-compatible Rust alias for older callers naming ChangeSpec rows.
+pub type AgentChangeSpecWorkStatsWire = AgentPatchWorkStatsWire;
+
+/// Per-project and per-Patch work attribution for a run snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentWorkStatsWire {
     #[serde(default)]
     pub projects: Vec<AgentProjectWorkStatsWire>,
-    #[serde(default)]
-    pub changespecs: Vec<AgentChangeSpecWorkStatsWire>,
+    #[serde(default, rename = "changespecs", alias = "patches")]
+    pub patches: Vec<AgentPatchWorkStatsWire>,
     pub unattributed_runs: u64,
-    pub truncated_changespec_rows: u64,
+    #[serde(
+        rename = "truncated_changespec_rows",
+        alias = "truncated_patch_rows"
+    )]
+    pub truncated_patch_rows: u64,
     /// Missing, unreadable, or malformed active/archive project files.
     pub malformed_spec_files_skipped: u64,
 }

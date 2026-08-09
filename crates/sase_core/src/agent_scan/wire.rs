@@ -193,7 +193,7 @@ pub struct AgentMetaWire {
     pub artifact_agent_id: Option<String>,
     #[serde(default)]
     pub artifact_source_dir: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "patch_name")]
     pub changespec_name: Option<String>,
     #[serde(default)]
     pub cl_name: Option<String>,
@@ -217,7 +217,7 @@ pub struct AgentMetaWire {
     pub epic_bead_id: Option<String>,
     #[serde(default)]
     pub phase_bead_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "commit_patch_name")]
     pub commit_changespec_name: Option<String>,
     #[serde(default)]
     pub commit_entry_id: Option<String>,

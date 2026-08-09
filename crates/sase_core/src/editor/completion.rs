@@ -1928,6 +1928,7 @@ fn vcs_project_entry_kind(entry: &VcsProjectEntry) -> &str {
         entry.entry_kind.as_str()
     };
     match raw_kind {
+        // Legacy completion metadata maps to the canonical patch kind.
         "changespec" => "patch",
         "patch" => "patch",
         _ => "project",
@@ -5691,7 +5692,7 @@ mod tests {
             &doc,
             &context,
             &[
-                changespec_entry("ship-completion", "sase", "Ready"),
+                patch_entry("ship-completion", "sase", "Ready"),
                 project_entry("sase", "gh"),
                 project_entry("bob", "git"),
             ],
@@ -5763,11 +5764,7 @@ mod tests {
         }
     }
 
-    fn changespec_entry(
-        name: &str,
-        project: &str,
-        status: &str,
-    ) -> VcsProjectEntry {
+    fn patch_entry(name: &str, project: &str, status: &str) -> VcsProjectEntry {
         VcsProjectEntry {
             name: name.to_string(),
             vcs_prefix: "gh".to_string(),
@@ -5776,13 +5773,14 @@ mod tests {
             description: String::new(),
             aliases: Vec::new(),
             entry_kind: "patch".to_string(),
+            // Legacy backing kind remains in fixtures for compatibility.
             kind: "changespec".to_string(),
             project: project.to_string(),
             status: status.to_string(),
         }
     }
 
-    fn legacy_changespec_entry(
+    fn legacy_patch_entry(
         name: &str,
         project: &str,
         status: &str,
@@ -5795,6 +5793,7 @@ mod tests {
             description: String::new(),
             aliases: Vec::new(),
             entry_kind: String::new(),
+            // Legacy backing kind remains accepted for compatibility.
             kind: "changespec".to_string(),
             project: project.to_string(),
             status: status.to_string(),
@@ -6041,7 +6040,7 @@ mod tests {
             cursor,
             &[
                 project_entry("sase", "gh"),
-                changespec_entry("ship-completion", "sase", "Ready"),
+                patch_entry("ship-completion", "sase", "Ready"),
             ],
             &vcs_names(),
         );
@@ -6065,7 +6064,7 @@ mod tests {
             token,
             &doc,
             cursor,
-            &[legacy_changespec_entry("ship-completion", "sase", "Ready")],
+            &[legacy_patch_entry("ship-completion", "sase", "Ready")],
             &vcs_names(),
         );
 

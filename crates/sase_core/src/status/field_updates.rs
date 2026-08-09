@@ -5,21 +5,21 @@
 //! helpers are line-oriented and side-effect free; the host owns the file
 //! lock and atomic write.
 
-/// Read the STATUS for a named ChangeSpec from a sequence of file lines.
+/// Read the STATUS for a named Patch from a sequence of file lines.
 ///
-/// Iterates lines in order, tracking the current ChangeSpec via `NAME:`
+/// Iterates lines in order, tracking the current Patch via `NAME:`
 /// headers. Returns the value following `STATUS:` for the matching record,
 /// preserving any workspace suffix as written. Returns `None` when the
-/// ChangeSpec is not present in *lines*.
+/// Patch is not present in *lines*.
 pub fn read_status_from_lines(
     lines: &[String],
-    changespec_name: &str,
+    patch_name: &str,
 ) -> Option<String> {
     let mut in_target = false;
     for line in lines {
         if let Some(rest) = line.strip_prefix("NAME:") {
             let current = rest.split_once('\n').map(|(s, _)| s).unwrap_or(rest);
-            in_target = current.trim() == changespec_name;
+            in_target = current.trim() == patch_name;
         }
         if in_target {
             if let Some(rest) = line.strip_prefix("STATUS:") {
@@ -32,12 +32,12 @@ pub fn read_status_from_lines(
     None
 }
 
-/// Replace the STATUS line of *changespec_name* in *lines* with
+/// Replace the STATUS line of *patch_name* in *lines* with
 /// `STATUS: <new_status>\n`.
 ///
 /// Returns the updated file content as a single string. Lines that do not
-/// belong to the target ChangeSpec — including `STATUS:` lines for other
-/// ChangeSpecs — pass through verbatim. When *changespec_name* is not
+/// belong to the target Patch — including `STATUS:` lines for other
+/// Patches — pass through verbatim. When *patch_name* is not
 /// present, the input is returned unchanged.
 ///
 /// Mirrors `apply_status_update_python` exactly: the target flag is
@@ -46,7 +46,7 @@ pub fn read_status_from_lines(
 /// touched.
 pub fn apply_status_update(
     lines: &[String],
-    changespec_name: &str,
+    patch_name: &str,
     new_status: &str,
 ) -> String {
     let total_capacity: usize = lines.iter().map(|l| l.len()).sum();
@@ -55,7 +55,7 @@ pub fn apply_status_update(
     for line in lines {
         if let Some(rest) = line.strip_prefix("NAME:") {
             let current = rest.split_once('\n').map(|(s, _)| s).unwrap_or(rest);
-            in_target = current.trim() == changespec_name;
+            in_target = current.trim() == patch_name;
         }
         if in_target && line.starts_with("STATUS:") {
             updated.push_str("STATUS: ");
@@ -79,7 +79,7 @@ mod tests {
 
     fn project_lines() -> Vec<String> {
         lines(&[
-            "## ChangeSpec\n",
+            "## Patch\n",
             "\n",
             "NAME: alpha\n",
             "DESCRIPTION:\n",
@@ -88,7 +88,7 @@ mod tests {
             "\n",
             "---\n",
             "\n",
-            "## ChangeSpec\n",
+            "## Patch\n",
             "\n",
             "NAME: beta\n",
             "DESCRIPTION:\n",
@@ -100,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn read_status_matches_first_changespec() {
+    fn read_status_matches_first_patch() {
         assert_eq!(
             read_status_from_lines(&project_lines(), "alpha").as_deref(),
             Some("Ready")
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn read_status_matches_second_changespec() {
+    fn read_status_matches_second_patch() {
         assert_eq!(
             read_status_from_lines(&project_lines(), "beta").as_deref(),
             Some("Draft")
@@ -133,7 +133,7 @@ mod tests {
     fn apply_status_update_replaces_only_target_status() {
         let updated = apply_status_update(&project_lines(), "alpha", "Mailed");
         assert!(updated.contains("STATUS: Mailed\n"));
-        // Other ChangeSpec untouched.
+        // Other Patch untouched.
         assert!(updated.contains("STATUS: Draft\n"));
         // Replaced original gone.
         assert!(!updated.contains("STATUS: Ready\n"));
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_status_update_no_matching_changespec_is_noop() {
+    fn apply_status_update_no_matching_patch_is_noop() {
         let pls = project_lines();
         let updated = apply_status_update(&pls, "gamma", "Mailed");
         assert_eq!(updated, pls.concat());

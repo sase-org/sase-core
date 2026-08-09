@@ -86,7 +86,7 @@ client-supplied host paths.
 
 Workflow helper routes call fixed `sase mobile helper-bridge <operation>` commands through the helper host bridge. They
 do not accept mobile-supplied shell commands, cwd values, environment variables, project file paths, or arbitrary bridge
-argv. ChangeSpec, xprompt, and bead helpers are read-only; the only mutating helper route starts the preconfigured
+argv. Patch, xprompt, and bead helpers are read-only; the only mutating helper route starts the preconfigured
 update worker.
 
 `GET /api/v1/xprompts/catalog` preserves the Python helper bridge's xprompt editor metadata. Entries may include
@@ -226,6 +226,7 @@ Use workflow helper APIs for native mobile pickers and update status:
 curl -sS "$BASE_URL/api/v1/changespec-tags?project=sase&limit=25" \
   -H "$AUTH_HEADER"
 
+# Legacy `changespec` tag filters remain accepted for compatibility.
 curl -sS "$BASE_URL/api/v1/xprompts/catalog?project=sase&tag=changespec&limit=50" \
   -H "$AUTH_HEADER"
 

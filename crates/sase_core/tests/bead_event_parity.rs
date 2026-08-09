@@ -12,7 +12,7 @@ const EVENT_ROUNDTRIP_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/event_roundtrip_schema.jsonl");
 const CURRENT_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/current_schema.jsonl");
-const PRE_CHANGESPEC_SCHEMA: &str =
+const PRE_PATCH_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/pre_changespec_metadata_schema.jsonl");
 const CORRUPT_LINES: &str =
     include_str!("fixtures/bead/jsonl/corrupt_lines.jsonl");
@@ -119,7 +119,7 @@ fn event_import_mints_reproducible_content_hashed_ids() {
 
 #[test]
 fn event_import_preserves_legacy_defaults_and_corrupt_jsonl_tolerance() {
-    for input in [CURRENT_SCHEMA, PRE_CHANGESPEC_SCHEMA, CORRUPT_LINES] {
+    for input in [CURRENT_SCHEMA, PRE_PATCH_SCHEMA, CORRUPT_LINES] {
         let outcome = parse_issues_jsonl(input);
         let streams = import_issues_to_event_streams(&outcome.issues).unwrap();
         let reduced = reduce_event_streams(&streams).unwrap();

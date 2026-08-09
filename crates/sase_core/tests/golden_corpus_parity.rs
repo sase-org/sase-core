@@ -1,6 +1,6 @@
 //! Phase 1C parity gate: parse the canonical golden corpus and compare
 //! against the same JSON shape `sase_100`'s Python parser produces (via
-//! `tests/test_core_golden.py::test_changespec_wire_json_snapshot`).
+//! `tests/test_core_golden.py::test_patch_wire_json_snapshot`).
 //!
 //! The fixtures under `tests/fixtures/` are byte-for-byte copies of
 //! `sase_100/tests/core_golden/*.sase`. The expected JSON is embedded as
@@ -9,7 +9,7 @@
 //!
 //! ## Documented normalization: `source_span.end_line`
 //!
-//! Python's `changespec_to_wire` defaults `end_line == start_line` because
+//! Legacy Python `changespec_to_wire` defaults `end_line == start_line` because
 //! the Python parser doesn't track end positions. Rust's parser tracks
 //! real end lines, which the plan in
 //! `sase_100/plans/202604/rust_backend_phase1.md` explicitly calls out as

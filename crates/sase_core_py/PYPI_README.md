@@ -11,7 +11,7 @@ without a local Rust toolchain.
 
 ## Provided functions
 
-- `parse_project_bytes(path, data)` — ChangeSpec parser.
+- `parse_project_bytes(path, data)` — Patch parser.
 - `tokenize_query`, `parse_query`, `canonicalize_query`,
   `evaluate_query_many` — query language.
 - `scan_agent_artifacts(projects_root, options=None)` — agent-artifact

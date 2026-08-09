@@ -319,7 +319,7 @@ fn handle_show(
         && (!issue.changespec_name.is_empty()
             || !issue.changespec_bug_id.is_empty())
     {
-        stdout.push_str("\nCHANGESPEC\n");
+        stdout.push_str("\nPATCH\n");
         if !issue.changespec_name.is_empty() {
             writeln!(stdout, "  Name: {}", issue.changespec_name)
                 .expect("writing to String cannot fail");
@@ -549,7 +549,7 @@ fn handle_create(
             || !parsed.changespec_bug_id.is_empty())
     {
         return Ok(error(
-            "Error: ChangeSpec metadata can only be attached to plan beads\n"
+            "Error: Patch metadata can only be attached to plan beads\n"
                 .to_string(),
         ));
     }

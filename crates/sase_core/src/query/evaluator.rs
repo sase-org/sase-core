@@ -4,7 +4,7 @@
 //!
 //! - [`compile_query`] turns a query string into a [`QueryProgram`] (parsed
 //!   AST plus the original source).
-//! - [`QueryCorpus`] owns a ChangeSpec list plus reusable per-corpus derived
+//! - [`QueryCorpus`] owns a Patch list plus reusable per-corpus derived
 //!   data such as parent lookup, base statuses, project names, sibling bases,
 //!   and searchable text.
 //! - [`QueryEvaluationContext`] holds query-specific state. Today that is
@@ -79,7 +79,7 @@ pub fn compile_query(query: &str) -> Result<QueryProgram, QueryErrorWire> {
     Ok(QueryProgram::new(query, expr))
 }
 
-/// Persistent ChangeSpec corpus used across many query evaluations.
+/// Persistent Patch corpus used across many query evaluations.
 ///
 /// This owns the wire specs and the expensive or repeated derived values that
 /// depend only on the corpus, not on a particular query. A single

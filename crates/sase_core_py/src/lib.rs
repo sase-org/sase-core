@@ -230,7 +230,7 @@
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
 //! - `agent_stats_query_runs(index_path: str, request: dict) -> dict` (run,
-//!   runtime, project, and ChangeSpec work rollups)
+//!   runtime, project, and Patch work rollups)
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
 //!   `-> dict` (project-filterable skills and memories plus global documents)
 //! - `compose_snippet_catalog(templates: dict[str, str]) -> dict`
@@ -1379,7 +1379,7 @@ fn py_parse_commit_subject<'py>(
     json_value_to_py(py, &value)
 }
 
-/// Compile a persistent ChangeSpec corpus from Python wire dicts.
+/// Compile a persistent Patch corpus from Python wire dicts.
 ///
 /// Python dicts are converted to `ChangeSpecWire` before the GIL is released;
 /// the reusable corpus indexes and searchable text are then built without
@@ -1390,7 +1390,7 @@ fn py_compile_corpus<'py>(
     py: Python<'py>,
     specs: &Bound<'py, PyList>,
 ) -> PyResult<PyQueryCorpusHandle> {
-    let wire_specs = changespecs_from_py_list(specs)?;
+    let wire_specs = patches_from_py_list(specs)?;
     let corpus = py.allow_threads(|| CoreQueryCorpus::new(wire_specs));
     Ok(PyQueryCorpusHandle { corpus })
 }
@@ -1433,7 +1433,7 @@ fn py_evaluate_many<'py>(
 ///
 /// `specs` must be a `list[dict]` matching the JSON shape of
 /// `sase_core::wire::ChangeSpecWire` (i.e. the dicts produced by
-/// `sase.core.wire.to_json_dict(changespec_to_wire(cs))`).
+/// `sase.core.wire.to_json_dict(changespec_to_wire(cs))` legacy compatibility).
 ///
 /// Compiles the query, builds a per-list `QueryEvaluationContext`, and
 /// evaluates the program against every spec. Returns `list[bool]` of the
@@ -1445,7 +1445,7 @@ fn py_evaluate_query_many<'py>(
     query: &str,
     specs: &Bound<'py, PyList>,
 ) -> PyResult<Bound<'py, PyList>> {
-    let wire_specs = changespecs_from_py_list(specs)?;
+    let wire_specs = patches_from_py_list(specs)?;
     let program =
         sase_core::compile_query(query).map_err(query_error_to_pyerr)?;
     let results = py.allow_threads(|| {
@@ -2435,15 +2435,16 @@ fn py_is_valid_status_transition(from_status: &str, to_status: &str) -> bool {
     core_is_valid_transition(from_status, to_status)
 }
 
-/// Read the STATUS for *changespec_name* from a list of project-file lines.
+/// Read the STATUS for the requested Patch name from a list of project-file lines.
 ///
 /// Mirrors `sase.status_state_machine.field_updates.read_status_from_lines_python`.
-/// Returns `None` when the ChangeSpec is not present.
+/// Returns `None` when the Patch is not present.
 #[pyfunction]
 #[pyo3(name = "read_status_from_lines")]
 fn py_read_status_from_lines<'py>(
     py: Python<'py>,
     lines: &Bound<'py, PyList>,
+    // Legacy Python keyword retained for compatibility.
     changespec_name: &str,
 ) -> PyResult<PyObject> {
     let mut owned: Vec<String> = Vec::with_capacity(lines.len());
@@ -2468,6 +2469,7 @@ fn py_read_status_from_lines<'py>(
 #[pyo3(name = "apply_status_update")]
 fn py_apply_status_update<'py>(
     lines: &Bound<'py, PyList>,
+    // Legacy Python keyword retained for compatibility.
     changespec_name: &str,
     new_status: &str,
 ) -> PyResult<String> {
@@ -2485,7 +2487,7 @@ fn py_apply_status_update<'py>(
     ))
 }
 
-/// Plan a status transition for one ChangeSpec.
+/// Plan a status transition for one Patch.
 ///
 /// *request* must be a `StatusTransitionRequestWire`-shape dict (see
 /// `sase.core.status_wire`). The result is a
@@ -5301,7 +5303,7 @@ fn bead_error_to_pyerr(err: BeadError) -> PyErr {
     PyValueError::new_err(format!("{err}"))
 }
 
-fn changespecs_from_py_list(
+fn patches_from_py_list(
     specs: &Bound<'_, PyList>,
 ) -> PyResult<Vec<ChangeSpecWire>> {
     let mut wire_specs: Vec<ChangeSpecWire> = Vec::with_capacity(specs.len());
@@ -11626,8 +11628,9 @@ MENTORS:
                 json!(60.0)
             );
             assert_eq!(result["work"]["projects"][0]["project"], json!("proj"));
+            // Legacy JSON key is still emitted for compatibility.
             assert_eq!(
-                result["work"]["changespecs"][0]["name"],
+                result["work"]["changespecs"][0]["name"], // legacy JSON key
                 json!("binding-spec")
             );
             assert_eq!(result["runners"]["start_ts"], json!(100.0));

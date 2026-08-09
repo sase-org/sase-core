@@ -320,7 +320,7 @@ fn add_bundle_candidate(
     seen: &mut BTreeSet<AgentCleanupIdentityWire>,
     target: &AgentCleanupTargetWire,
 ) {
-    if target.from_changespec {
+    if target.from_patch {
         return;
     }
     if seen.insert(target.identity.clone()) {
@@ -847,7 +847,7 @@ mod tests {
             raw_suffix: raw_suffix.map(str::to_string),
             project_file: Some("/tmp/project.sase".to_string()),
             artifacts_dir: Some("/tmp/artifacts".to_string()),
-            from_changespec: false,
+            from_patch: false,
             workspace: None,
             tribe: None,
             agent_clan: None,

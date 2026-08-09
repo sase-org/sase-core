@@ -1,7 +1,7 @@
 //! Predicates and helpers used during query evaluation.
 //!
 //! Mirrors `src/sase/ace/query/matchers.py` and the suffix-related helpers in
-//! `src/sase/ace/changespec/validation.py`. Substring matching only — no
+//! `src/sase/ace/patch/validation.py`. Substring matching only — no
 //! regex is exposed to query authors. The two regex helpers below are
 //! private status strippers (Python: `_WORKSPACE_SUFFIX_RE` /
 //! `_LEGACY_READY_TO_MAIL_RE`).
@@ -35,7 +35,7 @@ pub fn get_base_status(status: &str) -> String {
 }
 
 /// Strip the trailing `_<N>` (or legacy `__<N>`) reverted suffix from a
-/// ChangeSpec name. Mirrors `sase.core.changespec.strip_reverted_suffix` —
+/// Patch name. Mirrors `sase.core.patch.strip_reverted_suffix` —
 /// the double-underscore form is checked first so `name__123` returns
 /// `name` rather than `name_`.
 pub fn strip_reverted_suffix(name: &str) -> String {
@@ -52,7 +52,7 @@ pub fn strip_reverted_suffix(name: &str) -> String {
     name.to_string()
 }
 
-/// Detect the `(!: ...)` error-suffix marker anywhere on a ChangeSpec
+/// Detect the `(!: ...)` error-suffix marker anywhere on a Patch
 /// (STATUS, COMMITS, HOOKS, COMMENTS). Mirrors
 /// `has_any_status_suffix` in `validation.py` — used to evaluate the `!!!`
 /// shorthand without scanning searchable text.
@@ -91,7 +91,7 @@ pub fn match_project(value: &str, cs: &ChangeSpecWire) -> bool {
     effective_project_name(cs).eq_ignore_ascii_case(value)
 }
 
-/// `name:<value>` — case-insensitive exact match on the ChangeSpec NAME.
+/// `name:<value>` — case-insensitive exact match on the Patch NAME.
 pub fn match_name(value: &str, cs: &ChangeSpecWire) -> bool {
     cs.name.eq_ignore_ascii_case(value)
 }

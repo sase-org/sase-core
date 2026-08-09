@@ -16,17 +16,15 @@ pub fn evaluate_chop_decision(
                 name_prefix,
                 statuses,
             } => {
-                if let Some(changespec) =
-                    request.changespecs.iter().find(|row| {
-                        row.name.starts_with(name_prefix)
-                            && status_matches(&row.status, statuses)
-                    })
-                {
+                if let Some(patch) = request.patches.iter().find(|row| {
+                    row.name.starts_with(name_prefix)
+                        && status_matches(&row.status, statuses)
+                }) {
                     return Ok(decision(
                         "skip",
                         format!(
                             "inhibited by Patch `{}` in status `{}`",
-                            changespec.name, changespec.status
+                            patch.name, patch.status
                         ),
                         Some("patch"),
                     ));

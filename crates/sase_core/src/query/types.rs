@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The internal expansion of the `!!!` shorthand (matches error-suffix markers
-/// inside `ChangeSpec` text). Mirrors `ERROR_SUFFIX_QUERY` in Python.
+/// inside `Patch` text). Mirrors `ERROR_SUFFIX_QUERY` in Python.
 pub const ERROR_SUFFIX_QUERY: &str = " - (!: ";
 
 /// Internal marker for `@@@` (running-agent) — mirrors `RUNNING_AGENT_QUERY`.

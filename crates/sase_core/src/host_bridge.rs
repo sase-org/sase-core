@@ -617,7 +617,8 @@ pub struct MobileChangeSpecTagListResponseWire {
 pub struct MobileChangeSpecTagEntryWire {
     pub tag: String,
     pub project: Option<String>,
-    pub changespec: String,
+    #[serde(rename = "changespec", alias = "patch")]
+    pub patch: String,
     pub title: Option<String>,
     pub status: String,
     pub workflow: Option<String>,

@@ -1,5 +1,5 @@
 //! Per-section line parsers — direct ports of
-//! `sase_100/src/sase/ace/changespec/section_parsers.py`.
+//! `sase_100/src/sase/ace/patch/section_parsers.py`.
 //!
 //! Each function reads one line at a time and folds it into the parser
 //! state's running entry collections. Unknown shapes are quietly ignored

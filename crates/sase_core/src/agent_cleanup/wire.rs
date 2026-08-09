@@ -72,8 +72,8 @@ pub struct AgentCleanupTargetWire {
     pub project_file: Option<String>,
     #[serde(default)]
     pub artifacts_dir: Option<String>,
-    #[serde(default)]
-    pub from_changespec: bool,
+    #[serde(default, rename = "from_changespec", alias = "from_patch")]
+    pub from_patch: bool,
     #[serde(default)]
     pub workspace: Option<i64>,
     #[serde(default)]

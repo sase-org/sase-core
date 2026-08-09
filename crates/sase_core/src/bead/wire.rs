@@ -538,7 +538,7 @@ impl IssueWire {
                 || !self.changespec_bug_id.is_empty())
         {
             return Err(BeadError::validation(
-                "Only plan issues can carry ChangeSpec metadata",
+                "Only plan issues can carry Patch metadata",
             ));
         }
         if self.status == StatusWire::Ready
@@ -918,7 +918,7 @@ mod tests {
         issue.changespec_name = "not_allowed".to_string();
         assert_eq!(
             issue.validate().unwrap_err().message,
-            "Only plan issues can carry ChangeSpec metadata"
+            "Only plan issues can carry Patch metadata"
         );
     }
 

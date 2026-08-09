@@ -3,7 +3,7 @@
 //!
 //! Keeping these types here (separate from `crate::wire`) matches the
 //! Python module split: the status wire evolves on its own
-//! `STATUS_WIRE_SCHEMA_VERSION` independently of the ChangeSpec parser
+//! `STATUS_WIRE_SCHEMA_VERSION` independently of the Patch parser
 //! wire's `CHANGESPEC_WIRE_SCHEMA_VERSION`.
 //!
 //! JSON shape rules (mirroring the Python dataclasses and enforced by
@@ -51,7 +51,8 @@ pub struct ChangespecChildWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusTransitionRequestWire {
     pub schema_version: u32,
-    pub changespec_name: String,
+    #[serde(rename = "changespec_name", alias = "patch_name")]
+    pub patch_name: String,
     pub old_status: String,
     pub new_status: String,
     pub validate: bool,
@@ -110,11 +111,12 @@ fn default_archive_action() -> String {
 /// Inputs for `read_status_from_lines`. Mirrors `StatusFieldReadWire` in
 /// `status_wire.py`. Provided as a structured type so the PyO3 binding can
 /// accept the same shape as the dataclass (`{"lines": [...],
-/// "changespec_name": "..."}`).
+/// "patch_name": "..."}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusFieldReadWire {
     pub lines: Vec<String>,
-    pub changespec_name: String,
+    #[serde(rename = "changespec_name", alias = "patch_name")]
+    pub patch_name: String,
 }
 
 /// Inputs for `apply_status_update`. Mirrors `StatusFieldUpdateWire` in
@@ -122,7 +124,8 @@ pub struct StatusFieldReadWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusFieldUpdateWire {
     pub lines: Vec<String>,
-    pub changespec_name: String,
+    #[serde(rename = "changespec_name", alias = "patch_name")]
+    pub patch_name: String,
     pub new_status: String,
 }
 
@@ -179,7 +182,7 @@ mod tests {
     fn request_round_trips_through_json() {
         let req = StatusTransitionRequestWire {
             schema_version: STATUS_WIRE_SCHEMA_VERSION,
-            changespec_name: "proj_foo".into(),
+            patch_name: "proj_foo".into(),
             old_status: "Ready (proj_2)".into(),
             new_status: "Draft".into(),
             validate: true,
@@ -222,7 +225,7 @@ mod tests {
     fn schema_mismatch_returns_error() {
         let bad_request = json!({
             "schema_version": STATUS_WIRE_SCHEMA_VERSION + 99,
-            "changespec_name": "x",
+            "patch_name": "x",
             "old_status": "WIP",
             "new_status": "Draft",
             "validate": true,

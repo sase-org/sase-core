@@ -1261,7 +1261,7 @@ mod tests {
             warnings: vec!["one project could not be read".to_string()],
             skipped: vec![MobileHelperSkippedWire {
                 target: Some("archive.sase".to_string()),
-                reason: "terminal changespec".to_string(),
+                reason: "terminal patch".to_string(),
             }],
             partial_failure_count: Some(1),
         };
@@ -1278,7 +1278,7 @@ mod tests {
                 tags: vec![MobileChangeSpecTagEntryWire {
                     tag: "#gh:feature".to_string(),
                     project: Some("sase".to_string()),
-                    changespec: "feature".to_string(),
+                    patch: "feature".to_string(),
                     title: Some("Feature work".to_string()),
                     status: "WIP".to_string(),
                     workflow: Some("gh".to_string()),
@@ -1297,7 +1297,7 @@ mod tests {
                     "warnings": ["one project could not be read"],
                     "skipped": [{
                         "target": "archive.sase",
-                        "reason": "terminal changespec"
+                        "reason": "terminal patch"
                     }],
                     "partial_failure_count": 1
                 },
@@ -1381,7 +1381,7 @@ mod tests {
                     "warnings": ["one project could not be read"],
                     "skipped": [{
                         "target": "archive.sase",
-                        "reason": "terminal changespec"
+                        "reason": "terminal patch"
                     }],
                     "partial_failure_count": 1
                 },
@@ -1475,7 +1475,7 @@ mod tests {
                     "warnings": ["one project could not be read"],
                     "skipped": [{
                         "target": "archive.sase",
-                        "reason": "terminal changespec"
+                        "reason": "terminal patch"
                     }],
                     "partial_failure_count": 1
                 },
@@ -1537,7 +1537,7 @@ mod tests {
                     "warnings": ["one project could not be read"],
                     "skipped": [{
                         "target": "archive.sase",
-                        "reason": "terminal changespec"
+                        "reason": "terminal patch"
                     }],
                     "partial_failure_count": 1
                 },

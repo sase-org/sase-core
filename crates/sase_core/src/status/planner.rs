@@ -23,11 +23,11 @@ use super::wire::{
     SUFFIX_ACTION_NONE, SUFFIX_ACTION_STRIP,
 };
 
-/// Reproduce the `transition_changespec_status_python` rejection string.
+/// Reproduce the `transition_patch_status_python` rejection string.
 /// Format must be byte-for-byte identical to
 /// `_format_invalid_transition_error` in `status_wire_conversion.py`.
 fn format_invalid_transition_error(
-    changespec_name: &str,
+    patch_name: &str,
     old_status: &str,
     new_status: &str,
 ) -> String {
@@ -44,7 +44,7 @@ fn format_invalid_transition_error(
         format!("[{inner}]")
     };
     format!(
-        "Invalid status transition for '{changespec_name}': '{old_status}' -> \
+        "Invalid status transition for '{patch_name}': '{old_status}' -> \
          '{new_status}'. Allowed transitions from '{old_status}': {allowed_repr}"
     )
 }
@@ -109,7 +109,7 @@ pub fn plan_status_transition(
         ));
     }
 
-    let changespec_name = request.changespec_name.as_str();
+    let patch_name = request.patch_name.as_str();
     let old_status = request.old_status.as_str();
     let new_status = request.new_status.as_str();
     let validate = request.validate;
@@ -127,7 +127,7 @@ pub fn plan_status_transition(
             return Ok(failure_plan(
                 request,
                 format!(
-                    "Cannot transition '{changespec_name}' to Draft: \
+                    "Cannot transition '{patch_name}' to Draft: \
                      children must be WIP, Draft, or Reverted. \
                      Invalid children: {child_info}"
                 ),
@@ -137,16 +137,14 @@ pub fn plan_status_transition(
             return Ok(failure_plan(
                 request,
                 format_invalid_transition_error(
-                    changespec_name,
-                    old_status,
-                    new_status,
+                    patch_name, old_status, new_status,
                 ),
             ));
         }
         let existing: HashSet<String> =
             request.existing_names.iter().cloned().collect();
-        let suffix_num = get_next_suffix_number(changespec_name, &existing);
-        let suffixed_name = format!("{changespec_name}_{suffix_num}");
+        let suffix_num = get_next_suffix_number(patch_name, &existing);
+        let suffixed_name = format!("{patch_name}_{suffix_num}");
         return Ok(StatusTransitionPlanWire {
             schema_version: STATUS_WIRE_SCHEMA_VERSION,
             success: true,
@@ -155,7 +153,7 @@ pub fn plan_status_transition(
             status_update_target: Some(new_status.to_string()),
             suffix_action: SUFFIX_ACTION_APPEND.into(),
             suffixed_name: Some(suffixed_name.clone()),
-            base_name: Some(changespec_name.to_string()),
+            base_name: Some(patch_name.to_string()),
             mentor_draft_action: MENTOR_ACTION_SET.into(),
             archive_action: classify_archive_action(
                 Some(old_status),
@@ -174,9 +172,7 @@ pub fn plan_status_transition(
             return Ok(failure_plan(
                 request,
                 format_invalid_transition_error(
-                    changespec_name,
-                    old_status,
-                    new_status,
+                    patch_name, old_status, new_status,
                 ),
             ));
         }
@@ -196,7 +192,7 @@ pub fn plan_status_transition(
             )
             .into(),
             timestamp_event: Some(format!("{old_status} -> {new_status}")),
-            timestamp_target_name: Some(changespec_name.to_string()),
+            timestamp_target_name: Some(patch_name.to_string()),
             revert_siblings: false,
         });
     }
@@ -207,9 +203,7 @@ pub fn plan_status_transition(
             return Ok(failure_plan(
                 request,
                 format_invalid_transition_error(
-                    changespec_name,
-                    old_status,
-                    new_status,
+                    patch_name, old_status, new_status,
                 ),
             ));
         }
@@ -229,7 +223,7 @@ pub fn plan_status_transition(
             )
             .into(),
             timestamp_event: Some(format!("{old_status} -> {new_status}")),
-            timestamp_target_name: Some(changespec_name.to_string()),
+            timestamp_target_name: Some(patch_name.to_string()),
             revert_siblings: false,
         });
     }
@@ -240,9 +234,7 @@ pub fn plan_status_transition(
             return Ok(failure_plan(
                 request,
                 format_invalid_transition_error(
-                    changespec_name,
-                    old_status,
-                    new_status,
+                    patch_name, old_status, new_status,
                 ),
             ));
         }
@@ -262,7 +254,7 @@ pub fn plan_status_transition(
             )
             .into(),
             timestamp_event: Some(format!("{old_status} -> {new_status}")),
-            timestamp_target_name: Some(changespec_name.to_string()),
+            timestamp_target_name: Some(patch_name.to_string()),
             revert_siblings: false,
         });
     }
@@ -284,9 +276,9 @@ pub fn plan_status_transition(
         return Ok(failure_plan(
             request,
             format!(
-                "Cannot transition '{changespec_name}' to {new_status}: \
+                "Cannot transition '{patch_name}' to {new_status}: \
                  parent is {parent_status}. \
-                 Children of WIP/Draft ChangeSpecs must be WIP, Draft, or Reverted."
+                 Children of WIP/Draft Patches must be WIP, Draft, or Reverted."
             ),
         ));
     }
@@ -295,26 +287,22 @@ pub fn plan_status_transition(
     if validate && !is_valid_transition(old_status, new_status) {
         return Ok(failure_plan(
             request,
-            format_invalid_transition_error(
-                changespec_name,
-                old_status,
-                new_status,
-            ),
+            format_invalid_transition_error(patch_name, old_status, new_status),
         ));
     }
 
     // 3) Sibling-unreverted-children check on WIP/Draft -> Ready with suffix.
     if new_status == "Ready"
         && (base_old_status == "WIP" || base_old_status == "Draft")
-        && has_suffix(changespec_name)
+        && has_suffix(patch_name)
         && !request.siblings_with_unreverted_children.is_empty()
     {
         let sibling = &request.siblings_with_unreverted_children[0];
         return Ok(failure_plan(
             request,
             format!(
-                "Cannot transition '{changespec_name}' to Ready: \
-                 sibling ChangeSpec '{sibling}' has unreverted children."
+                "Cannot transition '{patch_name}' to Ready: \
+                 sibling Patch '{sibling}' has unreverted children."
             ),
         ));
     }
@@ -327,11 +315,11 @@ pub fn plan_status_transition(
     let mut revert_siblings = false;
     if new_status == "Ready"
         && (base_old_status == "WIP" || base_old_status == "Draft")
-        && has_suffix(changespec_name)
+        && has_suffix(patch_name)
     {
         suffix_action = SUFFIX_ACTION_STRIP;
-        strip_suffixed_name = Some(changespec_name.to_string());
-        strip_base_name = Some(strip_reverted_suffix(changespec_name));
+        strip_suffixed_name = Some(patch_name.to_string());
+        strip_base_name = Some(strip_reverted_suffix(patch_name));
         revert_siblings = true;
     }
 
@@ -344,7 +332,7 @@ pub fn plan_status_transition(
     let timestamp_target_name = if suffix_action == SUFFIX_ACTION_STRIP {
         strip_base_name.clone()
     } else {
-        Some(changespec_name.to_string())
+        Some(patch_name.to_string())
     };
 
     Ok(StatusTransitionPlanWire {
@@ -371,13 +359,13 @@ mod tests {
     use crate::status::wire::ChangespecChildWire;
 
     fn req(
-        changespec_name: &str,
+        patch_name: &str,
         old_status: &str,
         new_status: &str,
     ) -> StatusTransitionRequestWire {
         StatusTransitionRequestWire {
             schema_version: STATUS_WIRE_SCHEMA_VERSION,
-            changespec_name: changespec_name.into(),
+            patch_name: patch_name.into(),
             old_status: old_status.into(),
             new_status: new_status.into(),
             validate: true,
@@ -557,7 +545,7 @@ mod tests {
         let plan = plan_status_transition(&r).unwrap();
         assert!(!plan.success);
         let err = plan.error.unwrap();
-        assert!(err.contains("sibling ChangeSpec 'proj_feature_1'"));
+        assert!(err.contains("sibling Patch 'proj_feature_1'"));
         assert!(err.contains("unreverted children"));
     }
 

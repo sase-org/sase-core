@@ -18,11 +18,11 @@ pub const RUNNING_AGENT_MARKER: &str = "- (@";
 /// from the running-agent marker.
 pub const RUNNING_PROCESS_MARKER: &str = "- ($: ";
 
-/// `basename(dirname(file_path))` — matches `ChangeSpec.project_name` in
+/// `basename(dirname(file_path))` — matches `Patch.project_name` in
 /// Python, which is the *parent directory* of the project file (e.g.
 /// `core_golden` for `tests/core_golden/myproj.sase`).
 ///
-/// Note this is intentionally *not* `ChangeSpecWire.project_basename`
+/// Note this is intentionally *not* `ChangeSpecWire.project_basename` compatibility field
 /// (the file basename minus extension); the Python query evaluator uses the
 /// parent directory name and the golden corpus depends on that distinction.
 pub fn project_dir_name(file_path: &str) -> &str {
@@ -86,7 +86,7 @@ fn push_suffix_part(
     }
 }
 
-/// Build the concatenated searchable text for one ChangeSpec.
+/// Build the concatenated searchable text for one Patch.
 ///
 /// Mirrors `sase.ace.query.searchable.get_searchable_text` exactly, including
 /// the `\n` join, the order of fields, and the suffix formatting per type.
