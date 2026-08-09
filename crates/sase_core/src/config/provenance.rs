@@ -129,15 +129,18 @@ fn build_sources(
                 layer: Some(layer.name.clone()),
             });
         }
-        if keys.iter().any(|key| key == "glossary") && layer.kind != "local" {
-            diagnostics.push(ConfigDiagnosticWire {
-                severity: "error".to_string(),
-                code: "glossary_scope".to_string(),
-                message: "`glossary` is only valid in project-local sase.yml"
-                    .to_string(),
-                path: Some("glossary".to_string()),
-                layer: Some(layer.name.clone()),
-            });
+        if layer.kind != "local" {
+            for path in glossary_scope_paths(&layer.value) {
+                diagnostics.push(ConfigDiagnosticWire {
+                    severity: "error".to_string(),
+                    code: "glossary_scope".to_string(),
+                    message: format!(
+                        "`{path}` is only valid in project-local sase.yml"
+                    ),
+                    path: Some(path),
+                    layer: Some(layer.name.clone()),
+                });
+            }
         }
         if let Some(err) = &layer.error {
             diagnostics.push(ConfigDiagnosticWire {
@@ -163,4 +166,23 @@ fn build_sources(
         });
     }
     sources
+}
+
+fn glossary_scope_paths(value: &Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    if object.contains_key("glossary") {
+        paths.push("glossary".to_string());
+    }
+    if object
+        .get("memory")
+        .and_then(Value::as_object)
+        .is_some_and(|memory| memory.contains_key("glossary"))
+    {
+        paths.push("memory.glossary".to_string());
+    }
+    paths
 }

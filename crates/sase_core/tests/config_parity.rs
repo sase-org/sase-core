@@ -310,6 +310,23 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
             "value": {
                 "glossary": {
                     "Agent Clan": {"definition": "A named rootless container."}
+                },
+                "memory": {
+                    "glossary": {
+                        "Patch": {"definition": "A local unit of change."}
+                    }
+                }
+            }
+        },
+        {
+            "name": "overlay:sase_extra.yml",
+            "kind": "overlay",
+            "path": "/home/u/.config/sase/sase_extra.yml",
+            "list_strategy": "concatenate",
+            "writable": true,
+            "value": {
+                "memory": {
+                    "h1_title": "Project Instructions"
                 }
             }
         },
@@ -320,8 +337,10 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
             "list_strategy": "concatenate",
             "writable": true,
             "value": {
-                "glossary": {
-                    "Workspace": {"definition": "A numbered checkout."}
+                "memory": {
+                    "glossary": {
+                        "Workspace": {"definition": "A numbered checkout."}
+                    }
                 }
             }
         }
@@ -331,7 +350,14 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
         schema: json!({
             "type": "object",
             "properties": {
-                "glossary": {"type": "object"}
+                "glossary": {"type": "object"},
+                "memory": {
+                    "type": "object",
+                    "properties": {
+                        "h1_title": {"type": "string"},
+                        "glossary": {"type": "object"}
+                    }
+                }
             }
         }),
         layers,
@@ -344,6 +370,18 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
         diagnostic.code == "glossary_scope"
             && diagnostic.layer.as_deref() == Some("user")
             && diagnostic.path.as_deref() == Some("glossary")
+    }));
+    assert!(inventory.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "glossary_scope"
+            && diagnostic.layer.as_deref() == Some("user")
+            && diagnostic.path.as_deref() == Some("memory.glossary")
+            && diagnostic
+                .message
+                .contains("`memory.glossary` is only valid")
+    }));
+    assert!(!inventory.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "glossary_scope"
+            && diagnostic.layer.as_deref() == Some("overlay:sase_extra.yml")
     }));
     assert!(!inventory.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "glossary_scope"
