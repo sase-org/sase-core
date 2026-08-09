@@ -31,6 +31,8 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "tier",
 ];
 
+const REGEX_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+
 pub fn search_issues(
     beads_dir: &Path,
     query: &str,
@@ -122,10 +124,13 @@ impl SearchMatcher {
         let kind = if regex {
             RegexBuilder::new(query)
                 .case_insensitive(true)
+                .size_limit(REGEX_SIZE_LIMIT)
                 .build()
                 .map(SearchMatcherKind::Regex)
                 .map_err(|err| {
-                    BeadError::validation(format!("invalid regex: {err}"))
+                    BeadError::validation(format!(
+                        "invalid search regex: {err}"
+                    ))
                 })?
         } else {
             SearchMatcherKind::Literal {
@@ -148,7 +153,12 @@ impl SearchMatcher {
     }
 
     pub(crate) fn is_match(&self, value: &str) -> bool {
-        !self.byte_ranges(value).is_empty()
+        match &self.kind {
+            SearchMatcherKind::Literal { needle } => {
+                value.to_lowercase().contains(needle)
+            }
+            SearchMatcherKind::Regex(regex) => regex.is_match(value),
+        }
     }
 
     pub(crate) fn byte_ranges(&self, value: &str) -> Vec<(usize, usize)> {
@@ -781,6 +791,16 @@ mod tests {
     }
 
     #[test]
+    fn literal_match_truth_uses_plain_case_folded_containment() {
+        let matcher =
+            SearchMatcher::new("auth.*", false).expect("valid matcher");
+
+        assert!(matcher.is_match("Fix auth.* route"));
+        assert!(!matcher.is_match("Fix authxyz route"));
+        assert_eq!(matcher.byte_ranges("Fix auth.* route"), vec![(4, 10)]);
+    }
+
+    #[test]
     fn regex_search_matches_patterns_case_insensitively_by_default() {
         let later = phase_issue_with(|issue| {
             issue.id = "beads-1.2".to_string();
@@ -848,19 +868,40 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.kind, "validation");
-        assert!(err.message.starts_with("invalid regex: "));
+        assert!(err.message.starts_with("invalid search regex: "));
     }
 
     #[test]
-    fn matcher_ranges_ignore_zero_width_regex_matches() {
+    fn zero_width_regex_matches_truth_but_not_highlight_ranges() {
         let zero_width =
             SearchMatcher::new(r"\b", true).expect("valid regex matcher");
         assert!(zero_width.byte_ranges("auth token").is_empty());
-        assert!(!zero_width.is_match("auth token"));
+        assert!(zero_width.is_match("auth token"));
 
         let word =
             SearchMatcher::new(r"\bauth\b", true).expect("valid matcher");
         assert_eq!(word.byte_ranges("auth token"), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn zero_width_regex_matches_fields() {
+        let issue = phase_issue_with(|issue| {
+            issue.title = "Auth boundary".to_string();
+        });
+
+        let results = search_issues_in_issues(
+            vec![issue],
+            r"\b",
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.1"]);
+        assert!(results[0].matched_fields.contains(&"title".to_string()));
     }
 
     #[test]

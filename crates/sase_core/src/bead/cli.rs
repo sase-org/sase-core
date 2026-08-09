@@ -3063,14 +3063,24 @@ mod tests {
     }
 
     #[test]
-    fn search_regex_invalid_pattern_is_usage_error() {
+    fn search_regex_invalid_pattern_is_usage_error_across_formats() {
         let store = seed_issues(Vec::new());
 
-        let outcome =
-            execute_search(&store.beads_dir, &["search", "[", "--regex"]);
+        for args in [
+            &["search", "[", "--regex"][..],
+            &["search", "[", "--regex", "--format", "json"][..],
+            &["search", "[", "--regex", "--format", "full"][..],
+        ] {
+            let outcome = execute_search(&store.beads_dir, args);
 
-        assert_eq!(outcome.exit_code, 2);
-        assert!(outcome.stderr.starts_with("Error: invalid regex: "));
+            assert_eq!(outcome.exit_code, 2, "args: {args:?}");
+            assert!(outcome.stdout.is_empty(), "args: {args:?}");
+            assert!(
+                outcome.stderr.starts_with("Error: invalid search regex: "),
+                "stderr for {args:?}: {}",
+                outcome.stderr
+            );
+        }
     }
 
     #[test]
@@ -3096,7 +3106,7 @@ mod tests {
     }
 
     #[test]
-    fn search_regex_zero_width_only_pattern_matches_nothing() {
+    fn search_regex_zero_width_only_pattern_matches_without_empty_highlights() {
         let store = seed_issues(vec![phase_issue(
             "beads-1.1",
             "Auth boundary",
@@ -3105,11 +3115,14 @@ mod tests {
             "2026-01-01T00:01:00Z",
         )]);
 
-        let outcome =
-            execute_search(&store.beads_dir, &["search", r"\b", "-e"]);
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["search", r"\b", "-e", "--color", "always"],
+        );
 
         assert_eq!(outcome.exit_code, 0);
-        assert_eq!(outcome.stdout, "No beads match \"\\b\".\n");
+        assert!(outcome.stdout.contains("Auth boundary"));
+        assert!(!outcome.stdout.contains(ANSI_HIGHLIGHT));
     }
 
     #[test]
