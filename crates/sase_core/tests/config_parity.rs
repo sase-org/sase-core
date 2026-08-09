@@ -308,9 +308,6 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
             "list_strategy": "concatenate",
             "writable": true,
             "value": {
-                "glossary": {
-                    "Agent Clan": {"definition": "A named rootless container."}
-                },
                 "memory": {
                     "glossary": {
                         "Patch": {"definition": "A local unit of change."}
@@ -350,7 +347,6 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
         schema: json!({
             "type": "object",
             "properties": {
-                "glossary": {"type": "object"},
                 "memory": {
                     "type": "object",
                     "properties": {
@@ -366,11 +362,6 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
     };
     let inventory = config_inventory(&request).unwrap();
 
-    assert!(inventory.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "glossary_scope"
-            && diagnostic.layer.as_deref() == Some("user")
-            && diagnostic.path.as_deref() == Some("glossary")
-    }));
     assert!(inventory.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "glossary_scope"
             && diagnostic.layer.as_deref() == Some("user")

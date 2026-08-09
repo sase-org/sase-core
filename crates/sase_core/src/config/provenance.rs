@@ -174,9 +174,6 @@ fn glossary_scope_paths(value: &Value) -> Vec<String> {
     };
 
     let mut paths = Vec::new();
-    if object.contains_key("glossary") {
-        paths.push("glossary".to_string());
-    }
     if object
         .get("memory")
         .and_then(Value::as_object)
