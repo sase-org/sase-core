@@ -28,6 +28,10 @@ name = "sase_core_rs"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
 sase_core = { workspace = true }
 pyo3 = { version = "0.22", features = ["abi3-py312"] }

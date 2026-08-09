@@ -50,6 +50,6 @@ Issues = "https://github.com/sase-org/sase-core/issues"
 module-name = "sase_core_rs"
 python-source = "python"
 manifest-path = "Cargo.toml"
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
 # Strip release wheels so platform downloads stay small.
 strip = true
