@@ -511,3 +511,94 @@ jobs:
         run: |
           echo "prs_created: ${PRS_CREATED}"
           echo "pr: ${PR}"
+
+  # sase-core master is unprotected (no branch protection, no rulesets), so
+  # `gh pr merge --auto` degrades to an immediate merge that does not wait
+  # for CI. This job watches checks explicitly instead. The release-plz
+  # step's own `pr`/`prs_created` outputs are not reliable here: both are
+  # empty/false when this run merely pushed new commits to an already-open
+  # release PR (not just when there is genuinely nothing to release), so the
+  # PR to merge is looked up fresh from GitHub instead of threaded through
+  # job outputs.
+  release-plz-merge:
+    name: Merge release PR
+    needs: release-plz-pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.repository_owner == 'sase-org' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-merge-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Resolve release PR
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          release_actor="$(gh api user --jq .login)"
+
+          # Guard on more than just "an open PR exists": base branch, author
+          # identity, release-plz's default head-branch timestamp shape, the
+          # release-plz PR title shape, and the release-plz body footer all
+          # have to agree before this job will touch a PR. Never merge an
+          # arbitrary open PR.
+          pr_json="$(gh pr list --base master --state open --author "${release_actor}" \
+            --json number,title,headRefName,body \
+            --jq '[.[] | select(.headRefName | test("^release-plz-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}Z$"))
+                        | select(.title | test("^chore: release v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                        | select(.body | contains("generated with [release-plz]"))] | .[0] // empty')"
+
+          if [[ -z "${pr_json}" ]]; then
+            echo "no open release-plz release PR found; nothing to merge"
+            echo "number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          number="$(jq -r '.number' <<<"${pr_json}")"
+          head_ref="$(jq -r '.headRefName' <<<"${pr_json}")"
+          echo "found release PR #${number} (${head_ref})"
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for checks to register
+        if: steps.resolve.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.number }}
+        run: |
+          set -euo pipefail
+
+          # `gh pr checks --watch` exits immediately with "no checks
+          # reported" if GitHub has not registered any checks yet, which
+          # races this job (started as soon as release-plz-pr finishes)
+          # against ci.yml being triggered by the PR's own push event.
+          deadline=$((SECONDS + 300))
+          while (( SECONDS < deadline )); do
+            count="$(gh pr checks "${PR_NUMBER}" --json name --jq 'length' 2>/dev/null || echo 0)"
+            if (( count > 0 )); then
+              echo "checks registered: ${count}"
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "timed out waiting for checks to register on PR #${PR_NUMBER}" >&2
+          exit 1
+
+      - name: Wait for checks to pass
+        if: steps.resolve.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.number }}
+        run: gh pr checks "${PR_NUMBER}" --watch --fail-fast
+
+      - name: Squash-merge release PR
+        if: steps.resolve.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.SASE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.number }}
+        run: gh pr merge "${PR_NUMBER}" --squash --delete-branch
