@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0](https://github.com/sase-org/sase-core/compare/v0.21.3...v0.22.0) - 2026-08-09
+
+### Added
+
+- *(glossary)* match phrases across line breaks
+- [**breaking**] drop legacy top-level glossary path from glossary_scope_paths
+- *(vcs-log)* add parent ids and merge summaries
+
+### Fixed
+
+- *(config)* diagnose nested glossary scope
+
+### Other
+
+- *(glossary)* document plural alias release note
+- expose extension-module feature for PyO3 crate
+
 ## [0.21.3](https://github.com/sase-org/sase-core/compare/v0.21.2...v0.21.3) - 2026-08-09
 
 ### Fixed
