@@ -601,8 +601,8 @@ fn vcs_project_completion_item(
     replacement_range: EditorRange,
 ) -> CompletionItem {
     let filter_text = format!("+{}", candidate.name);
-    let is_changespec = candidate.kind == "changespec";
-    let label_details = if is_changespec {
+    let is_patch = is_patch_completion_kind(&candidate.kind);
+    let label_details = if is_patch {
         Some(CompletionItemLabelDetails {
             detail: (!candidate.project.is_empty())
                 .then(|| format!(" · {}", candidate.project)),
@@ -619,7 +619,7 @@ fn vcs_project_completion_item(
         })
     };
     let detail = Some(candidate.insertion.clone());
-    let kind = if is_changespec {
+    let kind = if is_patch {
         CompletionItemKind::EVENT
     } else {
         CompletionItemKind::MODULE
@@ -684,7 +684,7 @@ fn vcs_ref_completion_item(
 
 fn vcs_ref_item_kind(candidate: &CompletionCandidate) -> CompletionItemKind {
     match candidate.kind.as_str() {
-        "changespec" => CompletionItemKind::REFERENCE,
+        "patch" | "changespec" => CompletionItemKind::REFERENCE,
         "namespace" => CompletionItemKind::FOLDER,
         _ => CompletionItemKind::MODULE,
     }
@@ -692,7 +692,7 @@ fn vcs_ref_item_kind(candidate: &CompletionCandidate) -> CompletionItemKind {
 
 fn vcs_ref_sort_group(candidate: &CompletionCandidate) -> u8 {
     match candidate.kind.as_str() {
-        "changespec" => 1,
+        "patch" | "changespec" => 1,
         "namespace" => 2,
         _ => 0,
     }
@@ -702,7 +702,7 @@ fn vcs_ref_label_details(
     candidate: &CompletionCandidate,
 ) -> CompletionItemLabelDetails {
     match candidate.kind.as_str() {
-        "changespec" => CompletionItemLabelDetails {
+        "patch" | "changespec" => CompletionItemLabelDetails {
             detail: (!candidate.project.is_empty())
                 .then(|| format!(" · {}", candidate.project)),
             description: Some(if candidate.status.is_empty() {
@@ -724,6 +724,10 @@ fn vcs_ref_label_details(
             description: Some("project".to_string()),
         },
     }
+}
+
+fn is_patch_completion_kind(kind: &str) -> bool {
+    matches!(kind, "patch" | "changespec")
 }
 
 fn vcs_repo_completion_item(

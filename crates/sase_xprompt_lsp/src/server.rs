@@ -2060,10 +2060,10 @@ fn file_history() -> Vec<String> {
 ///
 /// Read fresh on every `+` completion request. Any failure (no path, unreadable
 /// file, malformed JSON) degrades to empty results so the `+` menu simply
-/// shows nothing rather than breaking completion. Schema versions 1, 2, and 3
+/// shows nothing rather than breaking completion. Schema versions 1 through 4
 /// are accepted; v1 entries default to project rows, and v1/v2 catalogs default
-/// `namespaces` to empty. The v3 file shape is
-/// `{ "schema_version": 3, "workflow_names": [..], "entries": [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]} }`.
+/// `namespaces` to empty. The v4 file shape is
+/// `{ "schema_version": 4, "workflow_names": [..], "entries": [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]} }`.
 fn load_vcs_project_catalog(path: Option<&Path>) -> VcsProjectCatalog {
     let Some(path) = path else {
         return VcsProjectCatalog::default();
@@ -2079,7 +2079,7 @@ fn load_vcs_project_catalog(path: Option<&Path>) -> VcsProjectCatalog {
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if !matches!(schema_version, 1..=3) {
+    if !matches!(schema_version, 1..=4) {
         warn!(
             "unsupported vcs project catalog schema_version {schema_version} at {path:?}"
         );
@@ -5064,7 +5064,7 @@ mod tests {
         fs::write(
             path,
             r##"{
-                "schema_version": 2,
+                "schema_version": 4,
                 "workflow_names": ["gh", "git", "hg"],
                 "entries": [
                     {
@@ -5074,6 +5074,7 @@ mod tests {
                         "provider_display": "GitHub",
                         "description": "SASE repo",
                         "aliases": [],
+                        "entry_kind": "project",
                         "kind": "project",
                         "project": "sase",
                         "status": ""
@@ -5109,6 +5110,7 @@ mod tests {
                         "provider_display": "GitHub",
                         "description": "",
                         "aliases": [],
+                        "entry_kind": "patch",
                         "kind": "changespec",
                         "project": "sase",
                         "status": "Ready"
@@ -5133,6 +5135,7 @@ mod tests {
                         "provider_display": "GitHub",
                         "description": "SASE repo",
                         "aliases": ["sase-core"],
+                        "entry_kind": "project",
                         "kind": "project",
                         "project": "sase",
                         "status": ""
@@ -5142,8 +5145,9 @@ mod tests {
                         "vcs_prefix": "gh",
                         "display_tag": "#gh:ship-completion",
                         "provider_display": "GitHub",
-                        "description": "Completion ChangeSpec",
+                        "description": "Completion patch",
                         "aliases": [],
+                        "entry_kind": "patch",
                         "kind": "changespec",
                         "project": "sase",
                         "status": "Ready"
@@ -5155,6 +5159,7 @@ mod tests {
                         "provider_display": "Bare Git",
                         "description": "",
                         "aliases": [],
+                        "entry_kind": "project",
                         "kind": "project",
                         "project": "local",
                         "status": ""
@@ -5601,6 +5606,43 @@ mod tests {
         assert_eq!(namespaces[0].kind_label, "org");
         assert_eq!(namespaces[1].name, "bbugyi200");
         assert_eq!(namespaces[1].kind_label, "org");
+    }
+
+    #[test]
+    fn loads_v4_vcs_project_catalog_with_patch_entry_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 4,
+                "workflow_names": ["gh"],
+                "entries": [
+                    {
+                        "name": "ship-completion",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:ship-completion",
+                        "provider_display": "GitHub",
+                        "description": "",
+                        "aliases": [],
+                        "entry_kind": "patch",
+                        "kind": "changespec",
+                        "project": "sase",
+                        "status": "Ready"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+        assert_eq!(catalog.workflow_names, vec!["gh"]);
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].entry_kind, "patch");
+        assert_eq!(catalog.entries[0].kind, "changespec");
+        assert_eq!(catalog.entries[0].project, "sase");
+        assert_eq!(catalog.entries[0].status, "Ready");
     }
 
     #[test]
@@ -6707,7 +6749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completes_vcs_changespec_with_pr_label_details() {
+    async fn completes_vcs_patch_with_pr_label_details() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("vcs_project_catalog.json");
         write_vcs_project_catalog_with_pr(&catalog_path);
@@ -7049,23 +7091,17 @@ mod tests {
         assert_eq!(project_edit.range.end, Position::new(0, 4));
         assert_eq!(project_edit.new_text, "sase ");
 
-        let changespec = &items[1];
-        assert_eq!(changespec.kind, Some(CompletionItemKind::REFERENCE));
-        assert_eq!(changespec.filter_text.as_deref(), Some("ship-completion"));
+        let patch = &items[1];
+        assert_eq!(patch.kind, Some(CompletionItemKind::REFERENCE));
+        assert_eq!(patch.filter_text.as_deref(), Some("ship-completion"));
+        assert_eq!(patch.sort_text.as_deref(), Some("1:ship-completion:0001"));
         assert_eq!(
-            changespec.sort_text.as_deref(),
-            Some("1:ship-completion:0001")
-        );
-        assert_eq!(
-            changespec.detail.as_deref(),
+            patch.detail.as_deref(),
             Some("GitHub · #gh:ship-completion")
         );
-        let changespec_details = changespec.label_details.as_ref().unwrap();
-        assert_eq!(changespec_details.detail.as_deref(), Some(" · sase"));
-        assert_eq!(
-            changespec_details.description.as_deref(),
-            Some("PR · Ready")
-        );
+        let patch_details = patch.label_details.as_ref().unwrap();
+        assert_eq!(patch_details.detail.as_deref(), Some(" · sase"));
+        assert_eq!(patch_details.description.as_deref(), Some("PR · Ready"));
 
         let namespace = &items[2];
         assert_eq!(namespace.kind, Some(CompletionItemKind::FOLDER));

@@ -1841,10 +1841,11 @@ pub fn build_vcs_ref_completion_candidates(
 
     let query = trigger.query.to_lowercase();
     let mut candidates = Vec::new();
-    for include_changespecs in [false, true] {
+    for include_patches in [false, true] {
         for entry in entries {
-            let is_changespec = entry.kind == "changespec";
-            if is_changespec != include_changespecs
+            let entry_kind = vcs_project_entry_kind(entry);
+            let is_patch = entry_kind == "patch";
+            if is_patch != include_patches
                 || entry.vcs_prefix != trigger.workflow
                 || !vcs_ref_project_matches(entry, &query)
             {
@@ -1873,7 +1874,7 @@ pub fn build_vcs_ref_completion_candidates(
                     new_text,
                 }),
                 additional_edits: Vec::new(),
-                kind: entry.kind.clone(),
+                kind: entry_kind.to_string(),
                 project: entry.project.clone(),
                 status: entry.status.clone(),
             });
@@ -1917,6 +1918,19 @@ pub fn build_vcs_ref_completion_candidates(
     CompletionList {
         candidates,
         shared_extension: String::new(),
+    }
+}
+
+fn vcs_project_entry_kind(entry: &VcsProjectEntry) -> &str {
+    let raw_kind = if entry.entry_kind.is_empty() {
+        entry.kind.as_str()
+    } else {
+        entry.entry_kind.as_str()
+    };
+    match raw_kind {
+        "changespec" => "patch",
+        "patch" => "patch",
+        _ => "project",
     }
 }
 
@@ -2165,7 +2179,7 @@ pub fn build_vcs_project_completion_candidates(
             name: entry.name.clone(),
             replacement: Some(primary),
             additional_edits: additional,
-            kind: entry.kind.clone(),
+            kind: vcs_project_entry_kind(entry).to_string(),
             project: entry.project.clone(),
             status: entry.status.clone(),
         });
@@ -5692,7 +5706,7 @@ mod tests {
             vec!["sase", "ship-completion", "sase-org"]
         );
         assert_eq!(list.candidates[0].kind, "project");
-        assert_eq!(list.candidates[1].kind, "changespec");
+        assert_eq!(list.candidates[1].kind, "patch");
         assert_eq!(list.candidates[1].project, "sase");
         assert_eq!(list.candidates[1].status, "Ready");
         assert_eq!(list.candidates[2].display, "sase-org/");
@@ -5742,6 +5756,7 @@ mod tests {
             provider_display: "GitHub".to_string(),
             description: String::new(),
             aliases: Vec::new(),
+            entry_kind: "project".to_string(),
             kind: "project".to_string(),
             project: name.to_string(),
             status: String::new(),
@@ -5760,6 +5775,26 @@ mod tests {
             provider_display: "GitHub".to_string(),
             description: String::new(),
             aliases: Vec::new(),
+            entry_kind: "patch".to_string(),
+            kind: "changespec".to_string(),
+            project: project.to_string(),
+            status: status.to_string(),
+        }
+    }
+
+    fn legacy_changespec_entry(
+        name: &str,
+        project: &str,
+        status: &str,
+    ) -> VcsProjectEntry {
+        VcsProjectEntry {
+            name: name.to_string(),
+            vcs_prefix: "gh".to_string(),
+            display_tag: format!("#gh:{name}"),
+            provider_display: "GitHub".to_string(),
+            description: String::new(),
+            aliases: Vec::new(),
+            entry_kind: String::new(),
             kind: "changespec".to_string(),
             project: project.to_string(),
             status: status.to_string(),
@@ -5995,7 +6030,7 @@ mod tests {
     }
 
     #[test]
-    fn vcs_project_candidates_include_changespec_context() {
+    fn vcs_project_candidates_include_patch_context() {
         let doc = DocumentSnapshot::new("Review +ship");
         let cursor = pos(12);
         let context = classify_completion_context(&doc, cursor, &[]).unwrap();
@@ -6015,9 +6050,27 @@ mod tests {
         let candidate = &list.candidates[0];
         assert_eq!(candidate.name, "ship-completion");
         assert_eq!(candidate.insertion, "#gh:ship-completion");
-        assert_eq!(candidate.kind, "changespec");
+        assert_eq!(candidate.kind, "patch");
         assert_eq!(candidate.project, "sase");
         assert_eq!(candidate.status, "Ready");
+    }
+
+    #[test]
+    fn vcs_project_candidates_accept_legacy_changespec_kind() {
+        let doc = DocumentSnapshot::new("Review +ship");
+        let cursor = pos(12);
+        let context = classify_completion_context(&doc, cursor, &[]).unwrap();
+        let token = context.token.as_ref().unwrap();
+        let list = build_vcs_project_completion_candidates(
+            token,
+            &doc,
+            cursor,
+            &[legacy_changespec_entry("ship-completion", "sase", "Ready")],
+            &vcs_names(),
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].kind, "patch");
     }
 
     #[test]

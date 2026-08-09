@@ -704,8 +704,12 @@ fn validate_guard_provider(
     tagged: bool,
     diagnostics: &mut Vec<ConfigDiagnosticWire>,
 ) {
+    let provider = match provider {
+        "changespec" => "patch",
+        value => value,
+    };
     let mut allowed = match provider {
-        "changespec" => vec!["name_prefix", "statuses"],
+        "patch" => vec!["name_prefix", "statuses"],
         "agent_hood" => vec!["hood", "name"],
         "agent_clan" => vec!["name_prefix"],
         _ => {
@@ -714,7 +718,7 @@ fn validate_guard_provider(
                 "unknown_guard_provider",
                 path,
                 &format!(
-                    "unknown guard provider `{provider}`; supported providers: changespec, agent_hood, agent_clan"
+                    "unknown guard provider `{provider}`; supported providers: patch, agent_hood, agent_clan"
                 ),
             ));
             return;
@@ -725,7 +729,7 @@ fn validate_guard_provider(
     }
     unknown_keys(request, config, &allowed, path, diagnostics);
     match provider {
-        "changespec" => {
+        "patch" => {
             if let Some(prefix) = config.get("name_prefix") {
                 validate_optional_type(
                     request,
@@ -753,7 +757,7 @@ fn validate_guard_provider(
                                 request,
                                 "terminal_guard_status",
                                 &format!("{}[{index}]", child_path(path, "statuses")),
-                                "changespec guards may only select non-terminal statuses",
+                                "patch guards may only select non-terminal statuses",
                             ));
                         }
                     }

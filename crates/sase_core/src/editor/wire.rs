@@ -120,8 +120,8 @@ pub struct CompletionCandidate {
     #[serde(default)]
     pub additional_edits: Vec<EditorTextEdit>,
     /// Optional entry discriminator for specialized completion surfaces.
-    /// `vcs_project` uses `project` or `changespec`; generic completion kinds
-    /// leave it empty.
+    /// `vcs_project` uses `project` or `patch`; generic completion kinds leave
+    /// it empty. Legacy catalogs may still carry `changespec`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
     /// Optional owning project context for specialized completion surfaces.
@@ -138,7 +138,7 @@ pub struct CompletionList {
     pub shared_extension: String,
 }
 
-/// One enabled project or ChangeSpec completion candidate for the `+`
+/// One enabled project or patch completion candidate for the `+`
 /// (`vcs_project`) completion kind.
 ///
 /// This mirrors the Python `VcsProjectEntry` produced by
@@ -147,7 +147,7 @@ pub struct CompletionList {
 /// surfaces stay in sync via the shared golden test-vector table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcsProjectEntry {
-    /// Project name (e.g. `sase`) or ChangeSpec name.
+    /// Project name (e.g. `sase`) or patch name.
     pub name: String,
     /// VCS workflow prefix (e.g. `gh`, `git`).
     pub vcs_prefix: String,
@@ -163,14 +163,19 @@ pub struct VcsProjectEntry {
     /// Alternate names the project can be matched by.
     #[serde(default)]
     pub aliases: Vec<String>,
-    /// `project` for project rows, `changespec` for PR rows.
+    /// Canonical entry discriminator. `project` for project rows, `patch` for
+    /// patch rows. Present in v4+ catalogs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub entry_kind: String,
+    /// Legacy entry discriminator. `project` for project rows, `changespec` for
+    /// patch rows in older catalogs.
     #[serde(default = "default_vcs_project_entry_kind")]
     pub kind: String,
     /// Owning project basename. For project rows, this equals `name` in v2
     /// catalogs and may be empty for v1 catalogs.
     #[serde(default)]
     pub project: String,
-    /// Base ChangeSpec status for PR rows; empty for project rows.
+    /// Base patch status for patch rows; empty for project rows.
     #[serde(default)]
     pub status: String,
 }

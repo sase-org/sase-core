@@ -201,8 +201,8 @@ pub struct ChopResultDocumentWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "provider", deny_unknown_fields)]
 pub enum ChopGuardConfigWire {
-    #[serde(rename = "changespec")]
-    Changespec {
+    #[serde(rename = "patch", alias = "changespec")]
+    Patch {
         #[serde(default)]
         name_prefix: String,
         #[serde(default)]

@@ -12,7 +12,7 @@ pub fn evaluate_chop_decision(
 
     for guard in &request.inhibit_if {
         match guard {
-            ChopGuardConfigWire::Changespec {
+            ChopGuardConfigWire::Patch {
                 name_prefix,
                 statuses,
             } => {
@@ -25,10 +25,10 @@ pub fn evaluate_chop_decision(
                     return Ok(decision(
                         "skip",
                         format!(
-                            "inhibited by ChangeSpec `{}` in status `{}`",
+                            "inhibited by Patch `{}` in status `{}`",
                             changespec.name, changespec.status
                         ),
-                        Some("changespec"),
+                        Some("patch"),
                     ));
                 }
             }
@@ -122,7 +122,7 @@ fn validate_request(
     }
     for (index, guard) in request.inhibit_if.iter().enumerate() {
         match guard {
-            ChopGuardConfigWire::Changespec { statuses, .. } => {
+            ChopGuardConfigWire::Patch { statuses, .. } => {
                 if statuses.iter().any(|status| status.trim().is_empty()) {
                     return Err(ChopEngineError::new(
                         "blank_value",
