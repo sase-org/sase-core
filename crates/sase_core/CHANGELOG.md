@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(bead)* add regex search support
+- *(glossary)* derive plural aliases for matching
 
 ## [0.21.1](https://github.com/sase-org/sase-core/compare/v0.21.0...v0.21.1) - 2026-08-09
 
