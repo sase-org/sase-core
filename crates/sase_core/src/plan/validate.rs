@@ -22,6 +22,7 @@ use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 const HEADER_BLOCK_REMEDY: &str = "SASE owns the plan header block: a link-shaped section (`PLAN`, `PROMPT`, `PARENT`, `BEAD`) must be a bolded key followed by exactly one Markdown link and nothing else, and a list-shaped section (`AGENTS`, `ARTIFACTS`, `COMMITS`) must be a bare bolded key whose entries are indented bullets. Delete the hand-authored text; SASE rewrites this block itself.";
 
 const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
+const TALE_FIELDS: &[&str] = &["size"];
 const SYSTEM_FIELDS: &[&str] = &[
     "create_time",
     "status",
@@ -37,6 +38,8 @@ const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
 
 const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
+const SIZE_FIELD_TYPE: &str = "xsmall | small | medium | large | xlarge";
+const TALE_SIZE_DESCRIPTION: &str = "Estimated tale scope. Use the same five-step size taxonomy as phase and task beads so the coder follow-up can route through size-specific worker defaults. An explicit `model` still overrides size-derived routing.";
 const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `xsmall` only for the very simplest tasks that need almost no reasoning, such as launching SASE agents purely to observe their output while testing a SASE agent feature. Use `small` for focused work implemented directly and `medium` for substantial work still implemented directly from its phase description. Use `large` for work that needs a separate planning handoff and may itself justify an epic plan. Use `xlarge` rarely: it admits the task is too large to plan effectively alone, or deliberately defers planning part of a feature until other parts are implemented; choose it only when fairly confident the phase agent will itself author an epic plan. Only `large` and `xlarge` phases receive `#plan`. Without an explicit `model`, the five sizes route through `@xsmall_phase_worker`, `@small_phase_worker`, `@medium_phase_worker`, `@large_phase_worker`, and `@xlarge_phase_worker`, respectively.";
 const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Set this explicitly only when the user's prompt requested a specific model; an explicit model overrides size-derived routing for every size. Otherwise omit it. For a phase that only exercises or observes a SASE agent feature and does no consequential work, use `size: xsmall` instead of a cheap model override.";
 
@@ -123,6 +126,7 @@ pub struct PlanPhaseWire {
 pub struct ValidatedPlanWire {
     pub tier: String,
     pub goal: String,
+    pub size: Option<String>,
     pub model: Option<String>,
     pub title: Option<String>,
     pub phases: Vec<PlanPhaseWire>,
@@ -193,17 +197,28 @@ pub fn plan_frontmatter_schema(
             "Outcome the plan is designed to achieve.",
             json!("The requested capability works end to end."),
         ),
-        field_spec(
-            "model",
-            "non-empty string",
-            false,
-            match tier {
-                PlanTier::Tale => "Model for the tale's coder follow-up.",
-                PlanTier::Epic => "Model for the epic's land agent.",
-            },
-            json!("codex/gpt-5.6-sol"),
-        ),
     ];
+
+    if tier == PlanTier::Tale {
+        fields.push(field_spec(
+            "size",
+            SIZE_FIELD_TYPE,
+            true,
+            TALE_SIZE_DESCRIPTION,
+            json!("small"),
+        ));
+    }
+
+    fields.push(field_spec(
+        "model",
+        "non-empty string",
+        false,
+        match tier {
+            PlanTier::Tale => "Model for the tale's coder follow-up.",
+            PlanTier::Epic => "Model for the epic's land agent.",
+        },
+        json!("codex/gpt-5.6-sol"),
+    ));
 
     if tier == PlanTier::Epic {
         fields.extend([
@@ -249,7 +264,7 @@ pub fn plan_frontmatter_schema(
             ),
             field_spec(
                 "phases[].size",
-                "xsmall | small | medium | large | xlarge",
+                SIZE_FIELD_TYPE,
                 true,
                 PHASE_SIZE_DESCRIPTION,
                 json!("small"),
@@ -412,6 +427,10 @@ impl<'a> Validator<'a> {
         let authored_tier = self.validate_tier(mapping, &index);
         let title = self.required_non_empty_string(mapping, "title", &index);
         let goal = self.required_non_empty_string(mapping, "goal", &index);
+        let size = match self.tier {
+            PlanTier::Tale => self.validate_tale_size(mapping, &index),
+            PlanTier::Epic => None,
+        };
         let model = self.optional_model(mapping, "model", &index);
         let bead = self.optional_non_empty_string(mapping, "bead", &index);
         let proposed_by =
@@ -467,6 +486,7 @@ impl<'a> Validator<'a> {
         let plan = (!has_errors).then(|| ValidatedPlanWire {
             tier: authored_tier.expect("valid tier must be present"),
             goal: goal.expect("valid goal must be present"),
+            size,
             model,
             title,
             phases,
@@ -548,6 +568,20 @@ impl<'a> Validator<'a> {
             if COMMON_FIELDS.contains(&key) || SYSTEM_FIELDS.contains(&key) {
                 continue;
             }
+            if TALE_FIELDS.contains(&key) {
+                if self.tier == PlanTier::Epic {
+                    self.push(
+                        "error",
+                        "unknown-key",
+                        key,
+                        format!(
+                            "tale-only field `{key}` is invalid when validating an epic"
+                        ),
+                        index,
+                    );
+                }
+                continue;
+            }
             if EPIC_FIELDS.contains(&key) {
                 if self.tier == PlanTier::Tale {
                     self.push(
@@ -601,6 +635,50 @@ impl<'a> Validator<'a> {
             );
         }
         Some(tier)
+    }
+
+    fn validate_tale_size(
+        &mut self,
+        mapping: &Mapping,
+        index: &SourceIndex,
+    ) -> Option<String> {
+        let Some(value) = mapping_value(mapping, "size") else {
+            self.push(
+                "error",
+                "tale-size-missing",
+                "size",
+                "required tale field `size` is missing; expected `xsmall`, `small`, `medium`, `large`, or `xlarge`",
+                index,
+            );
+            return None;
+        };
+        let Some(value) = value.as_str() else {
+            self.push(
+                "error",
+                "tale-size-invalid",
+                "size",
+                format!(
+                    "tale `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found {}",
+                    yaml_type_name(value)
+                ),
+                index,
+            );
+            return None;
+        };
+        let value = value.trim();
+        if !is_plan_size(value) {
+            self.push(
+                "error",
+                "tale-size-invalid",
+                "size",
+                format!(
+                    "tale `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found `{value}`"
+                ),
+                index,
+            );
+            return None;
+        }
+        Some(value.to_string())
     }
 
     fn validate_phases(
@@ -786,8 +864,7 @@ impl<'a> Validator<'a> {
             return String::new();
         };
         let value = value.trim();
-        if !matches!(value, "xsmall" | "small" | "medium" | "large" | "xlarge")
-        {
+        if !is_plan_size(value) {
             self.push(
                 "error",
                 "phase-size-invalid",
@@ -1174,6 +1251,10 @@ fn is_slug(value: &str) -> bool {
     !previous_was_separator
 }
 
+fn is_plan_size(value: &str) -> bool {
+    matches!(value, "xsmall" | "small" | "medium" | "large" | "xlarge")
+}
+
 /// Best-effort YAML source index. Exact source spans are not available from
 /// `serde_yaml::Value`, so this records key lines and falls back to the nearest
 /// containing phase or top-level field for flow-style YAML.
@@ -1282,7 +1363,7 @@ mod tests {
     }
 
     fn valid_tale() -> &'static str {
-        "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n# Plan\nDo it.\n"
+        "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\nsize: small\n---\n# Plan\nDo it.\n"
     }
 
     fn valid_epic() -> &'static str {
@@ -1291,7 +1372,7 @@ mod tests {
 
     #[test]
     fn valid_tale_returns_normalized_plan_and_accepts_system_fields() {
-        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
+        let content = "---\ncreate_time: [system, value]\nstatus: {state: wip}\nprompt: null\nbead: ' sase-88.1 '\nparent: ' sase/repos/plans/202607/parent.md '\nbead_id: 42\ntier: tale\ntitle: ' Ship the feature '\ngoal: ' Ship the feature '\nsize: medium\nmodel: codex/gpt-5.6-sol\n---\n# Plan\nDo it.\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert_eq!(codes(&result), ["parent-frontmatter-deprecated"]);
@@ -1301,6 +1382,7 @@ mod tests {
             Some(ValidatedPlanWire {
                 tier: "tale".to_string(),
                 goal: "Ship the feature".to_string(),
+                size: Some("medium".to_string()),
                 model: Some("codex/gpt-5.6-sol".to_string()),
                 title: Some("Ship the feature".to_string()),
                 phases: Vec::new(),
@@ -1331,15 +1413,17 @@ mod tests {
             plan_validate("---\n- tale\n---\nbody\n", "tale").unwrap();
         assert_eq!(codes(&not_mapping), ["frontmatter-not-mapping"]);
 
-        let empty_body =
-            plan_validate("---\ntier: tale\ntitle: x\ngoal: x\n---\n", "tale")
-                .unwrap();
+        let empty_body = plan_validate(
+            "---\ntier: tale\ntitle: x\ngoal: x\nsize: small\n---\n",
+            "tale",
+        )
+        .unwrap();
         assert_eq!(codes(&empty_body), ["body-empty"]);
     }
 
     #[test]
     fn common_field_rules_report_together_with_locations() {
-        let content = "---\ntier: epic\ntitle: Plan title\ngoal: '   '\nmodel: |\n  bad\n  model\ntyop: value\n---\n# Plan\n";
+        let content = "---\ntier: epic\ntitle: Plan title\ngoal: '   '\nsize: small\nmodel: |\n  bad\n  model\ntyop: value\n---\n# Plan\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(!result.ok);
         assert_eq!(
@@ -1352,14 +1436,13 @@ mod tests {
             ]
         );
         assert_eq!(result.diagnostics[0].field_path, "tyop");
-        assert_eq!(result.diagnostics[0].line, Some(8));
+        assert_eq!(result.diagnostics[0].line, Some(9));
         assert!(result.plan.is_none());
     }
 
     #[test]
     fn missing_wrong_type_and_invalid_tier_are_distinct() {
-        let content =
-            "---\ntier: story\ntitle: Plan title\ngoal: [not, text]\n---\nbody\n";
+        let content = "---\ntier: story\ntitle: Plan title\ngoal: [not, text]\nsize: small\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert_eq!(codes(&result), ["tier-invalid", "type-mismatch"]);
 
@@ -1367,16 +1450,22 @@ mod tests {
             plan_validate("---\nstatus: wip\n---\nbody\n", "tale").unwrap();
         assert_eq!(
             codes(&missing),
-            ["required-missing", "required-missing", "required-missing"]
+            [
+                "required-missing",
+                "required-missing",
+                "required-missing",
+                "tale-size-missing"
+            ]
         );
         assert_eq!(missing.diagnostics[0].field_path, "tier");
         assert_eq!(missing.diagnostics[1].field_path, "title");
         assert_eq!(missing.diagnostics[2].field_path, "goal");
+        assert_eq!(missing.diagnostics[3].field_path, "size");
     }
 
     #[test]
     fn tale_epic_fields_are_inert_warnings() {
-        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nphases: nonsense\npatch: ''\nbug_id: nope\nparent_bead: sase-7z.1\n---\nbody\n";
+        let content = "---\ntier: tale\ntitle: Small plan\ngoal: Small outcome\nsize: small\nphases: nonsense\npatch: ''\nbug_id: nope\nparent_bead: sase-7z.1\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
         assert!(result.ok);
         assert_eq!(
@@ -1396,6 +1485,43 @@ mod tests {
     }
 
     #[test]
+    fn tale_size_is_required_strict_and_normalized() {
+        let missing = valid_tale().replace("size: small\n", "");
+        let result = plan_validate(&missing, "tale").unwrap();
+        assert!(!result.ok);
+        assert_eq!(codes(&result), ["tale-size-missing"]);
+        assert_eq!(result.diagnostics[0].field_path, "size");
+        assert_eq!(result.diagnostics[0].severity, "error");
+
+        for invalid_size in ["enormous", "[]"] {
+            let invalid = valid_tale()
+                .replace("size: small\n", &format!("size: {invalid_size}\n"));
+            let result = plan_validate(&invalid, "tale").unwrap();
+            assert!(!result.ok, "{invalid_size}");
+            assert_eq!(codes(&result), ["tale-size-invalid"]);
+            assert_eq!(result.diagnostics[0].field_path, "size");
+        }
+
+        for valid_size in ["xsmall", "small", "medium", "large", "xlarge"] {
+            let valid = valid_tale()
+                .replace("size: small\n", &format!("size: {valid_size}\n"));
+            let result = plan_validate(&valid, "tale").unwrap();
+            assert!(result.ok, "{valid_size}: {:?}", result.diagnostics);
+            assert_eq!(result.plan.unwrap().size.as_deref(), Some(valid_size));
+        }
+
+        let epic_with_top_level_size = valid_epic().replace(
+            "goal: Plans validate deterministically\n",
+            "goal: Plans validate deterministically\nsize: small\n",
+        );
+        let result = plan_validate(&epic_with_top_level_size, "epic").unwrap();
+        assert!(!result.ok);
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "unknown-key" && diagnostic.field_path == "size"
+        }));
+    }
+
+    #[test]
     fn both_tiers_require_a_non_empty_string_title() {
         for (tier, extra) in [
             ("tale", ""),
@@ -1410,7 +1536,9 @@ mod tests {
                 ("title: [not, text]\n", "type-mismatch"),
             ] {
                 let content = format!(
-                    "---\ntier: {tier}\n{title_line}goal: outcome\n{extra}---\nbody\n"
+                    "---\ntier: {tier}\n{title_line}goal: outcome\n{}{}---\nbody\n",
+                    if tier == "tale" { "size: small\n" } else { "" },
+                    extra
                 );
                 let result = plan_validate(&content, tier).unwrap();
                 assert!(!result.ok, "{tier}: {title_line:?}");
@@ -1481,6 +1609,7 @@ mod tests {
             Some(ValidatedPlanWire {
                 tier: "epic".to_string(),
                 goal: "Plans validate deterministically".to_string(),
+                size: None,
                 model: None,
                 title: Some("Validation engine".to_string()),
                 phases: vec![PlanPhaseWire {
@@ -1670,7 +1799,7 @@ mod tests {
     fn managed_plan_links_are_optional_on_both_tiers_and_type_checked() {
         for tier in ["tale", "epic"] {
             let extra = match tier {
-                "tale" => String::new(),
+                "tale" => "size: small\n".to_string(),
                 "epic" => "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section validates managed plan links.\n    size: small\n"
                     .to_string(),
                 _ => unreachable!(),
@@ -1720,7 +1849,7 @@ mod tests {
     fn managed_plan_proposer_is_optional_normalized_and_type_checked() {
         for tier in ["tale", "epic"] {
             let extra = match tier {
-                "tale" => String::new(),
+                "tale" => "size: small\n".to_string(),
                 "epic" => "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section validates proposal attribution.\n    size: small\n"
                     .to_string(),
                 _ => unreachable!(),
@@ -1770,6 +1899,7 @@ mod tests {
                 "tier",
                 "title",
                 "goal",
+                "size",
                 "model",
                 "create_time",
                 "status",
@@ -1842,10 +1972,11 @@ mod tests {
             );
         }
         assert!(tale.iter().all(|field| field.name != "prompt"));
-        assert_eq!(
-            phase_size.field_type,
-            "xsmall | small | medium | large | xlarge"
-        );
+        let tale_size = tale.iter().find(|field| field.name == "size").unwrap();
+        assert_eq!(tale_size.field_type, SIZE_FIELD_TYPE);
+        assert!(tale_size.required);
+        assert_eq!(tale_size.description, TALE_SIZE_DESCRIPTION);
+        assert_eq!(phase_size.field_type, SIZE_FIELD_TYPE);
         assert!(phase_size.required);
         for (name, description) in [
             (
@@ -1885,9 +2016,9 @@ mod tests {
     }
 
     /// A tale whose body opens with `block` as its plan-header block. The
-    /// block's first bullet is document line 7.
+    /// block's first bullet is document line 8.
     fn tale_with_header(block: &str) -> String {
-        format!("---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n\n{block}\n\n# Plan\nDo it.\n")
+        format!("---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\nsize: small\n---\n\n{block}\n\n# Plan\nDo it.\n")
     }
 
     fn header_diagnostic(content: &str) -> PlanDiagnosticWire {
@@ -1936,7 +2067,7 @@ mod tests {
                 "{}",
                 diagnostic.message
             );
-            assert_eq!(diagnostic.line, Some(7));
+            assert_eq!(diagnostic.line, Some(8));
         }
     }
 
@@ -1952,7 +2083,7 @@ mod tests {
             "{}",
             duplicate.message
         );
-        assert_eq!(duplicate.line, Some(8));
+        assert_eq!(duplicate.line, Some(9));
 
         // An unknown key can only start a block's second bullet: a leading
         // unknown bullet is prose, so no block is detected at all.
@@ -1966,7 +2097,7 @@ mod tests {
             "{}",
             unknown.message
         );
-        assert_eq!(unknown.line, Some(8));
+        assert_eq!(unknown.line, Some(9));
 
         let malformed =
             header_diagnostic(&tale_with_header("- **PARENT:** epic.md"));
@@ -1977,7 +2108,7 @@ mod tests {
             "{}",
             malformed.message
         );
-        assert_eq!(malformed.line, Some(7));
+        assert_eq!(malformed.line, Some(8));
 
         let entry = header_diagnostic(&tale_with_header(
             "- **PARENT:** [a](a.md)\n- **AGENTS:**\n  - [one](one.md)\n  - [two](two.md) bad",
@@ -1989,7 +2120,7 @@ mod tests {
             "{}",
             entry.message
         );
-        assert_eq!(entry.line, Some(10));
+        assert_eq!(entry.line, Some(11));
     }
 
     #[test]
@@ -2009,7 +2140,7 @@ mod tests {
         // Header-shaped bullets outside the leading block are prose, not a
         // header block, so this plan's own examples stay valid.
         let prose = plan_validate(
-            "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\n---\n# Plan\nDo not author:\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n```markdown\n- **PARENT:** [epic](epic.md) (annotated)\n```\n",
+            "---\ntier: tale\ntitle: Ship the feature\ngoal: Ship the feature\nsize: small\n---\n# Plan\nDo not author:\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n```markdown\n- **PARENT:** [epic](epic.md) (annotated)\n```\n",
             "tale",
         )
         .unwrap();
@@ -2019,7 +2150,7 @@ mod tests {
     #[test]
     fn a_malformed_header_block_does_not_hide_frontmatter_diagnostics() {
         let result = plan_validate(
-            "---\ntier: tale\ngoal: [not, text]\n---\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n# Plan\n",
+            "---\ntier: tale\ngoal: [not, text]\nsize: small\n---\n\n- **PARENT:** [epic](epic.md) (annotated)\n\n# Plan\n",
             "tale",
         )
         .unwrap();
@@ -2027,7 +2158,7 @@ mod tests {
             codes(&result),
             ["header-invalid", "required-missing", "type-mismatch"]
         );
-        assert_eq!(result.diagnostics[0].line, Some(6));
+        assert_eq!(result.diagnostics[0].line, Some(7));
     }
 
     #[test]

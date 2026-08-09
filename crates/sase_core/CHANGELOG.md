@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(plan)* [**breaking**] require tale `size` frontmatter and expose normalized plan size
+
 ## [0.22.0](https://github.com/sase-org/sase-core/compare/v0.21.3...v0.22.0) - 2026-08-09
 
 ### Added

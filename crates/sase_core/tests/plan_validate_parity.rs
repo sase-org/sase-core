@@ -40,7 +40,7 @@ fn plan_validate_matches_python_facade_fixture() {
         serde_json::to_value(plan_validate(EPIC_PLAN, "epic").unwrap())
             .unwrap();
     let python_facade_fixture: Value = json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "ok": true,
         "diagnostics": [
             {
@@ -61,6 +61,7 @@ fn plan_validate_matches_python_facade_fixture() {
         "plan": {
             "tier": "epic",
             "goal": "Stale workspaces are collected safely",
+            "size": null,
             "model": "claude/opus",
             "title": "Workspace GC rewrite",
             "phases": [

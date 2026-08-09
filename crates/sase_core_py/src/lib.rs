@@ -9308,7 +9308,7 @@ MENTORS:
             let result =
                 py_plan_validate(py, content, "epic", "authoring").unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(value["schema_version"], json!(2));
+            assert_eq!(value["schema_version"], json!(3));
             assert_eq!(value["ok"], json!(true));
             assert_eq!(
                 value["diagnostics"][0]["code"],
@@ -9316,6 +9316,7 @@ MENTORS:
             );
             assert_eq!(value["plan"]["title"], json!("Binding parity"));
             assert_eq!(value["plan"]["parent_bead"], json!("sase-7z.1"));
+            assert_eq!(value["plan"]["size"], json!(null));
             assert_eq!(value["plan"]["bead"], json!("sase-88.1"));
             assert_eq!(
                 value["plan"]["parent"],
@@ -9324,7 +9325,7 @@ MENTORS:
             assert_eq!(value["plan"]["phases"][0]["depends_on"], json!([]));
             assert_eq!(value["plan"]["phases"][0]["size"], json!("medium"));
 
-            let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\nbead: sase-88.1\nparent: sase/repos/plans/202607/parent.md\n---\n# Plan\nImplement it.\n";
+            let tale = "---\ntier: tale\ntitle: Tale binding parity\ngoal: The binding returns normalized data\nsize: medium\nbead: sase-88.1\nparent: sase/repos/plans/202607/parent.md\n---\n# Plan\nImplement it.\n";
             let tale_result =
                 py_plan_validate(py, tale, "tale", "authoring").unwrap();
             let tale_value = py_to_json_value(tale_result.bind(py)).unwrap();
@@ -9337,6 +9338,7 @@ MENTORS:
                 tale_value["plan"]["title"],
                 json!("Tale binding parity")
             );
+            assert_eq!(tale_value["plan"]["size"], json!("medium"));
             assert_eq!(tale_value["plan"]["bead"], json!("sase-88.1"));
             assert_eq!(
                 tale_value["plan"]["parent"],
@@ -9344,7 +9346,7 @@ MENTORS:
             );
 
             for (tier, extra) in [
-                ("tale", ""),
+                ("tale", "size: small\n"),
                 (
                     "epic",
                     "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section exercises title validation.\n    size: small\n",
@@ -9399,6 +9401,12 @@ MENTORS:
                 py_to_json_value(tale_schema.bind(py)).unwrap();
             assert_eq!(tale_schema_value[1]["name"], json!("title"));
             assert_eq!(tale_schema_value[1]["required"], json!(true));
+            assert!(tale_schema_value.as_array().unwrap().iter().any(
+                |field| {
+                    field["name"] == json!("size")
+                        && field["required"] == json!(true)
+                }
+            ));
             for field_name in ["bead", "parent"] {
                 assert!(tale_schema_value
                     .as_array()
