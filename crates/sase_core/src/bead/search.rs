@@ -3,6 +3,8 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+use regex::{Regex, RegexBuilder};
+
 use super::read::{list_issues_in_issues, read_store_issues};
 use super::wire::{
     BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
@@ -36,6 +38,7 @@ pub fn search_issues(
     issue_types: Option<&[String]>,
     tiers: Option<&[String]>,
     limit: Option<usize>,
+    regex: bool,
 ) -> Result<Vec<BeadSearchMatchWire>, BeadError> {
     search_issues_in_issues(
         read_store_issues(beads_dir)?,
@@ -44,6 +47,7 @@ pub fn search_issues(
         issue_types,
         tiers,
         limit,
+        regex,
     )
 }
 
@@ -54,12 +58,27 @@ pub(crate) fn search_issues_in_issues(
     issue_types: Option<&[String]>,
     tiers: Option<&[String]>,
     limit: Option<usize>,
+    regex: bool,
 ) -> Result<Vec<BeadSearchMatchWire>, BeadError> {
-    if query.trim().is_empty() {
-        return Err(BeadError::validation("search query cannot be empty"));
-    }
+    let matcher = SearchMatcher::new(query, regex)?;
+    search_issues_in_issues_with_matcher(
+        issues,
+        &matcher,
+        statuses,
+        issue_types,
+        tiers,
+        limit,
+    )
+}
 
-    let needle = query.to_lowercase();
+pub(crate) fn search_issues_in_issues_with_matcher(
+    issues: Vec<IssueWire>,
+    matcher: &SearchMatcher,
+    statuses: Option<&[String]>,
+    issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
+    limit: Option<usize>,
+) -> Result<Vec<BeadSearchMatchWire>, BeadError> {
     let filtered = list_issues_in_issues(issues, statuses, issue_types, tiers)?;
     let max = limit.unwrap_or(0);
     let mut matches = Vec::new();
@@ -67,7 +86,7 @@ pub(crate) fn search_issues_in_issues(
     // ascending; iterate in reverse so newer matches come before older ones,
     // and so `--limit` keeps the newest matches.
     for issue in filtered.into_iter().rev() {
-        let matched_fields = matched_field_names(&issue, &needle);
+        let matched_fields = matched_field_names(&issue, matcher);
         if matched_fields.is_empty() {
             continue;
         }
@@ -82,12 +101,139 @@ pub(crate) fn search_issues_in_issues(
     Ok(matches)
 }
 
-fn matched_field_names(issue: &IssueWire, needle: &str) -> Vec<String> {
+#[derive(Debug, Clone)]
+pub(crate) struct SearchMatcher {
+    query: String,
+    kind: SearchMatcherKind,
+}
+
+#[derive(Debug, Clone)]
+enum SearchMatcherKind {
+    Literal { needle: String },
+    Regex(Regex),
+}
+
+impl SearchMatcher {
+    pub(crate) fn new(query: &str, regex: bool) -> Result<Self, BeadError> {
+        if query.trim().is_empty() {
+            return Err(BeadError::validation("search query cannot be empty"));
+        }
+
+        let kind = if regex {
+            RegexBuilder::new(query)
+                .case_insensitive(true)
+                .build()
+                .map(SearchMatcherKind::Regex)
+                .map_err(|err| {
+                    BeadError::validation(format!("invalid regex: {err}"))
+                })?
+        } else {
+            SearchMatcherKind::Literal {
+                needle: query.to_lowercase(),
+            }
+        };
+
+        Ok(Self {
+            query: query.to_string(),
+            kind,
+        })
+    }
+
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(crate) fn is_regex(&self) -> bool {
+        matches!(self.kind, SearchMatcherKind::Regex(_))
+    }
+
+    pub(crate) fn is_match(&self, value: &str) -> bool {
+        !self.byte_ranges(value).is_empty()
+    }
+
+    pub(crate) fn byte_ranges(&self, value: &str) -> Vec<(usize, usize)> {
+        match &self.kind {
+            SearchMatcherKind::Literal { needle } => {
+                case_insensitive_byte_ranges(value, needle)
+            }
+            SearchMatcherKind::Regex(regex) => regex
+                .find_iter(value)
+                .filter(|matched| matched.start() < matched.end())
+                .map(|matched| (matched.start(), matched.end()))
+                .collect(),
+        }
+    }
+}
+
+fn matched_field_names(
+    issue: &IssueWire,
+    matcher: &SearchMatcher,
+) -> Vec<String> {
     searchable_fields(issue)
         .into_iter()
-        .filter(|field| field.value.to_lowercase().contains(needle))
+        .filter(|field| matcher.is_match(&field.value))
         .map(|field| field.name.to_string())
         .collect()
+}
+
+fn case_insensitive_byte_ranges(
+    text: &str,
+    needle: &str,
+) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let (folded, offsets) = folded_with_offsets(text);
+    let mut ranges = Vec::new();
+    let mut search_start = 0;
+    while let Some(relative_start) = folded[search_start..].find(needle) {
+        let folded_start = search_start + relative_start;
+        let folded_end = folded_start + needle.len();
+        let Some(original_start) = offsets
+            .iter()
+            .find(|(start, end, _, _)| {
+                *start <= folded_start && folded_start < *end
+            })
+            .map(|(_, _, original_start, _)| *original_start)
+        else {
+            break;
+        };
+        let Some(original_end) = offsets
+            .iter()
+            .rev()
+            .find(|(start, end, _, _)| {
+                *start < folded_end && folded_end <= *end
+            })
+            .map(|(_, _, _, original_end)| *original_end)
+        else {
+            break;
+        };
+        ranges.push((original_start, original_end));
+        search_start = folded_end;
+    }
+    ranges
+}
+
+fn folded_with_offsets(
+    text: &str,
+) -> (String, Vec<(usize, usize, usize, usize)>) {
+    let mut folded = String::new();
+    let mut offsets = Vec::new();
+    for (original_start, ch) in text.char_indices() {
+        let original_end = original_start + ch.len_utf8();
+        for lower in ch.to_lowercase() {
+            let folded_start = folded.len();
+            folded.push(lower);
+            let folded_end = folded.len();
+            offsets.push((
+                folded_start,
+                folded_end,
+                original_start,
+                original_end,
+            ));
+        }
+    }
+    (folded, offsets)
 }
 
 struct SearchField<'a> {
@@ -316,6 +462,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
             assert_eq!(results.len(), 1, "field {field_name}");
@@ -364,6 +511,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -386,6 +534,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -410,6 +559,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -429,6 +579,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -450,6 +601,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -481,6 +633,7 @@ mod tests {
             Some(&["plan".to_string()]),
             Some(&["epic".to_string()]),
             None,
+            false,
         )
         .unwrap();
 
@@ -506,6 +659,7 @@ mod tests {
             None,
             None,
             Some(2),
+            false,
         )
         .unwrap();
 
@@ -531,6 +685,7 @@ mod tests {
             None,
             None,
             Some(0),
+            false,
         )
         .unwrap();
 
@@ -547,6 +702,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap_err();
             assert_eq!(err.kind, "validation");
@@ -576,6 +732,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -591,10 +748,119 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn literal_search_treats_regex_metacharacters_literally() {
+        let issue = phase_issue_with(|issue| {
+            issue.title = "Fix auth.* route".to_string();
+        });
+        let regex_like_but_literal = phase_issue_with(|issue| {
+            issue.id = "beads-1.2".to_string();
+            issue.title = "Fix authxyz route".to_string();
+            issue.created_at = "2026-01-01T00:02:00Z".to_string();
+        });
+
+        let results = search_issues_in_issues(
+            vec![issue, regex_like_but_literal],
+            "auth.*",
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.1"]);
+    }
+
+    #[test]
+    fn regex_search_matches_patterns_case_insensitively_by_default() {
+        let later = phase_issue_with(|issue| {
+            issue.id = "beads-1.2".to_string();
+            issue.title = "AUTH service".to_string();
+            issue.created_at = "2026-01-01T00:02:00Z".to_string();
+        });
+        let earlier = phase_issue_with(|issue| {
+            issue.id = "beads-1.1".to_string();
+            issue.title = "auth token".to_string();
+            issue.created_at = "2026-01-01T00:01:00Z".to_string();
+        });
+
+        let results = search_issues_in_issues(
+            vec![earlier, later],
+            r"auth\s+(service|token)",
+            None,
+            None,
+            None,
+            Some(1),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.2"]);
+        assert_eq!(results[0].matched_fields, vec!["title"]);
+    }
+
+    #[test]
+    fn regex_search_allows_inline_case_sensitivity() {
+        let lowercase = phase_issue_with(|issue| {
+            issue.id = "beads-1.1".to_string();
+            issue.title = "needle".to_string();
+        });
+        let uppercase = phase_issue_with(|issue| {
+            issue.id = "beads-1.2".to_string();
+            issue.title = "Needle".to_string();
+            issue.created_at = "2026-01-01T00:02:00Z".to_string();
+        });
+
+        let results = search_issues_in_issues(
+            vec![lowercase, uppercase],
+            r"(?-i:Needle)",
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&results), vec!["beads-1.2"]);
+    }
+
+    #[test]
+    fn invalid_regex_is_a_validation_error() {
+        let err = search_issues_in_issues(
+            vec![phase_issue_with(|_| {})],
+            "[",
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert!(err.message.starts_with("invalid regex: "));
+    }
+
+    #[test]
+    fn matcher_ranges_ignore_zero_width_regex_matches() {
+        let zero_width =
+            SearchMatcher::new(r"\b", true).expect("valid regex matcher");
+        assert!(zero_width.byte_ranges("auth token").is_empty());
+        assert!(!zero_width.is_match("auth token"));
+
+        let word =
+            SearchMatcher::new(r"\bauth\b", true).expect("valid matcher");
+        assert_eq!(word.byte_ranges("auth token"), vec![(0, 4)]);
     }
 
     #[test]
@@ -612,7 +878,7 @@ mod tests {
         .unwrap();
 
         let results =
-            search_issues(&beads_dir, "needle", None, None, None, None)
+            search_issues(&beads_dir, "needle", None, None, None, None, false)
                 .unwrap();
 
         assert_eq!(

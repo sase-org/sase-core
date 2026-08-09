@@ -25,7 +25,7 @@ use super::mutation::{
 use super::read::{
     read_store_issues, resolve_issue_id_in_issues, resolve_issue_ids,
 };
-use super::search::search_issues_in_issues;
+use super::search::{search_issues_in_issues_with_matcher, SearchMatcher};
 use super::wire::{
     BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
     DependencyWire, IssueTypeWire, IssueWire, StatusWire,
@@ -365,10 +365,18 @@ fn handle_search(
         }
         SearchParseOutcome::Defer => return Ok(defer()),
     };
+    let matcher =
+        match SearchMatcher::new(&search_args.query, search_args.regex) {
+            Ok(matcher) => matcher,
+            Err(err) if err.kind == "validation" => {
+                return Ok(usage_error(format!("Error: {}\n", err.message)));
+            }
+            Err(err) => return Err(err),
+        };
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
-    let matches = match search_issues_in_issues(
+    let matches = match search_issues_in_issues_with_matcher(
         issues,
-        &search_args.query,
+        &matcher,
         optional_filter(&search_args.statuses),
         optional_filter(&search_args.issue_types),
         optional_filter(&search_args.tiers),
@@ -384,12 +392,12 @@ fn handle_search(
         && search_args.color.resolve_stdout();
     let stdout = match search_args.format {
         SearchFormat::Compact => {
-            render_search_compact(&matches, &search_args.query, color)
+            render_search_compact(&matches, &matcher, color)
         }
-        SearchFormat::Json => render_search_json(&matches, &search_args.query)?,
+        SearchFormat::Json => render_search_json(&matches, &matcher)?,
         SearchFormat::Full => render_search_full(
             &matches,
-            &search_args.query,
+            matcher.query(),
             read_beads_dirs,
             write_beads_dir,
             cwd,
@@ -1487,6 +1495,7 @@ struct SearchArgs {
     tiers: Vec<String>,
     limit: Option<usize>,
     color: ColorMode,
+    regex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1567,10 +1576,13 @@ fn parse_search_args(args: &[String]) -> SearchParseOutcome {
     let mut tiers = Vec::new();
     let mut limit = None;
     let mut color = ColorMode::Auto;
+    let mut regex = false;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
-        if arg == "-f" || arg == "--format" {
+        if arg == "-e" || arg == "--regex" {
+            regex = true;
+        } else if arg == "-f" || arg == "--format" {
             idx += 1;
             let Some(value) = args.get(idx) else {
                 return SearchParseOutcome::Defer;
@@ -1683,6 +1695,7 @@ fn parse_search_args(args: &[String]) -> SearchParseOutcome {
         tiers,
         limit,
         color,
+        regex,
     })
 }
 
@@ -1934,11 +1947,11 @@ fn render_dependency(
 
 fn render_search_compact(
     matches: &[BeadSearchMatchWire],
-    query: &str,
+    matcher: &SearchMatcher,
     color: bool,
 ) -> String {
     if matches.is_empty() {
-        return format!("No beads match \"{query}\".\n");
+        return format!("No beads match \"{}\".\n", matcher.query());
     }
 
     let mut stdout = String::new();
@@ -1951,10 +1964,10 @@ fn render_search_compact(
             color_issue_type_cell(&issue.issue_type, color, type_width),
             color_status_icon(&issue.status, color),
             color_issue_id(&issue.id, color),
-            highlight_matches(&issue.title, query, color),
+            highlight_matches(&issue.title, matcher, color),
         )
         .expect("writing to String cannot fail");
-        if let Some(snippet) = compact_snippet(result, query, color) {
+        if let Some(snippet) = compact_snippet(result, matcher, color) {
             writeln!(stdout, "{}", dim_line(&format!("  {snippet}"), color))
                 .expect("writing to String cannot fail");
         }
@@ -1964,17 +1977,19 @@ fn render_search_compact(
 
 fn render_search_json(
     matches: &[BeadSearchMatchWire],
-    query: &str,
+    matcher: &SearchMatcher,
 ) -> Result<String, BeadError> {
     #[derive(Serialize)]
     struct SearchEnvelope<'a> {
         query: &'a str,
+        regex: bool,
         count: usize,
         results: &'a [BeadSearchMatchWire],
     }
 
     let mut stdout = serde_json::to_string_pretty(&SearchEnvelope {
-        query,
+        query: matcher.query(),
+        regex: matcher.is_regex(),
         count: matches.len(),
         results: matches,
     })?;
@@ -2016,7 +2031,7 @@ fn render_search_full(
 
 fn compact_snippet(
     result: &BeadSearchMatchWire,
-    query: &str,
+    matcher: &SearchMatcher,
     color: bool,
 ) -> Option<String> {
     let issue = &result.issue;
@@ -2024,9 +2039,9 @@ fn compact_snippet(
         .matched_fields
         .iter()
         .any(|field| field == "title" || field == "description");
-    let description = single_line_snippet(&issue.description, query, 96);
+    let description = single_line_snippet(&issue.description, matcher, 96);
     if has_title_or_description_match && !description.is_empty() {
-        return Some(highlight_matches(&description, query, color));
+        return Some(highlight_matches(&description, matcher, color));
     }
 
     result
@@ -2035,12 +2050,12 @@ fn compact_snippet(
         .filter(|field| field.as_str() != "title")
         .find_map(|field| {
             let value = search_field_display_value(issue, field)?;
-            let snippet = single_line_snippet(&value, query, 96);
+            let snippet = single_line_snippet(&value, matcher, 96);
             (!snippet.is_empty()).then(|| {
                 format!(
                     "{}: \"{}\"",
                     field,
-                    highlight_matches(&snippet, query, color)
+                    highlight_matches(&snippet, matcher, color)
                 )
             })
         })
@@ -2070,13 +2085,17 @@ fn search_field_display_value(
     }
 }
 
-fn single_line_snippet(value: &str, query: &str, max_chars: usize) -> String {
+fn single_line_snippet(
+    value: &str,
+    matcher: &SearchMatcher,
+    max_chars: usize,
+) -> String {
     let line = value.lines().next().unwrap_or("").trim();
     if line.chars().count() <= max_chars {
         return line.to_string();
     }
 
-    let ranges = case_insensitive_byte_ranges(line, query);
+    let ranges = matcher.byte_ranges(line);
     let Some((match_start, match_end)) = ranges.first().copied() else {
         return truncate_chars(line, max_chars);
     };
@@ -2250,11 +2269,15 @@ fn dim_line(line: &str, color: bool) -> String {
     }
 }
 
-fn highlight_matches(text: &str, query: &str, color: bool) -> String {
+fn highlight_matches(
+    text: &str,
+    matcher: &SearchMatcher,
+    color: bool,
+) -> String {
     if !color {
         return text.to_string();
     }
-    let ranges = case_insensitive_byte_ranges(text, query);
+    let ranges = matcher.byte_ranges(text);
     if ranges.is_empty() {
         return text.to_string();
     }
@@ -2273,67 +2296,6 @@ fn highlight_matches(text: &str, query: &str, color: bool) -> String {
     }
     highlighted.push_str(&text[cursor..]);
     highlighted
-}
-
-fn case_insensitive_byte_ranges(
-    text: &str,
-    query: &str,
-) -> Vec<(usize, usize)> {
-    let needle = query.to_lowercase();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let (folded, offsets) = folded_with_offsets(text);
-    let mut ranges = Vec::new();
-    let mut search_start = 0;
-    while let Some(relative_start) = folded[search_start..].find(&needle) {
-        let folded_start = search_start + relative_start;
-        let folded_end = folded_start + needle.len();
-        let Some(original_start) = offsets
-            .iter()
-            .find(|(start, end, _, _)| {
-                *start <= folded_start && folded_start < *end
-            })
-            .map(|(_, _, original_start, _)| *original_start)
-        else {
-            break;
-        };
-        let Some(original_end) = offsets
-            .iter()
-            .rev()
-            .find(|(start, end, _, _)| {
-                *start < folded_end && folded_end <= *end
-            })
-            .map(|(_, _, _, original_end)| *original_end)
-        else {
-            break;
-        };
-        ranges.push((original_start, original_end));
-        search_start = folded_end;
-    }
-    ranges
-}
-
-fn folded_with_offsets(
-    text: &str,
-) -> (String, Vec<(usize, usize, usize, usize)>) {
-    let mut folded = String::new();
-    let mut offsets = Vec::new();
-    for (original_start, ch) in text.char_indices() {
-        let original_end = original_start + ch.len_utf8();
-        for lower in ch.to_lowercase() {
-            let folded_start = folded.len();
-            folded.push(lower);
-            let folded_end = folded.len();
-            offsets.push((
-                folded_start,
-                folded_end,
-                original_start,
-                original_end,
-            ));
-        }
-    }
-    (folded, offsets)
 }
 
 fn blocking_issue_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
@@ -3052,12 +3014,102 @@ mod tests {
         assert!(!outcome.stdout.contains("\x1b["));
         let parsed: Value = serde_json::from_str(&outcome.stdout).unwrap();
         assert_eq!(parsed["query"], "auth");
+        assert_eq!(parsed["regex"], false);
         assert_eq!(parsed["count"], 1);
         assert_eq!(parsed["results"][0]["issue"]["id"], "beads-1.1");
         assert_eq!(
             parsed["results"][0]["matched_fields"],
             serde_json::json!(["title"])
         );
+    }
+
+    #[test]
+    fn search_regex_flag_is_fast_path_only_as_bare_flag() {
+        let parsed = parse_search_args(&string_args(&["needle", "--regex"]));
+        assert!(matches!(
+            parsed,
+            SearchParseOutcome::Parsed(SearchArgs { regex: true, .. })
+        ));
+
+        let short = parse_search_args(&string_args(&["needle", "-e"]));
+        assert!(matches!(
+            short,
+            SearchParseOutcome::Parsed(SearchArgs { regex: true, .. })
+        ));
+
+        assert_eq!(
+            parse_search_args(&string_args(&["needle", "--regex=true"])),
+            SearchParseOutcome::Defer
+        );
+    }
+
+    #[test]
+    fn search_regex_matches_patterns_and_highlights_ranges() {
+        let store = seed_issues(vec![phase_issue(
+            "beads-1.1",
+            "AuthToken",
+            "Rotate the token.",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        )]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["search", r"auth\w+", "--regex", "--color", "always"],
+        );
+
+        assert_eq!(outcome.exit_code, 0);
+        assert!(outcome.stdout.contains("\x1b[30;43mAuthToken\x1b[39;49m"));
+    }
+
+    #[test]
+    fn search_regex_invalid_pattern_is_usage_error() {
+        let store = seed_issues(Vec::new());
+
+        let outcome =
+            execute_search(&store.beads_dir, &["search", "[", "--regex"]);
+
+        assert_eq!(outcome.exit_code, 2);
+        assert!(outcome.stderr.starts_with("Error: invalid regex: "));
+    }
+
+    #[test]
+    fn search_regex_json_marks_regex_mode() {
+        let store = seed_issues(vec![phase_issue(
+            "beads-1.1",
+            "Auth JSON",
+            "Structured output",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        )]);
+
+        let outcome = execute_search(
+            &store.beads_dir,
+            &["search", r"auth\s+json", "-e", "-f", "json"],
+        );
+
+        assert_eq!(outcome.exit_code, 0);
+        let parsed: Value = serde_json::from_str(&outcome.stdout).unwrap();
+        assert_eq!(parsed["query"], r"auth\s+json");
+        assert_eq!(parsed["regex"], true);
+        assert_eq!(parsed["count"], 1);
+    }
+
+    #[test]
+    fn search_regex_zero_width_only_pattern_matches_nothing() {
+        let store = seed_issues(vec![phase_issue(
+            "beads-1.1",
+            "Auth boundary",
+            "Structured output",
+            StatusWire::Open,
+            "2026-01-01T00:01:00Z",
+        )]);
+
+        let outcome =
+            execute_search(&store.beads_dir, &["search", r"\b", "-e"]);
+
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.stdout, "No beads match \"\\b\".\n");
     }
 
     #[test]
@@ -3727,7 +3779,7 @@ mod tests {
     }
 
     fn execute_search(beads_dir: &Path, args: &[&str]) -> BeadCliOutcomeWire {
-        let argv = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let argv = string_args(args);
         execute_bead_cli(
             &argv,
             &[beads_dir.to_path_buf()],
@@ -3737,6 +3789,10 @@ mod tests {
             &[],
         )
         .unwrap()
+    }
+
+    fn string_args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
     }
 
     fn seed_issues(issues: Vec<IssueWire>) -> SeededStore {

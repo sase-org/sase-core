@@ -3009,7 +3009,8 @@ fn py_bead_list<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_search")]
-#[pyo3(signature = (beads_dir, query, statuses=None, issue_types=None, tiers=None, limit=None))]
+#[pyo3(signature = (beads_dir, query, statuses=None, issue_types=None, tiers=None, limit=None, regex=false))]
+#[allow(clippy::too_many_arguments)]
 fn py_bead_search<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -3018,6 +3019,7 @@ fn py_bead_search<'py>(
     issue_types: Option<Vec<String>>,
     tiers: Option<Vec<String>>,
     limit: Option<usize>,
+    regex: bool,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     bead_result_to_py(
@@ -3030,6 +3032,7 @@ fn py_bead_search<'py>(
                 issue_types.as_deref(),
                 tiers.as_deref(),
                 limit,
+                regex,
             )
         }),
     )
@@ -10699,9 +10702,54 @@ MENTORS:
                 None,
                 None,
                 Some(1),
+                false,
             )
             .unwrap();
             let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value[0]["issue"]["id"], json!("beads-1.1"));
+            assert_eq!(value[0]["matched_fields"], json!(["title"]));
+        });
+    }
+
+    #[test]
+    fn bead_search_binding_accepts_regex_keyword() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (_temp, beads_dir) = temp_beads_dir();
+            fs::write(
+                beads_dir.join("issues.jsonl"),
+                serde_json::to_string(&json!({
+                    "id": "beads-1.1",
+                    "title": "Auth binding",
+                    "status": "open",
+                    "issue_type": "phase",
+                    "parent_id": "beads-1",
+                    "created_at": "2026-01-01T00:01:00Z",
+                    "updated_at": "2026-01-01T00:01:00Z"
+                }))
+                .unwrap()
+                    + "\n",
+            )
+            .unwrap();
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_bead_search, &module).unwrap(),
+                )
+                .unwrap();
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("regex", true).unwrap();
+
+            let result = module
+                .getattr("bead_search")
+                .unwrap()
+                .call(
+                    (beads_dir.to_str().unwrap(), r"auth\s+binding"),
+                    Some(&kwargs),
+                )
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
 
             assert_eq!(value[0]["issue"]["id"], json!("beads-1.1"));
             assert_eq!(value[0]["matched_fields"], json!(["title"]));
