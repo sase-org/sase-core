@@ -170,7 +170,7 @@ fn accumulate(
             accumulator.color_cursor = Some(cursor.clone());
         }
     }
-    if let Some(icon) = declared_tab_icon(row) {
+    if let Some(icon) = declared_tab_icon_for_tab(row, &key) {
         if donation_wins(&cursor, accumulator.icon_cursor.as_ref()) {
             accumulator.icon = Some(icon);
             accumulator.icon_cursor = Some(cursor);
@@ -198,6 +198,17 @@ fn declared_color(notification: &NotificationWire) -> Option<String> {
         return None;
     }
     Some(color.to_string())
+}
+
+/// Return a sender-declared icon for the declared panel tab, ignoring stored junk.
+fn declared_tab_icon_for_tab(
+    notification: &NotificationWire,
+    tab_key: &str,
+) -> Option<String> {
+    if declared_panel(notification)? != tab_key {
+        return None;
+    }
+    declared_tab_icon(notification)
 }
 
 /// Return a sender-declared tab icon, ignoring stored junk.
@@ -683,8 +694,9 @@ mod tests {
     fn a_tab_wears_the_newest_declared_icon_and_ignores_junk() {
         fn declaring(id: &str, at: &str, icon: &str) -> NotificationWire {
             let mut row = notification(id);
-            row.tags = vec!["alpha".to_string()];
             row.timestamp = at.to_string();
+            row.action_data
+                .insert("panel".to_string(), "alpha".to_string());
             row.action_data
                 .insert("panel_icon".to_string(), icon.to_string());
             row
@@ -722,16 +734,20 @@ mod tests {
     #[test]
     fn a_resurfaced_row_donates_its_icon_over_a_newer_sent_row() {
         let mut sent_later = notification("sent-later");
-        sent_later.tags = vec!["alpha".to_string()];
         sent_later.timestamp = "2026-03-17T09:00:00-04:00".to_string();
+        sent_later
+            .action_data
+            .insert("panel".to_string(), "alpha".to_string());
         sent_later
             .action_data
             .insert("panel_icon".to_string(), "◆".to_string());
         let mut resurfaced = notification("resurfaced");
-        resurfaced.tags = vec!["alpha".to_string()];
         resurfaced.timestamp = "2026-03-01T00:00:00-04:00".to_string();
         resurfaced.resurfaced_at =
             Some("2026-03-17T12:00:00-04:00".to_string());
+        resurfaced
+            .action_data
+            .insert("panel".to_string(), "alpha".to_string());
         resurfaced
             .action_data
             .insert("panel_icon".to_string(), "◈".to_string());
@@ -742,7 +758,36 @@ mod tests {
     }
 
     #[test]
-    fn any_row_may_donate_an_icon_not_only_a_panel_row() {
+    fn a_row_donates_its_icon_only_to_its_declared_panel_tab() {
+        let mut beads = notification("beads");
+        beads
+            .action_data
+            .insert("panel".to_string(), "beads".to_string());
+        beads
+            .action_data
+            .insert("panel_icon".to_string(), "◆".to_string());
+        let mut snoozed = notification("snoozed");
+        snoozed.timestamp = "2026-03-17T11:00:00-04:00".to_string();
+        snoozed.muted = true;
+        snoozed.snooze_until = Some("2026-03-18T10:00:00-04:00".to_string());
+        snoozed
+            .action_data
+            .insert("panel".to_string(), "beads".to_string());
+        snoozed
+            .action_data
+            .insert("panel_icon".to_string(), "◈".to_string());
+
+        let tabs = classify_notification_tabs(&[beads, snoozed]).tabs;
+        let beads = tabs.iter().find(|tab| tab.key == "beads").unwrap();
+        let snoozed =
+            tabs.iter().find(|tab| tab.key == SNOOZED_TAB_KEY).unwrap();
+
+        assert_eq!(beads.icon.as_deref(), Some("◆"));
+        assert_eq!(snoozed.icon, None);
+    }
+
+    #[test]
+    fn a_non_panel_row_does_not_donate_a_panel_icon() {
         let mut row = notification("h");
         row.action = Some("PlanApproval".to_string());
         row.action_data
@@ -751,7 +796,7 @@ mod tests {
         let tabs = classify_notification_tabs(&[row]).tabs;
 
         assert_eq!(tabs[0].kind, TAB_KIND_HITL);
-        assert_eq!(tabs[0].icon.as_deref(), Some("⚑"));
+        assert_eq!(tabs[0].icon, None);
     }
 
     #[test]
