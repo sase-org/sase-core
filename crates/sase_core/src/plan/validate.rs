@@ -39,9 +39,10 @@ const PHASE_FIELDS: &[&str] =
 
 const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
 const SIZE_FIELD_TYPE: &str = "xsmall | small | medium | large | xlarge";
-const TALE_SIZE_DESCRIPTION: &str = "Estimated tale scope. Use the same five-step size taxonomy as phase and task beads so the coder follow-up can route through size-specific worker defaults. An explicit `model` still overrides size-derived routing.";
-const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope. Use `xsmall` only for the very simplest tasks that need almost no reasoning, such as launching SASE agents purely to observe their output while testing a SASE agent feature. Use `small` for focused work implemented directly and `medium` for substantial work still implemented directly from its phase description. Use `large` for work that needs a separate planning handoff and may itself justify an epic plan. Use `xlarge` rarely: it admits the task is too large to plan effectively alone, or deliberately defers planning part of a feature until other parts are implemented; choose it only when fairly confident the phase agent will itself author an epic plan. Only `large` and `xlarge` phases receive `#plan`. Without an explicit `model`, the five sizes route through `@xsmall_phase_worker`, `@small_phase_worker`, `@medium_phase_worker`, `@large_phase_worker`, and `@xlarge_phase_worker`, respectively.";
-const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent. Set this explicitly only when the user's prompt requested a specific model; an explicit model overrides size-derived routing for every size. Otherwise omit it. For a phase that only exercises or observes a SASE agent feature and does no consequential work, use `size: xsmall` instead of a cheap model override.";
+const TALE_SIZE_FIELD_TYPE: &str = "xsmall | small | medium";
+const TALE_SIZE_DESCRIPTION: &str = "Estimated tale scope: `xsmall`, `small`, or `medium`; read `sase/memory/sase_sizes.md` with `/sase_memory_read` for size guidance.";
+const PHASE_SIZE_DESCRIPTION: &str = "Estimated phase scope: `xsmall`, `small`, `medium`, `large`, or `xlarge`; read `sase/memory/sase_sizes.md` with `/sase_memory_read` for size guidance.";
+const PHASE_MODEL_DESCRIPTION: &str = "Model for this phase's agent: an explicit model overrides size-derived routing; read `sase/memory/sase_sizes.md` with `/sase_memory_read` for size and routing guidance.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanTier {
@@ -202,7 +203,7 @@ pub fn plan_frontmatter_schema(
     if tier == PlanTier::Tale {
         fields.push(field_spec(
             "size",
-            SIZE_FIELD_TYPE,
+            TALE_SIZE_FIELD_TYPE,
             true,
             TALE_SIZE_DESCRIPTION,
             json!("small"),
@@ -643,14 +644,21 @@ impl<'a> Validator<'a> {
         index: &SourceIndex,
     ) -> Option<String> {
         let Some(value) = mapping_value(mapping, "size") else {
-            self.push(
-                "error",
-                "tale-size-missing",
-                "size",
-                "required tale field `size` is missing; expected `xsmall`, `small`, `medium`, `large`, or `xlarge`",
-                index,
-            );
-            return None;
+            let (severity, message) = match self.mode {
+                PlanValidationMode::Authoring => (
+                    "error",
+                    "required tale field `size` is missing; expected `xsmall`, `small`, or `medium`",
+                ),
+                PlanValidationMode::Launch => (
+                    "warning",
+                    "legacy tale field `size` is missing; treating the tale as `medium` for launch",
+                ),
+            };
+            self.push(severity, "tale-size-missing", "size", message, index);
+            return match self.mode {
+                PlanValidationMode::Authoring => None,
+                PlanValidationMode::Launch => Some("medium".to_string()),
+            };
         };
         let Some(value) = value.as_str() else {
             self.push(
@@ -658,7 +666,7 @@ impl<'a> Validator<'a> {
                 "tale-size-invalid",
                 "size",
                 format!(
-                    "tale `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found {}",
+                    "tale `size` must be `xsmall`, `small`, or `medium`, found {}",
                     yaml_type_name(value)
                 ),
                 index,
@@ -666,19 +674,34 @@ impl<'a> Validator<'a> {
             return None;
         };
         let value = value.trim();
-        if !is_plan_size(value) {
+        if is_tale_size(value) {
+            return Some(value.to_string());
+        }
+        if matches!(
+            (self.mode, value),
+            (PlanValidationMode::Launch, "large" | "xlarge")
+        ) {
             self.push(
-                "error",
+                "warning",
                 "tale-size-invalid",
                 "size",
                 format!(
-                    "tale `size` must be `xsmall`, `small`, `medium`, `large`, or `xlarge`, found `{value}`"
+                    "legacy tale field `size` is `{value}`; treating the tale as `medium` for launch"
                 ),
                 index,
             );
-            return None;
+            return Some("medium".to_string());
         }
-        Some(value.to_string())
+        self.push(
+            "error",
+            "tale-size-invalid",
+            "size",
+            format!(
+                "tale `size` must be `xsmall`, `small`, or `medium`, found `{value}`; a tale is work one follow-up agent implements directly, and `large` or `xlarge` work belongs in an epic plan"
+            ),
+            index,
+        );
+        None
     }
 
     fn validate_phases(
@@ -1255,6 +1278,10 @@ fn is_plan_size(value: &str) -> bool {
     matches!(value, "xsmall" | "small" | "medium" | "large" | "xlarge")
 }
 
+fn is_tale_size(value: &str) -> bool {
+    matches!(value, "xsmall" | "small" | "medium")
+}
+
 /// Best-effort YAML source index. Exact source spans are not available from
 /// `serde_yaml::Value`, so this records key lines and falls back to the nearest
 /// containing phase or top-level field for flow-style YAML.
@@ -1493,21 +1520,57 @@ mod tests {
         assert_eq!(result.diagnostics[0].field_path, "size");
         assert_eq!(result.diagnostics[0].severity, "error");
 
+        let launch =
+            plan_validate_with_mode(&missing, "tale", "launch").unwrap();
+        assert!(launch.ok);
+        assert_eq!(codes(&launch), ["tale-size-missing"]);
+        assert_eq!(launch.diagnostics[0].severity, "warning");
+        assert_eq!(
+            launch.plan.unwrap().size.as_deref(),
+            Some("medium"),
+            "legacy launch validation must normalize missing tale size"
+        );
+
         for invalid_size in ["enormous", "[]"] {
             let invalid = valid_tale()
                 .replace("size: small\n", &format!("size: {invalid_size}\n"));
-            let result = plan_validate(&invalid, "tale").unwrap();
-            assert!(!result.ok, "{invalid_size}");
-            assert_eq!(codes(&result), ["tale-size-invalid"]);
-            assert_eq!(result.diagnostics[0].field_path, "size");
+            for mode in ["authoring", "launch"] {
+                let result =
+                    plan_validate_with_mode(&invalid, "tale", mode).unwrap();
+                assert!(!result.ok, "{mode}: {invalid_size}");
+                assert_eq!(codes(&result), ["tale-size-invalid"]);
+                assert_eq!(result.diagnostics[0].field_path, "size");
+            }
         }
 
-        for valid_size in ["xsmall", "small", "medium", "large", "xlarge"] {
+        for valid_size in ["xsmall", "small", "medium"] {
             let valid = valid_tale()
                 .replace("size: small\n", &format!("size: {valid_size}\n"));
             let result = plan_validate(&valid, "tale").unwrap();
             assert!(result.ok, "{valid_size}: {:?}", result.diagnostics);
             assert_eq!(result.plan.unwrap().size.as_deref(), Some(valid_size));
+        }
+
+        for invalid_size in ["large", "xlarge"] {
+            let invalid = valid_tale()
+                .replace("size: small\n", &format!("size: {invalid_size}\n"));
+            let authoring = plan_validate(&invalid, "tale").unwrap();
+            assert!(!authoring.ok, "{invalid_size}");
+            assert_eq!(codes(&authoring), ["tale-size-invalid"]);
+            assert!(authoring.diagnostics[0]
+                .message
+                .contains("belongs in an epic plan"));
+
+            let launch =
+                plan_validate_with_mode(&invalid, "tale", "launch").unwrap();
+            assert!(launch.ok, "{invalid_size}: {:?}", launch.diagnostics);
+            assert_eq!(codes(&launch), ["tale-size-invalid"]);
+            assert_eq!(launch.diagnostics[0].severity, "warning");
+            assert_eq!(
+                launch.plan.unwrap().size.as_deref(),
+                Some("medium"),
+                "legacy launch validation must normalize oversized tale size"
+            );
         }
 
         let epic_with_top_level_size = valid_epic().replace(
@@ -1959,21 +2022,9 @@ mod tests {
             .find(|field| field.name == "phases[].size")
             .unwrap();
         assert_eq!(phase_size.description, PHASE_SIZE_DESCRIPTION);
-        for alias in [
-            "@xsmall_phase_worker",
-            "@small_phase_worker",
-            "@medium_phase_worker",
-            "@large_phase_worker",
-            "@xlarge_phase_worker",
-        ] {
-            assert!(
-                phase_size.description.contains(alias),
-                "phase-size guidance is missing `{alias}`"
-            );
-        }
         assert!(tale.iter().all(|field| field.name != "prompt"));
         let tale_size = tale.iter().find(|field| field.name == "size").unwrap();
-        assert_eq!(tale_size.field_type, SIZE_FIELD_TYPE);
+        assert_eq!(tale_size.field_type, TALE_SIZE_FIELD_TYPE);
         assert!(tale_size.required);
         assert_eq!(tale_size.description, TALE_SIZE_DESCRIPTION);
         assert_eq!(phase_size.field_type, SIZE_FIELD_TYPE);
