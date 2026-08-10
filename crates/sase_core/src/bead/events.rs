@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::wire::{
-    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
-    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    parse_task_plus_one_observed_since, BeadCloseRecordWire, BeadError,
+    BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -1295,7 +1296,10 @@ pub(super) fn apply_event(
                     issue.refs.push(reference.clone());
                 }
             }
-            if matches!(issue.status, StatusWire::Open | StatusWire::Closed) {
+            if let TaskPlusOneReopenDecision::Reopen =
+                task_plus_one_reopen_decision(issue, evidence)?
+            {
+                let was_closed = issue.status == StatusWire::Closed;
                 issue.status = StatusWire::Ready;
                 archive_close_metadata(
                     issue,
@@ -1303,6 +1307,9 @@ pub(super) fn apply_event(
                     BeadReopenCauseWire::PlusOne,
                     Some(evidence.reporter.clone()),
                 );
+                if was_closed {
+                    issue.assignee.clear();
+                }
             }
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
@@ -1423,6 +1430,47 @@ pub(super) fn archive_close_metadata(
     issue.closed_at = None;
     issue.close_reason = None;
     issue.resolution = None;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TaskPlusOneReopenDecision {
+    Reopen,
+    Withheld { closed_at: String },
+    Unchanged,
+}
+
+pub(super) fn task_plus_one_reopen_decision(
+    issue: &IssueWire,
+    evidence: &TaskPlusOneEvidenceWire,
+) -> Result<TaskPlusOneReopenDecision, BeadError> {
+    match issue.status {
+        StatusWire::Open => Ok(TaskPlusOneReopenDecision::Reopen),
+        StatusWire::Closed => {
+            let Some(observed_since) = evidence.observed_since.as_deref()
+            else {
+                return Ok(TaskPlusOneReopenDecision::Reopen);
+            };
+            let Some(closed_at) = issue.closed_at.as_deref() else {
+                return Ok(TaskPlusOneReopenDecision::Reopen);
+            };
+            let observed = parse_task_plus_one_observed_since(observed_since)?;
+            let closed =
+                chrono::DateTime::parse_from_rfc3339(closed_at.trim())
+                    .map_err(|error| {
+                        BeadError::validation(format!(
+                            "closed_at must be an RFC-3339 timestamp when comparing task +1 observed_since: {closed_at:?} ({error})"
+                        ))
+                    })?;
+            if observed > closed {
+                Ok(TaskPlusOneReopenDecision::Reopen)
+            } else {
+                Ok(TaskPlusOneReopenDecision::Withheld {
+                    closed_at: closed_at.to_string(),
+                })
+            }
+        }
+        _ => Ok(TaskPlusOneReopenDecision::Unchanged),
+    }
 }
 
 /// Drop the snooze record a bead leaving `snoozed` no longer owns.
@@ -1664,6 +1712,7 @@ mod tests {
     fn plus_one_event(event_id: &str, reporter: &str) -> BeadEventRecordWire {
         let evidence = TaskPlusOneEvidenceWire {
             timestamp: "2026-01-02T00:00:00Z".to_string(),
+            observed_since: None,
             reporter: reporter.to_string(),
             note: "independent reproduction".to_string(),
             refs: Vec::new(),

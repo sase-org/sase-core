@@ -1139,12 +1139,14 @@ mod tests {
         corroborated.plus_one_evidence = vec![
             TaskPlusOneEvidenceWire {
                 timestamp: "2026-01-01T00:00:00Z".to_string(),
+                observed_since: None,
                 reporter: "agent-a".to_string(),
                 note: "first".to_string(),
                 refs: Vec::new(),
             },
             TaskPlusOneEvidenceWire {
                 timestamp: "2026-01-02T00:00:00Z".to_string(),
+                observed_since: None,
                 reporter: "agent-b".to_string(),
                 note: "second".to_string(),
                 refs: Vec::new(),

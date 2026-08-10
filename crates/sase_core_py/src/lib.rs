@@ -214,7 +214,7 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
-//! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None) -> dict`
+//! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None, observed_since: str | None = None) -> dict`
 //! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
 //! - `bead_snooze_cancel(beads_dir: str, issue_id: str, actor: str = "", now: str | None = None) -> dict`
 //! - `bead_close(beads_dir: str, issue_ids: list[str], reason: str | None = None, resolution: str | None = None, force: bool = False, now: str | None = None, note: str | None = None, author: str | None = None) -> dict`
@@ -4092,7 +4092,7 @@ fn py_bead_append_note<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None))]
+#[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None, observed_since=None))]
 fn py_bead_plus_one<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -4101,6 +4101,7 @@ fn py_bead_plus_one<'py>(
     note: &str,
     refs: Option<Vec<String>>,
     now: Option<String>,
+    observed_since: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     let refs = refs.unwrap_or_default();
@@ -4108,7 +4109,13 @@ fn py_bead_plus_one<'py>(
         py,
         py.allow_threads(|| {
             core_bead_add_task_plus_one(
-                &beads_dir, issue_id, reporter, note, &refs, now,
+                &beads_dir,
+                issue_id,
+                reporter,
+                note,
+                &refs,
+                now,
+                observed_since,
             )
         }),
     )
@@ -8138,6 +8145,7 @@ mod tests {
                 "reproduced",
                 Some(vec!["research:202608/repro.md".to_string()]),
                 Some("2026-01-02T00:00:00Z".to_string()),
+                None,
             )
             .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();

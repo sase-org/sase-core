@@ -1,4 +1,6 @@
-use sase_core::bead::BeadResolutionWire;
+use sase_core::bead::{
+    BeadReopenCauseWire, BeadResolutionWire, TaskPlusOneEvidenceWire,
+};
 use sase_core::{
     export_issues_to_jsonl, import_issues_to_event_streams,
     merge_bead_event_streams, parse_issues_jsonl, reduce_event_streams,
@@ -534,6 +536,99 @@ fn redundant_close_keeps_the_first_close_projection() {
     assert_eq!(issue.close_reason.as_deref(), Some("shipped"));
     assert_eq!(issue.resolution, Some(BeadResolutionWire::Done));
     assert_eq!(issue.updated_at, "2026-01-01T00:01:00Z");
+}
+
+#[test]
+fn task_plus_one_replay_honors_observation_window_freshness() {
+    let mut task = issue(
+        "gold-1",
+        "Task",
+        IssueTypeWire::Task,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    task.size = Some(sase_core::PhaseSizeWire::Small);
+    task.assignee = "finishing-agent".to_string();
+
+    let stream = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![
+            event(
+                "gold-1",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated { issue: task },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:01:00Z",
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: Some("fixed".to_string()),
+                    resolution: Some(BeadResolutionWire::Done),
+                    forced_descendant_ids: Vec::new(),
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:02:00Z",
+                BeadEventOperationWire::TaskPlusOneRecorded,
+                BeadEventPayloadWire::TaskPlusOneRecorded {
+                    evidence: TaskPlusOneEvidenceWire {
+                        timestamp: "2026-01-01T00:02:00Z".to_string(),
+                        observed_since: Some(
+                            "2026-01-01T00:00:30Z".to_string(),
+                        ),
+                        reporter: "stale-agent".to_string(),
+                        note: "saw this before the close".to_string(),
+                        refs: Vec::new(),
+                    },
+                },
+            ),
+            event(
+                "gold-1",
+                "2026-01-01T00:03:00Z",
+                BeadEventOperationWire::TaskPlusOneRecorded,
+                BeadEventPayloadWire::TaskPlusOneRecorded {
+                    evidence: TaskPlusOneEvidenceWire {
+                        timestamp: "2026-01-01T00:03:00Z".to_string(),
+                        observed_since: Some(
+                            "2026-01-01T00:02:30Z".to_string(),
+                        ),
+                        reporter: "fresh-agent".to_string(),
+                        note: "reproduced after the close".to_string(),
+                        refs: Vec::new(),
+                    },
+                },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+    let issue = &reduced[0];
+
+    assert_eq!(issue.status, StatusWire::Ready);
+    assert_eq!(issue.assignee, "");
+    assert_eq!(issue.closed_at, None);
+    assert_eq!(issue.plus_one_count(), 2);
+    assert_eq!(issue.close_history.len(), 1);
+    assert_eq!(
+        issue.close_history[0].closed_at.as_str(),
+        "2026-01-01T00:01:00Z"
+    );
+    assert_eq!(
+        issue.close_history[0].reopened_at.as_str(),
+        "2026-01-01T00:03:00Z"
+    );
+    assert_eq!(
+        issue.close_history[0].reopened_via,
+        BeadReopenCauseWire::PlusOne
+    );
+    assert_eq!(
+        issue.close_history[0].reopened_by.as_deref(),
+        Some("fresh-agent")
+    );
 }
 
 #[test]

@@ -18,9 +18,10 @@ use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
     appended_note_text, archive_close_metadata, clear_snooze_record,
     import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
-    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
-    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire,
-    BeadSnoozeWakeCauseWire, BEAD_EVENT_SCHEMA_VERSION,
+    task_plus_one_reopen_decision, BeadEventOperationWire,
+    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStreamWire,
+    BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
+    TaskPlusOneReopenDecision, BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
@@ -160,6 +161,10 @@ pub struct BeadMutationOutcomeWire {
     pub reopened_ancestor_ids: Vec<String>,
     #[serde(default)]
     pub unchanged_ids: Vec<String>,
+    #[serde(default)]
+    pub reopen_withheld: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopen_withheld_closed_at: Option<String>,
 }
 
 pub fn init_store(
@@ -300,6 +305,7 @@ pub fn add_task_plus_one(
     note: &str,
     references: &[String],
     now: Option<String>,
+    observed_since: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let reporter = reporter.trim().to_string();
     if reporter.is_empty() {
@@ -343,6 +349,7 @@ pub fn add_task_plus_one(
         let timestamp = now.unwrap_or_else(now_utc);
         let evidence = TaskPlusOneEvidenceWire {
             timestamp: timestamp.clone(),
+            observed_since,
             reporter: reporter.clone(),
             note,
             refs: references.clone(),
@@ -360,18 +367,30 @@ pub fn add_task_plus_one(
         // promotion below: it only leaves `snoozed` when its own +1 target is
         // reached, and never on an ordinary +1.
         let wake_note = plus_one_wake_note(issue);
+        let mut reopen_withheld_closed_at = None;
         if wake_note.is_some() {
             issue.status = StatusWire::Ready;
             clear_snooze_record(issue);
-        } else if matches!(issue.status, StatusWire::Open | StatusWire::Closed)
-        {
-            issue.status = StatusWire::Ready;
-            archive_close_metadata(
-                issue,
-                &timestamp,
-                BeadReopenCauseWire::PlusOne,
-                Some(reporter.clone()),
-            );
+        } else {
+            match task_plus_one_reopen_decision(issue, &evidence)? {
+                TaskPlusOneReopenDecision::Reopen => {
+                    let was_closed = issue.status == StatusWire::Closed;
+                    issue.status = StatusWire::Ready;
+                    archive_close_metadata(
+                        issue,
+                        &timestamp,
+                        BeadReopenCauseWire::PlusOne,
+                        Some(reporter.clone()),
+                    );
+                    if was_closed {
+                        issue.assignee.clear();
+                    }
+                }
+                TaskPlusOneReopenDecision::Withheld { closed_at } => {
+                    reopen_withheld_closed_at = Some(closed_at);
+                }
+                TaskPlusOneReopenDecision::Unchanged => {}
+            }
         }
         issue.updated_at = timestamp.clone();
         issue.validate()?;
@@ -403,6 +422,8 @@ pub fn add_task_plus_one(
         let mut result = outcome("plus_one", true, vec![resolved_id]);
         result.issue = Some(issue);
         result.references = references;
+        result.reopen_withheld = reopen_withheld_closed_at.is_some();
+        result.reopen_withheld_closed_at = reopen_withheld_closed_at;
         Ok(result)
     })
 }
@@ -2668,6 +2689,8 @@ fn outcome(
         rollback_preclaims: Vec::new(),
         reopened_ancestor_ids: Vec::new(),
         unchanged_ids: Vec::new(),
+        reopen_withheld: false,
+        reopen_withheld_closed_at: None,
     }
 }
 
@@ -2684,6 +2707,13 @@ mod tests {
     fn task_plus_one_fixture(
         status: StatusWire,
     ) -> (tempfile::TempDir, PathBuf, String) {
+        task_plus_one_fixture_with_assignee(status, "")
+    }
+
+    fn task_plus_one_fixture_with_assignee(
+        status: StatusWire,
+        assignee: &str,
+    ) -> (tempfile::TempDir, PathBuf, String) {
         let temp = tempdir().unwrap();
         init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
         let beads_dir = temp.path().join("beads");
@@ -2694,6 +2724,7 @@ mod tests {
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
                 created_by: Some("creator-agent".to_string()),
+                assignee: assignee.to_string(),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
                 ..Default::default()
             },
@@ -2709,6 +2740,17 @@ mod tests {
                 Some(BeadResolutionWire::Canceled),
                 false,
                 Some("2026-01-01T00:01:00Z".to_string()),
+            )
+            .unwrap();
+        } else if status != StatusWire::Open {
+            update_issue(
+                &beads_dir,
+                &task.id,
+                BeadUpdateFieldsWire {
+                    status: Some(mutation_status_value(&status).to_string()),
+                    now: Some("2026-01-01T00:01:00Z".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
         }
@@ -2810,6 +2852,7 @@ mod tests {
             "hit this too",
             &[],
             Some("2026-01-02T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 
@@ -3167,6 +3210,7 @@ mod tests {
             "hit this too",
             &[],
             Some("2026-01-02T00:00:00Z".to_string()),
+            None,
         )
         .unwrap()
         .issue
@@ -3188,6 +3232,7 @@ mod tests {
             "hit this too",
             &[],
             Some("2026-01-02T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 
@@ -3198,6 +3243,7 @@ mod tests {
             "and again",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap()
         .issue
@@ -3228,6 +3274,7 @@ mod tests {
                 "me too",
                 &[],
                 Some(timestamp.to_string()),
+                None,
             )
             .unwrap();
         }
@@ -3295,16 +3342,20 @@ mod tests {
                 "bead:sase-related".to_string(),
             ],
             Some("2026-01-02T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 
         assert!(result.changed);
+        assert!(!result.reopen_withheld);
+        assert_eq!(result.reopen_withheld_closed_at, None);
         let issue = result.issue.unwrap();
         assert_eq!(issue.status, StatusWire::Ready);
         assert_eq!(issue.closed_at, None);
         assert_eq!(issue.close_reason, None);
         assert_eq!(issue.resolution, None);
         assert_eq!(issue.plus_one_count(), 1);
+        assert_eq!(issue.plus_one_evidence[0].observed_since, None);
         assert_eq!(issue.plus_one_evidence[0].reporter, "reporter-agent");
         assert_eq!(
             issue.plus_one_evidence[0].note,
@@ -3325,6 +3376,145 @@ mod tests {
     }
 
     #[test]
+    fn task_plus_one_stale_observation_window_records_without_reopening_closed_task(
+    ) {
+        let (_temp, beads_dir, task_id) = task_plus_one_fixture_with_assignee(
+            StatusWire::Closed,
+            "finished-agent",
+        );
+
+        let result = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-agent",
+            "saw this before the close landed",
+            &[],
+            Some("2026-01-01T00:02:00Z".to_string()),
+            Some("2026-01-01T00:00:30Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert!(result.reopen_withheld);
+        assert_eq!(
+            result.reopen_withheld_closed_at.as_deref(),
+            Some("2026-01-01T00:01:00Z")
+        );
+        let issue = result.issue.unwrap();
+        assert_eq!(issue.status, StatusWire::Closed);
+        assert_eq!(issue.closed_at.as_deref(), Some("2026-01-01T00:01:00Z"));
+        assert_eq!(issue.assignee, "finished-agent");
+        assert_eq!(issue.plus_one_count(), 1);
+        assert_eq!(
+            issue.plus_one_evidence[0].observed_since.as_deref(),
+            Some("2026-01-01T00:00:30Z")
+        );
+        let (projected, reduced) = projected_and_reduced(&beads_dir, &task_id);
+        assert_eq!(projected, issue);
+        assert_eq!(reduced, issue);
+    }
+
+    #[test]
+    fn task_plus_one_fresh_observation_window_reopens_closed_task_and_clears_assignee(
+    ) {
+        let (_temp, beads_dir, task_id) = task_plus_one_fixture_with_assignee(
+            StatusWire::Closed,
+            "finished-agent",
+        );
+
+        let result = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-agent",
+            "reproduced after the close landed",
+            &[],
+            Some("2026-01-01T00:03:00Z".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert!(result.changed);
+        assert!(!result.reopen_withheld);
+        assert_eq!(result.reopen_withheld_closed_at, None);
+        let issue = result.issue.unwrap();
+        assert_eq!(issue.status, StatusWire::Ready);
+        assert_eq!(issue.closed_at, None);
+        assert_eq!(issue.assignee, "");
+        assert_eq!(issue.close_history.len(), 1);
+        assert_eq!(
+            issue.close_history[0].closed_at.as_str(),
+            "2026-01-01T00:01:00Z"
+        );
+        assert_eq!(
+            issue.close_history[0].reopened_at.as_str(),
+            "2026-01-01T00:03:00Z"
+        );
+        assert_eq!(
+            issue.close_history[0].reopened_via,
+            BeadReopenCauseWire::PlusOne
+        );
+        assert_eq!(
+            issue.plus_one_evidence[0].observed_since.as_deref(),
+            Some("2026-01-01T00:02:00Z")
+        );
+        let (projected, reduced) = projected_and_reduced(&beads_dir, &task_id);
+        assert_eq!(projected, issue);
+        assert_eq!(reduced, issue);
+    }
+
+    #[test]
+    fn task_plus_one_open_and_active_statuses_preserve_existing_contract() {
+        let (_temp, beads_dir, task_id) =
+            task_plus_one_fixture(StatusWire::Open);
+        let open_result = add_task_plus_one(
+            &beads_dir,
+            &task_id,
+            "reporter-agent",
+            "draft task reproduction",
+            &[],
+            Some("2026-01-01T00:02:00Z".to_string()),
+            Some("2025-12-31T00:00:00Z".to_string()),
+        )
+        .unwrap();
+        let open_issue = open_result.issue.unwrap();
+        assert_eq!(open_issue.status, StatusWire::Ready);
+        assert!(!open_result.reopen_withheld);
+
+        for status in [
+            StatusWire::Claimed,
+            StatusWire::Ready,
+            StatusWire::InProgress,
+        ] {
+            let (_temp, beads_dir, task_id) =
+                task_plus_one_fixture_with_assignee(
+                    status.clone(),
+                    "active-agent",
+                );
+            let result = add_task_plus_one(
+                &beads_dir,
+                &task_id,
+                "reporter-agent",
+                "active task reproduction",
+                &[],
+                Some("2026-01-01T00:02:00Z".to_string()),
+                Some("2026-01-01T00:02:00Z".to_string()),
+            )
+            .unwrap();
+            assert!(result.changed);
+            assert!(!result.reopen_withheld);
+            let issue = result.issue.unwrap();
+            assert_eq!(issue.status, status);
+            assert_eq!(issue.assignee, "active-agent");
+            assert_eq!(issue.plus_one_count(), 1);
+            assert_reopen_parity(
+                &beads_dir,
+                &task_id,
+                mutation_status_value(&issue.status),
+            );
+        }
+    }
+
+    #[test]
     fn task_plus_one_creator_and_repeat_are_byte_identical_noops() {
         let (_temp, beads_dir, task_id) =
             task_plus_one_fixture(StatusWire::Open);
@@ -3336,6 +3526,7 @@ mod tests {
             "creator-agent",
             "creator retry",
             &[],
+            None,
             None,
         )
         .unwrap();
@@ -3349,6 +3540,7 @@ mod tests {
             "first independent report",
             &[],
             Some("2026-01-02T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
         let before_repeat = persisted_claim_state(&beads_dir);
@@ -3359,6 +3551,7 @@ mod tests {
             "later supplemental detail",
             &["research:202608/later.md".to_string()],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(!repeat.changed);
@@ -3384,6 +3577,7 @@ mod tests {
                     "independent reproduction",
                     &[],
                     Some("2026-01-02T00:00:00Z".to_string()),
+                    None,
                 )
                 .unwrap()
             }));
@@ -7568,6 +7762,7 @@ mod tests {
             "Saw the same flake in CI run 4821.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 
@@ -7601,6 +7796,7 @@ mod tests {
             "Still flaky.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert_reopen_parity(&beads_dir, &task_id, "plus_one");
@@ -7691,6 +7887,7 @@ mod tests {
             "Still flaky.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 
@@ -7717,6 +7914,7 @@ mod tests {
             "Still flaky.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
         close_for_history(&beads_dir, &task_id, "2026-01-04T00:00:00Z");
@@ -7756,6 +7954,7 @@ mod tests {
             "Also hit this.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
         open_issue(
@@ -7785,6 +7984,7 @@ mod tests {
             "Still flaky.",
             &[],
             Some("2026-01-03T00:00:00Z".to_string()),
+            None,
         )
         .unwrap();
 

@@ -200,6 +200,8 @@ pub struct DependencyWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPlusOneEvidenceWire {
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_since: Option<String>,
     pub reporter: String,
     pub note: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -212,6 +214,9 @@ impl TaskPlusOneEvidenceWire {
             return Err(BeadError::validation(
                 "task +1 evidence timestamp cannot be empty or blank",
             ));
+        }
+        if let Some(observed_since) = &self.observed_since {
+            parse_task_plus_one_observed_since(observed_since)?;
         }
         if self.reporter.trim().is_empty() {
             return Err(BeadError::validation(
@@ -237,6 +242,16 @@ impl TaskPlusOneEvidenceWire {
         }
         Ok(())
     }
+}
+
+pub(crate) fn parse_task_plus_one_observed_since(
+    value: &str,
+) -> Result<DateTime<FixedOffset>, BeadError> {
+    DateTime::parse_from_rfc3339(value.trim()).map_err(|error| {
+        BeadError::validation(format!(
+            "task +1 evidence observed_since must be an RFC-3339 timestamp with an offset: {value:?} ({error})"
+        ))
+    })
 }
 
 /// Why a close was undone.
@@ -819,6 +834,7 @@ mod tests {
         issue.size = Some(PhaseSizeWire::Small);
         issue.plus_one_evidence = vec![TaskPlusOneEvidenceWire {
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            observed_since: None,
             reporter: "agent-a".to_string(),
             note: "reproduced".to_string(),
             refs: vec!["research:202608/repro.md".to_string()],
@@ -839,6 +855,15 @@ mod tests {
         assert!(issue.validate().unwrap_err().message.contains("note"));
 
         issue.plus_one_evidence[0].note = "reproduced".to_string();
+        issue.plus_one_evidence[0].observed_since =
+            Some("not-a-timestamp".to_string());
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("observed_since"));
+
+        issue.plus_one_evidence[0].observed_since = None;
         issue.issue_type = IssueTypeWire::Plan;
         assert_eq!(
             issue.validate().unwrap_err().message,
