@@ -4093,6 +4093,9 @@ fn py_bead_append_note<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None, observed_since=None))]
+// The argument list mirrors the exported Python binding signature; grouping it
+// locally would add a wrapper type the caller could not use directly.
+#[allow(clippy::too_many_arguments)]
 fn py_bead_plus_one<'py>(
     py: Python<'py>,
     beads_dir: &str,
