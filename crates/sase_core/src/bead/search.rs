@@ -275,9 +275,14 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
                 .plus_one_evidence
                 .iter()
                 .flat_map(|evidence| {
-                    [evidence.reporter.as_str(), evidence.note.as_str()]
-                        .into_iter()
-                        .chain(evidence.refs.iter().map(String::as_str))
+                    [
+                        Some(evidence.reporter.as_str()),
+                        Some(evidence.note.as_str()),
+                        evidence.observed_since.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .chain(evidence.refs.iter().map(String::as_str))
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -355,7 +360,9 @@ mod tests {
     use super::*;
     use std::fs;
 
-    use super::super::wire::{BeadCloseRecordWire, BeadReopenCauseWire};
+    use super::super::wire::{
+        BeadCloseRecordWire, BeadReopenCauseWire, TaskPlusOneEvidenceWire,
+    };
 
     use tempfile::tempdir;
 
@@ -401,6 +408,21 @@ mod tests {
                     issue.refs = vec!["research:202607/needle.md".to_string()];
                 }),
                 "needle",
+            ),
+            (
+                "plus_one_evidence",
+                task_issue_with(|issue| {
+                    issue.plus_one_evidence = vec![TaskPlusOneEvidenceWire {
+                        timestamp: "2026-08-01T15:00:00Z".to_string(),
+                        observed_since: Some(
+                            "2026-01-01T00:00:00Z".to_string(),
+                        ),
+                        reporter: "agent.beta".to_string(),
+                        note: "Saw this before the close landed.".to_string(),
+                        refs: Vec::new(),
+                    }];
+                }),
+                "2026-01-01T00:00:00Z",
             ),
             (
                 "close_history",
