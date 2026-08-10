@@ -33,7 +33,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 19;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 20;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -798,6 +798,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "xprompts_sig", "TEXT")?;
         migrate_record_json_refresh_v19(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 20) {
+        migrate_record_json_refresh_v20(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -1103,6 +1106,15 @@ fn migrate_record_json_refresh_v18(
 /// The Python lifecycle rebuilds older indexes from source after detecting
 /// this schema bump, populating the projection for historical records.
 fn migrate_record_json_refresh_v19(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v20 adds `agent_meta.model_alias` and `prompt_steps[*].model_alias` to
+/// `record_json` so the ACE `Model:` field can render launch-time alias
+/// provenance.
+fn migrate_record_json_refresh_v20(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
@@ -3563,7 +3575,35 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "19");
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
+    fn schema_v19_upgrade_refreshes_record_json_for_model_aliases() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        drop(open_index(&index).unwrap());
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '19')",
+                [],
+            )
+            .unwrap();
+        }
+
+        drop(open_index(&index).unwrap());
+
+        let conn = Connection::open(&index).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
     }
 
     #[test]

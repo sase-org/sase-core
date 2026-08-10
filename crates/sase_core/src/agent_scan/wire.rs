@@ -262,6 +262,8 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
+    pub model_alias: Option<String>,
+    #[serde(default)]
     pub vcs_provider: Option<String>,
     #[serde(default)]
     pub role_suffix: Option<String>,
@@ -504,6 +506,8 @@ pub struct PromptStepMarkerWire {
     pub llm_provider: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub model_alias: Option<String>,
     #[serde(default)]
     pub output: Option<Map<String, Value>>,
     #[serde(default)]

@@ -1041,6 +1041,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
         reasoning_effort: coerce_str(data.get("reasoning_effort")),
+        model_alias: coerce_str(data.get("model_alias")),
         vcs_provider: coerce_str(data.get("vcs_provider")),
         role_suffix: coerce_str(data.get("role_suffix")),
         parent_timestamp: coerce_str(data.get("parent_timestamp")),
@@ -1245,6 +1246,7 @@ fn prompt_step_from_object(
         model: coerce_str(data.get("model")),
         llm_provider: coerce_str(data.get("llm_provider")),
         reasoning_effort: coerce_str(data.get("reasoning_effort")),
+        model_alias: coerce_str(data.get("model_alias")),
         output: coerce_object(data.get("output")),
         output_types: coerce_str_str_map(data.get("output_types")),
     }
