@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0](https://github.com/sase-org/sase-core/compare/v0.23.1...v0.24.0) - 2026-08-10
+
+### Fixed
+
+- *(core-py)* allow plus-one binding signature
+- *(bead)* avoid stale plus-one reopens after close
+
 ## [0.23.0](https://github.com/sase-org/sase-core/compare/v0.22.0...v0.23.0) - 2026-08-09
 
 ### Added
