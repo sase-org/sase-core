@@ -11,15 +11,13 @@ use thiserror::Error;
 
 use crate::{
     content_layout::{
-        memory_note_issue, memory_reference_name, ref_placement_issue,
-        ref_reference_name, reserved_memory_namespace_issue,
-        reserved_ref_namespace_issue, resolve_layout_candidates,
+        memory_note_issue, memory_reference_name,
+        reserved_memory_namespace_issue, resolve_layout_candidates,
         sase_content_layout, skill_placement_issue, skill_reference_name,
         CompatibleLayoutPathWire, MemorySourceWire, MemoryTierWire,
-        MemoryXpromptIssueWire, RefPlacementIssueWire, RefSourceWire,
-        SkillPlacementIssueWire, SkillSourceWire, XpromptSourceWire,
-        MEMORY_NAMESPACE_SEGMENT, MEMORY_README_FILENAME,
-        REF_DIRECTORY_SEGMENT, REF_NAMESPACE_SEGMENT, SKILL_DIRECTORY_SEGMENT,
+        MemoryXpromptIssueWire, SkillPlacementIssueWire, SkillSourceWire,
+        XpromptSourceWire, MEMORY_NAMESPACE_SEGMENT, MEMORY_README_FILENAME,
+        SKILL_DIRECTORY_SEGMENT,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
     list_project_records, DocumentSnapshot, EditorRange,
@@ -38,7 +36,6 @@ const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
 const SASE_SKILL_PLUGIN_DIRS_JSON_ENV: &str = "SASE_SKILL_PLUGIN_DIRS_JSON";
-const SASE_REF_PLUGIN_DIRS_JSON_ENV: &str = "SASE_REF_PLUGIN_DIRS_JSON";
 
 /// The packaged Jinja frame that generated `SKILL.md` files are rendered
 /// through. It ships beside the bundled skill sources but is a template, not a
@@ -125,8 +122,6 @@ struct CatalogXprompt {
     /// Tier of the SASE memory note this entry was loaded from. A non-null
     /// value is the authoritative marker that the entry is an xprompt memory.
     memory_type: Option<MemoryTierWire>,
-    /// Artifact-reference kind rendered by a `#ref/<kind>` entry.
-    ref_kind: Option<String>,
     snippet: Option<CatalogSnippet>,
 }
 
@@ -152,7 +147,6 @@ struct StructuredSource {
     is_skill: bool,
     skill_name: Option<String>,
     memory_type: Option<MemoryTierWire>,
-    ref_kind: Option<String>,
     content: String,
     definition_section: DefinitionSection,
 }
@@ -415,7 +409,6 @@ fn structured_entry(
         is_skill: entry.is_skill,
         skill_name: entry.skill_name.clone(),
         memory_type: entry.memory_type,
-        ref_kind: entry.ref_kind.clone(),
         content_preview: content_preview(&entry.content),
         source_path_display: loader.source_path_display(entry),
         definition_path: loader.definition_path(entry),
@@ -509,9 +502,6 @@ fn entry_kind_value(
 ) -> &'static str {
     if entry.memory_type.is_some() {
         return MEMORY_NAMESPACE_SEGMENT;
-    }
-    if entry.ref_kind.is_some() {
-        return REF_NAMESPACE_SEGMENT;
     }
     workflow_kind_value(kind)
 }
@@ -933,12 +923,10 @@ struct CatalogLoader {
     home_dir: Option<PathBuf>,
     package_xprompts_dir: Option<PathBuf>,
     package_skills_dir: Option<PathBuf>,
-    package_refs_dir: Option<PathBuf>,
     default_xprompts_dir: Option<PathBuf>,
     default_config_path: Option<PathBuf>,
     plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
     plugin_skill_dirs: BTreeMap<String, PathBuf>,
-    plugin_ref_dirs: BTreeMap<String, PathBuf>,
     plugin_config_paths: BTreeMap<String, PathBuf>,
     known_workspaces: BTreeMap<String, PathBuf>,
     canonical_project_refs: BTreeMap<String, String>,
@@ -950,8 +938,6 @@ struct CatalogLoader {
     /// reference claimed by an ordinary definition, an unreachable note stem,
     /// or a file in a memory root that is not a valid memory note.
     memory_issues: RefCell<Vec<MemoryXpromptIssueWire>>,
-    /// Definitions dropped by the canonical ref placement rules.
-    ref_issues: RefCell<Vec<RefPlacementIssueWire>>,
 }
 
 impl CatalogLoader {
@@ -969,11 +955,6 @@ impl CatalogLoader {
                     root.join("xprompts").join(SKILL_DIRECTORY_SEGMENT)
                 })
             });
-        let package_refs_dir = env_path("SASE_REF_BUILTIN_DIR").or_else(|| {
-            package_root
-                .as_ref()
-                .map(|root| root.join("xprompts").join(REF_DIRECTORY_SEGMENT))
-        });
         let default_xprompts_dir = env_path("SASE_XPROMPT_DEFAULT_DIR")
             .or_else(|| {
                 package_root
@@ -990,8 +971,6 @@ impl CatalogLoader {
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV);
         let plugin_skill_dirs =
             plugin_path_map_from_env(SASE_SKILL_PLUGIN_DIRS_JSON_ENV);
-        let plugin_ref_dirs =
-            plugin_path_map_from_env(SASE_REF_PLUGIN_DIRS_JSON_ENV);
         let plugin_config_paths =
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV);
         let known_projects = known_projects(home_dir.as_deref());
@@ -1000,18 +979,15 @@ impl CatalogLoader {
             home_dir,
             package_xprompts_dir,
             package_skills_dir,
-            package_refs_dir,
             default_xprompts_dir,
             default_config_path,
             plugin_xprompt_dirs,
             plugin_skill_dirs,
-            plugin_ref_dirs,
             plugin_config_paths,
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
             skill_issues: RefCell::new(Vec::new()),
             memory_issues: RefCell::new(Vec::new()),
-            ref_issues: RefCell::new(Vec::new()),
         }
     }
 
@@ -1062,7 +1038,6 @@ impl CatalogLoader {
                     is_skill: false,
                     skill_name: None,
                     memory_type: None,
-                    ref_kind: None,
                     content,
                     definition_section: DefinitionSection::Workflows,
                 });
@@ -1089,7 +1064,6 @@ impl CatalogLoader {
                 is_skill: xprompt.is_skill,
                 skill_name: xprompt.skill_name,
                 memory_type: xprompt.memory_type,
-                ref_kind: xprompt.ref_kind,
                 content: xprompt.content,
                 definition_section: DefinitionSection::Xprompts,
             });
@@ -1124,7 +1098,6 @@ impl CatalogLoader {
                     is_skill: xprompt.is_skill,
                     skill_name: xprompt.skill_name,
                     memory_type: xprompt.memory_type,
-                    ref_kind: xprompt.ref_kind,
                     content: xprompt.content,
                     definition_section: DefinitionSection::Xprompts,
                 });
@@ -1204,28 +1177,6 @@ impl CatalogLoader {
             all.extend(self.load_memory_notes(&source)?);
         }
 
-        // Ref renderers own the reserved `ref/` namespace, so they never
-        // collide with ordinary xprompts, skills, or memories. Lowest
-        // priority first, so project-local refs shadow package/plugin/home
-        // definitions of the same contextual kind.
-        if let Some(dir) = &self.package_refs_dir {
-            all.extend(self.load_refs_from_dir(dir, None, false)?);
-        }
-        all.extend(self.load_plugin_refs()?);
-        for source in self
-            .ref_directory_sources(self.root_dir.as_deref(), project)
-            .into_iter()
-            .rev()
-        {
-            let Some(path) = source.path.as_deref().map(Path::new) else {
-                continue;
-            };
-            all.extend(self.load_refs_from_dir(
-                path,
-                project,
-                source.project_namespaced,
-            )?);
-        }
         Ok(all)
     }
 
@@ -1305,29 +1256,6 @@ impl CatalogLoader {
             self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
         sase_content_layout(project_root, home_root, None, project)
             .skill_sources
-            .into_iter()
-            .filter(|source| {
-                matches!(
-                    source.scope.as_str(),
-                    "project" | "home" | "home_project"
-                ) && (self.home_dir.is_some()
-                    || !matches!(
-                        source.scope.as_str(),
-                        "home" | "home_project"
-                    ))
-            })
-            .collect()
-    }
-
-    fn ref_directory_sources(
-        &self,
-        project_root: Option<&Path>,
-        project: Option<&str>,
-    ) -> Vec<RefSourceWire> {
-        let home_root =
-            self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
-        sase_content_layout(project_root, home_root, None, project)
-            .ref_sources
             .into_iter()
             .filter(|source| {
                 matches!(
@@ -1423,7 +1351,6 @@ impl CatalogLoader {
                     is_skill: false,
                     skill_name: None,
                     memory_type: Some(memory_type),
-                    ref_kind: None,
                     snippet: None,
                 },
             );
@@ -1444,19 +1371,6 @@ impl CatalogLoader {
         )
     }
 
-    /// Canonical ref directory for the scope owning `dir`, used as the
-    /// migration destination when a ref declaration turns up in an ordinary
-    /// xprompt directory.
-    fn ref_destination_for_xprompt_dir(&self, dir: &Path) -> Option<String> {
-        let parent = dir.parent()?;
-        Some(
-            parent
-                .join(REF_DIRECTORY_SEGMENT)
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
-
     fn record_skill_issue(&self, issue: Option<SkillPlacementIssueWire>) {
         if let Some(issue) = issue {
             self.skill_issues.borrow_mut().push(issue);
@@ -1466,12 +1380,6 @@ impl CatalogLoader {
     fn record_memory_issue(&self, issue: Option<MemoryXpromptIssueWire>) {
         if let Some(issue) = issue {
             self.memory_issues.borrow_mut().push(issue);
-        }
-    }
-
-    fn record_ref_issue(&self, issue: Option<RefPlacementIssueWire>) {
-        if let Some(issue) = issue {
-            self.ref_issues.borrow_mut().push(issue);
         }
     }
 
@@ -1487,31 +1395,6 @@ impl CatalogLoader {
         rejected
     }
 
-    fn reject_reserved_ref_name(&self, source: &str, name: &str) -> bool {
-        let issue = reserved_ref_namespace_issue(source, name);
-        let rejected = issue.is_some();
-        self.record_ref_issue(issue);
-        rejected
-    }
-
-    fn reject_config_ref(
-        &self,
-        xprompt: &CatalogXprompt,
-        source: &str,
-    ) -> bool {
-        if xprompt.ref_kind.is_none() {
-            return false;
-        }
-        self.record_ref_issue(ref_placement_issue(
-            &format!("{source} xprompt `{}`", xprompt.name),
-            false,
-            true,
-            xprompt.ref_kind.as_deref(),
-            Some("a Markdown file in the scope's sase/refs/ directory"),
-        ));
-        true
-    }
-
     /// Migration diagnostics for every definition the placement rules dropped,
     /// so a misplaced source is reported rather than silently missing.
     fn placement_warnings(&self) -> Vec<String> {
@@ -1522,12 +1405,6 @@ impl CatalogLoader {
             .map(|issue| issue.message.clone())
             .chain(
                 self.memory_issues
-                    .borrow()
-                    .iter()
-                    .map(|issue| issue.message.clone()),
-            )
-            .chain(
-                self.ref_issues
                     .borrow()
                     .iter()
                     .map(|issue| issue.message.clone()),
@@ -1546,7 +1423,6 @@ impl CatalogLoader {
     ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
         let mut result = BTreeMap::new();
         let skill_destination = self.skill_destination_for_xprompt_dir(dir);
-        let ref_destination = self.ref_destination_for_xprompt_dir(dir);
         for path in files_with_extensions(dir, &["md"])? {
             let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
                 continue;
@@ -1560,23 +1436,7 @@ impl CatalogLoader {
                 ));
                 continue;
             }
-            if xprompt.ref_kind.is_some() {
-                self.record_ref_issue(ref_placement_issue(
-                    &path.to_string_lossy(),
-                    false,
-                    true,
-                    xprompt.ref_kind.as_deref(),
-                    ref_destination.as_deref(),
-                ));
-                continue;
-            }
             if self.reject_reserved_memory_name(
-                &path.to_string_lossy(),
-                &xprompt.name,
-            ) {
-                continue;
-            }
-            if self.reject_reserved_ref_name(
                 &path.to_string_lossy(),
                 &xprompt.name,
             ) {
@@ -1620,16 +1480,6 @@ impl CatalogLoader {
             let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
                 continue;
             };
-            if xprompt.ref_kind.is_some() {
-                self.record_ref_issue(ref_placement_issue(
-                    &path.to_string_lossy(),
-                    false,
-                    true,
-                    xprompt.ref_kind.as_deref(),
-                    Some("the scope's sase/refs/ directory"),
-                ));
-                continue;
-            }
             if !xprompt.is_skill {
                 self.record_skill_issue(skill_placement_issue(
                     &path.to_string_lossy(),
@@ -1643,65 +1493,6 @@ impl CatalogLoader {
             xprompt.skill_name = Some(xprompt.name.clone());
             xprompt.name = skill_reference_name(namespace, &xprompt.name);
             result.insert(xprompt.name.clone(), xprompt);
-        }
-        Ok(result)
-    }
-
-    /// Load one canonical ref directory.
-    ///
-    /// The filename stem is the artifact kind and the public xprompt name is
-    /// contextual `ref/<kind>`. Renderer-declared inputs are ignored: the
-    /// artifact-ref registry owns exactly one input contract per kind.
-    fn load_refs_from_dir(
-        &self,
-        dir: &Path,
-        _project: Option<&str>,
-        _namespace_local: bool,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
-        let mut result = BTreeMap::new();
-        let destination = dir.parent().map(|parent| {
-            parent.join("xprompts").to_string_lossy().into_owned()
-        });
-        for path in files_with_extensions(dir, &["md"])? {
-            let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
-                continue;
-            };
-            let Some(kind) = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            if xprompt.ref_kind.is_none() {
-                self.record_ref_issue(ref_placement_issue(
-                    &path.to_string_lossy(),
-                    true,
-                    false,
-                    Some(&kind),
-                    destination.as_deref(),
-                ));
-                continue;
-            }
-            if let Some(issue) = ref_placement_issue(
-                &path.to_string_lossy(),
-                true,
-                true,
-                Some(&kind),
-                destination.as_deref(),
-            ) {
-                self.record_ref_issue(Some(issue));
-                continue;
-            }
-            let name = ref_reference_name(&kind);
-            xprompt.name = name.clone();
-            xprompt.inputs = vec![canonical_ref_input(&kind)];
-            xprompt.local_xprompts.clear();
-            xprompt.is_skill = false;
-            xprompt.skill_name = None;
-            xprompt.memory_type = None;
-            xprompt.ref_kind = Some(kind);
-            result.insert(name, xprompt);
         }
         Ok(result)
     }
@@ -1754,20 +1545,7 @@ impl CatalogLoader {
                     ));
                     continue;
                 }
-                if xprompt.ref_kind.is_some() {
-                    self.record_ref_issue(ref_placement_issue(
-                        &source,
-                        false,
-                        true,
-                        xprompt.ref_kind.as_deref(),
-                        Some("the plugin's refs/ resource directory"),
-                    ));
-                    continue;
-                }
                 if self.reject_reserved_memory_name(&source, &xprompt.name) {
-                    continue;
-                }
-                if self.reject_reserved_ref_name(&source, &xprompt.name) {
                     continue;
                 }
                 xprompt.source_path = Some(source);
@@ -1794,16 +1572,6 @@ impl CatalogLoader {
                     continue;
                 };
                 let source = format!("plugin:{module}/{filename}");
-                if xprompt.ref_kind.is_some() {
-                    self.record_ref_issue(ref_placement_issue(
-                        &source,
-                        false,
-                        true,
-                        xprompt.ref_kind.as_deref(),
-                        Some("the plugin's refs/ resource directory"),
-                    ));
-                    continue;
-                }
                 if !xprompt.is_skill {
                     self.record_skill_issue(skill_placement_issue(
                         &source,
@@ -1817,65 +1585,6 @@ impl CatalogLoader {
                 xprompt.skill_name = Some(xprompt.name.clone());
                 xprompt.name = skill_reference_name(None, &xprompt.name);
                 result.insert(xprompt.name.clone(), xprompt);
-            }
-        }
-        Ok(result)
-    }
-
-    /// Load refs from plugins' sibling `refs/` resource directories.
-    fn load_plugin_refs(
-        &self,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
-        let mut result = BTreeMap::new();
-        for (module, dir) in &self.plugin_ref_dirs {
-            for path in files_with_extensions(dir, &["md"])? {
-                let Some(mut xprompt) = load_xprompt_from_markdown(&path)?
-                else {
-                    continue;
-                };
-                let Some(filename) =
-                    path.file_name().and_then(|name| name.to_str())
-                else {
-                    continue;
-                };
-                let source = format!("plugin:{module}/{filename}");
-                let Some(kind) = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_string)
-                else {
-                    continue;
-                };
-                if xprompt.ref_kind.is_none() {
-                    self.record_ref_issue(ref_placement_issue(
-                        &source,
-                        true,
-                        false,
-                        Some(&kind),
-                        Some("the plugin's xprompts/ resource directory"),
-                    ));
-                    continue;
-                }
-                if let Some(issue) = ref_placement_issue(
-                    &source,
-                    true,
-                    true,
-                    Some(&kind),
-                    Some("the plugin's xprompts/ resource directory"),
-                ) {
-                    self.record_ref_issue(Some(issue));
-                    continue;
-                }
-                let name = ref_reference_name(&kind);
-                xprompt.name = name.clone();
-                xprompt.source_path = Some(source);
-                xprompt.inputs = vec![canonical_ref_input(&kind)];
-                xprompt.local_xprompts.clear();
-                xprompt.is_skill = false;
-                xprompt.skill_name = None;
-                xprompt.memory_type = None;
-                xprompt.ref_kind = Some(kind);
-                result.insert(name, xprompt);
             }
         }
         Ok(result)
@@ -1951,16 +1660,7 @@ impl CatalogLoader {
                 if self.reject_config_skill(&xprompt, &source) {
                     continue;
                 }
-                if self.reject_config_ref(&xprompt, &source) {
-                    continue;
-                }
                 if self.reject_reserved_memory_name(
-                    &format!("{source} xprompt `{}`", xprompt.name),
-                    &xprompt.name,
-                ) {
-                    continue;
-                }
-                if self.reject_reserved_ref_name(
                     &format!("{source} xprompt `{}`", xprompt.name),
                     &xprompt.name,
                 ) {
@@ -2064,16 +1764,7 @@ impl CatalogLoader {
             if self.reject_config_skill(&xprompt, &source) {
                 continue;
             }
-            if self.reject_config_ref(&xprompt, &source) {
-                continue;
-            }
             if self.reject_reserved_memory_name(
-                &format!("{source} xprompt `{}`", xprompt.name),
-                &xprompt.name,
-            ) {
-                continue;
-            }
-            if self.reject_reserved_ref_name(
                 &format!("{source} xprompt `{}`", xprompt.name),
                 &xprompt.name,
             ) {
@@ -2116,21 +1807,6 @@ impl CatalogLoader {
                 continue;
             };
             result.extend(self.load_skills_from_dir(
-                path,
-                Some(project),
-                true,
-            )?);
-        }
-        for source in self
-            .ref_directory_sources(Some(workspace), Some(project))
-            .into_iter()
-            .rev()
-            .filter(|source| source.scope == "project")
-        {
-            let Some(path) = source.path.as_deref().map(Path::new) else {
-                continue;
-            };
-            result.extend(self.load_refs_from_dir(
                 path,
                 Some(project),
                 true,
@@ -2397,7 +2073,6 @@ impl CatalogLoader {
         [
             self.package_xprompts_dir.clone(),
             self.package_skills_dir.clone(),
-            self.package_refs_dir.clone(),
             self.default_xprompts_dir.clone(),
         ]
         .into_iter()
@@ -2576,11 +2251,6 @@ fn load_xprompt_from_markdown(
         .and_then(|data| mapping_get(data, "skill"))
         .map(value_is_truthy)
         .unwrap_or(false);
-    let is_ref = front_matter
-        .as_ref()
-        .and_then(|data| mapping_get(data, "ref"))
-        .map(value_is_truthy)
-        .unwrap_or(false);
     let snippet = front_matter
         .as_ref()
         .and_then(|data| mapping_get(data, "snippet"))
@@ -2601,7 +2271,6 @@ fn load_xprompt_from_markdown(
         is_skill,
         skill_name: None,
         memory_type: None,
-        ref_kind: is_ref.then(|| name.clone()),
         snippet,
     }))
 }
@@ -2828,7 +2497,6 @@ fn xprompt_from_config_entry(
             is_skill: false,
             skill_name: None,
             memory_type: None,
-            ref_kind: None,
             snippet: None,
         });
     }
@@ -2851,10 +2519,6 @@ fn xprompt_from_config_entry(
             .unwrap_or(false),
         skill_name: None,
         memory_type: None,
-        ref_kind: mapping_get(data, "ref")
-            .map(value_is_truthy)
-            .unwrap_or(false)
-            .then(|| name.to_string()),
         snippet: mapping_get(data, "snippet").and_then(parse_snippet),
     })
 }
@@ -2873,29 +2537,6 @@ fn xprompt_to_workflow(xprompt: &CatalogXprompt) -> CatalogWorkflow {
         source_path: xprompt.source_path.clone(),
         tags: xprompt.tags.clone(),
         description: xprompt.description.clone(),
-    }
-}
-
-fn canonical_ref_input(kind: &str) -> CatalogInput {
-    let (name, type_name) = match kind {
-        "commit" => ("commit", "line"),
-        "bug" => ("bug", "line"),
-        "file" => ("artifact_id", "line"),
-        "bead" => ("bead_id", "word"),
-        "agent" => ("agent_name", "agent"),
-        // `chat` and all document artifact kinds carry repo-relative paths.
-        _ => ("file_path", "path"),
-    };
-    CatalogInput {
-        name: name.to_string(),
-        type_name: type_name.to_string(),
-        description: None,
-        required: true,
-        default_display: None,
-        default_snippet_value: None,
-        is_step_input: false,
-        repeatable: false,
-        choices: Vec::new(),
     }
 }
 
@@ -3851,132 +3492,6 @@ mod tests {
         // The bare names never resolve after the cutover.
         assert!(!xprompts.contains_key("bob_query"));
         assert!(!xprompts.contains_key("app/scoped"));
-    }
-
-    #[test]
-    fn ref_markdown_loads_as_contextual_renderer_with_canonical_input() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("workspace");
-        let refs = root.join("sase/refs");
-        fs::create_dir_all(&refs).unwrap();
-        fs::write(
-            refs.join("research.md"),
-            "---\nname: ignored\nref: true\ninput:\n  custom: word\nxprompts:\n  _helper:\n    content: helper\n---\nRender {{ file_path }}\n",
-        )
-        .unwrap();
-
-        let loader = CatalogLoader {
-            root_dir: Some(root.clone()),
-            home_dir: None,
-            ..CatalogLoader::default()
-        };
-        let xprompts = loader.load_all_xprompts(None).unwrap();
-        let renderer = &xprompts["ref/research"];
-
-        assert_eq!(xprompts.keys().collect::<Vec<_>>(), vec!["ref/research"]);
-        assert_eq!(renderer.name, "ref/research");
-        assert_eq!(renderer.ref_kind.as_deref(), Some("research"));
-        assert_eq!(
-            renderer
-                .inputs
-                .iter()
-                .map(|input| (input.name.as_str(), input.type_name.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("file_path", "path")]
-        );
-        assert!(renderer.local_xprompts.is_empty());
-        assert!(!renderer.is_skill && renderer.memory_type.is_none());
-
-        let sources = loader.gather_structured_sources(None).unwrap();
-        let entry = structured_entry(
-            sources
-                .iter()
-                .find(|source| source.name == "ref/research")
-                .unwrap(),
-            &loader,
-        );
-        assert_eq!(entry.kind.as_deref(), Some("ref"));
-        assert_eq!(entry.ref_kind.as_deref(), Some("research"));
-        assert_eq!(entry.insertion.as_deref(), Some("#ref/research"));
-        assert_eq!(entry.input_signature.as_deref(), Some("(file_path: path)"));
-        assert_eq!(
-            entry.definition_path.as_deref(),
-            Some(
-                refs.join("research.md")
-                    .canonicalize()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            )
-        );
-        assert!(loader.placement_warnings().is_empty());
-    }
-
-    #[test]
-    fn canonical_ref_inputs_cover_builtin_and_document_kinds() {
-        let cases = [
-            ("commit", "commit", "line"),
-            ("bug", "bug", "line"),
-            ("file", "artifact_id", "line"),
-            ("bead", "bead_id", "word"),
-            ("agent", "agent_name", "agent"),
-            ("chat", "file_path", "path"),
-            ("research", "file_path", "path"),
-        ];
-
-        for (kind, input_name, type_name) in cases {
-            let input = canonical_ref_input(kind);
-            assert_eq!(input.name, input_name, "{kind}");
-            assert_eq!(input.type_name, type_name, "{kind}");
-            assert!(input.required, "{kind}");
-        }
-    }
-
-    #[test]
-    fn misplaced_ref_definitions_are_rejected_in_both_directions() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("workspace");
-        fs::create_dir_all(root.join("sase/xprompts")).unwrap();
-        fs::create_dir_all(root.join("sase/refs")).unwrap();
-        fs::write(
-            root.join("sase/xprompts/reserved.md"),
-            "---\nname: ref/research\n---\nNot a ref renderer\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("sase/xprompts/ref_flag.md"),
-            "---\nref: true\n---\nWrong directory\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("sase/refs/missing.md"),
-            "Missing ref frontmatter\n",
-        )
-        .unwrap();
-
-        let loader = CatalogLoader {
-            root_dir: Some(root.clone()),
-            home_dir: None,
-            ..CatalogLoader::default()
-        };
-        let xprompts = loader.load_all_xprompts(None).unwrap();
-
-        assert!(xprompts.is_empty(), "{:?}", xprompts.keys());
-        let warnings = loader.placement_warnings().join("\n");
-        assert!(warnings.contains("#ref/research"), "{warnings}");
-        assert!(warnings.contains("ref_flag.md"), "{warnings}");
-        assert!(warnings.contains("missing.md"), "{warnings}");
-        assert!(
-            warnings
-                .contains(root.join("sase/refs").to_string_lossy().as_ref()),
-            "{warnings}"
-        );
-        assert!(
-            warnings.contains(
-                root.join("sase/xprompts").to_string_lossy().as_ref()
-            ),
-            "{warnings}"
-        );
     }
 
     #[test]
@@ -5277,7 +4792,6 @@ mod tests {
             is_skill: false,
             skill_name: None,
             memory_type: None,
-            ref_kind: None,
             content: "body".to_string(),
             definition_section: DefinitionSection::Xprompts,
         };

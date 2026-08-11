@@ -213,7 +213,6 @@ mod tests {
             is_skill: true,
             skill_name: Some("sase_plan".to_string()),
             memory_type: None,
-            ref_kind: None,
         }];
         let at = |text: &str, character: u32| {
             hover_at_position(
@@ -258,7 +257,6 @@ mod tests {
             is_skill: false,
             skill_name: None,
             memory_type: Some(MemoryTierWire::Long),
-            ref_kind: None,
         }];
         let at = |text: &str, character: u32| {
             hover_at_position(
@@ -306,7 +304,6 @@ mod tests {
             is_skill: false,
             skill_name: None,
             memory_type: None,
-            ref_kind: None,
         }];
         let doc = DocumentSnapshot::new("#review:");
         let hover = hover_at_position(

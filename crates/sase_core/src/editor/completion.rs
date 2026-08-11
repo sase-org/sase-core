@@ -103,7 +103,6 @@ pub fn assist_entries_from_catalog(
                 is_skill: entry.is_skill,
                 skill_name: entry.skill_name.clone(),
                 memory_type: entry.memory_type,
-                ref_kind: entry.ref_kind.clone(),
             }
         })
         .collect()
@@ -1323,56 +1322,6 @@ pub fn build_xprompt_arg_name_candidates(
     CompletionList {
         candidates,
         shared_extension: String::new(),
-    }
-}
-
-pub fn build_xprompt_ref_arg_completion_candidates(
-    entry: &XpromptAssistEntry,
-    token: &str,
-    replacement_range: Option<EditorRange>,
-    context: &ArtifactRefContextWire,
-) -> CompletionList {
-    let Some(kind) = entry.ref_kind.as_deref() else {
-        return empty_artifact_ref_completion_list();
-    };
-    if kind == "bug" {
-        return empty_artifact_ref_completion_list();
-    }
-    let Ok(inventory) = build_artifact_ref_payload_inventory(kind, context)
-    else {
-        return empty_artifact_ref_completion_list();
-    };
-    let detected = AtReferenceContextWire {
-        stage: AtReferenceStage::Payload,
-        candidate_span: (0, token.len()),
-        replacement_span: (0, token.len()),
-        query_span: (0, token.len()),
-        query: token.to_string(),
-        kind: Some(kind.to_string()),
-        path_query: None,
-    };
-    let menu = build_at_reference_menu(&detected, &inventory);
-    let prefix = format!("@{kind}:");
-    let candidates = menu
-        .rows
-        .into_iter()
-        .map(|row| {
-            artifact_ref_candidate(
-                row.title,
-                row.insertion
-                    .strip_prefix(&prefix)
-                    .unwrap_or(&row.insertion)
-                    .to_string(),
-                row.detail,
-                replacement_range,
-                "artifact_payload",
-                Some(kind),
-            )
-        })
-        .collect();
-    CompletionList {
-        candidates,
-        shared_extension: menu.shared_extension,
     }
 }
 
@@ -3122,7 +3071,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
                 content_preview: Some("review body".to_string()),
                 source_path_display: Some(
                     "sase/xprompts/review.md".to_string(),
@@ -3147,7 +3095,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -3168,7 +3115,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: Some(MemoryTierWire::Short),
-                ref_kind: None,
                 content_preview: Some("Glossary body".to_string()),
                 source_path_display: Some(
                     "sase/memory/glossary.md".to_string(),
@@ -3193,7 +3139,6 @@ mod tests {
                 is_skill: true,
                 skill_name: Some("plan".to_string()),
                 memory_type: None,
-                ref_kind: None,
                 content_preview: None,
                 source_path_display: None,
                 definition_path: None,
@@ -4323,65 +4268,6 @@ mod tests {
     }
 
     #[test]
-    fn xprompt_ref_argument_completion_uses_artifact_payload_inventory() {
-        let temp = tempfile::tempdir().unwrap();
-        let designs = temp.path().join("designs");
-        fs::create_dir_all(&designs).unwrap();
-        fs::write(
-            designs.join("guide.md"),
-            "---\ntitle: Product Guide\n---\nbody",
-        )
-        .unwrap();
-        fs::write(designs.join("notes.md"), "notes").unwrap();
-        let context = ArtifactRefContextWire {
-            document_roots: vec![ArtifactRefDocumentRootWire {
-                kind: "designs".to_string(),
-                root: designs.to_string_lossy().into_owned(),
-                path_globs: Some(vec!["guide.md".to_string()]),
-            }],
-            ..Default::default()
-        };
-        let entry = XpromptAssistEntry {
-            name: "ref/designs".to_string(),
-            display_label: "ref/designs".to_string(),
-            insertion: "#ref/designs".to_string(),
-            reference_prefix: "#".to_string(),
-            kind: Some("ref".to_string()),
-            source_bucket: "project".to_string(),
-            project: None,
-            tags: Vec::new(),
-            input_signature: Some("(file_path: path)".to_string()),
-            inputs: vec![XpromptInputHint {
-                name: "file_path".to_string(),
-                r#type: "path".to_string(),
-                description: None,
-                required: true,
-                default_display: None,
-                position: 0,
-                repeatable: false,
-            }],
-            content_preview: None,
-            description: None,
-            source_path_display: None,
-            definition_path: None,
-            definition_range: None,
-            is_skill: false,
-            skill_name: None,
-            memory_type: None,
-            ref_kind: Some("designs".to_string()),
-        };
-
-        let list = build_xprompt_ref_arg_completion_candidates(
-            &entry, "prod", None, &context,
-        );
-
-        assert_eq!(list.candidates.len(), 1);
-        assert_eq!(list.candidates[0].insertion, "guide.md");
-        assert_eq!(list.candidates[0].name, "Product Guide");
-        assert_eq!(list.candidates[0].kind, "artifact_payload");
-    }
-
-    #[test]
     fn payload_inventory_discloses_the_scan_bound() {
         let temp = tempfile::tempdir().unwrap();
         let designs = temp.path().join("designs");
@@ -4892,7 +4778,6 @@ mod tests {
             description: None,
             skill_name: None,
             memory_type: None,
-            ref_kind: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,
@@ -5237,7 +5122,6 @@ mod tests {
             description: None,
             skill_name: None,
             memory_type: None,
-            ref_kind: None,
             source_path_display: None,
             definition_path: None,
             definition_range: None,

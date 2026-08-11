@@ -122,7 +122,6 @@ mod tests {
                     .to_string()
             }),
             memory_type: None,
-            ref_kind: None,
         }
     }
 

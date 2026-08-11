@@ -712,11 +712,6 @@ pub struct MobileXpromptCatalogEntryWire {
     /// predate xprompt memories simply omit the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_type: Option<MemoryTierWire>,
-    /// Artifact-reference kind rendered by a `#ref/<kind>` entry. A non-null
-    /// value is the authoritative marker that `kind` is `ref`; older payloads
-    /// that predate ref renderers simply omit the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ref_kind: Option<String>,
     pub content_preview: Option<String>,
     pub source_path_display: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -977,7 +972,6 @@ mod tests {
                     is_skill: false,
                     skill_name: None,
                     memory_type: None,
-                    ref_kind: None,
                     content_preview: Some("Complete the bead".to_string()),
                     source_path_display: Some(
                         "xprompts/bd/work_phase_bead.md".to_string(),

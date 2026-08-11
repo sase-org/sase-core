@@ -456,7 +456,6 @@ fn local_xprompt_entry_from_config(
         is_skill: false,
         skill_name: None,
         memory_type: None,
-        ref_kind: None,
     })
 }
 
@@ -710,7 +709,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
             },
             XpromptAssistEntry {
                 name: "run".to_string(),
@@ -731,7 +729,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
             },
             XpromptAssistEntry {
                 name: "skill/plan".to_string(),
@@ -752,7 +749,6 @@ mod tests {
                 is_skill: true,
                 skill_name: Some("plan".to_string()),
                 memory_type: None,
-                ref_kind: None,
             },
             XpromptAssistEntry {
                 name: "typed".to_string(),
@@ -777,7 +773,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
             },
             XpromptAssistEntry {
                 name: "ns/foo".to_string(),
@@ -798,7 +793,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
             },
             XpromptAssistEntry {
                 name: "merge".to_string(),
@@ -819,7 +813,6 @@ mod tests {
                 is_skill: false,
                 skill_name: None,
                 memory_type: None,
-                ref_kind: None,
             },
         ]
     }
