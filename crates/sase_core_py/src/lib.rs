@@ -53,6 +53,7 @@
 //! - `vcs_log_wire_schema_version() -> int`
 //! - `parse_git_log(stdout: str) -> list[dict]`
 //! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
+//! - `classify_commit_origin(message: str) -> str`
 //! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
 //! - `parse_merge_summary(subject: str, body: str) -> dict | None`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
@@ -660,10 +661,11 @@ use sase_core::telemetry::{
 };
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
+    classify_commit_origin as core_classify_commit_origin,
     classify_commit_presence as core_classify_commit_presence,
     parse_git_log as core_parse_git_log,
-    parse_merge_summary as core_parse_merge_summary, CommitPresenceWire,
-    VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
+    parse_merge_summary as core_parse_merge_summary, CommitOriginWire,
+    CommitPresenceWire, VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
@@ -2636,6 +2638,7 @@ fn vcs_commit_wire_to_py<'py>(
     dict.set_item("subject", &commit.subject)?;
     dict.set_item("body", &commit.body)?;
     dict.set_item("presence", commit_presence_to_str(commit.presence))?;
+    dict.set_item("origin", commit_origin_to_str(commit.origin))?;
     Ok(dict)
 }
 
@@ -2645,6 +2648,13 @@ fn commit_presence_to_str(presence: CommitPresenceWire) -> &'static str {
         CommitPresenceWire::Synced => "synced",
         CommitPresenceWire::RemoteOnly => "remote_only",
         CommitPresenceWire::LocalOnly => "local_only",
+    }
+}
+
+fn commit_origin_to_str(origin: CommitOriginWire) -> &'static str {
+    match origin {
+        CommitOriginWire::Manual => "manual",
+        CommitOriginWire::Sase => "sase",
     }
 }
 
@@ -2697,6 +2707,13 @@ fn py_classify_commit_presence<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &out)
+}
+
+/// Classify a full commit message as manual or SASE-originated.
+#[pyfunction]
+#[pyo3(name = "classify_commit_origin")]
+fn py_classify_commit_origin(message: &str) -> &'static str {
+    commit_origin_to_str(core_classify_commit_origin(message))
 }
 
 /// Interleave per-repo commit lists into a single newest-first timeline.
@@ -7466,6 +7483,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_commit_origin, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_merge_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -7814,7 +7832,7 @@ mod tests {
         Python::with_gil(|py| {
             use sase_core::vcs_log::parsers::{RECORD_SEP, UNIT_SEP};
 
-            assert_eq!(py_vcs_log_wire_schema_version(), 3);
+            assert_eq!(py_vcs_log_wire_schema_version(), 4);
 
             let stdout = format!(
                 "full{US}short{US}A{US}a@example.com{US}42{US}p1 p2{US}subject{US}body{RS}",
@@ -7835,9 +7853,19 @@ mod tests {
                     "subject": "subject",
                     "body": "body",
                     "presence": "unknown",
+                    "origin": "manual",
                 }])
             );
         });
+    }
+
+    #[test]
+    fn classify_commit_origin_binding_returns_origin_string() {
+        assert_eq!(py_classify_commit_origin("fix: manual\n\nBody"), "manual",);
+        assert_eq!(
+            py_classify_commit_origin("fix: tracked\n\nSASE_STITCH=1"),
+            "sase",
+        );
     }
 
     #[test]

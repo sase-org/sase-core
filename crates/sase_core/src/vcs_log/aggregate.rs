@@ -59,6 +59,7 @@ mod tests {
             subject: format!("subject {full}"),
             body: String::new(),
             presence: CommitPresenceWire::Unknown,
+            origin: Default::default(),
         }
     }
 
@@ -131,6 +132,7 @@ mod tests {
         assert!(obj.contains_key("repo"));
         assert!(obj.contains_key("full_id"));
         assert!(obj.contains_key("timestamp"));
+        assert!(obj.contains_key("origin"));
         assert!(!obj.contains_key("commit"));
         assert_eq!(obj["repo"], "sase");
         assert_eq!(obj["timestamp"], 500);

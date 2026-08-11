@@ -50,6 +50,7 @@ mod tests {
             subject: format!("subject {full}"),
             body: String::new(),
             presence: CommitPresenceWire::Unknown,
+            origin: Default::default(),
         }
     }
 

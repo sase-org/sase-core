@@ -11,6 +11,7 @@
 //! (`\x1f`) between fields and a record separator (`\x1e`) between
 //! commits, so multi-line commit bodies never corrupt parsing.
 
+use super::origin::classify_commit_origin;
 use super::wire::{CommitPresenceWire, VcsCommitWire};
 
 /// Field separator emitted by `%x1f` in the pinned `git log` format.
@@ -88,12 +89,21 @@ pub fn parse_git_log(stdout: &str) -> Vec<VcsCommitWire> {
             author_email: fields[3].to_string(),
             timestamp,
             parent_ids,
+            origin: classify_commit_origin(&commit_message(&subject, &body)),
             subject,
             body,
             presence: CommitPresenceWire::Unknown,
         });
     }
     commits
+}
+
+fn commit_message(subject: &str, body: &str) -> String {
+    if body.is_empty() {
+        subject.to_string()
+    } else {
+        format!("{subject}\n\n{body}")
+    }
 }
 
 fn parse_parent_ids(value: &str) -> Vec<String> {
@@ -162,6 +172,7 @@ mod tests {
             subject: subject.to_string(),
             body: body.to_string(),
             presence: CommitPresenceWire::Unknown,
+            origin: classify_commit_origin(&commit_message(subject, body)),
         }
     }
 
@@ -323,5 +334,20 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].subject, "subj");
         assert_eq!(parsed[0].body, format!("bo{}dy", UNIT_SEP));
+    }
+
+    #[test]
+    fn commit_with_sase_footer_gets_sase_origin() {
+        let stream = record(
+            "h1",
+            "s1",
+            "300",
+            "p0",
+            "fix: tracked",
+            "Details\n\nSASE_STITCH=1",
+        );
+        let parsed = parse_git_log(&stream);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].origin, crate::vcs_log::CommitOriginWire::Sase,);
     }
 }

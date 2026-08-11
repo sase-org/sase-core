@@ -17,6 +17,8 @@
 //!   a limit.
 //! - [`classify_commit_presence`] — stamp commit records with local/remote
 //!   presence from precomputed ahead/behind id sets.
+//! - [`classify_commit_origin`] — classify a full commit message as
+//!   manual or SASE-originated from its terminal SASE footer.
 //! - [`parse_merge_summary`] — strictly summarize well-known merge
 //!   subjects without altering unrecognized subjects.
 //!
@@ -27,6 +29,7 @@
 pub mod aggregate;
 pub mod classify;
 pub mod merge_summary;
+pub mod origin;
 pub mod parsers;
 pub mod wire;
 
@@ -35,6 +38,7 @@ pub use classify::classify_commit_presence;
 pub use merge_summary::{
     parse_merge_summary, MergeSummaryKindWire, MergeSummaryWire,
 };
+pub use origin::{classify_commit_origin, CommitOriginWire};
 pub use parsers::parse_git_log;
 pub use wire::{
     AggregatedCommitWire, CommitPresenceWire, VcsCommitWire,

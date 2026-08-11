@@ -646,7 +646,8 @@ pub use telemetry::{
     TELEMETRY_WIRE_SCHEMA_VERSION,
 };
 pub use vcs_log::{
-    aggregate_commit_log, parse_git_log, AggregatedCommitWire, VcsCommitWire,
+    aggregate_commit_log, classify_commit_origin, parse_git_log,
+    AggregatedCommitWire, CommitOriginWire, VcsCommitWire,
     VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{

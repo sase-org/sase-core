@@ -8,9 +8,9 @@
 
 use sase_core::vcs_log::parsers::{RECORD_SEP, UNIT_SEP};
 use sase_core::vcs_log::{
-    aggregate_commit_log, classify_commit_presence, parse_git_log,
-    AggregatedCommitWire, CommitPresenceWire, VcsCommitWire,
-    VCS_LOG_WIRE_SCHEMA_VERSION,
+    aggregate_commit_log, classify_commit_origin, classify_commit_presence,
+    parse_git_log, AggregatedCommitWire, CommitOriginWire, CommitPresenceWire,
+    VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 use serde_json::json;
 
@@ -58,6 +58,7 @@ fn commit(full: &str, ts: i64, subject: &str) -> VcsCommitWire {
         subject: subject.to_string(),
         body: String::new(),
         presence: CommitPresenceWire::Unknown,
+        origin: CommitOriginWire::Manual,
     }
 }
 
@@ -90,6 +91,7 @@ fn parse_single_commit_all_fields() {
             subject: "fix(sdd): link store".to_string(),
             body: String::new(),
             presence: CommitPresenceWire::Unknown,
+            origin: CommitOriginWire::Manual,
         }]
     );
 }
@@ -167,6 +169,20 @@ fn parse_multiline_body_preserved() {
     let stream = record("h1", "s1", "300", "p0", "subject", body);
     let parsed = parse_git_log(&stream);
     assert_eq!(parsed[0].body, body);
+}
+
+#[test]
+fn parse_sase_footer_sets_sase_origin() {
+    let stream = record(
+        "h1",
+        "s1",
+        "300",
+        "p0",
+        "fix: tracked",
+        "detail\n\nSASE_STITCH=1",
+    );
+    let parsed = parse_git_log(&stream);
+    assert_eq!(parsed[0].origin, CommitOriginWire::Sase);
 }
 
 #[test]
@@ -257,8 +273,8 @@ fn aggregate_truncates_to_limit() {
 // -- Wire helpers ---------------------------------------------------------
 
 #[test]
-fn vcs_log_wire_schema_version_is_three() {
-    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 3);
+fn vcs_log_wire_schema_version_is_four() {
+    assert_eq!(VCS_LOG_WIRE_SCHEMA_VERSION, 4);
 }
 
 #[test]
@@ -273,6 +289,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
         subject: "fix: thing".to_string(),
         body: "body text".to_string(),
         presence: CommitPresenceWire::LocalOnly,
+        origin: CommitOriginWire::Sase,
     };
     let value = serde_json::to_value(&row).unwrap();
     assert_eq!(
@@ -287,6 +304,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
             "subject": "fix: thing",
             "body": "body text",
             "presence": "local_only",
+            "origin": "sase",
         })
     );
 }
@@ -305,6 +323,7 @@ fn aggregated_commit_wire_serializes_flat() {
             subject: "fix: thing".to_string(),
             body: String::new(),
             presence: CommitPresenceWire::RemoteOnly,
+            origin: CommitOriginWire::Manual,
         },
     };
     let value = serde_json::to_value(&row).unwrap();
@@ -321,6 +340,7 @@ fn aggregated_commit_wire_serializes_flat() {
             "subject": "fix: thing",
             "body": "",
             "presence": "remote_only",
+            "origin": "manual",
         })
     );
 }
@@ -349,7 +369,22 @@ fn vcs_commit_wire_defaults_presence_to_unknown() {
     });
     let row: VcsCommitWire = serde_json::from_value(value).unwrap();
     assert_eq!(row.presence, CommitPresenceWire::Unknown);
+    assert_eq!(row.origin, CommitOriginWire::Manual);
     assert!(row.parent_ids.is_empty());
+}
+
+// -- classify_commit_origin ----------------------------------------------
+
+#[test]
+fn classify_commit_origin_uses_terminal_sase_footer() {
+    assert_eq!(
+        classify_commit_origin("fix: tracked\n\nSASE_STITCH=1"),
+        CommitOriginWire::Sase,
+    );
+    assert_eq!(
+        classify_commit_origin("fix: manual\n\nSASE_STITCH=body text\n\nMore"),
+        CommitOriginWire::Manual,
+    );
 }
 
 // -- classify_commit_presence --------------------------------------------

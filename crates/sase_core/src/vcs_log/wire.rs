@@ -14,15 +14,17 @@
 //! - [`AggregatedCommitWire`] flattens a [`VcsCommitWire`] and prefixes it
 //!   with the `repo` label, so its JSON object is the flat shape
 //!   `{"repo", "full_id", "short_id", "author_name", "author_email",
-//!   "timestamp", "parent_ids", "subject", "body", "presence"}`.
+//!   "timestamp", "parent_ids", "subject", "body", "presence",
+//!   "origin"}`.
 //! - Schema-version pinning is provided by
 //!   [`VCS_LOG_WIRE_SCHEMA_VERSION`].
 
+use super::origin::CommitOriginWire;
 use serde::{Deserialize, Serialize};
 
 /// Schema version mirrored from
 /// `vcs_log_wire.py::VCS_LOG_WIRE_SCHEMA_VERSION`.
-pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const VCS_LOG_WIRE_SCHEMA_VERSION: u32 = 4;
 
 /// Where a commit is present relative to the local checkout and the
 /// compared remote ref.
@@ -72,6 +74,9 @@ pub struct VcsCommitWire {
     /// Local/remote presence classification.
     #[serde(default)]
     pub presence: CommitPresenceWire,
+    /// Manual/SASE origin classification.
+    #[serde(default)]
+    pub origin: CommitOriginWire,
 }
 
 impl VcsCommitWire {
