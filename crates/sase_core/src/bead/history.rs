@@ -299,6 +299,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: Vec::new(),
         }
     }
@@ -411,6 +412,54 @@ mod tests {
             }
         );
         assert!(history.entries[2].changes.is_empty());
+    }
+
+    #[test]
+    fn external_ref_set_and_clear_are_recorded_in_history() {
+        let issue = issue("beads-1", IssueTypeWire::Task, None);
+        let streams = vec![stream(
+            "beads-1",
+            vec![
+                created("create", "2026-01-01T00:00:00Z", issue),
+                update(
+                    "set-ref",
+                    "2026-01-02T00:00:00Z",
+                    "beads-1",
+                    BeadIssueUpdateEventFieldsWire {
+                        external_ref: Some("bug:sase#42".to_string()),
+                        ..Default::default()
+                    },
+                ),
+                update(
+                    "clear-ref",
+                    "2026-01-03T00:00:00Z",
+                    "beads-1",
+                    BeadIssueUpdateEventFieldsWire {
+                        external_ref: Some(String::new()),
+                        ..Default::default()
+                    },
+                ),
+            ],
+        )];
+
+        let history = history_from_streams(&streams, "beads-1").unwrap();
+
+        assert_eq!(
+            change(&history.entries[1], "external_ref"),
+            &BeadHistoryChangeWire {
+                field: "external_ref".to_string(),
+                from: None,
+                to: Some(Value::String("bug:sase#42".to_string())),
+            }
+        );
+        assert_eq!(
+            change(&history.entries[2], "external_ref"),
+            &BeadHistoryChangeWire {
+                field: "external_ref".to_string(),
+                from: Some(Value::String("bug:sase#42".to_string())),
+                to: None,
+            }
+        );
     }
 
     #[test]

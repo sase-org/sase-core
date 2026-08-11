@@ -26,6 +26,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "size",
     "changespec_name",
     "changespec_bug_id",
+    "external_ref",
     "status",
     "type",
     "tier",
@@ -313,6 +314,7 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("model", issue.model.as_str()),
         field("changespec_name", issue.changespec_name.as_str()),
         field("changespec_bug_id", issue.changespec_bug_id.as_str()),
+        field("external_ref", issue.external_ref.as_str()),
         field("status", status_value(&issue.status)),
         field("type", issue_type_value(&issue.issue_type)),
     ];
@@ -476,6 +478,13 @@ mod tests {
                     issue.changespec_name = "has_bug".to_string();
                 }),
                 "needle",
+            ),
+            (
+                "external_ref",
+                task_issue_with(|issue| {
+                    issue.external_ref = "bug:sase#42".to_string();
+                }),
+                "sase#42",
             ),
             (
                 "status",
@@ -1003,6 +1012,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: Vec::new(),
         };
         update(&mut issue);

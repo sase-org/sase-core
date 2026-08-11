@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::wire::{
-    parse_task_plus_one_observed_since, BeadCloseRecordWire, BeadError,
-    BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
-    DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    parse_task_plus_one_observed_since, validate_unique_external_refs,
+    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
+    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -358,6 +358,8 @@ pub struct BeadIssueUpdateEventFieldsWire {
     #[serde(default)]
     pub changespec_bug_id: Option<String>,
     #[serde(default)]
+    pub external_ref: Option<String>,
+    #[serde(default)]
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
@@ -378,6 +380,7 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.resolution.is_none()
             && self.changespec_name.is_none()
             && self.changespec_bug_id.is_none()
+            && self.external_ref.is_none()
             && self.tier.is_none()
             && self.is_ready_to_work.is_none()
         {
@@ -510,6 +513,7 @@ pub fn reduce_event_streams(
     for issue in &reduced {
         issue.validate()?;
     }
+    validate_unique_external_refs(&reduced)?;
     Ok(reduced)
 }
 
@@ -1384,6 +1388,9 @@ fn apply_update_event_fields(
     if let Some(value) = &fields.changespec_bug_id {
         issue.changespec_bug_id = value.clone();
     }
+    if let Some(value) = &fields.external_ref {
+        issue.external_ref = value.clone();
+    }
     if let Some(value) = &fields.tier {
         issue.tier = Some(value.clone());
     }
@@ -1665,6 +1672,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: Vec::new(),
         }
     }
@@ -1886,6 +1894,39 @@ mod tests {
             reduce_event_streams(&streams).unwrap()[0].refs,
             vec!["bead:sase-bb.1"]
         );
+    }
+
+    #[test]
+    fn reduction_rejects_duplicate_external_refs() {
+        let mut first = issue_with_refs(Vec::new());
+        first.id = "sase-1".to_string();
+        first.external_ref = "bug:sase#42".to_string();
+        let mut second = issue_with_refs(Vec::new());
+        second.id = "sase-2".to_string();
+        second.external_ref = "bug:sase#42".to_string();
+        let streams = vec![
+            BeadEventStreamWire {
+                stream_id: first.id.clone(),
+                root_issue_id: first.id.clone(),
+                events: vec![PendingEvent::created(&first)
+                    .into_record(&first.id, 1)
+                    .unwrap()],
+            },
+            BeadEventStreamWire {
+                stream_id: second.id.clone(),
+                root_issue_id: second.id.clone(),
+                events: vec![PendingEvent::created(&second)
+                    .into_record(&second.id, 1)
+                    .unwrap()],
+            },
+        ];
+
+        let error = reduce_event_streams(&streams).unwrap_err();
+
+        assert_eq!(error.kind, "conflict");
+        assert!(error.message.contains("external_ref bug:sase#42"));
+        assert!(error.message.contains("sase-1"));
+        assert!(error.message.contains("sase-2"));
     }
 
     /// Build one side of a concurrent mint: same id, different bead.

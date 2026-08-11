@@ -105,6 +105,13 @@ impl BeadError {
             message: message.into(),
         }
     }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            kind: "conflict".to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 impl From<std::io::Error> for BeadError {
@@ -485,6 +492,12 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub changespec_bug_id: String,
+    #[serde(
+        default = "empty_string",
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub external_ref: String,
     #[serde(default)]
     pub dependencies: Vec<DependencyWire>,
 }
@@ -613,6 +626,30 @@ pub(crate) fn deserialize_valid_issue(
     Ok(issue)
 }
 
+pub(crate) fn validate_unique_external_refs(
+    issues: &[IssueWire],
+) -> Result<(), BeadError> {
+    let mut owner_by_ref: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for issue in issues {
+        let external_ref = issue.external_ref.trim();
+        if external_ref.is_empty() {
+            continue;
+        }
+        if let Some((existing_ref, existing_id)) = owner_by_ref
+            .iter()
+            .find(|(candidate_ref, _)| *candidate_ref == external_ref)
+            .copied()
+        {
+            return Err(BeadError::conflict(format!(
+                "external_ref {existing_ref} already belongs to {existing_id}; cannot also assign it to {}",
+                issue.id
+            )));
+        }
+        owner_by_ref.insert((external_ref, issue.id.as_str()));
+    }
+    Ok(())
+}
+
 pub(crate) fn invalid_record_error<E: std::fmt::Display>(
     error: E,
 ) -> de::value::Error {
@@ -652,6 +689,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: vec![],
         }
     }
@@ -824,7 +862,22 @@ mod tests {
         assert_eq!(issue.size, None);
         assert!(issue.plus_one_evidence.is_empty());
         assert_eq!(issue.changespec_name, "");
+        assert_eq!(issue.external_ref, "");
         assert_eq!(issue.dependencies[0].created_at, "");
+    }
+
+    #[test]
+    fn external_ref_round_trips_when_non_empty() {
+        let mut issue = phase(None);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.external_ref = "bug:sase#42".to_string();
+
+        let encoded = serde_json::to_value(&issue).unwrap();
+        assert_eq!(encoded["external_ref"], "bug:sase#42");
+
+        let decoded: IssueWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.external_ref, "bug:sase#42");
+        decoded.validate().unwrap();
     }
 
     #[test]

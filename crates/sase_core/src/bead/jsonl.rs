@@ -16,8 +16,9 @@ use super::events::{
     BeadEventStoreManifestWire, BeadEventStreamWire,
 };
 use super::wire::{
-    deserialize_valid_issue, invalid_record_error, BeadError, BeadTierWire,
-    IssueTypeWire, IssueWire,
+    deserialize_valid_issue, invalid_record_error,
+    validate_unique_external_refs, BeadError, BeadTierWire, IssueTypeWire,
+    IssueWire,
 };
 
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -94,7 +95,9 @@ pub fn import_issues_from_jsonl(
         return Ok(JsonlLoadOutcome::default());
     }
     let contents = fs::read_to_string(path)?;
-    Ok(parse_issues_jsonl(&contents))
+    let outcome = parse_issues_jsonl(&contents);
+    validate_unique_external_refs(&outcome.issues)?;
+    Ok(outcome)
 }
 
 pub fn export_issues_to_jsonl(
@@ -109,6 +112,7 @@ pub fn export_issues_to_jsonl(
         output.push_str(&serde_json::to_string(&issue)?);
         output.push('\n');
     }
+    validate_unique_external_refs(issues)?;
     Ok(output)
 }
 
@@ -468,6 +472,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: vec![],
         }
     }
@@ -566,6 +571,32 @@ mod tests {
         );
 
         assert_eq!(outcome.issues[0].model, "#pro");
+    }
+
+    #[test]
+    fn import_rejects_duplicate_external_refs() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("issues.jsonl");
+        let mut first = plan("gold-1");
+        first.external_ref = "bug:sase#42".to_string();
+        let mut second = plan("gold-2");
+        second.external_ref = "bug:sase#42".to_string();
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&first).unwrap(),
+                serde_json::to_string(&second).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        let error = import_issues_from_jsonl(&path).unwrap_err();
+
+        assert_eq!(error.kind, "conflict");
+        assert!(error.message.contains("external_ref bug:sase#42"));
+        assert!(error.message.contains("gold-1"));
+        assert!(error.message.contains("gold-2"));
     }
 
     #[test]

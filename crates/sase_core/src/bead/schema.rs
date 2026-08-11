@@ -39,6 +39,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
+    external_ref TEXT,
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan') OR
@@ -71,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
 CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON dependencies(depends_on_id);
 "#;
 
@@ -170,6 +174,20 @@ pub fn plus_one_evidence_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN plus_one_evidence TEXT NOT NULL DEFAULT '[]'"
 }
 
+pub fn needs_external_ref_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("external_ref"),
+    }
+}
+
+pub fn external_ref_migration_sql() -> &'static str {
+    r#"ALTER TABLE issues ADD COLUMN external_ref TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';"#
+}
+
 pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
     match create_table_sql {
         None => false,
@@ -231,6 +249,7 @@ CREATE TABLE _issues_new (
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
+    external_ref TEXT,
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan') OR
@@ -250,13 +269,13 @@ INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
-    changespec_name, changespec_bug_id
+    changespec_name, changespec_bug_id, external_ref
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
-    changespec_name, changespec_bug_id
+    changespec_name, changespec_bug_id, external_ref
 FROM issues;
 DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
@@ -264,6 +283,9 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
 CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -324,6 +346,7 @@ CREATE TABLE _issues_new (
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
+    external_ref TEXT,
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan') OR
@@ -345,13 +368,13 @@ INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, close_history,
-    model, size, is_ready_to_work, changespec_name, changespec_bug_id
+    model, size, is_ready_to_work, changespec_name, changespec_bug_id, external_ref
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, close_history,
-    model, size, is_ready_to_work, changespec_name, changespec_bug_id
+    model, size, is_ready_to_work, changespec_name, changespec_bug_id, external_ref
 FROM issues;
 DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
@@ -359,6 +382,9 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
 CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -413,6 +439,7 @@ CREATE TABLE _issues_new (
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
+    external_ref TEXT,
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan') OR
@@ -432,13 +459,13 @@ INSERT INTO _issues_new (
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
-    changespec_name, changespec_bug_id
+    changespec_name, changespec_bug_id, external_ref
 )
 SELECT
     id, title, status, issue_type, tier, parent_id, owner, assignee,
     created_at, created_by, updated_at, closed_at, close_reason, resolution,
     description, notes, design, refs, plus_one_evidence, model, size, is_ready_to_work,
-    changespec_name, changespec_bug_id
+    changespec_name, changespec_bug_id, external_ref
 FROM issues;
 DROP TABLE issues;
 ALTER TABLE _issues_new RENAME TO issues;
@@ -446,6 +473,9 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
 CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -749,6 +779,15 @@ mod tests {
         assert!(needs_refs_migration(Some("CREATE TABLE issues(id TEXT)")));
         assert!(!needs_refs_migration(Some("refs TEXT")));
 
+        assert!(!needs_external_ref_migration(None));
+        assert!(needs_external_ref_migration(Some(
+            "CREATE TABLE issues(id TEXT)"
+        )));
+        assert!(!needs_external_ref_migration(Some("external_ref TEXT")));
+        assert!(external_ref_migration_sql().contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref"
+        ));
+
         assert!(!needs_size_migration(None));
         assert!(needs_size_migration(Some("CREATE TABLE issues(id TEXT)")));
         assert!(!needs_size_migration(Some("size TEXT")));
@@ -833,6 +872,73 @@ mod tests {
             )
             .unwrap();
         assert!(!needs_refs_migration(Some(&migrated_sql)));
+    }
+
+    #[test]
+    fn external_ref_migration_adds_nullable_partial_unique_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                issue_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO issues VALUES (
+                'legacy-1', 'Legacy', 'open', 'plan', 'now', 'now'
+             );",
+        )
+        .unwrap();
+
+        conn.execute_batch(external_ref_migration_sql()).unwrap();
+
+        let external_ref: Option<String> = conn
+            .query_row(
+                "SELECT external_ref FROM issues WHERE id='legacy-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(external_ref, None);
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, external_ref
+             ) VALUES (
+                'legacy-2', 'Other', 'open', 'plan', 'now', 'now', 'bug:sase#42'
+             )",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, created_at, updated_at, external_ref
+                 ) VALUES (
+                    'legacy-3', 'Dupe', 'open', 'plan', 'now', 'now', 'bug:sase#42'
+                 )",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, external_ref
+             ) VALUES (
+                'legacy-4', 'Blank one', 'open', 'plan', 'now', 'now', ''
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, external_ref
+             ) VALUES (
+                'legacy-5', 'Blank two', 'open', 'plan', 'now', 'now', ''
+             )",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

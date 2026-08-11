@@ -225,6 +225,8 @@
 //! - `bead_task_ready_migration_sql() -> str`
 //! - `bead_needs_snoozed_status_migration(create_table_sql: str | None) -> bool`
 //! - `bead_snoozed_status_migration_sql() -> str`
+//! - `bead_needs_external_ref_migration(create_table_sql: str | None) -> bool`
+//! - `bead_external_ref_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -462,11 +464,13 @@ use sase_core::bead::{
     doctor_with_contexts as core_bead_doctor_with_contexts,
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
+    external_ref_migration_sql as core_bead_external_ref_migration_sql,
     get_epic_children as core_bead_get_epic_children,
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
     merge_bead_event_streams_with_relocation as core_merge_bead_event_streams_with_relocation,
+    needs_external_ref_migration as core_bead_needs_external_ref_migration,
     needs_plus_one_evidence_migration as core_bead_needs_plus_one_evidence_migration,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
@@ -2872,6 +2876,23 @@ fn py_bead_needs_snoozed_status_migration(
 #[pyo3(name = "bead_snoozed_status_migration_sql")]
 fn py_bead_snoozed_status_migration_sql() -> &'static str {
     core_bead_snoozed_status_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_needs_external_ref_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_external_ref_migration(
+    create_table_sql: Option<&str>,
+) -> bool {
+    core_bead_needs_external_ref_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_external_ref_migration_sql")]
+fn py_bead_external_ref_migration_sql() -> &'static str {
+    core_bead_external_ref_migration_sql()
 }
 
 #[pyfunction]
@@ -7470,6 +7491,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_snoozed_status_migration_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_needs_external_ref_migration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_external_ref_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_resolution_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -11039,6 +11062,8 @@ MENTORS:
             for name in [
                 "bead_needs_resolution_migration",
                 "bead_resolution_migration_sql",
+                "bead_needs_external_ref_migration",
+                "bead_external_ref_migration_sql",
                 "bead_needs_size_check_relax_migration",
                 "bead_size_check_relax_migration_sql",
                 "bead_needs_task_ready_migration",
@@ -11070,6 +11095,16 @@ MENTORS:
             assert_eq!(
                 py_bead_task_ready_migration_sql(),
                 core_bead_task_ready_migration_sql()
+            );
+            assert!(py_bead_needs_external_ref_migration(Some(
+                "CREATE TABLE issues(id TEXT)"
+            )));
+            assert!(!py_bead_needs_external_ref_migration(Some(
+                "external_ref TEXT"
+            )));
+            assert_eq!(
+                py_bead_external_ref_migration_sql(),
+                core_bead_external_ref_migration_sql()
             );
             assert!(py_bead_needs_resolution_migration(Some(
                 "CREATE TABLE issues(id TEXT)"

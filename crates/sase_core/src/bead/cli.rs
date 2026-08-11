@@ -329,6 +329,10 @@ fn handle_show(
                 .expect("writing to String cannot fail");
         }
     }
+    if !issue.external_ref.is_empty() {
+        writeln!(stdout, "\nEXTERNAL\n  Ref: {}", issue.external_ref)
+            .expect("writing to String cannot fail");
+    }
     if !issue.design.is_empty() {
         let display = display_design_path(
             &issue.design,
@@ -536,6 +540,7 @@ struct CreateArgs {
     tier: Option<BeadTierWire>,
     changespec_name: String,
     changespec_bug_id: String,
+    external_ref: String,
     model: String,
     refs: Vec<String>,
 }
@@ -602,6 +607,7 @@ fn handle_create(
         assignee: parsed.assignee,
         changespec_name: parsed.changespec_name,
         changespec_bug_id: parsed.changespec_bug_id,
+        external_ref: parsed.external_ref,
         refs: parsed.refs,
         ..BeadCreateRequestWire::default()
     };
@@ -772,6 +778,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
     let mut tier = None;
     let mut changespec_name = String::new();
     let mut changespec_bug_id = String::new();
+    let mut external_ref = String::new();
     let mut model = String::new();
     let mut refs = Vec::new();
     let mut idx = 0;
@@ -792,6 +799,8 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
                 | "--changespec"
                 | "-b"
                 | "--bug-id"
+                | "-x"
+                | "--external-ref"
                 | "-m"
                 | "--model"
                 | "-R"
@@ -820,6 +829,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
             }
             "-c" | "--changespec" => changespec_name = value,
             "-b" | "--bug-id" => changespec_bug_id = value,
+            "-x" | "--external-ref" => external_ref = value,
             "-m" | "--model" => model = value,
             "-R" | "--ref" => refs.push(value),
             _ => return Ok(None),
@@ -840,6 +850,7 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
         tier,
         changespec_name,
         changespec_bug_id,
+        external_ref,
         model,
         refs,
     }))
@@ -1726,6 +1737,7 @@ fn parse_update_args(
 ) -> Option<(Vec<String>, BeadUpdateFieldsWire)> {
     let mut ids = Vec::new();
     let mut fields = BeadUpdateFieldsWire::default();
+    let mut clear_external_ref = false;
     let mut idx = 0;
     while idx < args.len() {
         let arg = &args[idx];
@@ -1749,6 +1761,8 @@ fn parse_update_args(
                 | "--model"
                 | "-a"
                 | "--assignee"
+                | "-x"
+                | "--external-ref"
                 | "-E"
                 | "--epic-count"
                 | "--tier"
@@ -1769,6 +1783,12 @@ fn parse_update_args(
             ("--model", value.to_string())
         } else if let Some(value) = arg.strip_prefix("--assignee=") {
             ("--assignee", value.to_string())
+        } else if let Some(value) = arg.strip_prefix("--external-ref=") {
+            ("--external-ref", value.to_string())
+        } else if arg == "-X" || arg == "--clear-external-ref" {
+            clear_external_ref = true;
+            idx += 1;
+            continue;
         } else {
             let value = arg.strip_prefix("--tier=")?;
             ("--tier", value.to_string())
@@ -1784,10 +1804,17 @@ fn parse_update_args(
             "-D" | "--design" => fields.design = Some(value),
             "-m" | "--model" => fields.model = Some(value),
             "-a" | "--assignee" => fields.assignee = Some(value),
+            "-x" | "--external-ref" => fields.external_ref = Some(value),
             "--tier" => fields.tier = Some(parse_tier(&value)?),
             _ => return None,
         }
         idx += 1;
+    }
+    if clear_external_ref && fields.external_ref.is_some() {
+        return None;
+    }
+    if clear_external_ref {
+        fields.external_ref = Some(String::new());
     }
     Some((ids, fields))
 }
@@ -2078,6 +2105,7 @@ fn search_field_display_value(
         "size" => issue.size.as_ref().map(|size| size.as_str().to_string()),
         "changespec_name" => Some(issue.changespec_name.clone()),
         "changespec_bug_id" => Some(issue.changespec_bug_id.clone()),
+        "external_ref" => Some(issue.external_ref.clone()),
         "status" => Some(status_value(&issue.status).to_string()),
         "type" => Some(issue_type_value(&issue.issue_type).to_string()),
         "tier" => issue.tier.as_ref().map(|tier| tier_value(tier).to_string()),
@@ -4123,6 +4151,7 @@ mod tests {
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
+            external_ref: String::new(),
             dependencies: Vec::new(),
         }
     }

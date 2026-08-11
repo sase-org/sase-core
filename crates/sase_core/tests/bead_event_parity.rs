@@ -2080,6 +2080,7 @@ fn issue(
         is_ready_to_work: false,
         changespec_name: String::new(),
         changespec_bug_id: String::new(),
+        external_ref: String::new(),
         dependencies: Vec::new(),
     }
 }

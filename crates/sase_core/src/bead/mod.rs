@@ -63,9 +63,10 @@ pub use read::{
     BeadProjectionDriftWire, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
-    changespec_metadata_migration_sql, is_ready_to_work_migration_sql,
-    issue_type_migration_sql, missing_changespec_metadata_columns,
-    model_migration_sql, needs_is_ready_to_work_migration,
+    changespec_metadata_migration_sql, external_ref_migration_sql,
+    is_ready_to_work_migration_sql, issue_type_migration_sql,
+    missing_changespec_metadata_columns, model_migration_sql,
+    needs_external_ref_migration, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration,
     needs_plus_one_evidence_migration, needs_refs_migration,
     needs_resolution_migration, needs_size_check_relax_migration,

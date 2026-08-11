@@ -30,9 +30,10 @@ use super::jsonl::{
 use super::read::resolve_issue_id_in_issues;
 use super::wire::{
     deserialize_option_phase_size, parse_snooze_timestamp,
-    validate_model_value, BeadError, BeadReopenCauseWire, BeadResolutionWire,
-    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    validate_model_value, validate_unique_external_refs, BeadError,
+    BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -73,6 +74,8 @@ pub struct BeadCreateRequestWire {
     #[serde(default)]
     pub changespec_bug_id: String,
     #[serde(default)]
+    pub external_ref: String,
+    #[serde(default)]
     pub now: Option<String>,
 }
 
@@ -104,6 +107,8 @@ pub struct BeadUpdateFieldsWire {
     pub changespec_name: Option<String>,
     #[serde(default)]
     pub changespec_bug_id: Option<String>,
+    #[serde(default)]
+    pub external_ref: Option<String>,
     #[serde(default)]
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
@@ -258,9 +263,13 @@ pub fn create_issue(
             is_ready_to_work: false,
             changespec_name: request.changespec_name,
             changespec_bug_id: request.changespec_bug_id,
+            external_ref: request.external_ref,
             dependencies: Vec::new(),
         };
         issue.validate()?;
+        let mut candidate_issues = store.issues.clone();
+        candidate_issues.push(issue.clone());
+        validate_unique_external_refs(&candidate_issues)?;
         store.issues.push(issue.clone());
         let mut event_issue = issue.clone();
         event_issue.dependencies.clear();
@@ -749,6 +758,12 @@ pub fn update_issues(
             resulting_issues.push(issue.clone());
             planned.push((index, issue, was_closed));
         }
+
+        let mut candidate_issues = store.issues.clone();
+        for (index, issue, _) in &planned {
+            candidate_issues[*index] = issue.clone();
+        }
+        validate_unique_external_refs(&candidate_issues)?;
 
         if planned.is_empty() {
             let mut result = outcome("update", false, Vec::new());
@@ -2164,6 +2179,9 @@ fn apply_update_fields(
     if let Some(value) = fields.changespec_bug_id {
         issue.changespec_bug_id = value;
     }
+    if let Some(value) = fields.external_ref {
+        issue.external_ref = value;
+    }
     if let Some(value) = fields.tier {
         issue.tier = Some(value);
     }
@@ -2203,6 +2221,7 @@ fn event_fields_from_update_fields(
         resolution,
         changespec_name: fields.changespec_name.clone(),
         changespec_bug_id: fields.changespec_bug_id.clone(),
+        external_ref: fields.external_ref.clone(),
         tier: fields.tier.clone(),
         is_ready_to_work: fields.is_ready_to_work,
     };
@@ -2277,6 +2296,7 @@ impl MutableStore {
             let streams = import_issues_to_event_streams(&issues)?;
             (issues, streams)
         };
+        validate_unique_external_refs(&issues)?;
         Ok(Self {
             beads_dir: beads_dir.to_path_buf(),
             config,
@@ -2294,6 +2314,7 @@ impl MutableStore {
         for issue in &self.issues {
             issue.validate()?;
         }
+        validate_unique_external_refs(&self.issues)?;
         write_event_store(&self.beads_dir, &self.streams)?;
         save_config(&self.beads_dir, &self.config)?;
         self.save_issues()
@@ -2780,6 +2801,33 @@ mod tests {
     fn reduces_to_store(beads_dir: &Path) -> Vec<IssueWire> {
         let (_manifest, streams) = read_event_store(beads_dir).unwrap();
         reduce_event_streams(&streams).unwrap()
+    }
+
+    fn external_ref_store() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        (temp, beads_dir)
+    }
+
+    fn create_plan_with_external_ref(
+        beads_dir: &Path,
+        title: &str,
+        external_ref: &str,
+    ) -> IssueWire {
+        create_issue(
+            beads_dir,
+            BeadCreateRequestWire {
+                title: title.to_string(),
+                issue_type: IssueTypeWire::Plan,
+                external_ref: external_ref.to_string(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap()
     }
 
     #[test]
@@ -6075,6 +6123,136 @@ mod tests {
         .issue
         .unwrap();
         assert_eq!(updated.model, "#pro");
+    }
+
+    #[test]
+    fn create_rejects_duplicate_external_ref_without_writing() {
+        let (_temp, beads_dir) = external_ref_store();
+        let first =
+            create_plan_with_external_ref(&beads_dir, "First", "bug:sase#42");
+
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Duplicate".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                external_ref: "bug:sase#42".to_string(),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "conflict");
+        assert!(error.message.contains("external_ref bug:sase#42"));
+        assert!(error.message.contains(&first.id));
+        let issues = read_store_issues(&beads_dir).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, first.id);
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].events.len(), 1);
+    }
+
+    #[test]
+    fn external_ref_create_update_clear_and_batch_conflicts_are_atomic() {
+        let (_temp, beads_dir) = external_ref_store();
+        let plan =
+            create_plan_with_external_ref(&beads_dir, "Plan", "bug:sase#42");
+        let phase = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Phase".to_string(),
+                issue_type: IssueTypeWire::Phase,
+                parent_id: Some(plan.id.clone()),
+                external_ref: "bug:sase#43".to_string(),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                external_ref: "bug:sase#44".to_string(),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let error = update_issue(
+            &beads_dir,
+            &phase.id,
+            BeadUpdateFieldsWire {
+                external_ref: Some("bug:sase#42".to_string()),
+                now: Some("2026-01-01T00:03:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "conflict");
+        assert_eq!(
+            read_store_issues(&beads_dir)
+                .unwrap()
+                .into_iter()
+                .find(|issue| issue.id == phase.id)
+                .unwrap()
+                .external_ref,
+            "bug:sase#43"
+        );
+
+        let cleared = update_issue(
+            &beads_dir,
+            &task.id,
+            BeadUpdateFieldsWire {
+                external_ref: Some(String::new()),
+                now: Some("2026-01-01T00:04:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(cleared.external_ref, "");
+
+        let error = update_issues(
+            &beads_dir,
+            &[task.id.clone(), plan.id.clone()],
+            BeadUpdateFieldsWire {
+                external_ref: Some("bug:sase#99".to_string()),
+                now: Some("2026-01-01T00:05:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "conflict");
+
+        let issues = read_store_issues(&beads_dir).unwrap();
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.id == plan.id)
+                .unwrap()
+                .external_ref,
+            "bug:sase#42"
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .find(|issue| issue.id == task.id)
+                .unwrap()
+                .external_ref,
+            ""
+        );
     }
 
     #[test]
