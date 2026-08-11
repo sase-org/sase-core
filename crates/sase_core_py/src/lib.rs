@@ -45,6 +45,8 @@
 //! - `read_status_from_lines(lines: list[str], changespec_name: str) -> str | None`
 //! - `apply_status_update(lines: list[str], changespec_name: str, new_status: str) -> str`
 //! - `plan_status_transition(request: dict) -> dict`
+//! - `canonical_pull_request_url(url: str) -> dict | None`
+//! - `plan_external_pr_import(request: dict) -> dict`
 //! - `parse_git_name_status_z(stdout: str) -> list[dict]`
 //! - `parse_git_branch_name(stdout: str) -> str | None`
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
@@ -548,6 +550,11 @@ use sase_core::effort_override::{
     set_effort_override_relative as core_set_effort_override_relative,
     set_effort_override_until as core_set_effort_override_until,
     EffortOverrideError as EffortOverrideDomainError,
+};
+use sase_core::external_pr::{
+    canonical_pull_request_url as core_canonical_pull_request_url,
+    plan_external_pr_import as core_plan_external_pr_import,
+    ExternalPrImportRequestWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -2521,6 +2528,44 @@ fn py_plan_status_transition<'py>(
         })?;
     let plan =
         core_plan_status_transition(&req).map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Canonicalize a pull-request URL into the external-PR mirror identity dict.
+#[pyfunction]
+#[pyo3(name = "canonical_pull_request_url")]
+fn py_canonical_pull_request_url<'py>(
+    py: Python<'py>,
+    url: &str,
+) -> PyResult<Option<PyObject>> {
+    let Some(parsed) = core_canonical_pull_request_url(url) else {
+        return Ok(None);
+    };
+    let value = serde_json::to_value(&parsed).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value).map(Some)
+}
+
+/// Plan reconciliation of one remote PR against local Patch records.
+#[pyfunction]
+#[pyo3(name = "plan_external_pr_import")]
+fn py_plan_external_pr_import<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ExternalPrImportRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid ExternalPrImportRequestWire dict: {e}"
+            ))
+        })?;
+    let plan =
+        core_plan_external_pr_import(&req).map_err(PyValueError::new_err)?;
     let value = serde_json::to_value(&plan).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -7475,6 +7520,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_read_status_from_lines, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_status_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_status_transition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canonical_pull_request_url, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_external_pr_import, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_name_status_z, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_branch_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;

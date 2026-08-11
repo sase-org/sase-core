@@ -35,6 +35,7 @@ pub mod content_layout;
 pub mod editor;
 pub mod effort;
 pub mod effort_override;
+pub mod external_pr;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -482,6 +483,12 @@ pub use effort_override::{
     set_effort_override_relative, set_effort_override_until,
     EffortOverrideError, EffortOverrideWire, EFFORT_OVERRIDE_STATE_FILENAME,
     EFFORT_OVERRIDE_WIRE_SCHEMA_VERSION,
+};
+pub use external_pr::{
+    canonical_pull_request_url, plan_external_pr_import,
+    CanonicalPullRequestUrl, ExternalPrImportPlanWire,
+    ExternalPrImportRequestWire, LocalPatchWire, RemotePullRequestWire,
+    EXTERNAL_PR_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,
