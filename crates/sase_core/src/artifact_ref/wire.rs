@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 4;
-pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 4;
+pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 5;
+pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 5;
 pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
@@ -47,6 +47,8 @@ pub enum ArtifactRefKindWire {
     File,
     Bead,
     Agent,
+    Stitch,
+    Patch,
     Document { role: String },
 }
 
@@ -59,6 +61,8 @@ impl ArtifactRefKindWire {
             Self::File => "file",
             Self::Bead => "bead",
             Self::Agent => "agent",
+            Self::Stitch => "stitch",
+            Self::Patch => "patch",
             Self::Document { role } => role,
         }
     }
@@ -98,10 +102,20 @@ pub enum ArtifactRefPayloadWire {
         source: ArtifactFileSourceWire,
         digest: String,
     },
+    FilePath {
+        path: String,
+    },
     Bead {
         id: String,
     },
     Agent {
+        name: String,
+    },
+    Stitch {
+        repo: Option<String>,
+        sha: String,
+    },
+    Patch {
         name: String,
     },
     Document {
@@ -282,4 +296,5 @@ pub struct ArtifactRefPromptCandidateWire {
     pub separator_span: ArtifactRefSpanWire,
     pub payload_span: ArtifactRefSpanWire,
     pub fragment_span: Option<ArtifactRefSpanWire>,
+    pub quoted: bool,
 }

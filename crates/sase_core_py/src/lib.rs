@@ -241,6 +241,31 @@
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
 //!   `-> dict` (project-filterable skills and memories plus global documents)
 //! - `compose_snippet_catalog(templates: dict[str, str]) -> dict`
+//! - `artifact_ref_kind_catalog() -> list[dict]`
+//! - `artifact_ref_kind_canonicalize(label: str) -> dict`
+//! - `artifact_ref_parse_canonical(value: str) -> dict`
+//! - `artifact_ref_quote_argument(argument: str) -> str`
+//! - `artifact_ref_expansion_placeholders() -> list[str]`
+//! - `artifact_ref_expansion_validate(format: str) -> list[str]`
+//! - `artifact_ref_expansion_render(format: str, values: dict[str, str]) -> str`
+//! - `artifact_ref_provider_spec_validate(spec: dict) -> None`
+//! - `artifact_ref_provider_spec_digest(spec: dict) -> str`
+//! - `artifact_ref_provider_spec_wire_schema_version() -> int`
+//! - `artifact_ref_entry_validate(entry: dict) -> None`
+//! - `artifact_ref_entry_wire_schema_version() -> int`
+//! - `artifact_ref_use_manifest_parse(data: bytes) -> list[dict]`
+//! - `artifact_ref_use_record_render(record: dict) -> str`
+//! - `artifact_ref_use_wire_schema_version() -> int`
+//! - `markdown_link_refs_wire_schema_version() -> int`
+//! - `markdown_reference_links_scan(document: str) -> dict`
+//! - `markdown_reference_label_allocate(scan: dict, destination: str, assigned: dict[str, str]) -> str`
+//! - `markdown_reference_definitions_append(document: str, definitions: list[dict]) -> str`
+//! - `referenced_by_wire_schema_version() -> int`
+//! - `referenced_by_block_parse(document: str) -> dict`
+//! - `referenced_by_block_render(table: dict) -> str`
+//! - `referenced_by_block_upsert(document: str, table: dict) -> str`
+//! - `referenced_by_block_remove(document: str) -> str`
+//! - `referenced_by_block_strip(document: str) -> str`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -407,21 +432,37 @@ use sase_core::artifact_file::{
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_ref::{
+    artifact_ref_kind_catalog as core_artifact_ref_kind_catalog,
+    artifact_ref_provider_spec_digest as core_artifact_ref_provider_spec_digest,
+    canonical_artifact_ref_kind as core_canonical_artifact_ref_kind,
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
     filter_artifact_ref_path_payloads as core_filter_artifact_ref_path_payloads,
     normalize_artifact_ref_list as core_normalize_artifact_ref_list,
     parse_artifact_ref as core_parse_artifact_ref,
+    parse_artifact_ref_canonical as core_parse_artifact_ref_canonical,
     parse_artifact_ref_list as core_parse_artifact_ref_list,
+    parse_artifact_ref_use_manifest as core_parse_artifact_ref_use_manifest,
+    quote_artifact_ref_argument as core_quote_artifact_ref_argument,
     render_artifact_ref as core_render_artifact_ref,
+    render_artifact_ref_expansion as core_render_artifact_ref_expansion,
+    render_artifact_ref_use_record as core_render_artifact_ref_use_record,
     resolve_artifact_ref as core_resolve_artifact_ref,
     resolve_artifact_ref_list as core_resolve_artifact_ref_list,
-    scan_artifact_refs as core_scan_artifact_refs, ArtifactRefContextWire,
-    ArtifactRefError, ParsedArtifactRefWire,
-    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    scan_artifact_refs as core_scan_artifact_refs,
+    validate_artifact_entry as core_validate_artifact_entry,
+    validate_artifact_ref_expansion_format as core_validate_artifact_ref_expansion_format,
+    validate_artifact_ref_provider_spec as core_validate_artifact_ref_provider_spec,
+    ArtifactEntryWire, ArtifactRefContextWire, ArtifactRefError,
+    ArtifactRefProviderSpecWire, ArtifactRefUseRecordWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_EXPANSION_PLACEHOLDERS,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION,
 };
 use sase_core::axe_chop::{
     apply_checkpoint_update as core_apply_checkpoint_update,
@@ -577,6 +618,13 @@ use sase_core::machine_hood::{
     strip_machine_agent_name as core_strip_machine_agent_name,
     validate_machine_name as core_validate_machine_name,
 };
+use sase_core::markdown_link_refs::{
+    allocate_markdown_reference_label as core_allocate_markdown_reference_label,
+    append_markdown_reference_definitions as core_append_markdown_reference_definitions,
+    scan_markdown_reference_links as core_scan_markdown_reference_links,
+    MarkdownReferenceDefinitionWire, MarkdownReferenceScanWire,
+    MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
+};
 use sase_core::notifications::{
     append_notification as core_append_notification,
     append_notification_counts as core_append_notification_counts,
@@ -634,6 +682,14 @@ use sase_core::prompt_stash::{
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
     QueryCorpus as CoreQueryCorpus, QueryProgram as CoreQueryProgram,
+};
+use sase_core::referenced_by::{
+    parse_referenced_by_block as core_parse_referenced_by_block,
+    remove_referenced_by_block as core_remove_referenced_by_block,
+    render_referenced_by_block as core_render_referenced_by_block,
+    strip_referenced_by_block as core_strip_referenced_by_block,
+    upsert_referenced_by_block as core_upsert_referenced_by_block,
+    ReferencedByTableWire, REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION,
 };
 use sase_core::runner_limit_override::{
     clear_runner_limit_override as core_clear_runner_limit_override,
@@ -3439,6 +3495,323 @@ fn py_artifact_ref_wire_schema_version() -> u64 {
         ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION
     );
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION
+}
+
+/// Return every compiled-in artifact-reference kind, live or historical.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_kind_catalog")]
+fn py_artifact_ref_kind_catalog(py: Python<'_>) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_artifact_ref_kind_catalog())
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "internal artifact reference serialize error: {error}"
+            ))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Resolve one requested kind label against the permanent alias registry.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_kind_canonicalize")]
+fn py_artifact_ref_kind_canonicalize(
+    py: Python<'_>,
+    label: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_canonical_artifact_ref_kind(label))
+        .map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact reference serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Parse one reference after rewriting only its kind label to canonical.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_parse_canonical")]
+fn py_artifact_ref_parse_canonical(
+    py: Python<'_>,
+    value: &str,
+) -> PyResult<PyObject> {
+    artifact_ref_result_to_py(py, core_parse_artifact_ref_canonical(value))
+}
+
+/// Render `argument` as a bare or quoted-and-escaped artifact-ref argument.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_quote_argument")]
+fn py_artifact_ref_quote_argument(argument: &str) -> String {
+    core_quote_artifact_ref_argument(argument)
+}
+
+/// Return the placeholder names the expansion formatter accepts.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_expansion_placeholders")]
+fn py_artifact_ref_expansion_placeholders() -> Vec<String> {
+    ARTIFACT_REF_EXPANSION_PLACEHOLDERS
+        .iter()
+        .map(|placeholder| (*placeholder).to_string())
+        .collect()
+}
+
+/// Validate an expansion format and return the placeholders it uses.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_expansion_validate")]
+fn py_artifact_ref_expansion_validate(format: &str) -> PyResult<Vec<String>> {
+    core_validate_artifact_ref_expansion_format(format)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Render an expansion format, substituting each placeholder verbatim.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_expansion_render")]
+fn py_artifact_ref_expansion_render(
+    format: &str,
+    values: BTreeMap<String, String>,
+) -> PyResult<String> {
+    core_render_artifact_ref_expansion(format, &values)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+fn artifact_ref_provider_spec_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactRefProviderSpecWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "spec is not a valid ArtifactRefProviderSpecWire dict: {error}"
+        ))
+    })
+}
+
+/// Validate one assembled artifact-reference provider spec.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_provider_spec_validate")]
+fn py_artifact_ref_provider_spec_validate(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let spec = artifact_ref_provider_spec_from_pydict(spec)?;
+    core_validate_artifact_ref_provider_spec(&spec)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Compute a stable sha256 hex digest over the normalized provider spec.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_provider_spec_digest")]
+fn py_artifact_ref_provider_spec_digest(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let spec = artifact_ref_provider_spec_from_pydict(spec)?;
+    core_artifact_ref_provider_spec_digest(&spec)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Return the artifact-reference provider spec wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_provider_spec_wire_schema_version")]
+fn py_artifact_ref_provider_spec_wire_schema_version() -> u64 {
+    ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION
+}
+
+/// Validate one normalized artifact entry.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_entry_validate")]
+fn py_artifact_ref_entry_validate(entry: &Bound<'_, PyDict>) -> PyResult<()> {
+    let entry: ArtifactEntryWire = serde_json::from_value(py_to_json_value(
+        entry.as_any(),
+    )?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "entry is not a valid ArtifactEntryWire dict: {error}"
+        ))
+    })?;
+    core_validate_artifact_entry(&entry).map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Return the artifact-entry wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_entry_wire_schema_version")]
+fn py_artifact_ref_entry_wire_schema_version() -> u64 {
+    ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION
+}
+
+/// Parse a JSONL artifact-reference use manifest, skipping bad rows.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_use_manifest_parse")]
+fn py_artifact_ref_use_manifest_parse<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyBytes>,
+) -> PyResult<PyObject> {
+    let records = core_parse_artifact_ref_use_manifest(data.as_bytes());
+    let value = serde_json::to_value(records).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact reference serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Render one compact JSON artifact-reference use manifest row.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_use_record_render")]
+fn py_artifact_ref_use_record_render(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let record: ArtifactRefUseRecordWire = serde_json::from_value(
+        py_to_json_value(record.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid ArtifactRefUseRecordWire dict: {error}"
+        ))
+    })?;
+    core_render_artifact_ref_use_record(&record).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact reference serialize error: {error}"
+        ))
+    })
+}
+
+/// Return the artifact-reference use manifest wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_use_wire_schema_version")]
+fn py_artifact_ref_use_wire_schema_version() -> u64 {
+    ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION
+}
+
+/// Return the shared Markdown link-reference wire schema version.
+#[pyfunction]
+#[pyo3(name = "markdown_link_refs_wire_schema_version")]
+fn py_markdown_link_refs_wire_schema_version() -> u64 {
+    MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION
+}
+
+/// Scan a document for Markdown reference definitions and numeric uses.
+#[pyfunction]
+#[pyo3(name = "markdown_reference_links_scan")]
+fn py_markdown_reference_links_scan(
+    py: Python<'_>,
+    document: &str,
+) -> PyResult<PyObject> {
+    let value =
+        serde_json::to_value(core_scan_markdown_reference_links(document))
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal serialize error: {error}"
+                ))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Allocate a numeric Markdown reference label for one destination.
+#[pyfunction]
+#[pyo3(name = "markdown_reference_label_allocate")]
+fn py_markdown_reference_label_allocate(
+    scan: &Bound<'_, PyDict>,
+    destination: &str,
+    assigned: BTreeMap<String, String>,
+) -> PyResult<String> {
+    let scan: MarkdownReferenceScanWire = serde_json::from_value(
+        py_to_json_value(scan.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "scan is not a valid MarkdownReferenceScanWire dict: {error}"
+        ))
+    })?;
+    Ok(core_allocate_markdown_reference_label(
+        &scan,
+        destination,
+        &assigned,
+    ))
+}
+
+/// Append every missing Markdown reference definition to a document.
+#[pyfunction]
+#[pyo3(name = "markdown_reference_definitions_append")]
+fn py_markdown_reference_definitions_append(
+    document: &str,
+    definitions: &Bound<'_, PyList>,
+) -> PyResult<String> {
+    let mut parsed = Vec::with_capacity(definitions.len());
+    for (index, item) in definitions.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let definition: MarkdownReferenceDefinitionWire =
+            serde_json::from_value(value).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "definitions[{index}] is not a valid MarkdownReferenceDefinitionWire dict: {error}"
+                ))
+            })?;
+        parsed.push(definition);
+    }
+    Ok(core_append_markdown_reference_definitions(
+        document, &parsed,
+    ))
+}
+
+/// Return the `Referenced By` block wire schema version.
+#[pyfunction]
+#[pyo3(name = "referenced_by_wire_schema_version")]
+fn py_referenced_by_wire_schema_version() -> u64 {
+    REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION
+}
+
+/// Parse the managed `Referenced By` block out of a document.
+#[pyfunction]
+#[pyo3(name = "referenced_by_block_parse")]
+fn py_referenced_by_block_parse(
+    py: Python<'_>,
+    document: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_parse_referenced_by_block(document))
+        .map_err(|error| {
+            PyValueError::new_err(format!("internal serialize error: {error}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+fn referenced_by_table_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ReferencedByTableWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "table is not a valid ReferencedByTableWire dict: {error}"
+        ))
+    })
+}
+
+/// Render one `Referenced By` block's heading, table, and link definitions.
+#[pyfunction]
+#[pyo3(name = "referenced_by_block_render")]
+fn py_referenced_by_block_render(
+    table: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let table = referenced_by_table_from_pydict(table)?;
+    core_render_referenced_by_block(&table).map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Insert, replace, or remove the managed `Referenced By` block.
+#[pyfunction]
+#[pyo3(name = "referenced_by_block_upsert")]
+fn py_referenced_by_block_upsert(
+    document: &str,
+    table: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let table = referenced_by_table_from_pydict(table)?;
+    core_upsert_referenced_by_block(document, &table)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Remove the managed `Referenced By` block, if present.
+#[pyfunction]
+#[pyo3(name = "referenced_by_block_remove")]
+fn py_referenced_by_block_remove(document: &str) -> String {
+    core_remove_referenced_by_block(document)
+}
+
+/// Strip the managed `Referenced By` block for content hashing.
+#[pyfunction]
+#[pyo3(name = "referenced_by_block_strip")]
+fn py_referenced_by_block_strip(document: &str) -> String {
+    core_strip_referenced_by_block(document)
 }
 
 /// Build one content-addressed prompt-artifact pool filename.
@@ -7610,6 +7983,52 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_filter_path_payloads, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_kind_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_kind_canonicalize, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_parse_canonical, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_quote_argument, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_expansion_placeholders,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_expansion_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_expansion_render, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_provider_spec_validate,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_provider_spec_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_provider_spec_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_entry_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_entry_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_use_manifest_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_use_record_render, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_use_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_markdown_link_refs_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_markdown_reference_links_scan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_markdown_reference_label_allocate, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_markdown_reference_definitions_append,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_block_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_block_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_block_upsert, m)?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_block_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(py_referenced_by_block_strip, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_artifact_pool_filename, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_artifact_manifest_parse, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -9645,7 +10064,7 @@ MENTORS:
             let parsed =
                 py_artifact_ref_parse(py, "plans:202607/plan.md#L2").unwrap();
             let parsed_value = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed_value["schema_version"], json!(4));
+            assert_eq!(parsed_value["schema_version"], json!(5));
             assert_eq!(parsed_value["kind"]["type"], json!("document"));
             assert_eq!(parsed_value["fragment"]["type"], json!("lines"));
             assert_eq!(
@@ -9685,7 +10104,7 @@ MENTORS:
             let resolved =
                 py_artifact_ref_resolve(py, parsed.bind(py), context).unwrap();
             let resolved = py_to_json_value(resolved.bind(py)).unwrap();
-            assert_eq!(resolved["schema_version"], json!(4));
+            assert_eq!(resolved["schema_version"], json!(5));
             assert_eq!(resolved["status"], json!("exact"));
             assert_eq!(
                 resolved["resolved_path"],
@@ -9697,7 +10116,7 @@ MENTORS:
             let scanned = py_to_json_value(scanned.bind(py)).unwrap();
             assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
-            assert_eq!(py_artifact_ref_wire_schema_version(), 4);
+            assert_eq!(py_artifact_ref_wire_schema_version(), 5);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
             assert_eq!(
                 py_artifact_ref_list_normalize(vec![
@@ -9740,6 +10159,208 @@ MENTORS:
             );
             assert_eq!(py_artifact_ref_context_wire_schema_version(), 1);
             assert_eq!(py_artifact_ref_path_filter_wire_schema_version(), 1);
+        });
+    }
+
+    #[test]
+    fn artifact_ref_contract_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "artifact_ref_kind_catalog",
+                "artifact_ref_kind_canonicalize",
+                "artifact_ref_parse_canonical",
+                "artifact_ref_quote_argument",
+                "artifact_ref_expansion_placeholders",
+                "artifact_ref_expansion_validate",
+                "artifact_ref_expansion_render",
+                "artifact_ref_provider_spec_validate",
+                "artifact_ref_provider_spec_digest",
+                "artifact_ref_provider_spec_wire_schema_version",
+                "artifact_ref_entry_validate",
+                "artifact_ref_entry_wire_schema_version",
+                "artifact_ref_use_manifest_parse",
+                "artifact_ref_use_record_render",
+                "artifact_ref_use_wire_schema_version",
+                "markdown_link_refs_wire_schema_version",
+                "markdown_reference_links_scan",
+                "markdown_reference_label_allocate",
+                "markdown_reference_definitions_append",
+                "referenced_by_wire_schema_version",
+                "referenced_by_block_parse",
+                "referenced_by_block_render",
+                "referenced_by_block_upsert",
+                "referenced_by_block_remove",
+                "referenced_by_block_strip",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let catalog = py_artifact_ref_kind_catalog(py).unwrap();
+            let catalog = py_to_json_value(catalog.bind(py)).unwrap();
+            assert!(catalog
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["kind"] == json!("stitch")
+                    && entry["reserved"] == json!(true)));
+
+            let commit_alias =
+                py_artifact_ref_kind_canonicalize(py, "commit").unwrap();
+            let commit_alias = py_to_json_value(commit_alias.bind(py)).unwrap();
+            assert_eq!(commit_alias["canonical"], json!("stitch"));
+
+            let canonical = py_artifact_ref_parse_canonical(
+                py,
+                "commit:sase@0123456789abcdef0123456789abcdef01234567",
+            )
+            .unwrap();
+            let canonical = py_to_json_value(canonical.bind(py)).unwrap();
+            assert_eq!(
+                canonical["reference"]["rendered"],
+                json!("stitch:sase@0123456789abcdef0123456789abcdef01234567")
+            );
+
+            assert_eq!(
+                py_artifact_ref_quote_argument("has space"),
+                "\"has space\""
+            );
+            assert_eq!(py_artifact_ref_quote_argument("plain"), "plain");
+
+            assert!(py_artifact_ref_expansion_placeholders()
+                .contains(&"kind".to_string()));
+            assert_eq!(
+                py_artifact_ref_expansion_validate("{kind}:{argument}")
+                    .unwrap(),
+                ["kind", "argument"]
+            );
+            assert_eq!(
+                py_artifact_ref_expansion_render(
+                    "{kind}:{argument}",
+                    BTreeMap::from([
+                        ("kind".to_string(), "stitch".to_string()),
+                        ("argument".to_string(), "abc1234".to_string()),
+                    ]),
+                )
+                .unwrap(),
+                "stitch:abc1234"
+            );
+
+            let spec_value = json!({
+                "schema_version": 1,
+                "provider": "research",
+                "ref": {
+                    "kind": "research",
+                    "expansion_format": "{kind}:{argument}",
+                    "properties": {},
+                    "detail": {"fields": []},
+                    "identity": {},
+                    "inventory": {},
+                    "publication": {
+                        "link": "vcs_permalink",
+                        "referenced_by": "markdown_table"
+                    }
+                }
+            });
+            let spec_object = json_value_to_py(py, &spec_value).unwrap();
+            let spec = spec_object.bind(py).downcast::<PyDict>().unwrap();
+            py_artifact_ref_provider_spec_validate(spec).unwrap();
+            let digest = py_artifact_ref_provider_spec_digest(spec).unwrap();
+            assert_eq!(digest.len(), 64);
+            assert_eq!(py_artifact_ref_provider_spec_wire_schema_version(), 1);
+
+            let entry_value = json!({
+                "schema_version": 1,
+                "stable_id": "research:notes/x.md",
+                "ref_kind": "research",
+                "canonical_argument": "notes/x.md",
+                "display_label": "notes/x.md",
+                "properties": {},
+                "origin": "prompt_ref"
+            });
+            let entry_object = json_value_to_py(py, &entry_value).unwrap();
+            let entry = entry_object.bind(py).downcast::<PyDict>().unwrap();
+            py_artifact_ref_entry_validate(entry).unwrap();
+            assert_eq!(py_artifact_ref_entry_wire_schema_version(), 1);
+
+            let use_record_value = json!({
+                "schema_version": 1,
+                "recorded_at": "2026-08-01T14:22:03Z",
+                "agent_name": "bbugyi200.athena.sase-js.1",
+                "raw_ref": "bead:sase-js.1",
+                "canonical_ref": "bead:sase-js.1",
+                "ref_kind": "bead",
+                "prompt_text": "@bead:sase-js.1"
+            });
+            let use_record_object =
+                json_value_to_py(py, &use_record_value).unwrap();
+            let use_record =
+                use_record_object.bind(py).downcast::<PyDict>().unwrap();
+            let rendered_use =
+                py_artifact_ref_use_record_render(use_record).unwrap();
+            let parsed_manifest = py_artifact_ref_use_manifest_parse(
+                py,
+                &PyBytes::new_bound(py, rendered_use.as_bytes()),
+            )
+            .unwrap();
+            let parsed_manifest =
+                py_to_json_value(parsed_manifest.bind(py)).unwrap();
+            assert_eq!(parsed_manifest[0]["raw_ref"], json!("bead:sase-js.1"));
+            assert_eq!(py_artifact_ref_use_wire_schema_version(), 1);
+
+            assert_eq!(py_markdown_link_refs_wire_schema_version(), 1);
+            let scan =
+                py_markdown_reference_links_scan(py, "[1]: https://one\n")
+                    .unwrap();
+            let scan_value = py_to_json_value(scan.bind(py)).unwrap();
+            assert_eq!(scan_value["definitions"][0]["label"], json!("1"));
+            let scan_dict = scan.bind(py).downcast::<PyDict>().unwrap();
+            let allocated = py_markdown_reference_label_allocate(
+                scan_dict,
+                "https://two",
+                BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(allocated, "2");
+            let definitions = json_value_to_py(
+                py,
+                &json!([{"label": "2", "destination": "https://two"}]),
+            )
+            .unwrap();
+            let definitions =
+                definitions.bind(py).downcast::<PyList>().unwrap();
+            let appended = py_markdown_reference_definitions_append(
+                "[1]: https://one\n",
+                definitions,
+            )
+            .unwrap();
+            assert!(appended.contains("[2]: https://two"));
+
+            assert_eq!(py_referenced_by_wire_schema_version(), 1);
+            let table_value = json!({
+                "schema_version": 1,
+                "columns": [{"key": "agent", "label": "Agent", "numeric": false}],
+                "rows": [{"values": {"agent": "alpha"}, "link_targets": {}}],
+                "omitted": 0
+            });
+            let table_object = json_value_to_py(py, &table_value).unwrap();
+            let table = table_object.bind(py).downcast::<PyDict>().unwrap();
+            let rendered_block = py_referenced_by_block_render(table).unwrap();
+            assert!(rendered_block.contains("## Referenced By"));
+            let upserted =
+                py_referenced_by_block_upsert("Body\n", table).unwrap();
+            assert!(upserted.contains("<!-- sase:referenced-by:start -->"));
+            let parsed_block =
+                py_referenced_by_block_parse(py, &upserted).unwrap();
+            let parsed_block = py_to_json_value(parsed_block.bind(py)).unwrap();
+            assert_eq!(
+                parsed_block["table"]["rows"][0]["values"]["agent"],
+                json!("alpha")
+            );
+            assert_eq!(py_referenced_by_block_remove(&upserted), "Body\n");
+            assert_eq!(py_referenced_by_block_strip(&upserted), "Body");
         });
     }
 

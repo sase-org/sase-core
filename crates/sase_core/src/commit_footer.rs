@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::markdown_link_refs::{
+    assign_reference_id, parse_reference_definition, sanitize, ParsedReference,
+};
+
 pub const COMMIT_FOOTER_WIRE_SCHEMA_VERSION: u32 = 1;
 const COMMIT_TAG_PREFIX: &str = "SASE_";
 
@@ -45,12 +49,6 @@ pub struct CommitFooterUpdateWire {
     pub destination: Option<String>,
     #[serde(default)]
     pub reference_id: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ParsedReference<'a> {
-    id: &'a str,
-    destination: &'a str,
 }
 
 #[derive(Clone, Debug)]
@@ -343,61 +341,6 @@ fn empty_footer(body: &str) -> CommitFooterWire {
     }
 }
 
-fn assign_reference_id(
-    destination: &str,
-    preferred_id: Option<&str>,
-    existing_target_ids: &BTreeMap<String, Vec<String>>,
-    reserved_ids: &BTreeSet<String>,
-    used_ids: &mut BTreeMap<String, String>,
-    target_ids: &mut BTreeMap<String, Vec<String>>,
-    reference_order: &mut Vec<String>,
-) -> String {
-    let preferred = preferred_id.and_then(sanitize);
-    let mut candidates = Vec::new();
-    if let Some(id) = preferred {
-        candidates.push(id);
-    }
-    if let Some(ids) = target_ids.get(destination) {
-        candidates.extend(ids.iter().cloned());
-    }
-    if let Some(ids) = existing_target_ids.get(destination) {
-        candidates.extend(ids.iter().cloned());
-    }
-
-    let id = candidates
-        .into_iter()
-        .find(|id| match used_ids.get(id) {
-            Some(used) => used == destination,
-            None => true,
-        })
-        .unwrap_or_else(|| allocate_numeric_id(reserved_ids, used_ids));
-    if !used_ids.contains_key(&id) {
-        used_ids.insert(id.clone(), destination.to_string());
-        target_ids
-            .entry(destination.to_string())
-            .or_default()
-            .push(id.clone());
-        reference_order.push(id.clone());
-    }
-    id
-}
-
-fn allocate_numeric_id(
-    reserved_ids: &BTreeSet<String>,
-    used_ids: &BTreeMap<String, String>,
-) -> String {
-    let mut number = 1_u64;
-    loop {
-        let candidate = number.to_string();
-        if !reserved_ids.contains(&candidate)
-            && !used_ids.contains_key(&candidate)
-        {
-            return candidate;
-        }
-        number += 1;
-    }
-}
-
 fn reference_ids_in_body(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter_map(|line| parse_reference_definition(line.trim()))
@@ -432,27 +375,10 @@ fn parse_linked_value(value: &str) -> Option<(&str, &str)> {
     .then_some((label, id))
 }
 
-fn parse_reference_definition(line: &str) -> Option<ParsedReference<'_>> {
-    if !line.starts_with('[') {
-        return None;
-    }
-    let separator = line.find("]:")?;
-    let id = &line[1..separator];
-    let destination = line[separator + 2..].trim();
-    (!id.is_empty() && !id.contains(']') && !destination.is_empty())
-        .then_some(ParsedReference { id, destination })
-}
-
 fn canonicalize_key(key: &str) -> String {
     key.strip_prefix(COMMIT_TAG_PREFIX)
         .unwrap_or(key)
         .to_string()
-}
-
-fn sanitize(value: &str) -> Option<String> {
-    let cleaned = value.replace(['\r', '\n'], " ");
-    let trimmed = cleaned.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]

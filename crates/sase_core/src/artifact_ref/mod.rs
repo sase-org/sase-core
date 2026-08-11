@@ -1,8 +1,13 @@
 //! Kind-tagged logical references to SASE artifacts.
 
+mod entry;
+mod expansion;
 mod filter;
+mod kinds;
 mod list;
+mod provider_spec;
 mod scanner;
+mod uses;
 mod wire;
 
 use std::path::{Path, PathBuf};
@@ -19,12 +24,39 @@ use crate::reference_path::{
     RelativePayloadError,
 };
 
+pub use entry::{
+    validate_artifact_entry, ArtifactEntryOriginWire, ArtifactEntryWire,
+    ResolvedArtifactRefWire, ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION,
+};
+pub use expansion::{
+    render_artifact_ref_expansion, validate_artifact_ref_expansion_format,
+    ARTIFACT_REF_EXPANSION_PLACEHOLDERS,
+};
 pub use filter::filter_artifact_ref_path_payloads;
+pub use kinds::{
+    artifact_ref_kind_catalog, canonical_artifact_ref_kind,
+    parse_artifact_ref_canonical, ArtifactRefKindAliasWire,
+    ArtifactRefKindDescriptorWire, ArtifactRefKindStatusWire,
+    CanonicalArtifactRefWire, ARTIFACT_REF_KIND_CATALOG_WIRE_SCHEMA_VERSION,
+};
 pub use list::{
     normalize_artifact_ref_list, parse_artifact_ref_list,
     resolve_artifact_ref_list,
 };
-pub use scanner::scan_artifact_refs;
+pub use provider_spec::{
+    artifact_ref_provider_spec_digest, validate_artifact_ref_provider_spec,
+    ArtifactRefDetailSpecWire, ArtifactRefIdentitySpecWire,
+    ArtifactRefInventorySpecWire, ArtifactRefPropertySpecWire,
+    ArtifactRefProviderRefSpecWire, ArtifactRefProviderSpecWire,
+    ArtifactRefPublicationSpecWire,
+    ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION,
+};
+pub use scanner::{quote_artifact_ref_argument, scan_artifact_refs};
+pub use uses::{
+    parse_artifact_ref_use_manifest, render_artifact_ref_use_record,
+    validate_artifact_ref_use_record, ArtifactRefUseRecordWire,
+    ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION,
+};
 pub use wire::{
     ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
@@ -130,6 +162,13 @@ pub fn render_artifact_ref(
             validate_digest(digest)?;
             format!("{}:{digest}", source.label())
         }
+        (
+            ArtifactRefKindWire::File,
+            ArtifactRefPayloadWire::FilePath { path },
+        ) => {
+            validate_file_path_payload(path)?;
+            path.clone()
+        }
         (ArtifactRefKindWire::Bead, ArtifactRefPayloadWire::Bead { id }) => {
             validate_bead_id(id)?;
             id.clone()
@@ -139,6 +178,26 @@ pub fn render_artifact_ref(
             ArtifactRefPayloadWire::Agent { name },
         ) => {
             validate_agent_payload_name(name)?;
+            name.clone()
+        }
+        (
+            ArtifactRefKindWire::Stitch,
+            ArtifactRefPayloadWire::Stitch { repo, sha },
+        ) => {
+            validate_sha(sha, false)?;
+            match repo {
+                Some(repo) => {
+                    validate_repo(repo)?;
+                    format!("{repo}@{sha}")
+                }
+                None => sha.clone(),
+            }
+        }
+        (
+            ArtifactRefKindWire::Patch,
+            ArtifactRefPayloadWire::Patch { name },
+        ) => {
+            validate_patch_name(name)?;
             name.clone()
         }
         (
@@ -286,10 +345,34 @@ pub fn resolve_artifact_ref(
             ArtifactRefKindWire::Agent,
             ArtifactRefPayloadWire::Agent { name },
         ) => resolve_agent(name, rendered, context),
+        (
+            ArtifactRefKindWire::File,
+            ArtifactRefPayloadWire::FilePath { .. },
+        ) => Ok(unresolved_kind_resolution("file", rendered)),
+        (
+            ArtifactRefKindWire::Stitch,
+            ArtifactRefPayloadWire::Stitch { .. },
+        ) => Ok(unresolved_kind_resolution("stitch", rendered)),
+        (ArtifactRefKindWire::Patch, ArtifactRefPayloadWire::Patch { .. }) => {
+            Ok(unresolved_kind_resolution("patch", rendered))
+        }
         _ => Err(ArtifactRefError::validation(
             "artifact reference kind does not match its payload",
         )),
     }
+}
+
+/// Build the placeholder resolution for a kind resolved by the provider
+/// registry rather than this crate.
+fn unresolved_kind_resolution(
+    kind: &str,
+    rendered: String,
+) -> ArtifactRefResolutionWire {
+    let mut resolved = resolution("unknown_kind", rendered);
+    resolved.diagnostic = Some(format!(
+        "{kind} references resolve through the provider registry, not this crate"
+    ));
+    resolved
 }
 
 pub fn validate_artifact_ref_context(
@@ -312,6 +395,8 @@ fn classify_kind(kind: &str) -> ArtifactRefKindWire {
         "file" => ArtifactRefKindWire::File,
         "bead" => ArtifactRefKindWire::Bead,
         "agent" => ArtifactRefKindWire::Agent,
+        "stitch" => ArtifactRefKindWire::Stitch,
+        "patch" => ArtifactRefKindWire::Patch,
         role => ArtifactRefKindWire::Document {
             role: role.to_string(),
         },
@@ -378,25 +463,58 @@ fn parse_payload(
             })
         }
         ArtifactRefKindWire::File => {
-            let (source, digest) =
-                payload.split_once(':').ok_or_else(|| {
+            let first_segment = payload.split(':').next().unwrap_or("");
+            let colon_count = payload.matches(':').count();
+            let is_digest_payload = colon_count == 1
+                && matches!(first_segment, "explicit" | "default");
+            if is_digest_payload {
+                let (source, digest) = payload.split_once(':').ok_or_else(|| {
                     ArtifactRefError::validation(
                         "file payload must have the form (explicit|default):<hex24>",
                     )
                 })?;
-            let source = match source {
-                "explicit" => ArtifactFileSourceWire::Explicit,
-                "default" => ArtifactFileSourceWire::Default,
-                _ => {
-                    return Err(ArtifactRefError::validation(
-                        "file source must be 'explicit' or 'default'",
-                    ));
-                }
-            };
-            validate_digest(digest)?;
-            Ok(ArtifactRefPayloadWire::File {
-                source,
-                digest: digest.to_string(),
+                let source = match source {
+                    "explicit" => ArtifactFileSourceWire::Explicit,
+                    "default" => ArtifactFileSourceWire::Default,
+                    _ => {
+                        return Err(ArtifactRefError::validation(
+                            "file source must be 'explicit' or 'default'",
+                        ));
+                    }
+                };
+                validate_digest(digest)?;
+                Ok(ArtifactRefPayloadWire::File {
+                    source,
+                    digest: digest.to_string(),
+                })
+            } else {
+                validate_file_path_payload(payload)?;
+                Ok(ArtifactRefPayloadWire::FilePath {
+                    path: payload.to_string(),
+                })
+            }
+        }
+        ArtifactRefKindWire::Stitch => match payload.rsplit_once('@') {
+            Some((repo, sha)) => {
+                validate_repo(repo)?;
+                validate_sha(sha, false)?;
+                Ok(ArtifactRefPayloadWire::Stitch {
+                    repo: Some(repo.to_string()),
+                    sha: sha.to_string(),
+                })
+            }
+            None => {
+                validate_sha(payload, false)?;
+                Ok(ArtifactRefPayloadWire::Stitch {
+                    repo: None,
+                    sha: payload.to_string(),
+                })
+            }
+        },
+        ArtifactRefKindWire::Patch => {
+            validate_patch_name(payload)?;
+            Ok(ArtifactRefPayloadWire::Patch {
+                name: payload.to_string(),
             })
         }
         ArtifactRefKindWire::Bead => {
@@ -1047,6 +1165,8 @@ fn kind_rejects_fragments(kind: &ArtifactRefKindWire) -> bool {
             | ArtifactRefKindWire::Bug
             | ArtifactRefKindWire::Bead
             | ArtifactRefKindWire::Agent
+            | ArtifactRefKindWire::Stitch
+            | ArtifactRefKindWire::Patch
     )
 }
 
@@ -1106,6 +1226,61 @@ fn validate_path_payload(
             }
         })
     })
+}
+
+/// Validate a `file:` path payload lexically, with no filesystem access.
+///
+/// Deliberately looser than `validate_path_payload`: a `file:` path payload
+/// may be absolute or `~`-relative. Containment, `~` expansion, and traversal
+/// rejection belong to phase `files`, not this parse-time check.
+fn validate_file_path_payload(path: &str) -> Result<(), ArtifactRefError> {
+    if path.is_empty() {
+        return Err(ArtifactRefError::validation(
+            "file path must not be empty",
+        ));
+    }
+    if path.contains('\0') {
+        return Err(ArtifactRefError::validation(
+            "file path must not contain a NUL byte",
+        ));
+    }
+    if path.contains('\\') {
+        return Err(ArtifactRefError::validation(
+            "file path must not contain a backslash",
+        ));
+    }
+    if path.ends_with('/') {
+        return Err(ArtifactRefError::validation(
+            "file path must not end with a trailing slash",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a `patch:` name lexically.
+///
+/// Patch names may contain spaces and have no reserved separator, so
+/// project-qualified spellings are not accepted here; that lives on the
+/// resolved entry once the provider registry lands.
+fn validate_patch_name(name: &str) -> Result<(), ArtifactRefError> {
+    if name.is_empty() {
+        return Err(ArtifactRefError::validation(
+            "patch name must not be empty",
+        ));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ArtifactRefError::validation(
+            "patch name must not contain control characters",
+        ));
+    }
+    if name.starts_with(char::is_whitespace)
+        || name.ends_with(char::is_whitespace)
+    {
+        return Err(ArtifactRefError::validation(
+            "patch name must not begin or end with whitespace",
+        ));
+    }
+    Ok(())
 }
 
 fn artifact_path_payload(path: &Path) -> Result<String, ArtifactRefError> {
@@ -1240,10 +1415,27 @@ mod tests {
                 "file:default:52895d68931185056fd0e49f#t=90",
                 "file:default:52895d68931185056fd0e49f#t=90",
             ),
+            ("file:notes/x.md", "file:notes/x.md"),
+            (
+                "file:other:52895d68931185056fd0e49f",
+                "file:other:52895d68931185056fd0e49f",
+            ),
+            ("file:~/diagram.png", "file:~/diagram.png"),
+            ("file:/abs/path.md", "file:/abs/path.md"),
             (
                 "commit:sase@0123456789abcdef0123456789abcdef01234567",
                 "commit:sase@0123456789abcdef0123456789abcdef01234567",
             ),
+            (
+                "stitch:0123456789abcdef0123456789abcdef01234567",
+                "stitch:0123456789abcdef0123456789abcdef01234567",
+            ),
+            ("stitch:1234567", "stitch:1234567"),
+            (
+                "stitch:sase@0123456789abcdef0123456789abcdef01234567",
+                "stitch:sase@0123456789abcdef0123456789abcdef01234567",
+            ),
+            ("patch:my patch name", "patch:my patch name"),
             ("bug:sase#123", "bug:sase#123"),
             ("bead:sase-9z", "bead:sase-9z"),
             ("bead:sase-9z.1", "bead:sase-9z.1"),
@@ -1276,7 +1468,6 @@ mod tests {
             "bug:sase#0",
             "bug:sase#nope",
             "bug:sase#1#L2",
-            "file:other:52895d68931185056fd0e49f",
             "file:default:52895d68931185056fd0e49",
             "plans:x.md#L0",
             "plans:x.md#L3-L2",
@@ -1293,14 +1484,38 @@ mod tests {
             "agent:a/b",
             "agent:.9w",
             "agent:9w#L1",
+            "stitch:123456",
+            "stitch:sase@ABCDEF0",
+            "stitch:0123456789abcdef0123456789abcdef012345678",
+            "stitch:sase@0123456#L1",
+            "stitch:1234567#L1",
+            "patch:",
+            "patch: leading space",
+            "patch:trailing space ",
+            "patch:name#L1",
+            "file:#L1",
+            "file:notes/x.md\0",
+            "file:notes/x.md\\y",
+            "file:notes/x.md/",
         ] {
             assert!(parse_artifact_ref(value).is_err(), "{value}");
         }
     }
 
     #[test]
+    fn file_path_payloads_accept_fragments_and_stitch_shorthand_bounds() {
+        for value in [
+            "file:notes/x.md#L3",
+            "stitch:1234567",
+            "stitch:0123456789abcdef0123456789abcdef01234567",
+        ] {
+            assert!(parse_artifact_ref(value).is_ok(), "{value}");
+        }
+    }
+
+    #[test]
     fn parsed_references_carry_the_current_wire_schema() {
-        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 4);
+        assert_eq!(parse_artifact_ref("bead:x").unwrap().schema_version, 5);
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
+pub mod markdown_link_refs;
 pub mod notifications;
 pub mod parser;
 pub mod plan;
@@ -50,6 +51,7 @@ mod prompt_rewrite;
 pub mod prompt_stash;
 pub mod query;
 mod reference_path;
+pub mod referenced_by;
 pub mod runner_limit_override;
 pub mod sections;
 pub mod status;
@@ -529,6 +531,11 @@ pub use machine_hood::{
     machine_hood_of, qualify_machine_agent_name, strip_machine_agent_name,
     validate_machine_name, MachineNameError,
 };
+pub use markdown_link_refs::{
+    allocate_markdown_reference_label, append_markdown_reference_definitions,
+    scan_markdown_reference_links, MarkdownReferenceDefinitionWire,
+    MarkdownReferenceScanWire, MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
+};
 pub use notifications::{
     append_notification, append_notification_counts,
     apply_notification_state_update, apply_notification_state_update_counts,
@@ -606,6 +613,13 @@ pub use query::{
     project_dir_name, strip_reverted_suffix, tokenize_query, QueryCorpus,
     QueryErrorWire, QueryEvaluationContext, QueryExprWire, QueryProgram,
     QueryProgramWire, QueryTokenKind, QueryTokenWire,
+};
+pub use referenced_by::{
+    parse_referenced_by_block, remove_referenced_by_block,
+    render_referenced_by_block, strip_referenced_by_block,
+    upsert_referenced_by_block, ReferencedByColumnWire,
+    ReferencedByDocumentWire, ReferencedByRowWire, ReferencedByTableWire,
+    MAX_RENDERED_REFERENCED_BY_ROWS, REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION,
 };
 pub use runner_limit_override::{
     clear_runner_limit_override, get_runner_limit_override,
