@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::prompt_rewrite::{rewrite_prompt_links, PromptLinkCandidate};
 
 /// Wire schema for rows in `.sase/artifacts/prompt-artifacts.jsonl`.
-pub const PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION: u64 = 1;
+pub const PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION: u64 = 2;
 
 const ARTIFACT_BASENAME_MAX_BYTES: usize = 120;
 const ORIGINAL_NAME_HASH_LEN: usize = 8;
@@ -41,6 +41,18 @@ pub struct PromptArtifactRecord {
     pub locator: Option<String>,
     #[serde(default)]
     pub skipped_reason: Option<String>,
+    #[serde(default)]
+    pub logical_path: Option<String>,
+    #[serde(default)]
+    pub root_name: Option<String>,
+    #[serde(default)]
+    pub authored_path: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub object_relpath: Option<String>,
+    #[serde(default)]
+    pub sidecar_visibility: Option<String>,
 }
 
 /// Rewritten prompt text and the manifest rows that produced live links.
@@ -169,9 +181,8 @@ pub fn parse_prompt_artifact_manifest(
             continue;
         }
         match serde_json::from_slice::<PromptArtifactRecord>(line) {
-            Ok(record)
-                if record.schema_version
-                    == PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION =>
+            Ok(record) if (1..=PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION)
+                .contains(&record.schema_version) =>
             {
                 records.push(record);
             }
@@ -297,6 +308,12 @@ mod tests {
             vcs_relpath: None,
             locator: None,
             skipped_reason: None,
+            logical_path: None,
+            root_name: None,
+            authored_path: None,
+            origin: None,
+            object_relpath: None,
+            sidecar_visibility: None,
         }
     }
 

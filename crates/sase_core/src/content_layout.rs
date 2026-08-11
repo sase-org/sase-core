@@ -414,7 +414,6 @@ pub fn skill_placement_issue(
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutCandidateResolutionWire {
     pub selected_index: Option<usize>,

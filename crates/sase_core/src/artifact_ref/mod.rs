@@ -2,10 +2,12 @@
 
 mod entry;
 mod expansion;
+mod file_roots;
 mod filter;
 mod kinds;
 mod list;
 mod provider_spec;
+mod ref_files;
 mod scanner;
 mod uses;
 mod wire;
@@ -51,6 +53,12 @@ pub use provider_spec::{
     ArtifactRefPublicationSpecWire,
     ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION,
 };
+pub use ref_files::{
+    fold_artifact_ref_files, parse_artifact_ref_file_index,
+    render_artifact_ref_file_row, validate_artifact_ref_file_row,
+    ArtifactRefFileVersionRowWire, ArtifactRefFileVersionWire,
+    ArtifactRefLogicalFileWire, ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
+};
 pub use scanner::{quote_artifact_ref_argument, scan_artifact_refs};
 pub use uses::{
     parse_artifact_ref_use_manifest, render_artifact_ref_use_record,
@@ -60,8 +68,8 @@ pub use uses::{
 pub use wire::{
     ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
-    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
-    ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFileRootWire,
+    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefListEntryWire,
     ArtifactRefListResolutionWire, ArtifactRefPathFilterBatchWire,
     ArtifactRefPayloadWire, ArtifactRefProjectWire,
     ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
@@ -73,6 +81,7 @@ pub use wire::{
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 
+use file_roots::resolve_artifact_file_path;
 use filter::ArtifactPathFilter;
 
 /// Parse and validate one canonical `<kind>:<payload>[#<fragment>]` value.
@@ -347,8 +356,8 @@ pub fn resolve_artifact_ref(
         ) => resolve_agent(name, rendered, context),
         (
             ArtifactRefKindWire::File,
-            ArtifactRefPayloadWire::FilePath { .. },
-        ) => Ok(unresolved_kind_resolution("file", rendered)),
+            ArtifactRefPayloadWire::FilePath { path },
+        ) => resolve_artifact_file_path(path, context, rendered),
         (
             ArtifactRefKindWire::Stitch,
             ArtifactRefPayloadWire::Stitch { .. },

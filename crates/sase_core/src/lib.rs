@@ -23,6 +23,7 @@ pub mod agent_scan;
 pub mod agent_stats;
 pub mod artifact_consumption;
 pub mod artifact_file;
+pub mod artifact_object_store;
 pub mod artifact_ref;
 pub mod axe_chop;
 pub mod axe_status;
@@ -246,20 +247,28 @@ pub use artifact_file::{
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
+pub use artifact_object_store::{
+    artifact_object_prompt_link, artifact_object_relpath,
+    ARTIFACT_OBJECT_STORE_DIR,
+};
 pub use artifact_ref::{
     canonicalize_artifact_ref, filter_artifact_ref_path_payloads,
-    normalize_artifact_ref_list, parse_artifact_ref, parse_artifact_ref_list,
-    render_artifact_ref, resolve_artifact_ref, resolve_artifact_ref_list,
-    scan_artifact_refs, validate_artifact_ref_context, ArtifactFileSourceWire,
-    ArtifactRefAgentOwnerWire, ArtifactRefAgentRootWire,
-    ArtifactRefBeadStoreWire, ArtifactRefContextWire,
-    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFragmentWire,
-    ArtifactRefKindWire, ArtifactRefListEntryWire,
-    ArtifactRefListResolutionWire, ArtifactRefPathFilterBatchWire,
-    ArtifactRefPayloadWire, ArtifactRefProjectWire,
-    ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
-    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
-    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    fold_artifact_ref_files, normalize_artifact_ref_list, parse_artifact_ref,
+    parse_artifact_ref_file_index, parse_artifact_ref_list,
+    render_artifact_ref, render_artifact_ref_file_row, resolve_artifact_ref,
+    resolve_artifact_ref_list, scan_artifact_refs,
+    validate_artifact_ref_context, validate_artifact_ref_file_row,
+    ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
+    ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
+    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFileRootWire,
+    ArtifactRefFileVersionRowWire, ArtifactRefFileVersionWire,
+    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefListResolutionWire, ArtifactRefLogicalFileWire,
+    ArtifactRefPathFilterBatchWire, ArtifactRefPayloadWire,
+    ArtifactRefProjectWire, ArtifactRefPromptCandidateWire,
+    ArtifactRefRepositoryWire, ArtifactRefResolutionWire, ArtifactRefSpanWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
@@ -390,8 +399,8 @@ pub use content_layout::{
     ProjectContentLayoutWire, SaseContentLayoutWire, SkillPlacementIssueWire,
     SkillPlacementRuleWire, SkillSourceWire, XpromptSourceWire,
     CONTENT_LAYOUT_SCHEMA_VERSION, MEMORY_NAMESPACE_SEGMENT,
-    MEMORY_README_FILENAME, REF_DIRECTORY_SEGMENT,
-    SKILL_DIRECTORY_SEGMENT, SKILL_NAMESPACE_SEGMENT,
+    MEMORY_README_FILENAME, REF_DIRECTORY_SEGMENT, SKILL_DIRECTORY_SEGMENT,
+    SKILL_NAMESPACE_SEGMENT,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

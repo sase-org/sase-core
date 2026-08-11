@@ -431,32 +431,42 @@ use sase_core::artifact_file::{
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
+use sase_core::artifact_object_store::{
+    artifact_object_prompt_link as core_artifact_object_prompt_link,
+    artifact_object_relpath as core_artifact_object_relpath,
+};
 use sase_core::artifact_ref::{
     artifact_ref_kind_catalog as core_artifact_ref_kind_catalog,
     artifact_ref_provider_spec_digest as core_artifact_ref_provider_spec_digest,
     canonical_artifact_ref_kind as core_canonical_artifact_ref_kind,
     canonicalize_artifact_ref as core_canonicalize_artifact_ref,
     filter_artifact_ref_path_payloads as core_filter_artifact_ref_path_payloads,
+    fold_artifact_ref_files as core_fold_artifact_ref_files,
     normalize_artifact_ref_list as core_normalize_artifact_ref_list,
     parse_artifact_ref as core_parse_artifact_ref,
     parse_artifact_ref_canonical as core_parse_artifact_ref_canonical,
+    parse_artifact_ref_file_index as core_parse_artifact_ref_file_index,
     parse_artifact_ref_list as core_parse_artifact_ref_list,
     parse_artifact_ref_use_manifest as core_parse_artifact_ref_use_manifest,
     quote_artifact_ref_argument as core_quote_artifact_ref_argument,
     render_artifact_ref as core_render_artifact_ref,
     render_artifact_ref_expansion as core_render_artifact_ref_expansion,
+    render_artifact_ref_file_row as core_render_artifact_ref_file_row,
     render_artifact_ref_use_record as core_render_artifact_ref_use_record,
     resolve_artifact_ref as core_resolve_artifact_ref,
     resolve_artifact_ref_list as core_resolve_artifact_ref_list,
     scan_artifact_refs as core_scan_artifact_refs,
     validate_artifact_entry as core_validate_artifact_entry,
     validate_artifact_ref_expansion_format as core_validate_artifact_ref_expansion_format,
+    validate_artifact_ref_file_row as core_validate_artifact_ref_file_row,
     validate_artifact_ref_provider_spec as core_validate_artifact_ref_provider_spec,
     ArtifactEntryWire, ArtifactRefContextWire, ArtifactRefError,
-    ArtifactRefProviderSpecWire, ArtifactRefUseRecordWire,
-    ParsedArtifactRefWire, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ArtifactRefFileVersionRowWire, ArtifactRefProviderSpecWire,
+    ArtifactRefUseRecordWire, ParsedArtifactRefWire,
+    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_EXPANSION_PLACEHOLDERS,
+    ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
@@ -3469,6 +3479,77 @@ fn py_artifact_ref_filter_path_payloads<'py>(
     )
 }
 
+/// Return the agents-sidecar object relpath for one full SHA-256 digest.
+#[pyfunction]
+#[pyo3(name = "artifact_object_relpath")]
+fn py_artifact_object_relpath(sha256: &str) -> PyResult<String> {
+    core_artifact_object_relpath(sha256).map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Return the prompt-relative link target for one validated object relpath.
+#[pyfunction]
+#[pyo3(name = "artifact_object_prompt_link")]
+fn py_artifact_object_prompt_link(relpath: &str) -> PyResult<String> {
+    core_artifact_object_prompt_link(relpath)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Parse valid rows from a tolerant artifact-reference file JSONL index.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_file_index_parse")]
+fn py_artifact_ref_file_index_parse<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyBytes>,
+) -> PyResult<PyObject> {
+    prompt_artifact_result_to_py(
+        py,
+        &core_parse_artifact_ref_file_index(data.as_bytes()),
+    )
+}
+
+/// Render one artifact-reference file index row as compact JSON.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_file_row_render")]
+fn py_artifact_ref_file_row_render(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let record = artifact_ref_file_row_from_pydict(record)?;
+    core_render_artifact_ref_file_row(&record).map_err(|error| {
+        PyValueError::new_err(format!(
+            "invalid artifact reference file index row: {error}"
+        ))
+    })
+}
+
+/// Validate one artifact-reference file index row.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_file_row_validate")]
+fn py_artifact_ref_file_row_validate(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let record = artifact_ref_file_row_from_pydict(record)?;
+    core_validate_artifact_ref_file_row(&record)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Fold artifact-reference file index rows into logical files.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_files_fold")]
+fn py_artifact_ref_files_fold<'py>(
+    py: Python<'py>,
+    records: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let records = artifact_ref_file_rows_from_py_list(records)?;
+    prompt_artifact_result_to_py(py, &core_fold_artifact_ref_files(&records))
+}
+
+/// Return the artifact-reference file index wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_file_index_wire_schema_version")]
+fn py_artifact_ref_file_index_wire_schema_version() -> u64 {
+    ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION
+}
+
 /// Scan prompt text for kind-tagged artifact-reference candidates.
 #[pyfunction]
 #[pyo3(name = "artifact_ref_scan_prompt")]
@@ -5220,6 +5301,36 @@ fn artifact_ref_context_from_pydict(
             ))
         },
     )
+}
+
+fn artifact_ref_file_row_from_pydict(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactRefFileVersionRowWire> {
+    serde_json::from_value(py_to_json_value(record.as_any())?).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "row is not a valid ArtifactRefFileVersionRowWire dict: {error}"
+            ))
+        },
+    )
+}
+
+fn artifact_ref_file_rows_from_py_list(
+    records: &Bound<'_, PyList>,
+) -> PyResult<Vec<ArtifactRefFileVersionRowWire>> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            serde_json::from_value(py_to_json_value(&record)?).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "rows[{index}] is not a valid ArtifactRefFileVersionRowWire dict: {error}"
+                    ))
+                },
+            )
+        })
+        .collect()
 }
 
 fn bead_create_request_from_pydict(
@@ -7987,6 +8098,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_ref_kind_canonicalize, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_parse_canonical, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_quote_argument, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_object_relpath, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_object_prompt_link, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_file_index_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_file_row_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_file_row_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_files_fold, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_file_index_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_ref_expansion_placeholders,
         m

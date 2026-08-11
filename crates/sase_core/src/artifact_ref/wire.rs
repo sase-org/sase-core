@@ -6,7 +6,7 @@ use thiserror::Error;
 pub const ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION: u64 = 5;
 pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 5;
 pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
-pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -163,6 +163,19 @@ pub struct ArtifactRefDocumentRootWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefFileRootWire {
+    pub name: String,
+    pub path: String,
+    /// Optional positive/negative POSIX globs applied to this file root.
+    ///
+    /// `None` means the caller omitted a policy and all root-relative
+    /// payloads are allowed. `Some(vec![])` is an explicit empty policy and
+    /// allows nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_globs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefRepositoryWire {
     #[serde(default)]
     pub kind: String,
@@ -210,6 +223,8 @@ pub struct ArtifactRefContextWire {
     #[serde(default)]
     pub document_roots: Vec<ArtifactRefDocumentRootWire>,
     #[serde(default)]
+    pub file_roots: Vec<ArtifactRefFileRootWire>,
+    #[serde(default)]
     pub chats_root: Option<String>,
     #[serde(default)]
     pub artifact_index_path: Option<String>,
@@ -223,6 +238,10 @@ pub struct ArtifactRefContextWire {
     pub agent_roots: Vec<ArtifactRefAgentRootWire>,
     #[serde(default)]
     pub agent_owner: Option<ArtifactRefAgentOwnerWire>,
+    #[serde(default)]
+    pub home_dir: Option<String>,
+    #[serde(default)]
+    pub file_capture_max_bytes: Option<u64>,
 }
 
 impl Default for ArtifactRefContextWire {
@@ -230,6 +249,7 @@ impl Default for ArtifactRefContextWire {
         Self {
             schema_version: ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
             document_roots: Vec::new(),
+            file_roots: Vec::new(),
             chats_root: None,
             artifact_index_path: None,
             repositories: Vec::new(),
@@ -237,6 +257,8 @@ impl Default for ArtifactRefContextWire {
             bead_stores: Vec::new(),
             agent_roots: Vec::new(),
             agent_owner: None,
+            home_dir: None,
+            file_capture_max_bytes: None,
         }
     }
 }
