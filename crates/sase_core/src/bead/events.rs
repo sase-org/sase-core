@@ -513,8 +513,61 @@ pub fn reduce_event_streams(
     for issue in &reduced {
         issue.validate()?;
     }
+    let reduced = collapse_duplicate_external_refs(reduced);
     validate_unique_external_refs(&reduced)?;
     Ok(reduced)
+}
+
+/// Collapse independently created issues that share one non-empty
+/// `external_ref` into a single deterministic winner.
+///
+/// Two clones can each mint their own task bead mirroring the same external
+/// tracker issue before their bead sidecars ever sync with each other. That
+/// concurrent history must not make the whole store unreadable the moment it
+/// is integrated, so this runs at the one seam where streams from different
+/// origins first meet: reduction, not creation. Direct local mutation and
+/// JSONL import still call [`validate_unique_external_refs`] themselves and
+/// keep failing atomically on a duplicate.
+///
+/// The winner is the issue with the earliest `created_at`, tied-broken by
+/// the smaller issue id, so the outcome is identical regardless of which
+/// stream the merge visits first. The losing issue is dropped from this
+/// materialized projection only — its append-only event stream is left on
+/// disk untouched, so no source history is destroyed.
+fn collapse_duplicate_external_refs(issues: Vec<IssueWire>) -> Vec<IssueWire> {
+    let mut winner_index_by_ref: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, issue) in issues.iter().enumerate() {
+        let external_ref = issue.external_ref.trim();
+        if external_ref.is_empty() {
+            continue;
+        }
+        winner_index_by_ref
+            .entry(external_ref.to_string())
+            .and_modify(|winner_index| {
+                if external_ref_collapse_key(issue)
+                    < external_ref_collapse_key(&issues[*winner_index])
+                {
+                    *winner_index = index;
+                }
+            })
+            .or_insert(index);
+    }
+
+    let winning_indexes: BTreeSet<usize> =
+        winner_index_by_ref.into_values().collect();
+    issues
+        .into_iter()
+        .enumerate()
+        .filter(|(index, issue)| {
+            issue.external_ref.trim().is_empty()
+                || winning_indexes.contains(index)
+        })
+        .map(|(_, issue)| issue)
+        .collect()
+}
+
+fn external_ref_collapse_key(issue: &IssueWire) -> (&str, &str) {
+    (issue.created_at.as_str(), issue.id.as_str())
 }
 
 /// Order regenerated issue projections identically across every writer.
@@ -1896,37 +1949,80 @@ mod tests {
         );
     }
 
+    fn created_stream(issue: &IssueWire) -> BeadEventStreamWire {
+        BeadEventStreamWire {
+            stream_id: issue.id.clone(),
+            root_issue_id: issue.id.clone(),
+            events: vec![PendingEvent::created(issue)
+                .into_record(&issue.id, 1)
+                .unwrap()],
+        }
+    }
+
     #[test]
-    fn reduction_rejects_duplicate_external_refs() {
+    fn reduction_collapses_duplicate_external_refs_regardless_of_stream_order()
+    {
         let mut first = issue_with_refs(Vec::new());
         first.id = "sase-1".to_string();
         first.external_ref = "bug:sase#42".to_string();
         let mut second = issue_with_refs(Vec::new());
         second.id = "sase-2".to_string();
         second.external_ref = "bug:sase#42".to_string();
+
+        let forward = vec![created_stream(&first), created_stream(&second)];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+
+        for streams in [forward, reversed] {
+            let reduced = reduce_event_streams(&streams).unwrap();
+            assert_eq!(reduced.len(), 1);
+            assert_eq!(reduced[0].id, "sase-1");
+            assert_eq!(reduced[0].external_ref, "bug:sase#42");
+        }
+    }
+
+    #[test]
+    fn reduction_collapse_prefers_earlier_created_at_over_id_order() {
+        let mut first = issue_with_refs(Vec::new());
+        first.id = "sase-1".to_string();
+        first.external_ref = "bug:sase#42".to_string();
+        first.created_at = "2026-02-01T00:00:00Z".to_string();
+        let mut second = issue_with_refs(Vec::new());
+        second.id = "sase-2".to_string();
+        second.external_ref = "bug:sase#42".to_string();
+        second.created_at = "2026-01-01T00:00:00Z".to_string();
+
+        let streams = vec![created_stream(&first), created_stream(&second)];
+
+        let reduced = reduce_event_streams(&streams).unwrap();
+
+        assert_eq!(reduced.len(), 1);
+        assert_eq!(reduced[0].id, "sase-2");
+    }
+
+    #[test]
+    fn reduction_collapse_does_not_disturb_unrelated_issues() {
+        let mut first = issue_with_refs(Vec::new());
+        first.id = "sase-1".to_string();
+        first.external_ref = "bug:sase#42".to_string();
+        let mut second = issue_with_refs(Vec::new());
+        second.id = "sase-2".to_string();
+        second.external_ref = "bug:sase#42".to_string();
+        let mut unrelated = issue_with_refs(Vec::new());
+        unrelated.id = "sase-3".to_string();
+        unrelated.external_ref = String::new();
+
         let streams = vec![
-            BeadEventStreamWire {
-                stream_id: first.id.clone(),
-                root_issue_id: first.id.clone(),
-                events: vec![PendingEvent::created(&first)
-                    .into_record(&first.id, 1)
-                    .unwrap()],
-            },
-            BeadEventStreamWire {
-                stream_id: second.id.clone(),
-                root_issue_id: second.id.clone(),
-                events: vec![PendingEvent::created(&second)
-                    .into_record(&second.id, 1)
-                    .unwrap()],
-            },
+            created_stream(&first),
+            created_stream(&second),
+            created_stream(&unrelated),
         ];
 
-        let error = reduce_event_streams(&streams).unwrap_err();
+        let reduced = reduce_event_streams(&streams).unwrap();
 
-        assert_eq!(error.kind, "conflict");
-        assert!(error.message.contains("external_ref bug:sase#42"));
-        assert!(error.message.contains("sase-1"));
-        assert!(error.message.contains("sase-2"));
+        let ids: Vec<&str> =
+            reduced.iter().map(|issue| issue.id.as_str()).collect();
+        assert_eq!(ids, vec!["sase-1", "sase-3"]);
     }
 
     /// Build one side of a concurrent mint: same id, different bead.
