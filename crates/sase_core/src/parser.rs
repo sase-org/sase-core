@@ -7,8 +7,8 @@
 //!   headers, direct `NAME:` starts, end-on-next-header,
 //!   end-on-two-blank-lines, end-on-new-NAME.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
-//! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted), `BUG`,
-//!   `STATUS`.
+//! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted),
+//!   `PR_ORIGIN`, `BUG`, `STATUS`.
 //! - Section bodies: `REFS`, canonical `STITCHES`, legacy `COMMITS`,
 //!   `HOOKS`, `COMMENTS`, `MENTORS`, `TIMESTAMPS`, `DELTAS`. The legacy
 //!   wire records produced here match Python parser output for the golden
@@ -30,9 +30,9 @@ use crate::sections::{
     parse_mentors_line, parse_stitches_line, parse_timestamps_line,
 };
 use crate::wire::{
-    ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookWire, MentorWire,
-    ParseErrorWire, PatchWire, SourceSpanWire, TimestampWire,
-    CHANGESPEC_WIRE_SCHEMA_VERSION,
+    default_pr_origin, ChangeSpecWire, CommentWire, CommitWire, DeltaWire,
+    HookWire, MentorWire, ParseErrorWire, PatchWire, SourceSpanWire,
+    TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
 /// Parse all Patches from a project file's raw bytes.
@@ -135,6 +135,7 @@ struct ParserState {
     description_lines: Vec<String>,
     parent: Option<String>,
     pr_url: Option<String>,
+    pr_origin: Option<String>,
     bug: Option<String>,
     status: Option<String>,
     refs: Vec<String>,
@@ -209,6 +210,7 @@ impl ParserState {
             status,
             parent: self.parent,
             pr_url: self.pr_url,
+            pr_origin: self.pr_origin.unwrap_or_else(default_pr_origin),
             bug: self.bug,
             description,
             refs: self.refs,
@@ -271,6 +273,12 @@ fn try_field_header(state: &mut ParserState, line: &str) -> FieldHeaderOutcome {
         state.reset_section_flags();
         return FieldHeaderOutcome::Parsed;
     }
+    if let Some(rest) = line.strip_prefix("PR_ORIGIN: ") {
+        state.save_pending_entries();
+        state.pr_origin = Some(normalize_pr_origin(rest));
+        state.reset_section_flags();
+        return FieldHeaderOutcome::Parsed;
+    }
     if let Some(rest) = line.strip_prefix("BUG: ") {
         state.save_pending_entries();
         state.bug = Some(rest.trim().to_string());
@@ -284,6 +292,14 @@ fn try_field_header(state: &mut ParserState, line: &str) -> FieldHeaderOutcome {
         return FieldHeaderOutcome::Parsed;
     }
     FieldHeaderOutcome::None
+}
+
+fn normalize_pr_origin(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "sase" | "external" | "unknown" => normalized,
+        _ => default_pr_origin(),
+    }
 }
 
 fn try_section_header(state: &mut ParserState, line: &str) -> bool {
@@ -622,6 +638,36 @@ STATUS: WIP
 
         let cl_src = "NAME: a\nCL: 12345\nSTATUS: WIP\n";
         assert_eq!(parse(cl_src)[0].pr_url.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn pr_origin_scalars_round_trip_and_absence_defaults_unknown() {
+        let src = "\
+NAME: sase_patch
+PR_ORIGIN: sase
+STATUS: WIP
+
+NAME: external_patch
+PR_ORIGIN: external
+STATUS: WIP
+
+NAME: explicit_unknown
+PR_ORIGIN: unknown
+STATUS: WIP
+
+NAME: invalid_origin
+PR_ORIGIN: imported
+STATUS: WIP
+
+NAME: absent_origin
+STATUS: WIP
+";
+        let specs = parse(src);
+        assert_eq!(specs[0].pr_origin, "sase");
+        assert_eq!(specs[1].pr_origin, "external");
+        assert_eq!(specs[2].pr_origin, "unknown");
+        assert_eq!(specs[3].pr_origin, "unknown");
+        assert_eq!(specs[4].pr_origin, "unknown");
     }
 
     #[test]

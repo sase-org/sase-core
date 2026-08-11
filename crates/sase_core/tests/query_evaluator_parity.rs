@@ -279,6 +279,7 @@ fn ancestor_walk_avoids_cycles() {
         status: "WIP".into(),
         parent: Some(parent.into()),
         pr_url: None,
+        pr_origin: "unknown".into(),
         bug: None,
         description: String::new(),
         refs: vec![],

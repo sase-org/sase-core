@@ -22,6 +22,10 @@ pub const CHANGESPEC_WIRE_SCHEMA_VERSION: u32 = 5;
 /// name without implying a storage-format bump.
 pub const PATCH_WIRE_SCHEMA_VERSION: u32 = CHANGESPEC_WIRE_SCHEMA_VERSION;
 
+pub fn default_pr_origin() -> String {
+    "unknown".to_string()
+}
+
 /// Inclusive 1-based line range pointing into the source file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceSpanWire {
@@ -308,6 +312,8 @@ pub struct PatchWire {
     pub parent: Option<String>,
     #[serde(alias = "cl_or_pr")]
     pub pr_url: Option<String>,
+    #[serde(default = "default_pr_origin")]
+    pub pr_origin: String,
     pub bug: Option<String>,
     pub description: String,
     #[serde(default)]
@@ -338,6 +344,7 @@ impl From<ChangeSpecWire> for PatchWire {
             status: spec.status,
             parent: spec.parent,
             pr_url: spec.pr_url,
+            pr_origin: spec.pr_origin,
             bug: spec.bug,
             description: spec.description,
             refs: spec.refs,
@@ -363,6 +370,7 @@ impl From<PatchWire> for ChangeSpecWire {
             status: patch.status,
             parent: patch.parent,
             pr_url: patch.pr_url,
+            pr_origin: patch.pr_origin,
             bug: patch.bug,
             description: patch.description,
             refs: patch.refs,
@@ -395,6 +403,8 @@ pub struct ChangeSpecWire {
     pub parent: Option<String>,
     #[serde(alias = "cl_or_pr")]
     pub pr_url: Option<String>,
+    #[serde(default = "default_pr_origin")]
+    pub pr_origin: String,
     pub bug: Option<String>,
     pub description: String,
     #[serde(default)]
@@ -472,6 +482,7 @@ mod tests {
             status: "WIP".to_string(),
             parent: None,
             pr_url: None,
+            pr_origin: "unknown".to_string(),
             bug: None,
             description: "".to_string(),
             refs: vec![],
@@ -512,6 +523,7 @@ mod tests {
             status: "WIP".to_string(),
             parent: None,
             pr_url: None,
+            pr_origin: "unknown".to_string(),
             bug: None,
             description: "".to_string(),
             refs: vec![],
@@ -557,6 +569,7 @@ mod tests {
             cs.pr_url.as_deref(),
             Some("https://example.test/repo/pull/1")
         );
+        assert_eq!(cs.pr_origin, "unknown");
         assert_eq!(cs.project_display_name, None);
     }
 
@@ -574,6 +587,7 @@ mod tests {
             status: "WIP".to_string(),
             parent: None,
             pr_url: None,
+            pr_origin: "unknown".to_string(),
             bug: None,
             description: "".to_string(),
             refs: vec![],
@@ -595,6 +609,7 @@ mod tests {
             "status",
             "parent",
             "pr_url",
+            "pr_origin",
             "bug",
             "description",
             "refs",
@@ -627,6 +642,7 @@ mod tests {
             status: "WIP".to_string(),
             parent: None,
             pr_url: None,
+            pr_origin: "unknown".to_string(),
             bug: None,
             description: "work".to_string(),
             refs: vec![],
@@ -797,6 +813,7 @@ mod tests {
             status: "WIP".to_string(),
             parent: Some("parent_cl".to_string()),
             pr_url: Some("123".to_string()),
+            pr_origin: "sase".to_string(),
             bug: None,
             description: "first line\nsecond line".to_string(),
             refs: vec!["research:202607/report.md".to_string()],

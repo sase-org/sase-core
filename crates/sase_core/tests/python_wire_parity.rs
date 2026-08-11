@@ -21,6 +21,7 @@
 //!     status='WIP',
 //!     parent='parent_cl',
 //!     pr_url='123',
+//!     pr_origin='sase',
 //!     bug=None,
 //!     description='first line\\nsecond line',
 //!     refs=['research:202607/report.md', 'bead:sase-bb'],
@@ -61,6 +62,7 @@ const PYTHON_FIXTURE: &str = r#"{
     "status": "WIP",
     "parent": "parent_cl",
     "pr_url": "123",
+    "pr_origin": "sase",
     "bug": null,
     "description": "first line\nsecond line",
     "refs": [
@@ -152,6 +154,7 @@ fn rust_patch() -> ChangeSpecWire {
         status: "WIP".to_string(),
         parent: Some("parent_cl".to_string()),
         pr_url: Some("123".to_string()),
+        pr_origin: "sase".to_string(),
         bug: None,
         description: "first line\nsecond line".to_string(),
         refs: vec![
