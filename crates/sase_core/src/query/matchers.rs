@@ -104,3 +104,9 @@ pub fn match_sibling(value: &str, cs: &ChangeSpecWire) -> bool {
     let cs_base = strip_reverted_suffix(&cs.name);
     search_base.eq_ignore_ascii_case(&cs_base)
 }
+
+/// `origin:<value>` — case-insensitive equality on PR_ORIGIN (`sase`,
+/// `external`, or `unknown`; absent normalizes to `unknown` in `wire.rs`).
+pub fn match_origin(value: &str, cs: &ChangeSpecWire) -> bool {
+    cs.pr_origin.eq_ignore_ascii_case(value)
+}

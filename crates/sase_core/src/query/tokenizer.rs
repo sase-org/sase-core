@@ -421,7 +421,7 @@ impl<'a> Tokenizer<'a> {
                     }
                     return Err(QueryErrorWire::tokenizer(
                         format!(
-                            "Unknown property key: {} (valid keys: status, project, ancestor, name, sibling)",
+                            "Unknown property key: {} (valid keys: status, project, ancestor, name, sibling, origin)",
                             word
                         ),
                         word_start,

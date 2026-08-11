@@ -111,6 +111,12 @@ fn evaluation_matrix_property_filters() {
     case("ancestor:alpha", &["alpha", "beta", "beta__260102_010101"]);
     case("name:beta", &["beta"]);
     case("sibling:beta", &["beta"]);
+    // The golden corpus has no PR_ORIGIN field on any Patch, so every Patch
+    // normalizes to "unknown".
+    case(
+        "origin:unknown",
+        &["alpha", "beta", "beta__260102_010101", "gamma"],
+    );
     case("ancestor:alpha AND NOT \"beta\"", &["alpha"]);
 }
 
@@ -150,6 +156,11 @@ fn persistent_corpus_matches_golden_matrix_samples() {
         &corpus,
     );
     corpus_case("sibling:beta", &["beta"], &corpus);
+    corpus_case(
+        "origin:unknown",
+        &["alpha", "beta", "beta__260102_010101", "gamma"],
+        &corpus,
+    );
     corpus_case("@@@", &["gamma"], &corpus);
 }
 

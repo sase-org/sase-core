@@ -23,7 +23,7 @@ pub const RUNNING_PROCESS_QUERY: &str = "$$$ internal marker";
 
 /// Property keys accepted by the parser.
 pub const VALID_PROPERTY_KEYS: &[&str] =
-    &["status", "project", "ancestor", "name", "sibling"];
+    &["status", "project", "ancestor", "name", "sibling", "origin"];
 
 /// Token kinds matching `TokenType` in the Python tokenizer. Serialized as
 /// lowercase tags for JSON parity.

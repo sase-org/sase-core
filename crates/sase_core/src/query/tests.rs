@@ -174,6 +174,14 @@ fn tokenize_invalid_property_key() {
 }
 
 #[test]
+fn tokenize_origin_property() {
+    let toks = tok("origin:external");
+    assert_eq!(toks[0].kind, QueryTokenKind::Property);
+    assert_eq!(toks[0].value, "external");
+    assert_eq!(toks[0].property_key.as_deref(), Some("origin"));
+}
+
+#[test]
 fn tokenize_property_shorthands() {
     let toks = tok("+myproject");
     assert_eq!(toks[0].kind, QueryTokenKind::Property);

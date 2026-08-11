@@ -23,7 +23,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::query::matchers::{
-    get_base_status, has_any_status_suffix, match_name, strip_reverted_suffix,
+    get_base_status, has_any_status_suffix, match_name, match_origin,
+    strip_reverted_suffix,
 };
 use crate::query::parser::parse_query;
 use crate::query::searchable::{
@@ -267,6 +268,7 @@ impl QueryEvaluationContext {
                 let search_base = strip_reverted_suffix(value).to_lowercase();
                 corpus.sibling_bases[idx] == search_base
             }
+            "origin" => match_origin(value, &corpus.specs[idx]),
             // Unknown property keys never match (parser rejects unknown keys
             // up front, so this is just defensive).
             _ => false,

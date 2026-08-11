@@ -95,6 +95,7 @@ pub fn get_searchable_text(cs: &ChangeSpecWire) -> String {
     parts.push(cs.name.clone());
     parts.push(cs.description.clone());
     parts.push(cs.status.clone());
+    parts.push(cs.pr_origin.clone());
     parts.push(project_dir_name(&cs.file_path).to_string());
     parts.extend(cs.refs.iter().cloned());
 
