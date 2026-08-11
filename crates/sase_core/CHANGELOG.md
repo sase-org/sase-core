@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.4](https://github.com/sase-org/sase-core/compare/v0.24.3...v0.24.4) - 2026-08-11
+
+### Added
+
+- *(beads)* add external ref identity field
+
 ## [0.24.3](https://github.com/sase-org/sase-core/compare/v0.24.2...v0.24.3) - 2026-08-11
 
 ### Added
