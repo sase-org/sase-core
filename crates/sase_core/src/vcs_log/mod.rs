@@ -18,7 +18,7 @@
 //! - [`classify_commit_presence`] — stamp commit records with local/remote
 //!   presence from precomputed ahead/behind id sets.
 //! - [`classify_commit_origin`] — classify a full commit message as
-//!   manual or SASE-originated from its terminal SASE footer.
+//!   stitch, auto, or manual from its terminal SASE footer.
 //! - [`parse_merge_summary`] — strictly summarize well-known merge
 //!   subjects without altering unrecognized subjects.
 //!

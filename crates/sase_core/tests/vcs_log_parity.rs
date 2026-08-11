@@ -172,17 +172,17 @@ fn parse_multiline_body_preserved() {
 }
 
 #[test]
-fn parse_sase_footer_sets_sase_origin() {
+fn parse_stitch_type_footer_sets_stitch_origin() {
     let stream = record(
         "h1",
         "s1",
         "300",
         "p0",
         "fix: tracked",
-        "detail\n\nSASE_STITCH=1",
+        "detail\n\nSASE_TYPE=stitch",
     );
     let parsed = parse_git_log(&stream);
-    assert_eq!(parsed[0].origin, CommitOriginWire::Sase);
+    assert_eq!(parsed[0].origin, CommitOriginWire::Stitch);
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
         subject: "fix: thing".to_string(),
         body: "body text".to_string(),
         presence: CommitPresenceWire::LocalOnly,
-        origin: CommitOriginWire::Sase,
+        origin: CommitOriginWire::Stitch,
     };
     let value = serde_json::to_value(&row).unwrap();
     assert_eq!(
@@ -304,7 +304,7 @@ fn vcs_commit_wire_serializes_to_python_shape() {
             "subject": "fix: thing",
             "body": "body text",
             "presence": "local_only",
-            "origin": "sase",
+            "origin": "stitch",
         })
     );
 }
@@ -376,14 +376,26 @@ fn vcs_commit_wire_defaults_presence_to_unknown() {
 // -- classify_commit_origin ----------------------------------------------
 
 #[test]
-fn classify_commit_origin_uses_terminal_sase_footer() {
+fn classify_commit_origin_uses_terminal_type_footer() {
     assert_eq!(
-        classify_commit_origin("fix: tracked\n\nSASE_STITCH=1"),
-        CommitOriginWire::Sase,
+        classify_commit_origin("fix: tracked\n\nSASE_TYPE=stitch"),
+        CommitOriginWire::Stitch,
     );
     assert_eq!(
-        classify_commit_origin("fix: manual\n\nSASE_STITCH=body text\n\nMore"),
+        classify_commit_origin("fix: manual\n\nSASE_TYPE=stitch\n\nMore"),
         CommitOriginWire::Manual,
+    );
+}
+
+#[test]
+fn classify_commit_origin_distinguishes_auto_and_legacy_stitch() {
+    assert_eq!(
+        classify_commit_origin("fix: automatic\n\nSASE_TYPE=sase init"),
+        CommitOriginWire::Auto,
+    );
+    assert_eq!(
+        classify_commit_origin("fix: legacy\n\nSASE_AGENT=sase-1"),
+        CommitOriginWire::Stitch,
     );
 }
 

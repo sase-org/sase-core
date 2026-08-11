@@ -2699,7 +2699,8 @@ fn commit_presence_to_str(presence: CommitPresenceWire) -> &'static str {
 fn commit_origin_to_str(origin: CommitOriginWire) -> &'static str {
     match origin {
         CommitOriginWire::Manual => "manual",
-        CommitOriginWire::Sase => "sase",
+        CommitOriginWire::Stitch => "stitch",
+        CommitOriginWire::Auto => "auto",
     }
 }
 
@@ -2754,7 +2755,7 @@ fn py_classify_commit_presence<'py>(
     json_value_to_py(py, &out)
 }
 
-/// Classify a full commit message as manual or SASE-originated.
+/// Classify a full commit message as stitch, auto, or manual.
 #[pyfunction]
 #[pyo3(name = "classify_commit_origin")]
 fn py_classify_commit_origin(message: &str) -> &'static str {
@@ -7910,8 +7911,12 @@ mod tests {
     fn classify_commit_origin_binding_returns_origin_string() {
         assert_eq!(py_classify_commit_origin("fix: manual\n\nBody"), "manual",);
         assert_eq!(
-            py_classify_commit_origin("fix: tracked\n\nSASE_STITCH=1"),
-            "sase",
+            py_classify_commit_origin("fix: tracked\n\nSASE_TYPE=stitch"),
+            "stitch",
+        );
+        assert_eq!(
+            py_classify_commit_origin("fix: automatic\n\nSASE_TYPE=sase init"),
+            "auto",
         );
     }
 

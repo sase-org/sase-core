@@ -337,17 +337,17 @@ mod tests {
     }
 
     #[test]
-    fn commit_with_sase_footer_gets_sase_origin() {
+    fn commit_with_stitch_type_gets_stitch_origin() {
         let stream = record(
             "h1",
             "s1",
             "300",
             "p0",
             "fix: tracked",
-            "Details\n\nSASE_STITCH=1",
+            "Details\n\nSASE_TYPE=stitch",
         );
         let parsed = parse_git_log(&stream);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].origin, crate::vcs_log::CommitOriginWire::Sase,);
+        assert_eq!(parsed[0].origin, crate::vcs_log::CommitOriginWire::Stitch,);
     }
 }

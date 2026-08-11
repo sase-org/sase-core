@@ -74,7 +74,7 @@ pub struct VcsCommitWire {
     /// Local/remote presence classification.
     #[serde(default)]
     pub presence: CommitPresenceWire,
-    /// Manual/SASE origin classification.
+    /// Stitch/auto/manual origin classification.
     #[serde(default)]
     pub origin: CommitOriginWire,
 }
