@@ -14,6 +14,7 @@ use super::wire::{
 };
 
 const ACTION_ADOPT: &str = "adopt";
+const ACTION_REFRESH: &str = "refresh";
 const ACTION_REPAIR_ORIGIN: &str = "repair_origin";
 const ACTION_SKIP: &str = "skip";
 
@@ -25,6 +26,8 @@ const REASON_UNMARKED: &str = "unmarked";
 
 const DESTINATION_ACTIVE: &str = "active";
 const DESTINATION_ARCHIVE: &str = "archive";
+
+const PR_ORIGIN_EXTERNAL: &str = "external";
 
 /// Pure classifier for one remote pull request.
 pub fn plan_external_pr_import(
@@ -68,8 +71,17 @@ pub fn plan_external_pr_import(
             if !(marker_names_local
                 && (local.reserved || local.pr_url.trim().is_empty()))
             {
+                let destination_is_archive = destination == DESTINATION_ARCHIVE;
+                let needs_refresh = local.pr_origin == PR_ORIGIN_EXTERNAL
+                    && (local.status != status
+                        || local.archived != destination_is_archive);
+                let action = if needs_refresh {
+                    ACTION_REFRESH
+                } else {
+                    ACTION_SKIP
+                };
                 return Ok(ExternalPrImportPlanWire {
-                    action: ACTION_SKIP.into(),
+                    action: action.into(),
                     reason: REASON_ALREADY_OWNED.into(),
                     patch_name: Some(local.name.clone()),
                     name_base: None,
@@ -263,15 +275,27 @@ mod tests {
         origin: &str,
         status: &str,
     ) -> LocalPatchWire {
+        local_with_archived(name, pr_url, origin, status, false)
+    }
+
+    fn local_with_archived(
+        name: &str,
+        pr_url: &str,
+        origin: &str,
+        status: &str,
+        archived: bool,
+    ) -> LocalPatchWire {
         LocalPatchWire {
             name: name.into(),
             pr_url: pr_url.into(),
             pr_origin: origin.into(),
             status: status.into(),
-            archived: false,
+            archived,
             reserved: status == "Reserved",
         }
     }
+
+    const OWNED_PR_URL: &str = "https://github.com/sase-org/sase/pull/17";
 
     #[test]
     fn owned_url_skips_and_preserves_origin() {
@@ -367,5 +391,126 @@ mod tests {
             (submitted.status.as_str(), submitted.destination.as_str()),
             ("Submitted", "archive")
         );
+    }
+
+    #[test]
+    fn refresh_fires_when_open_external_patch_status_drifts() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "external",
+                "Mailed",
+                false,
+            )],
+        );
+        request.remote.is_draft = true;
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_REFRESH);
+        assert_eq!(plan.reason, REASON_ALREADY_OWNED);
+        assert_eq!(plan.patch_name.as_deref(), Some("pr_feature_1"));
+        assert_eq!(plan.pr_origin, "external");
+        assert_eq!(
+            (plan.status.as_str(), plan.destination.as_str()),
+            ("Draft", "active")
+        );
+    }
+
+    #[test]
+    fn refresh_fires_for_merged_pr_and_moves_to_archive() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "external",
+                "Mailed",
+                false,
+            )],
+        );
+        request.remote.merged_at = "2026-08-03T00:00:00Z".into();
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_REFRESH);
+        assert_eq!(
+            (plan.status.as_str(), plan.destination.as_str()),
+            ("Submitted", "archive")
+        );
+    }
+
+    #[test]
+    fn refresh_fires_for_closed_unmerged_pr() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "external",
+                "Mailed",
+                false,
+            )],
+        );
+        request.remote.state = "closed".into();
+        request.remote.closed_at = "2026-08-03T00:00:00Z".into();
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_REFRESH);
+        assert_eq!(
+            (plan.status.as_str(), plan.destination.as_str()),
+            ("Archived", "archive")
+        );
+    }
+
+    #[test]
+    fn unchanged_external_patch_skips() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "external",
+                "Submitted",
+                true,
+            )],
+        );
+        request.remote.merged_at = "2026-08-03T00:00:00Z".into();
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_SKIP);
+        assert_eq!(plan.reason, REASON_ALREADY_OWNED);
+    }
+
+    #[test]
+    fn sase_owned_patch_never_refreshes_despite_status_drift() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "sase",
+                "Mailed",
+                false,
+            )],
+        );
+        request.remote.merged_at = "2026-08-03T00:00:00Z".into();
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_SKIP);
+        assert_eq!(plan.pr_origin, "sase");
+    }
+
+    #[test]
+    fn unknown_origin_patch_never_refreshes_despite_status_drift() {
+        let mut request = req(
+            "",
+            vec![local_with_archived(
+                "pr_feature_1",
+                OWNED_PR_URL,
+                "unknown",
+                "Mailed",
+                false,
+            )],
+        );
+        request.remote.merged_at = "2026-08-03T00:00:00Z".into();
+        let plan = plan_external_pr_import(&request).unwrap();
+        assert_eq!(plan.action, ACTION_SKIP);
+        assert_eq!(plan.pr_origin, "unknown");
     }
 }

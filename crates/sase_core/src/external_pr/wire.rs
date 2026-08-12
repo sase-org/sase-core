@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const EXTERNAL_PR_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const EXTERNAL_PR_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemotePullRequestWire {
