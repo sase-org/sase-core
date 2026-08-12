@@ -10565,6 +10565,7 @@ MENTORS:
                 "pool_relpath": "pool/aaaaaaaaaaaa-diagram.png",
                 "vcs_repo": null,
                 "vcs_relpath": null,
+                "vcs_revision": null,
                 "locator": null,
                 "skipped_reason": null,
                 "logical_path": null,
@@ -10623,11 +10624,23 @@ MENTORS:
             let rewritten = py_to_json_value(rewritten.bind(py)).unwrap();
             assert_eq!(
                 rewritten["prompt"],
-                json!("Open [@~/diagram.png](archive.png).")
+                json!("Open [@~/diagram.png][1].\n\n[1]: archive.png")
             );
             assert_eq!(
                 rewritten["linked_records"].as_array().unwrap().len(),
                 1
+            );
+            assert_eq!(
+                rewritten["reference_definitions"],
+                json!([{"label": "1", "destination": "archive.png"}])
+            );
+            assert_eq!(
+                rewritten["reference_labels"],
+                json!([{
+                    "raw_ref": "@~/diagram.png",
+                    "label": "1",
+                    "destination": "archive.png"
+                }])
             );
         });
     }

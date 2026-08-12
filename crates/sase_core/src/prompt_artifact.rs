@@ -1,10 +1,14 @@
 //! Shared prompt-artifact manifest, naming, and link-rewrite contract.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::markdown_link_refs::{
+    allocate_markdown_reference_label, append_markdown_reference_definitions,
+    scan_markdown_reference_links, MarkdownReferenceDefinitionWire,
+};
 use crate::prompt_rewrite::{rewrite_prompt_links, PromptLinkCandidate};
 
 /// Wire schema for rows in `.sase/artifacts/prompt-artifacts.jsonl`.
@@ -38,6 +42,8 @@ pub struct PromptArtifactRecord {
     #[serde(default)]
     pub vcs_relpath: Option<String>,
     #[serde(default)]
+    pub vcs_revision: Option<String>,
+    #[serde(default)]
     pub locator: Option<String>,
     #[serde(default)]
     pub skipped_reason: Option<String>,
@@ -60,6 +66,17 @@ pub struct PromptArtifactRecord {
 pub struct PromptArtifactRewrite {
     pub prompt: String,
     pub linked_records: Vec<PromptArtifactRecord>,
+    #[serde(default)]
+    pub reference_definitions: Vec<MarkdownReferenceDefinitionWire>,
+    #[serde(default)]
+    pub reference_labels: Vec<PromptArtifactReferenceLabelWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptArtifactReferenceLabelWire {
+    pub raw_ref: String,
+    pub label: String,
+    pub destination: String,
 }
 
 /// Build the content-addressed pool filename for one artifact.
@@ -272,8 +289,48 @@ where
                 })
         })
         .collect::<Vec<_>>();
-    let (prompt, linked) =
-        rewrite_prompt_links(prompt, records.len(), &candidates, |_, _| true);
+    let scan = scan_markdown_reference_links(prompt);
+    let mut assigned = BTreeMap::new();
+    let mut labels_by_record: BTreeMap<
+        usize,
+        PromptArtifactReferenceLabelWire,
+    > = BTreeMap::new();
+    let (prompt, linked) = rewrite_prompt_links(
+        prompt,
+        records.len(),
+        &candidates,
+        |_, _| true,
+        |record_index, token, target| {
+            let label = labels_by_record
+                .get(&record_index)
+                .map(|entry| entry.label.clone())
+                .unwrap_or_else(|| {
+                    let label = allocate_markdown_reference_label(
+                        &scan, target, &assigned,
+                    );
+                    assigned.insert(label.clone(), target.to_string());
+                    labels_by_record.insert(
+                        record_index,
+                        PromptArtifactReferenceLabelWire {
+                            raw_ref: records[record_index].raw_ref.clone(),
+                            label: label.clone(),
+                            destination: target.to_string(),
+                        },
+                    );
+                    label
+                });
+            format!("[{token}][{label}]")
+        },
+    );
+    let reference_definitions = assigned
+        .iter()
+        .map(|(label, destination)| MarkdownReferenceDefinitionWire {
+            label: label.clone(),
+            destination: destination.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prompt =
+        append_markdown_reference_definitions(&prompt, &reference_definitions);
 
     PromptArtifactRewrite {
         prompt,
@@ -283,6 +340,8 @@ where
             .filter(|(_, linked)| *linked)
             .map(|(record, _)| record.clone())
             .collect(),
+        reference_definitions,
+        reference_labels: labels_by_record.into_values().collect(),
     }
 }
 
@@ -306,6 +365,7 @@ mod tests {
             pool_relpath: None,
             vcs_repo: None,
             vcs_relpath: None,
+            vcs_revision: None,
             locator: None,
             skipped_reason: None,
             logical_path: None,
@@ -408,15 +468,32 @@ mod tests {
         );
         assert_eq!(
             first.prompt,
-            "Open [@~/diagram.png](artifact.png) and [@~/diagram.png](artifact.png)."
+            "Open [@~/diagram.png][1] and [@~/diagram.png][1].\n\n[1]: artifact.png"
         );
         assert_eq!(first.linked_records, vec![diagram.clone()]);
+        assert_eq!(
+            first.reference_definitions,
+            vec![MarkdownReferenceDefinitionWire {
+                label: "1".to_string(),
+                destination: "artifact.png".to_string(),
+            }]
+        );
+        assert_eq!(
+            first.reference_labels,
+            vec![PromptArtifactReferenceLabelWire {
+                raw_ref: diagram.raw_ref.clone(),
+                label: "1".to_string(),
+                destination: "artifact.png".to_string(),
+            }]
+        );
         let second =
             rewrite_prompt_artifact_links(&first.prompt, &records, |_| {
                 Some("artifact.png".to_string())
             });
         assert_eq!(second.prompt, first.prompt);
         assert!(second.linked_records.is_empty());
+        assert!(second.reference_definitions.is_empty());
+        assert!(second.reference_labels.is_empty());
     }
 
     #[test]
@@ -430,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             rewritten.prompt,
-            "[@doc:file.md](archive.md) `@doc:file.md`\n```text\n@doc:file.md\n```\n[already @doc:file.md](target.md)\n"
+            "[@doc:file.md][1] `@doc:file.md`\n```text\n@doc:file.md\n```\n[already @doc:file.md](target.md)\n\n[1]: archive.md\n"
         );
         assert_eq!(rewritten.linked_records, vec![artifact]);
     }
@@ -446,7 +523,86 @@ mod tests {
         );
         assert_eq!(
             rewritten.prompt,
-            "Open [@.sase/artifacts/home/diagram.png](archive.png)."
+            "Open [@.sase/artifacts/home/diagram.png][1].\n\n[1]: archive.png"
         );
+    }
+
+    #[test]
+    fn rewrite_shares_labels_for_one_destination() {
+        let first = record("@one", None);
+        let second = record("@two", None);
+        let rewritten = rewrite_prompt_artifact_links(
+            "@one and @two",
+            &[first.clone(), second.clone()],
+            |_| Some("shared.md".to_string()),
+        );
+        assert_eq!(
+            rewritten.prompt,
+            "[@one][1] and [@two][1]\n\n[1]: shared.md"
+        );
+        assert_eq!(rewritten.linked_records, vec![first, second]);
+        assert_eq!(
+            rewritten.reference_definitions,
+            vec![MarkdownReferenceDefinitionWire {
+                label: "1".to_string(),
+                destination: "shared.md".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rewrite_reserves_existing_definitions_and_numeric_uses() {
+        let artifact = record("@doc", None);
+        let prompt = "See @doc and dangling [x][3].\n\n[1]: occupied.md\n";
+        let rewritten = rewrite_prompt_artifact_links(
+            prompt,
+            std::slice::from_ref(&artifact),
+            |_| Some("fresh.md".to_string()),
+        );
+        assert_eq!(
+            rewritten.prompt,
+            "See [@doc][2] and dangling [x][3].\n\n[1]: occupied.md\n\n[2]: fresh.md\n"
+        );
+        assert_eq!(
+            rewritten.reference_labels,
+            vec![PromptArtifactReferenceLabelWire {
+                raw_ref: artifact.raw_ref.clone(),
+                label: "2".to_string(),
+                destination: "fresh.md".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rewrite_reuses_matching_existing_definition() {
+        let artifact = record("@doc", None);
+        let prompt = "See @doc.\n\n[7]: fresh.md\n";
+        let rewritten = rewrite_prompt_artifact_links(
+            prompt,
+            std::slice::from_ref(&artifact),
+            |_| Some("fresh.md".to_string()),
+        );
+        assert_eq!(rewritten.prompt, "See [@doc][7].\n\n[7]: fresh.md\n");
+        assert_eq!(
+            rewritten.reference_definitions,
+            vec![MarkdownReferenceDefinitionWire {
+                label: "7".to_string(),
+                destination: "fresh.md".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rewrite_does_not_allocate_for_absent_tokens() {
+        let artifact = record("@absent", None);
+        let rewritten = rewrite_prompt_artifact_links(
+            "No live refs.\n\n[1]: occupied.md\n",
+            std::slice::from_ref(&artifact),
+            |_| Some("fresh.md".to_string()),
+        );
+        assert_eq!(rewritten.prompt, "No live refs.\n\n[1]: occupied.md\n");
+        assert!(rewritten.linked_records.is_empty());
+        assert!(rewritten.reference_definitions.is_empty());
+        assert!(rewritten.reference_labels.is_empty());
     }
 }

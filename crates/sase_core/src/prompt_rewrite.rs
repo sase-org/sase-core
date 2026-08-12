@@ -13,6 +13,7 @@ pub(crate) fn rewrite_prompt_links<F>(
     record_count: usize,
     candidates: &[PromptLinkCandidate<'_>],
     mut valid_start: F,
+    mut replacement: impl FnMut(usize, &str, &str) -> String,
 ) -> (String, Vec<bool>)
 where
     F: FnMut(&str, usize) -> bool,
@@ -56,11 +57,11 @@ where
             })
             .max_by_key(|candidate| candidate.token.len());
         if let Some(candidate) = candidate {
-            rewritten.push('[');
-            rewritten.push_str(candidate.token);
-            rewritten.push_str("](");
-            rewritten.push_str(candidate.target);
-            rewritten.push(')');
+            rewritten.push_str(&replacement(
+                candidate.record_index,
+                candidate.token,
+                candidate.target,
+            ));
             linked[candidate.record_index] = true;
             cursor += candidate.token.len();
             continue;
