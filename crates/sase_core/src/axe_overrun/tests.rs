@@ -65,6 +65,33 @@ fn fast_skipped_newest_run_in_front_of_over_success_is_still_over() {
     assert_eq!(verdict.level, ChopOverrunLevelWire::Over);
     assert_eq!(verdict.sampled_runs, 1);
     assert_eq!(verdict.over_runs, 1);
+    // The per-run ratios stay aligned with the raw request order: the
+    // skipped newest entry is unsampled, and the older success run keeps
+    // its own ratio so a detail view keyed to raw run_idx can find it.
+    let expected_ratio = 65_000.0 / 60_000.0;
+    assert_eq!(verdict.run_ratios.len(), 2);
+    assert_eq!(verdict.run_ratios[0], None);
+    assert!((verdict.run_ratios[1].unwrap() - expected_ratio).abs() < 1e-9);
+    assert_eq!(verdict.latest_ratio, verdict.run_ratios[1]);
+}
+
+#[test]
+fn older_overrun_is_locatable_by_run_idx_after_a_healthy_newest_run() {
+    // Newest raw run (index 0) is healthy; an older raw run (index 1)
+    // overran. The summary level reflects only the newest sampled run, but
+    // run_ratios must still let a caller find the older overrun by its own
+    // raw index (e.g. after paging to it in a detail view).
+    let mut input = request();
+    input.runs = vec![
+        run("success", T, Some(6_000), None),
+        run("success", T, Some(65_000), None),
+    ];
+    let verdict = classify_chop_overrun(&input).unwrap();
+    assert_eq!(verdict.level, ChopOverrunLevelWire::Intermittent);
+    assert_eq!(verdict.run_ratios.len(), 2);
+    assert_eq!(verdict.run_ratios[0], Some(0.1));
+    let older_ratio = verdict.run_ratios[1].unwrap();
+    assert!(older_ratio >= 1.0);
 }
 
 #[test]
@@ -129,6 +156,7 @@ fn empty_history_is_none_with_null_ratios() {
     assert_eq!(verdict.worst_ratio, None);
     assert_eq!(verdict.worst_blocking_ms, None);
     assert_eq!(verdict.latest_ratio, None);
+    assert_eq!(verdict.run_ratios, Vec::<Option<f64>>::new());
 }
 
 #[test]
@@ -138,6 +166,27 @@ fn unparsable_started_at_is_dropped_not_fatal() {
     let verdict = classify_chop_overrun(&input).unwrap();
     assert_eq!(verdict.level, ChopOverrunLevelWire::None);
     assert_eq!(verdict.sampled_runs, 0);
+    assert_eq!(verdict.run_ratios, vec![None]);
+}
+
+#[test]
+fn unparsable_started_at_is_dropped_for_every_otherwise_sampleable_status() {
+    // A completed run with a valid duration_ms must still be dropped when
+    // its started_at cannot be parsed: the original contract requires every
+    // unparsable-timestamp run to be excluded, never fatal and never
+    // silently sampled off a duration field alone.
+    let mut input = request();
+    input.runs = vec![
+        run("success", "not-a-timestamp", Some(65_000), None),
+        run("running", "not-a-timestamp", None, None),
+        run("skipped", "not-a-timestamp", Some(1), None),
+        run("action_succeeded", "not-a-timestamp", None, Some(65_000)),
+    ];
+    let verdict = classify_chop_overrun(&input).unwrap();
+    assert_eq!(verdict.level, ChopOverrunLevelWire::None);
+    assert_eq!(verdict.sampled_runs, 0);
+    assert_eq!(verdict.over_runs, 0);
+    assert_eq!(verdict.run_ratios, vec![None, None, None, None]);
 }
 
 #[test]
@@ -224,10 +273,12 @@ fn serialization_pins_public_field_order_and_round_trips() {
             "worst_ratio",
             "worst_blocking_ms",
             "latest_ratio",
+            "run_ratios",
         ]
     );
-    assert_eq!(value["schema_version"], json!(1));
+    assert_eq!(value["schema_version"], json!(2));
     assert_eq!(value["level"], json!("over"));
+    assert_eq!(value["run_ratios"], json!([65_000.0 / 60_000.0]));
 
     let round_trip: ChopOverrunWire = serde_json::from_value(value).unwrap();
     assert_eq!(round_trip, verdict);

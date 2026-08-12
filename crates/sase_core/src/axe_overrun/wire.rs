@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Version for chop-overrun requests and verdicts.
-pub const CHOP_OVERRUN_SCHEMA_VERSION: u32 = 1;
+pub const CHOP_OVERRUN_SCHEMA_VERSION: u32 = 2;
 
 /// A path-specific structural request failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -60,7 +60,7 @@ pub enum ChopOverrunLevelWire {
     Over,
 }
 
-/// Stable version-1 overrun verdict for one chop.
+/// Stable version-2 overrun verdict for one chop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChopOverrunWire {
@@ -71,4 +71,9 @@ pub struct ChopOverrunWire {
     pub worst_ratio: Option<f64>,
     pub worst_blocking_ms: Option<i64>,
     pub latest_ratio: Option<f64>,
+    /// One entry per raw request run, in the same order as `request.runs`.
+    /// `None` marks an unsampled raw entry; `Some` carries that entry's own
+    /// blocking/interval ratio so a consumer can key a per-run verdict to
+    /// whichever raw run is currently selected.
+    pub run_ratios: Vec<Option<f64>>,
 }

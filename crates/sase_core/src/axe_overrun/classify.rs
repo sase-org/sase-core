@@ -16,6 +16,7 @@ const DIRECT_STATUSES: [&str; 6] = [
     "success", "failure", "timeout", "no_op", "running", "launched",
 ];
 
+#[derive(Clone, Copy)]
 struct Sample {
     blocking_ms: i64,
     ratio: f64,
@@ -34,16 +35,24 @@ pub fn classify_chop_overrun(
         .expect("validated as a parsable RFC-3339 timestamp above");
     let interval_ms = request.interval_seconds * 1000;
 
-    let samples = request
+    let per_run_samples = request
         .runs
         .iter()
-        .filter_map(|run| sampled_blocking_ms(run, now))
-        .map(|blocking_ms| Sample {
-            blocking_ms,
-            ratio: blocking_ms as f64 / interval_ms as f64,
-            over: blocking_ms >= interval_ms,
+        .map(|run| {
+            sampled_blocking_ms(run, now).map(|blocking_ms| Sample {
+                blocking_ms,
+                ratio: blocking_ms as f64 / interval_ms as f64,
+                over: blocking_ms >= interval_ms,
+            })
         })
         .collect::<Vec<_>>();
+
+    let run_ratios = per_run_samples
+        .iter()
+        .map(|sample| sample.map(|sample| sample.ratio))
+        .collect::<Vec<_>>();
+
+    let samples = per_run_samples.into_iter().flatten().collect::<Vec<_>>();
 
     let sampled_runs = samples.len() as u32;
     let over_runs = samples.iter().filter(|sample| sample.over).count() as u32;
@@ -70,6 +79,7 @@ pub fn classify_chop_overrun(
         worst_ratio: worst.map(|sample| sample.ratio),
         worst_blocking_ms: worst.map(|sample| sample.blocking_ms),
         latest_ratio: samples.first().map(|sample| sample.ratio),
+        run_ratios,
     })
 }
 
@@ -125,11 +135,14 @@ fn sampled_blocking_ms(
         return None;
     }
 
+    // Every otherwise-sampleable run must carry a parsable `started_at`,
+    // even when its blocking time is ultimately derived from a duration
+    // field rather than from `started_at` itself.
+    let started = DateTime::parse_from_rfc3339(run.started_at.trim()).ok()?;
+
     let blocking_ms = if let Some(script_ms) = run.script_duration_ms {
         script_ms
     } else if run.status == "running" {
-        let started =
-            DateTime::parse_from_rfc3339(run.started_at.trim()).ok()?;
         now.signed_duration_since(started).num_milliseconds()
     } else if is_action_status(&run.status) {
         // A launched-run finalization overwrites `duration_ms` with the

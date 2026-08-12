@@ -9526,7 +9526,7 @@ mod tests {
 
     fn healthy_chop_overrun_request_json() -> JsonValue {
         json!({
-            "schema_version": 1,
+            "schema_version": CHOP_OVERRUN_SCHEMA_VERSION,
             "now": "2026-08-12T09:15:00-04:00",
             "interval_seconds": 60,
             "runs": [{
@@ -9555,13 +9555,14 @@ mod tests {
             assert_eq!(
                 value,
                 json!({
-                    "schema_version": 1,
+                    "schema_version": CHOP_OVERRUN_SCHEMA_VERSION,
                     "level": "over",
                     "sampled_runs": 1,
                     "over_runs": 1,
                     "worst_ratio": 65_000.0 / 60_000.0,
                     "worst_blocking_ms": 65_000,
                     "latest_ratio": 65_000.0 / 60_000.0,
+                    "run_ratios": [65_000.0 / 60_000.0],
                 })
             );
             assert!(result.bind(py).downcast::<PyDict>().is_ok());
@@ -9581,6 +9582,7 @@ mod tests {
                     "worst_ratio",
                     "worst_blocking_ms",
                     "latest_ratio",
+                    "run_ratios",
                 ]
             );
         });
@@ -9591,7 +9593,7 @@ mod tests {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let mut schema = healthy_chop_overrun_request_json();
-            schema["schema_version"] = json!(2);
+            schema["schema_version"] = json!(CHOP_OVERRUN_SCHEMA_VERSION + 1);
 
             let mut structural = healthy_chop_overrun_request_json();
             structural["interval_seconds"] = json!(0);
