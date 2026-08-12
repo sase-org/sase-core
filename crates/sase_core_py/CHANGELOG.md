@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.3](https://github.com/sase-org/sase-core/compare/v0.26.2...v0.26.3) - 2026-08-12
+
+### Added
+
+- *(axe_overrun)* add chop-overrun classifier with PyO3 bindings
+
 ## [0.26.2](https://github.com/sase-org/sase-core/compare/v0.26.1...v0.26.2) - 2026-08-12
 
 ### Added
