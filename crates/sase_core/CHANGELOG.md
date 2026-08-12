@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0](https://github.com/sase-org/sase-core/compare/v0.25.0...v0.26.0) - 2026-08-12
+
+### Added
+
+- resolve file artifact refs in core
+
+### Fixed
+
+- restore green CI on sase-core
+
+### Other
+
+- *(core)* [**breaking**] retire the #ref/<kind> xprompt-catalog adapter
+
 ## [0.25.0](https://github.com/sase-org/sase-core/compare/v0.24.6...v0.25.0) - 2026-08-11
 
 ### Added
