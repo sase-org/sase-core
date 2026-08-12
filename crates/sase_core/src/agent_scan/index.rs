@@ -81,6 +81,10 @@ pub struct AgentArtifactIndexQueryWire {
     pub include_hidden: bool,
     #[serde(default)]
     pub freshness: AgentArtifactIndexFreshnessWire,
+    /// Restrict results to monitor family members
+    /// (`agent_meta.agent_family_role == "monitor"`).
+    #[serde(default)]
+    pub only_monitors: bool,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -93,6 +97,7 @@ impl Default for AgentArtifactIndexQueryWire {
             recent_completed_limit: Some(200),
             include_hidden: false,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         }
     }
 }
@@ -460,6 +465,7 @@ pub fn query_agent_artifact_index(
                 selection: RecordSelection::Active,
                 include_hidden: query.include_hidden,
                 freshness: query.freshness,
+                only_monitors: query.only_monitors,
             },
             &mut stats,
             &mut by_dir,
@@ -480,6 +486,7 @@ pub fn query_agent_artifact_index(
                 selection: RecordSelection::Completed,
                 include_hidden: query.include_hidden,
                 freshness: query.freshness,
+                only_monitors: query.only_monitors,
             },
             &mut stats,
             &mut by_dir,
@@ -500,6 +507,7 @@ pub fn query_agent_artifact_index(
                 selection: RecordSelection::Visible,
                 include_hidden: query.include_hidden,
                 freshness: query.freshness,
+                only_monitors: query.only_monitors,
             },
             &mut stats,
             &mut by_dir,
@@ -1654,6 +1662,7 @@ fn select_records(
             &record,
             query.selection,
             query.include_hidden,
+            query.only_monitors,
         )? {
             by_dir.insert(row.artifact_dir, record);
         }
@@ -1727,6 +1736,7 @@ struct SelectRecordsQuery {
     selection: RecordSelection,
     include_hidden: bool,
     freshness: AgentArtifactIndexFreshnessWire,
+    only_monitors: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1867,7 +1877,11 @@ fn record_matches_selection(
     record: &AgentArtifactRecordWire,
     selection: RecordSelection,
     include_hidden: bool,
+    only_monitors: bool,
 ) -> Result<bool, String> {
+    if only_monitors && !record_is_monitor(record) {
+        return Ok(false);
+    }
     let summary = RecordSummary::from_record(record);
     if !include_hidden {
         if summary.hidden {
@@ -1883,6 +1897,14 @@ fn record_matches_selection(
         RecordSelection::Completed => record_is_completed(record),
         RecordSelection::Visible => true,
     })
+}
+
+fn record_is_monitor(record: &AgentArtifactRecordWire) -> bool {
+    record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.agent_family_role.as_deref())
+        == Some("monitor")
 }
 
 fn record_is_active(record: &AgentArtifactRecordWire) -> bool {
@@ -2370,6 +2392,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -2379,6 +2402,62 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         );
         assert_eq!(indexed.records, source.records);
+    }
+
+    #[test]
+    fn only_monitors_filters_to_monitor_family_role() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let plain_agent = artifact(&projects, "20260812170000");
+        let monitor_member = artifact(&projects, "20260812170100");
+        write_json(
+            &plain_agent.join("agent_meta.json"),
+            json!({"name": "acme--0"}),
+        );
+        write_json(
+            &monitor_member.join("agent_meta.json"),
+            json!({
+                "name": "acme--mon",
+                "agent_family": "acme",
+                "agent_family_role": "monitor",
+                "monitor_id": "m4kq",
+                "monitor_command": "sleep 60",
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let indexed = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: true,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(indexed.records.len(), 1);
+        assert_eq!(
+            indexed.records[0]
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.monitor_id.as_deref()),
+            Some("m4kq")
+        );
     }
 
     #[test]
@@ -2895,6 +2974,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -2940,6 +3020,7 @@ mod tests {
                 recent_completed_limit: Some(1),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -2991,6 +3072,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3078,6 +3160,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3134,6 +3217,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3184,6 +3268,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3201,6 +3286,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3299,6 +3385,7 @@ mod tests {
                 recent_completed_limit: Some(1),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire {
                 only_projects: vec!["proj".to_string()],
@@ -3338,6 +3425,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3412,6 +3500,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3468,6 +3557,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3511,6 +3601,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3566,6 +3657,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3620,6 +3712,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3834,6 +3927,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3851,6 +3945,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3868,6 +3963,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -3885,6 +3981,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4022,6 +4119,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4039,6 +4137,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4100,6 +4199,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4151,6 +4251,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4207,6 +4308,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4223,6 +4325,7 @@ mod tests {
             recent_completed_limit: Some(200),
             include_hidden: false,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         }
     }
 
@@ -4440,6 +4543,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4482,6 +4586,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4508,6 +4613,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4554,6 +4660,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4611,6 +4718,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4635,6 +4743,7 @@ mod tests {
                 recent_completed_limit: None,
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4684,6 +4793,7 @@ mod tests {
                 recent_completed_limit: Some(10),
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )

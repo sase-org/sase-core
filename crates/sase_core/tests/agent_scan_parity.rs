@@ -875,6 +875,7 @@ fn plan_committed_survives_live_scan_and_indexed_reads() {
             recent_completed_limit: None,
             include_hidden: true,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -936,6 +937,7 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             recent_completed_limit: None,
             include_hidden: true,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1211,6 +1213,7 @@ fn running_record_carries_linked_repos_through_scan_and_index() {
             recent_completed_limit: None,
             include_hidden: true,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1554,6 +1557,7 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             recent_completed_limit: Some(10),
             include_hidden: false,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
         },
         AgentArtifactScanOptionsWire::default(),
     )

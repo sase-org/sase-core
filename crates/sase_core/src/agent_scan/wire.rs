@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 4;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 5;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -175,6 +175,14 @@ pub struct DoneMarkerWire {
     /// Project-scoped import journal key for transaction-gated history.
     #[serde(default)]
     pub imported_transaction_key: Option<String>,
+    #[serde(default)]
+    pub monitor_state: Option<String>,
+    #[serde(default)]
+    pub monitor_exit_code: Option<i64>,
+    #[serde(default)]
+    pub monitor_elapsed_seconds: Option<f64>,
+    #[serde(default)]
+    pub status_label: Option<String>,
 }
 
 /// Bounded JSON value stored under `agent_meta.json::output_variables`.
@@ -327,6 +335,38 @@ pub struct AgentMetaWire {
     pub retry_terminal: bool,
     #[serde(default)]
     pub retry_error_category: Option<String>,
+    #[serde(default)]
+    pub monitor_id: Option<String>,
+    #[serde(default)]
+    pub monitor_command: Option<String>,
+    #[serde(default)]
+    pub monitor_cwd: Option<String>,
+    #[serde(default)]
+    pub monitor_label: Option<String>,
+    #[serde(default)]
+    pub monitor_reason: Option<String>,
+    #[serde(default)]
+    pub monitor_next_action: Option<String>,
+    #[serde(default)]
+    pub monitor_start_status: Option<String>,
+    #[serde(default)]
+    pub monitor_stop_status: Option<String>,
+    #[serde(default)]
+    pub monitor_timeout_seconds: Option<f64>,
+    #[serde(default)]
+    pub monitor_state: Option<String>,
+    #[serde(default)]
+    pub monitor_exit_code: Option<i64>,
+    #[serde(default)]
+    pub monitor_output_path: Option<String>,
+    #[serde(default)]
+    pub monitor_output_truncated: bool,
+    #[serde(default)]
+    pub monitor_starter_agent: Option<String>,
+    #[serde(default)]
+    pub monitor_followup_agent: Option<String>,
+    #[serde(default)]
+    pub monitor_tail_lines: Option<i64>,
 }
 
 /// Compact projection of `running.json`.
@@ -624,4 +664,85 @@ pub fn is_supported_workflow_dir(name: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_meta_wire_round_trips_every_monitor_field() {
+        let meta = AgentMetaWire {
+            name: Some("acme--mon".to_string()),
+            monitor_id: Some("m4kq".to_string()),
+            monitor_command: Some("just check-full".to_string()),
+            monitor_cwd: Some("/home/bryan/workspaces/acme".to_string()),
+            monitor_label: Some("just check-full".to_string()),
+            monitor_reason: Some("Verify the refactor".to_string()),
+            monitor_next_action: Some("Reply to the user.".to_string()),
+            monitor_start_status: Some("MONITORING".to_string()),
+            monitor_stop_status: Some("MONITORED".to_string()),
+            monitor_timeout_seconds: Some(2_700.0),
+            monitor_state: Some("running".to_string()),
+            monitor_exit_code: Some(1),
+            monitor_output_path: Some("live_reply.md".to_string()),
+            monitor_output_truncated: true,
+            monitor_starter_agent: Some("acme--0".to_string()),
+            monitor_followup_agent: Some("acme--1".to_string()),
+            monitor_tail_lines: Some(200),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&meta).unwrap();
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn agent_meta_wire_without_monitor_fields_still_parses() {
+        let old_record = serde_json::json!({
+            "name": "pre-monitor-agent",
+            "cl_name": "cl_alpha",
+        });
+
+        let decoded: AgentMetaWire =
+            serde_json::from_value(old_record).unwrap();
+
+        assert_eq!(decoded.name.as_deref(), Some("pre-monitor-agent"));
+        assert_eq!(decoded.monitor_id, None);
+        assert_eq!(decoded.monitor_state, None);
+        assert!(!decoded.monitor_output_truncated);
+    }
+
+    #[test]
+    fn done_marker_wire_round_trips_every_monitor_field() {
+        let done = DoneMarkerWire {
+            outcome: Some("monitored".to_string()),
+            monitor_state: Some("completed".to_string()),
+            monitor_exit_code: Some(0),
+            monitor_elapsed_seconds: Some(17.5),
+            status_label: Some("MONITORED".to_string()),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&done).unwrap();
+        let decoded: DoneMarkerWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, done);
+    }
+
+    #[test]
+    fn done_marker_wire_without_monitor_fields_still_parses() {
+        let old_record = serde_json::json!({
+            "outcome": "completed",
+            "finished_at": 1_777_900_000.0,
+        });
+
+        let decoded: DoneMarkerWire =
+            serde_json::from_value(old_record).unwrap();
+
+        assert_eq!(decoded.outcome.as_deref(), Some("completed"));
+        assert_eq!(decoded.monitor_state, None);
+        assert_eq!(decoded.monitor_exit_code, None);
+        assert_eq!(decoded.status_label, None);
+    }
 }

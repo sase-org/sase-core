@@ -1082,6 +1082,26 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         retried_as_timestamp: coerce_str(data.get("retried_as_timestamp")),
         retry_terminal: coerce_bool_truthy(data.get("retry_terminal")),
         retry_error_category: coerce_str(data.get("retry_error_category")),
+        monitor_id: coerce_str(data.get("monitor_id")),
+        monitor_command: coerce_str(data.get("monitor_command")),
+        monitor_cwd: coerce_str(data.get("monitor_cwd")),
+        monitor_label: coerce_str(data.get("monitor_label")),
+        monitor_reason: coerce_str(data.get("monitor_reason")),
+        monitor_next_action: coerce_str(data.get("monitor_next_action")),
+        monitor_start_status: coerce_str(data.get("monitor_start_status")),
+        monitor_stop_status: coerce_str(data.get("monitor_stop_status")),
+        monitor_timeout_seconds: coerce_float(
+            data.get("monitor_timeout_seconds"),
+        ),
+        monitor_state: coerce_str(data.get("monitor_state")),
+        monitor_exit_code: coerce_int(data.get("monitor_exit_code")),
+        monitor_output_path: coerce_str(data.get("monitor_output_path")),
+        monitor_output_truncated: coerce_bool_truthy(
+            data.get("monitor_output_truncated"),
+        ),
+        monitor_starter_agent: coerce_str(data.get("monitor_starter_agent")),
+        monitor_followup_agent: coerce_str(data.get("monitor_followup_agent")),
+        monitor_tail_lines: coerce_int(data.get("monitor_tail_lines")),
     }
 }
 
@@ -1123,6 +1143,12 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         imported_transaction_key: coerce_str(
             data.get("imported_transaction_key"),
         ),
+        monitor_state: coerce_str(data.get("monitor_state")),
+        monitor_exit_code: coerce_int(data.get("monitor_exit_code")),
+        monitor_elapsed_seconds: coerce_float(
+            data.get("monitor_elapsed_seconds"),
+        ),
+        status_label: coerce_str(data.get("status_label")),
     }
 }
 
