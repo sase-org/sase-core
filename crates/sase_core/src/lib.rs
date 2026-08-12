@@ -26,6 +26,7 @@ pub mod artifact_file;
 pub mod artifact_object_store;
 pub mod artifact_ref;
 pub mod axe_chop;
+pub mod axe_overrun;
 pub mod axe_status;
 pub mod bead;
 pub mod commit_footer;
