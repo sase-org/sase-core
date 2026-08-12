@@ -35,9 +35,14 @@ jobs:
           shared-key: rust-checks
           workspaces: ". -> target"
 
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - name: cargo fmt --all -- --check
+        run: ./scripts/check.sh fmt-check
+
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: ./scripts/check.sh clippy
+
+      - name: cargo test --workspace
+        run: ./scripts/check.sh test
 
   wheel-smoke:
     name: maturin build + import smoke

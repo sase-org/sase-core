@@ -114,6 +114,11 @@ fn init_git_repo(repo: &Path) {
     git(repo, &["init", "--quiet"]);
     git(repo, &["config", "user.name", "Commit Budget"]);
     git(repo, &["config", "user.email", "budget@example.com"]);
+    // Keep background git maintenance from racing fixture construction (a
+    // known class of interference, not a confirmed cause of the commit_at
+    // flake seen in CI).
+    git(repo, &["config", "gc.auto", "0"]);
+    git(repo, &["config", "maintenance.auto", "false"]);
 }
 
 fn commit_at(repo: &Path, timestamp: i64, subject: &str) {

@@ -8412,6 +8412,11 @@ mod tests {
         git(repo, &["config", "user.name", "Binding Test"]);
         git(repo, &["config", "user.email", "binding@example.com"]);
         git(repo, &["config", "core.abbrev", "7"]);
+        // Keep background git maintenance from racing fixture construction (a
+        // known class of interference, not a confirmed cause of the commit_at
+        // flake seen in CI).
+        git(repo, &["config", "gc.auto", "0"]);
+        git(repo, &["config", "maintenance.auto", "false"]);
     }
 
     #[test]
