@@ -20,8 +20,8 @@ use sase_core::agent_scan::{
     read_agent_artifact_index_meta, rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents, scan_agent_artifact_dirs,
     scan_agent_artifacts, write_agent_artifact_index_meta,
-    AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
+    AgentArtifactScanOptionsWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 use sase_core::AGENT_SCAN_WIRE_SCHEMA_VERSION;
 use serde_json::{json, Value};
@@ -874,6 +874,7 @@ fn plan_committed_survives_live_scan_and_indexed_reads() {
             active_limit: None,
             recent_completed_limit: None,
             include_hidden: true,
+            freshness: AgentArtifactIndexFreshnessWire::Revalidate,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -934,6 +935,7 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             active_limit: None,
             recent_completed_limit: None,
             include_hidden: true,
+            freshness: AgentArtifactIndexFreshnessWire::Revalidate,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1208,6 +1210,7 @@ fn running_record_carries_linked_repos_through_scan_and_index() {
             active_limit: None,
             recent_completed_limit: None,
             include_hidden: true,
+            freshness: AgentArtifactIndexFreshnessWire::Revalidate,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1550,6 +1553,7 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             active_limit: None,
             recent_completed_limit: Some(10),
             include_hidden: false,
+            freshness: AgentArtifactIndexFreshnessWire::Revalidate,
         },
         AgentArtifactScanOptionsWire::default(),
     )

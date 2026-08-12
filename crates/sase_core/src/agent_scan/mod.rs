@@ -25,8 +25,9 @@ pub use index::{
     replace_agent_artifact_index_dismissed_agents,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
-    AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
-    AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
+    AgentArtifactIndexStatusWire, AgentArtifactIndexUpdateWire,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 pub use layout::{
     canonical_agent_artifact_path, collect_workflow_artifact_candidates,
