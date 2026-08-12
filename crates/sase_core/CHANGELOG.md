@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.4](https://github.com/sase-org/sase-core/compare/v0.26.3...v0.26.4) - 2026-08-12
+
+### Fixed
+
+- *(axe_overrun)* validate started_at unconditionally and align per-run ratios
+
 ## [0.26.3](https://github.com/sase-org/sase-core/compare/v0.26.2...v0.26.3) - 2026-08-12
 
 ### Added
