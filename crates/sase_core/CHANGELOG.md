@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.5](https://github.com/sase-org/sase-core/compare/v0.26.4...v0.26.5) - 2026-08-12
+
+### Added
+
+- *(external-pr)* classify refresh actions for adopted external Patches
+
 ## [0.26.4](https://github.com/sase-org/sase-core/compare/v0.26.3...v0.26.4) - 2026-08-12
 
 ### Fixed
