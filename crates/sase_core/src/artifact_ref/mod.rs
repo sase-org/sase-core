@@ -387,9 +387,11 @@ fn unresolved_kind_resolution(
 pub fn validate_artifact_ref_context(
     context: &ArtifactRefContextWire,
 ) -> Result<(), ArtifactRefError> {
-    if context.schema_version != ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION {
+    if !(1..=ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION)
+        .contains(&context.schema_version)
+    {
         return Err(ArtifactRefError::validation(format!(
-            "unsupported artifact reference context schema_version {}; expected {}",
+            "unsupported artifact reference context schema_version {}; expected 1..={}",
             context.schema_version, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION
         )));
     }
@@ -1900,6 +1902,28 @@ mod tests {
             resolve_artifact_ref_list(&["plans:202607/plan.md"], &context)
                 .unwrap_err();
         assert!(list_error.message.contains("schema_version"));
+    }
+
+    #[test]
+    fn validate_artifact_ref_context_accepts_the_supported_range() {
+        for schema_version in 1..=ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION {
+            let context = ArtifactRefContextWire {
+                schema_version,
+                ..Default::default()
+            };
+            assert!(validate_artifact_ref_context(&context).is_ok());
+        }
+
+        // schema_version 0 is what the serde default produces for a payload
+        // that omits the field entirely; it must stay rejected.
+        for schema_version in [0, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION + 1]
+        {
+            let context = ArtifactRefContextWire {
+                schema_version,
+                ..Default::default()
+            };
+            assert!(validate_artifact_ref_context(&context).is_err());
+        }
     }
 
     #[test]

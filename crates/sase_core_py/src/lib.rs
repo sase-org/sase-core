@@ -10206,6 +10206,10 @@ MENTORS:
                 "bug:sase#123"
             );
 
+            // schema_version 1 deliberately: v1 read-compat regression
+            // coverage for `validate_artifact_ref_context`. Do not bump this
+            // to 2 — see the v2 case below, which exercises the other end
+            // of the supported range.
             let context_value = json!({
                 "schema_version": 1,
                 "document_roots": [{
@@ -10230,6 +10234,37 @@ MENTORS:
             assert_eq!(
                 resolved["resolved_path"],
                 json!(target.to_string_lossy())
+            );
+
+            let files_root = temp.path().join("files");
+            fs::create_dir_all(&files_root).unwrap();
+            let file_target = files_root.join("notes.md");
+            fs::write(&file_target, "notes").unwrap();
+            let v2_context_value = json!({
+                "schema_version": 2,
+                "file_roots": [{
+                    "name": "notes",
+                    "path": files_root.to_string_lossy()
+                }]
+            });
+            let v2_context_object =
+                json_value_to_py(py, &v2_context_value).unwrap();
+            let v2_context =
+                v2_context_object.bind(py).downcast::<PyDict>().unwrap();
+            let file_parsed = py_artifact_ref_parse(
+                py,
+                &format!("file:{}", file_target.to_string_lossy()),
+            )
+            .unwrap();
+            let file_resolved =
+                py_artifact_ref_resolve(py, file_parsed.bind(py), v2_context)
+                    .unwrap();
+            let file_resolved =
+                py_to_json_value(file_resolved.bind(py)).unwrap();
+            assert_eq!(file_resolved["status"], json!("exact"));
+            assert_eq!(
+                file_resolved["resolved_path"],
+                json!(file_target.to_string_lossy())
             );
 
             let scanned =
@@ -10278,7 +10313,7 @@ MENTORS:
                 py_artifact_ref_list_resolution_wire_schema_version(),
                 2
             );
-            assert_eq!(py_artifact_ref_context_wire_schema_version(), 1);
+            assert_eq!(py_artifact_ref_context_wire_schema_version(), 2);
             assert_eq!(py_artifact_ref_path_filter_wire_schema_version(), 1);
         });
     }
@@ -10502,7 +10537,7 @@ MENTORS:
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
 
-            assert_eq!(py_prompt_artifact_wire_schema_version(), 1);
+            assert_eq!(py_prompt_artifact_wire_schema_version(), 2);
             assert_eq!(
                 py_prompt_artifact_pool_filename(
                     &"a".repeat(64),
@@ -10511,7 +10546,7 @@ MENTORS:
                 "aaaaaaaaaaaa-diagram.png"
             );
             let record_value = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "recorded_at": "2026-08-01T14:22:03Z",
                 "agent_artifacts_dir": "/artifacts/run",
                 "raw_ref": "@~/diagram.png",
@@ -10526,7 +10561,13 @@ MENTORS:
                 "vcs_repo": null,
                 "vcs_relpath": null,
                 "locator": null,
-                "skipped_reason": null
+                "skipped_reason": null,
+                "logical_path": null,
+                "root_name": null,
+                "authored_path": null,
+                "origin": null,
+                "object_relpath": null,
+                "sidecar_visibility": null
             });
             let record_object = json_value_to_py(py, &record_value).unwrap();
             let record = record_object.bind(py).downcast::<PyDict>().unwrap();
@@ -11310,6 +11351,10 @@ MENTORS:
                 )
                 .unwrap();
 
+            // schema_version 1 deliberately: v1 read-compat regression
+            // coverage for `validate_artifact_ref_context`. Do not bump this
+            // to 2 — sase_core_py::tests::artifact_ref_bindings_round_trip_json_shapes
+            // covers the v2 side of the supported range.
             let context = json_value_to_py(
                 py,
                 &json!({

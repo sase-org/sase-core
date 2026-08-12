@@ -3002,6 +3002,8 @@ fn xprompt_ref_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use crate::editor::directive::directive_argument_candidates;
     use crate::effort::EFFORT_LEVELS_ORDERED;
@@ -3212,10 +3214,59 @@ mod tests {
             .unwrap();
         assert!(
             output.status.success(),
-            "git commit failed: {}",
+            "git commit in {} failed: {}",
+            repo.display(),
             String::from_utf8_lossy(&output.stderr)
         );
         git(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// Build one repository's entire commit history with a single
+    /// `git fast-import` invocation instead of one `git commit` subprocess
+    /// per commit. `fast-import` defaults the author identity to the
+    /// committer identity, so `%at` and `%an` come out correct without
+    /// separate author fields, and omitting the `from` command on every
+    /// `commit` block still chains each commit onto the branch's current
+    /// tip within the same stream.
+    fn commit_batch(repo: &Path, commits: &[(i64, &str, &str)]) {
+        let branch_ref = git(repo, &["symbolic-ref", "HEAD"]);
+        let mut stream = Vec::new();
+        for (timestamp, subject, body) in commits {
+            let message = if body.is_empty() {
+                format!("{subject}\n")
+            } else {
+                format!("{subject}\n\n{body}\n")
+            };
+            stream.extend_from_slice(
+                format!(
+                    "commit {branch_ref}\n\
+                     committer Commit Test <commit@example.com> {timestamp} +0000\n\
+                     data {}\n",
+                    message.len()
+                )
+                .as_bytes(),
+            );
+            stream.extend_from_slice(message.as_bytes());
+            stream.push(b'\n');
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&stream).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git fast-import into {} ({} commits) failed: {}",
+            repo.display(),
+            commits.len(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn repository(name: &str, checkout: &Path) -> ArtifactRefRepositoryWire {
@@ -3545,16 +3596,20 @@ mod tests {
         {
             let repo = temp.path().join(format!("code-{repo_index}"));
             init_git_repo(&repo);
-            for commit_index in 0..ARTIFACT_REF_COMMIT_SCAN_LIMIT {
-                commit_at(
-                    &repo,
-                    1_700_000_000
+            let subjects = (0..ARTIFACT_REF_COMMIT_SCAN_LIMIT)
+                .map(|commit_index| format!("code {repo_index} {commit_index}"))
+                .collect::<Vec<_>>();
+            let commits = subjects
+                .iter()
+                .enumerate()
+                .map(|(commit_index, subject)| {
+                    let timestamp = 1_700_000_000
                         + (repo_index * ARTIFACT_REF_COMMIT_SCAN_LIMIT
-                            + commit_index) as i64,
-                    &format!("code {repo_index} {commit_index}"),
-                    "",
-                );
-            }
+                            + commit_index) as i64;
+                    (timestamp, subject.as_str(), "")
+                })
+                .collect::<Vec<_>>();
+            commit_batch(&repo, &commits);
             repositories.push(repository_with_kind(
                 &format!("code-{repo_index}"),
                 "human-code",
@@ -3608,14 +3663,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
-        for index in 0..=ARTIFACT_REF_COMMIT_SCAN_LIMIT {
-            commit_at(
-                &repo,
-                1_700_000_000 + index as i64,
-                &format!("commit {index}"),
-                "",
-            );
-        }
+        let subjects = (0..=ARTIFACT_REF_COMMIT_SCAN_LIMIT)
+            .map(|index| format!("commit {index}"))
+            .collect::<Vec<_>>();
+        let commits = subjects
+            .iter()
+            .enumerate()
+            .map(|(index, subject)| {
+                (1_700_000_000 + index as i64, subject.as_str(), "")
+            })
+            .collect::<Vec<_>>();
+        commit_batch(&repo, &commits);
         let context = ArtifactRefContextWire {
             repositories: vec![repository("sase", &repo)],
             ..Default::default()
