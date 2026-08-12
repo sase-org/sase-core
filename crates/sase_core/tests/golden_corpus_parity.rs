@@ -293,6 +293,31 @@ fn archive_corpus_matches_python_golden_after_end_line_normalization() {
             "mentors": [],
             "timestamps": [],
             "deltas": []
+        },
+        {
+            "schema_version": 5,
+            "name": "release_blank_run_1",
+            "project_basename": "myproj",
+            "project_display_name": null,
+            "file_path": "myproj-archive.sase",
+            "source_span": {
+                "file_path": "myproj-archive.sase",
+                "start_line": 18,
+                "end_line": 18
+            },
+            "status": "Submitted",
+            "parent": null,
+            "pr_url": "https://example.test/repo/pull/123",
+            "pr_origin": "external",
+            "bug": null,
+            "description": "chore(master): release 1.2.3\n\n:robot: Body text after an indented blank run.\n\n\n## [1.2.3](https://example.test/repo/compare/v1.2.2...v1.2.3)",
+            "refs": [],
+            "commits": [],
+            "hooks": [],
+            "comments": [],
+            "mentors": [],
+            "timestamps": [],
+            "deltas": []
         }
     ]);
 

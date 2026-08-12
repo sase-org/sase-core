@@ -5,7 +5,8 @@
 //!
 //! - Patch boundaries: canonical `## Patch` and legacy `## ChangeSpec`
 //!   headers, direct `NAME:` starts, end-on-next-header,
-//!   end-on-two-blank-lines, end-on-new-NAME.
+//!   end-on-two-truly-empty-lines, end-on-new-NAME. Two-space-indented
+//!   blank lines inside a `DESCRIPTION` are content, not separators.
 //! - Drop incomplete records that lack either `NAME` or `STATUS`.
 //! - Scalar fields: `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is accepted),
 //!   `PR_ORIGIN`, `BUG`, `STATUS`.
@@ -434,7 +435,7 @@ fn parse_one_patch(
             break;
         }
 
-        if stripped.is_empty() {
+        if line.is_empty() {
             consecutive_blank += 1;
             if consecutive_blank >= 2 {
                 break;
@@ -619,6 +620,37 @@ STATUS: Submitted
             specs[0].description,
             "First paragraph.\n\nSecond paragraph."
         );
+    }
+
+    #[test]
+    fn indented_blank_run_in_description_does_not_end_spec() {
+        let src = "\
+NAME: release_blank_run_1
+DESCRIPTION:
+  chore(master): release 1.2.3
+  
+  :robot: Body text after an indented blank run.
+  
+  
+  ## [1.2.3](https://example.test/repo/compare/v1.2.2...v1.2.3)
+PR: https://example.test/repo/pull/123
+PR_ORIGIN: external
+STATUS: Submitted
+";
+        let specs = parse(src);
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+        assert_eq!(spec.name, "release_blank_run_1");
+        assert_eq!(
+            spec.description,
+            "chore(master): release 1.2.3\n\n:robot: Body text after an indented blank run.\n\n\n## [1.2.3](https://example.test/repo/compare/v1.2.2...v1.2.3)"
+        );
+        assert_eq!(
+            spec.pr_url.as_deref(),
+            Some("https://example.test/repo/pull/123")
+        );
+        assert_eq!(spec.pr_origin, "external");
+        assert_eq!(spec.status, "Submitted");
     }
 
     #[test]
