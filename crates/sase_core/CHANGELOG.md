@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.7](https://github.com/sase-org/sase-core/compare/v0.26.6...v0.26.7) - 2026-08-12
+
+### Added
+
+- *(agent-scan)* add monitor marker fields to the agent scan wire
+
 ## [0.26.6](https://github.com/sase-org/sase-core/compare/v0.26.5...v0.26.6) - 2026-08-12
 
 ### Added
