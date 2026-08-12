@@ -9875,6 +9875,54 @@ mod tests {
     }
 
     #[test]
+    fn chop_agent_runners_contracts_round_trip_through_python_bindings() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let decision_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "inhibit_if": [{
+                        "provider": "agent_runners",
+                        "max": 0
+                    }],
+                    "agents": [{
+                        "name": "foo.cld",
+                        "active": true,
+                        "holds_runner_slot": true
+                    }],
+                    "now": "2026-08-12T12:00:00Z"
+                }),
+            )
+            .unwrap();
+            let decision = decision_obj.bind(py).downcast::<PyDict>().unwrap();
+            let evaluated = py_evaluate_chop_decision(py, decision).unwrap();
+            let evaluated = py_to_json_value(evaluated.bind(py)).unwrap();
+            assert_eq!(evaluated["outcome"], json!("skip"));
+            assert_eq!(evaluated["provider"], json!("agent_runners"));
+
+            let config_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "config": {"lumberjacks": {"guard": {"chops": {
+                        "watch": {"inhibit_if": {"agent_runners": {
+                            "max": 0
+                        }}}
+                    }}}}
+                }),
+            )
+            .unwrap();
+            let config = config_obj.bind(py).downcast::<PyDict>().unwrap();
+            let diagnostics = py_validate_axe_config(py, config).unwrap();
+            assert_eq!(
+                py_to_json_value(diagnostics.bind(py)).unwrap(),
+                json!([])
+            );
+        });
+    }
+
+    #[test]
     fn required_axe_descriptions_round_trip_through_python_binding() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

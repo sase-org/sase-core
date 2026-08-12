@@ -712,13 +712,14 @@ fn validate_guard_provider(
         "patch" => vec!["name_prefix", "statuses"],
         "agent_hood" => vec!["hood", "name"],
         "agent_clan" => vec!["name_prefix"],
+        "agent_runners" => vec!["max"],
         _ => {
             diagnostics.push(diagnostic(
                 request,
                 "unknown_guard_provider",
                 path,
                 &format!(
-                    "unknown guard provider `{provider}`; supported providers: patch, agent_hood, agent_clan"
+                    "unknown guard provider `{provider}`; supported providers: patch, agent_hood, agent_clan, agent_runners"
                 ),
             ));
             return;
@@ -800,6 +801,16 @@ fn validate_guard_provider(
                 "agent_clan guard requires `name_prefix`",
             )),
         },
+        "agent_runners" => {
+            if let Some(max) = config.get("max") {
+                validate_nonnegative_integer(
+                    request,
+                    max,
+                    &child_path(path, "max"),
+                    diagnostics,
+                );
+            }
+        }
         _ => {}
     }
 }

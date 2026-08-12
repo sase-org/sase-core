@@ -68,6 +68,32 @@ pub fn evaluate_chop_decision(
                     ));
                 }
             }
+            ChopGuardConfigWire::AgentRunners { max } => {
+                let holders: Vec<_> = request
+                    .agents
+                    .iter()
+                    .filter(|row| row.active && row.holds_runner_slot)
+                    .collect();
+                if holders.len() as u64 > *max {
+                    let noun = if holders.len() == 1 {
+                        "agent"
+                    } else {
+                        "agents"
+                    };
+                    let example = holders
+                        .first()
+                        .map(|row| row.name.as_str())
+                        .unwrap_or_default();
+                    return Ok(decision(
+                        "skip",
+                        format!(
+                            "inhibited by {} {noun} holding runner slots (e.g. `{example}`); max is {max}",
+                            holders.len()
+                        ),
+                        Some("agent_runners"),
+                    ));
+                }
+            }
         }
     }
 

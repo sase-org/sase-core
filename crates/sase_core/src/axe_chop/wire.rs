@@ -215,6 +215,11 @@ pub enum ChopGuardConfigWire {
     },
     #[serde(rename = "agent_clan")]
     AgentClan { name_prefix: String },
+    #[serde(rename = "agent_runners")]
+    AgentRunners {
+        #[serde(default)]
+        max: u64,
+    },
 }
 
 /// Runner-owned checkpoint advancement policy.
@@ -270,6 +275,8 @@ pub struct ChopAgentSnapshotWire {
     pub status: Option<String>,
     #[serde(default)]
     pub active: bool,
+    #[serde(default)]
+    pub holds_runner_slot: bool,
 }
 
 /// Git observation computed by the host for one project.

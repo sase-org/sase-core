@@ -768,6 +768,97 @@ fn agent_clan_guard_short_circuits_trigger_errors() {
 }
 
 #[test]
+fn agent_runners_guard_counts_only_active_runner_slot_holders() {
+    let request = |max: Option<u64>,
+                   agents: serde_json::Value|
+     -> ChopDecisionRequestWire {
+        let mut guard = json!({"provider": "agent_runners"});
+        if let Some(max) = max {
+            guard["max"] = json!(max);
+        }
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "inhibit_if": [guard],
+            "trigger": {"provider": "always"},
+            "agents": agents,
+            "now": "2026-08-12T12:00:00Z"
+        }))
+        .unwrap()
+    };
+
+    // Default `max` is 0: a single slot-holding agent inhibits, singular noun.
+    let single = evaluate_chop_decision(&request(
+        None,
+        json!([{"name": "foo.cld", "active": true, "holds_runner_slot": true}]),
+    ))
+    .unwrap();
+    assert_eq!(single.outcome, "skip");
+    assert_eq!(single.provider.as_deref(), Some("agent_runners"));
+    assert_eq!(
+        single.reason,
+        "inhibited by 1 agent holding runner slots (e.g. `foo.cld`); max is 0"
+    );
+
+    // Exactly at max: does not fire.
+    let at_max = evaluate_chop_decision(&request(
+        Some(1),
+        json!([{"name": "foo.cld", "active": true, "holds_runner_slot": true}]),
+    ))
+    .unwrap();
+    assert_eq!(at_max.outcome, "fire");
+
+    // Rows that are inactive, or active but not slot-holding, are not counted.
+    let ignored = evaluate_chop_decision(&request(
+        None,
+        json!([
+            {"name": "bar.cld", "active": true, "holds_runner_slot": false},
+            {"name": "baz.cld", "active": false, "holds_runner_slot": true}
+        ]),
+    ))
+    .unwrap();
+    assert_eq!(ignored.outcome, "fire");
+
+    // Above max with multiple holders: plural noun, first-by-order example.
+    let plural = evaluate_chop_decision(&request(
+        Some(1),
+        json!([
+            {"name": "first.cld", "active": true, "holds_runner_slot": true},
+            {"name": "second.cld", "active": true, "holds_runner_slot": true}
+        ]),
+    ))
+    .unwrap();
+    assert_eq!(plural.outcome, "skip");
+    assert_eq!(
+        plural.reason,
+        "inhibited by 2 agents holding runner slots (e.g. `first.cld`); max is 1"
+    );
+}
+
+#[test]
+fn earlier_guard_wins_over_agent_runners() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "inhibit_if": [
+            {"provider": "agent_clan", "name_prefix": "toobig-"},
+            {"provider": "agent_runners", "max": 0}
+        ],
+        "trigger": {"provider": "always"},
+        "agents": [{
+            "name": "toobig-0.worker",
+            "agent_clan": "toobig-0",
+            "active": true,
+            "holds_runner_slot": true
+        }],
+        "now": "2026-08-12T12:00:00Z"
+    }))
+    .unwrap();
+
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "skip");
+    assert_eq!(decision.provider.as_deref(), Some("agent_clan"));
+}
+
+#[test]
 fn git_trigger_returns_checkpoint_observation() {
     let request: ChopDecisionRequestWire = serde_json::from_value(json!({
         "schema_version": 1,
@@ -1321,6 +1412,72 @@ fn strict_axe_validation_rejects_invalid_agent_clan_guards_fail_closed() {
         item.path.as_deref()
             == Some(
                 "lumberjacks.guards.chops.unknown.inhibit_if.agent_clan.hood",
+            )
+    }));
+}
+
+#[test]
+fn strict_axe_validation_accepts_keyed_and_tagged_agent_runners_guards() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"lumberjacks": {"guards": {"chops": {
+                "keyed": {
+                    "inhibit_if": {
+                        "agent_runners": {"max": 0}
+                    }
+                },
+                "tagged": {
+                    "inhibit_if": [{
+                        "provider": "agent_runners",
+                        "max": 2
+                    }]
+                },
+                "default_max": {
+                    "inhibit_if": {"agent_runners": {}}
+                }
+            }}}}
+        }))
+        .unwrap();
+
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_invalid_agent_runners_guards_fail_closed() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"lumberjacks": {"guards": {"chops": {
+                "unknown": {"inhibit_if": {
+                    "agent_runners": {"max": 0, "hood": "toobig"}
+                }},
+                "not_an_integer": {"inhibit_if": [{
+                    "provider": "agent_runners",
+                    "max": "zero"
+                }]},
+                "negative": {"inhibit_if": {
+                    "agent_runners": {"max": -1}
+                }}
+            }}}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+    let codes: Vec<_> =
+        diagnostics.iter().map(|item| item.code.as_str()).collect();
+    assert!(codes.contains(&"unknown_key"));
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|item| item.code == "negative_integer")
+            .count(),
+        2
+    );
+    assert!(diagnostics.iter().any(|item| {
+        item.path.as_deref()
+            == Some(
+                "lumberjacks.guards.chops.negative.inhibit_if.agent_runners.max",
             )
     }));
 }
