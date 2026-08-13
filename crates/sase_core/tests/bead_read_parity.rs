@@ -558,13 +558,13 @@ fn doctor_groups_plan_reference_diagnostics_without_changing_compatibility() {
     fs::write(
         beads_dir.join("issues.jsonl"),
         [
-            issue_with_design("beads-exact", "plans:202607/exact.md"),
+            issue_with_design("beads-exact", "plan:202607/exact.md"),
             issue_with_design("beads-legacy", legacy.to_str().unwrap()),
-            issue_with_design("beads-drifted", "plans:202606/drifted.md"),
-            issue_with_design("beads-missing", "plans:202607/missing.md"),
-            issue_with_design("beads-malformed", "plans:../malformed.md"),
-            issue_with_design("beads-ambiguous", "plans:202606/duplicate.md"),
-            issue_with_design("beads-mismatch", "plans:202607/mismatch.md"),
+            issue_with_design("beads-drifted", "plan:202606/drifted.md"),
+            issue_with_design("beads-missing", "plan:202607/missing.md"),
+            issue_with_design("beads-malformed", "plan:../malformed.md"),
+            issue_with_design("beads-ambiguous", "plan:202606/duplicate.md"),
+            issue_with_design("beads-mismatch", "plan:202607/mismatch.md"),
         ]
         .join("\n")
             + "\n",
@@ -611,7 +611,7 @@ fn doctor_notes_explicitly_unavailable_plan_roots() {
     fs::write(beads_dir.join("beads.db"), "").unwrap();
     fs::write(
         beads_dir.join("issues.jsonl"),
-        issue_with_design("beads-1", "plans:202607/plan.md") + "\n",
+        issue_with_design("beads-1", "plan:202607/plan.md") + "\n",
     )
     .unwrap();
 

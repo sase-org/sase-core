@@ -37,7 +37,7 @@ const PLAN_REFERENCE_MISSING_LABEL: &str = "(unresolved: no plan file found)";
 /// Rendered when a stored plan reference matches more than one plan file.
 const PLAN_REFERENCE_AMBIGUOUS_LABEL: &str =
     "(ambiguous: multiple plans match this reference)";
-/// Rendered when a stored `plans:` value violates the reference grammar.
+/// Rendered when a stored plan reference violates the reference grammar.
 const PLAN_REFERENCE_INVALID_LABEL: &str =
     "(unresolved: malformed plan reference)";
 /// Marks a reference that only resolved after ignoring its month directory.
@@ -2547,7 +2547,7 @@ fn resolve_design_reference(
         };
     }
     // A legacy relative path still names a file below the working directory,
-    // which is how in-tree stores linked plans before `plans:` references.
+    // which is how in-tree stores linked plans before typed plan references.
     if let Some(path) = legacy_path_below_cwd(design, cwd) {
         return DesignResolution::Resolved {
             path,
@@ -3257,7 +3257,7 @@ mod tests {
             StatusWire::Open,
             "2026-01-01T00:01:00Z",
         );
-        epic.design = "plans:202607/roadmap.md".to_string();
+        epic.design = "plan:202607/roadmap.md".to_string();
         let store = seed_issues(vec![epic]);
 
         let outcome = execute_search(
@@ -3268,7 +3268,7 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(
             outcome.stdout,
-            "▸ ○ beads-1 · Linked epic\n  design: \"plans:202607/roadmap.md\"\n"
+            "▸ ○ beads-1 · Linked epic\n  design: \"plan:202607/roadmap.md\"\n"
         );
 
         let old_prefix = execute_search(
@@ -3785,7 +3785,7 @@ mod tests {
 
         assert_eq!(outcome.exit_code, 0);
         let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
-        assert_eq!(issue.design, "plans:202607/roadmap.md");
+        assert_eq!(issue.design, "plan:202607/roadmap.md");
     }
 
     #[test]
@@ -3816,7 +3816,7 @@ mod tests {
 
         assert_eq!(outcome.exit_code, 0);
         let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
-        assert_eq!(issue.design, "plans:202607/roadmap.md");
+        assert_eq!(issue.design, "plan:202607/roadmap.md");
     }
 
     fn execute_search(beads_dir: &Path, args: &[&str]) -> BeadCliOutcomeWire {
@@ -3910,7 +3910,7 @@ mod tests {
         let root = seed_plan_root(&plans, "202607", "durable.md");
 
         let plan = show_plan_section(
-            "plans:202607/durable.md",
+            "plan:202607/durable.md",
             std::slice::from_ref(&root),
             Path::new("/repo"),
             false,
@@ -3919,7 +3919,7 @@ mod tests {
         assert_eq!(
             plan,
             format!(
-                "  plans:202607/durable.md\n  → {}\n",
+                "  plan:202607/durable.md\n  → {}\n",
                 root.join("202607/durable.md").display()
             )
         );
@@ -3931,7 +3931,7 @@ mod tests {
         let root = seed_plan_root(&plans, "202607", "drifted.md");
 
         let plan = show_plan_section(
-            "plans:202606/drifted.md",
+            "plan:202606/drifted.md",
             std::slice::from_ref(&root),
             Path::new("/repo"),
             false,
@@ -3940,7 +3940,7 @@ mod tests {
         assert_eq!(
             plan,
             format!(
-                "  plans:202606/drifted.md\n  → {} (month drift)\n",
+                "  plan:202606/drifted.md\n  → {} (month drift)\n",
                 root.join("202607/drifted.md").display()
             )
         );
@@ -3952,7 +3952,7 @@ mod tests {
         let root = plans.path().to_path_buf();
 
         let plan = show_plan_section(
-            "plans:202607/gone.md",
+            "plan:202607/gone.md",
             std::slice::from_ref(&root),
             Path::new("/repo"),
             false,
@@ -3961,7 +3961,7 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "  plans:202607/gone.md\n",
+                "  plan:202607/gone.md\n",
                 "  → (unresolved: no plan file found)\n",
             )
         );
@@ -3974,7 +3974,7 @@ mod tests {
         let root = seed_plan_root(&plans, "202607", "twin.md");
 
         let plan = show_plan_section(
-            "plans:202605/twin.md",
+            "plan:202605/twin.md",
             std::slice::from_ref(&root),
             Path::new("/repo"),
             false,
@@ -3983,7 +3983,7 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "  plans:202605/twin.md\n",
+                "  plan:202605/twin.md\n",
                 "  → (ambiguous: multiple plans match this reference)\n",
             )
         );
@@ -3992,7 +3992,7 @@ mod tests {
     #[test]
     fn show_reports_a_malformed_reference() {
         let plan = show_plan_section(
-            "plans:../escape.md",
+            "plan:../escape.md",
             &[],
             Path::new("/repo"),
             false,
@@ -4001,7 +4001,7 @@ mod tests {
         assert_eq!(
             plan,
             concat!(
-                "  plans:../escape.md\n",
+                "  plan:../escape.md\n",
                 "  → (unresolved: malformed plan reference)\n",
             )
         );

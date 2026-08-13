@@ -10308,14 +10308,22 @@ MENTORS:
             }
 
             let parsed =
-                py_plan_reference_parse(py, "plans:202607/plan.md").unwrap();
+                py_plan_reference_parse(py, "plan:202607/plan.md").unwrap();
             let parsed = py_to_json_value(parsed.bind(py)).unwrap();
-            assert_eq!(parsed["kind"], json!("plans"));
+            assert_eq!(parsed["kind"], json!("plan"));
             assert_eq!(parsed["legacy"], json!(false));
+            assert_eq!(parsed["rendered"], json!("plan:202607/plan.md"));
+
+            let alias =
+                py_plan_reference_parse(py, "plans:202607/plan.md").unwrap();
+            let alias = py_to_json_value(alias.bind(py)).unwrap();
+            assert_eq!(alias["kind"], json!("plan"));
+            assert_eq!(alias["legacy"], json!(false));
+            assert_eq!(alias["rendered"], json!("plan:202607/plan.md"));
 
             assert_eq!(
                 py_plan_reference_render("plans", "202607/plan.md").unwrap(),
-                "plans:202607/plan.md"
+                "plan:202607/plan.md"
             );
             assert_eq!(
                 py_plan_reference_canonicalize(
@@ -10324,12 +10332,12 @@ MENTORS:
                 )
                 .unwrap()
                 .as_deref(),
-                Some("plans:202608/plan.md")
+                Some("plan:202608/plan.md")
             );
 
             let resolved = py_plan_reference_resolve(
                 py,
-                "plans:202607/plan.md",
+                "plan:202607/plan.md",
                 vec![root.to_string_lossy().into_owned()],
             )
             .unwrap();

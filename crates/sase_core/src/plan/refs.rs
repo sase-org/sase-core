@@ -15,8 +15,12 @@ use super::wire::{
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 
-const PLAN_REFERENCE_KIND: &str = "plans";
-const PLAN_REFERENCE_PREFIX: &str = "plans:";
+const PLAN_REFERENCE_KIND: &str = "plan";
+const PLAN_REFERENCE_PREFIX: &str = "plan:";
+const LEGACY_PLAN_REFERENCE_KIND: &str = "plans";
+/// Read-only: persisted history (commit trailers, bead event streams) still
+/// carries this spelling. Never emitted.
+const LEGACY_PLAN_REFERENCE_PREFIX: &str = "plans:";
 const LEGACY_PLAN_MARKERS: &[&[&str]] = &[
     &["sase", "repos", "plans"],
     &[".sase", "sdd", "plans"],
@@ -33,11 +37,17 @@ pub struct ParsedPlanReference {
     pub rendered: String,
 }
 
-/// Parse a canonical `plans:` reference or preserve an accepted legacy path.
+/// Parse a canonical `plan:` reference or read-only `plans:` alias, or
+/// preserve an accepted legacy path.
 pub fn parse_plan_reference(
     value: &str,
 ) -> Result<ParsedPlanReference, PlanError> {
-    let Some(path) = value.strip_prefix(PLAN_REFERENCE_PREFIX) else {
+    let path = if let Some(path) = value.strip_prefix(PLAN_REFERENCE_PREFIX) {
+        path
+    } else if let Some(path) = value.strip_prefix(LEGACY_PLAN_REFERENCE_PREFIX)
+    {
+        path
+    } else {
         return Ok(ParsedPlanReference {
             kind: PLAN_REFERENCE_KIND.to_string(),
             path: value.to_string(),
@@ -59,7 +69,7 @@ pub fn render_plan_reference(
     kind: &str,
     path: &str,
 ) -> Result<String, PlanError> {
-    if kind != PLAN_REFERENCE_KIND {
+    if kind != PLAN_REFERENCE_KIND && kind != LEGACY_PLAN_REFERENCE_KIND {
         return Err(PlanError::validation(format!(
             "unsupported plan reference kind: {kind}"
         )));
@@ -201,12 +211,16 @@ mod tests {
     #[test]
     fn typed_reference_round_trips() {
         let rendered =
-            render_plan_reference("plans", "202607/durable.md").unwrap();
-        assert_eq!(rendered, "plans:202607/durable.md");
+            render_plan_reference("plan", "202607/durable.md").unwrap();
+        assert_eq!(rendered, "plan:202607/durable.md");
+        assert_eq!(
+            render_plan_reference("plans", "202607/durable.md").unwrap(),
+            rendered
+        );
         assert_eq!(
             parse_plan_reference(&rendered).unwrap(),
             ParsedPlanReference {
-                kind: "plans".to_string(),
+                kind: "plan".to_string(),
                 path: "202607/durable.md".to_string(),
                 legacy: false,
                 rendered,
@@ -217,11 +231,11 @@ mod tests {
     #[test]
     fn typed_reference_rejects_unsafe_payloads_and_unknown_kinds() {
         for value in [
-            "plans:",
-            "plans:/tmp/plan.md",
-            "plans:202607//plan.md",
-            "plans:202607/../plan.md",
-            r"plans:202607\plan.md",
+            "plan:",
+            "plan:/tmp/plan.md",
+            "plan:202607//plan.md",
+            "plan:202607/../plan.md",
+            r"plan:202607\plan.md",
         ] {
             assert!(parse_plan_reference(value).is_err(), "{value}");
         }
@@ -231,24 +245,21 @@ mod tests {
     #[test]
     fn validation_messages_remain_stable_after_helper_extraction() {
         for (value, message) in [
+            ("plan:", "validation: plan reference path must not be empty"),
             (
-                "plans:",
-                "validation: plan reference path must not be empty",
-            ),
-            (
-                "plans:/tmp/plan.md",
+                "plan:/tmp/plan.md",
                 "validation: plan reference path must be relative",
             ),
             (
-                r"plans:202607\plan.md",
+                r"plan:202607\plan.md",
                 "validation: plan reference path must use forward slashes",
             ),
             (
-                "plans:202607//plan.md",
+                "plan:202607//plan.md",
                 "validation: plan reference path contains an empty segment",
             ),
             (
-                "plans:202607/../plan.md",
+                "plan:202607/../plan.md",
                 "validation: plan reference path must not contain '..'",
             ),
         ] {
@@ -289,7 +300,7 @@ mod tests {
             canonicalize_plan_reference(&path, &[outer.clone(), inner.clone()])
                 .unwrap()
                 .as_deref(),
-            Some("plans:202607/plan.md")
+            Some("plan:202607/plan.md")
         );
         assert_eq!(
             canonicalize_plan_reference(
@@ -311,7 +322,7 @@ mod tests {
             fs::write(root.join("202607/plan.md"), "# Plan\n").unwrap();
         }
         let result = resolve_plan_reference(
-            "plans:202607/plan.md",
+            "plan:202607/plan.md",
             &[first.clone(), second],
         )
         .unwrap();
@@ -330,7 +341,7 @@ mod tests {
         fs::create_dir_all(root.join("202608")).unwrap();
         fs::write(root.join("202608/plan.md"), "# Plan\n").unwrap();
         let result = resolve_plan_reference(
-            "plans:202607/plan.md",
+            "plan:202607/plan.md",
             std::slice::from_ref(&root),
         )
         .unwrap();
@@ -350,7 +361,7 @@ mod tests {
             fs::write(root.join(month).join("plan.md"), "# Plan\n").unwrap();
         }
         let result =
-            resolve_plan_reference("plans:202607/plan.md", &[root]).unwrap();
+            resolve_plan_reference("plan:202607/plan.md", &[root]).unwrap();
         assert_eq!(result.status, "ambiguous");
         assert_eq!(result.resolved_path, None);
         assert_eq!(result.candidates.len(), 2);
@@ -361,7 +372,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let roots = [temp.path().join("store"), temp.path().join("local")];
         let result =
-            resolve_plan_reference("plans:202607/plan.md", &roots).unwrap();
+            resolve_plan_reference("plan:202607/plan.md", &roots).unwrap();
         assert_eq!(result.status, "missing");
         assert_eq!(result.resolved_path, None);
         assert_eq!(
@@ -392,6 +403,7 @@ mod tests {
             ".sase/sdd/plans/202607/plan.md".to_string(),
             "sdd/plans/202607/plan.md".to_string(),
             "plans/202607/plan.md".to_string(),
+            "plans:202607/plan.md".to_string(),
             "202607/plan.md".to_string(),
         ];
         for value in values {
@@ -405,5 +417,18 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn alias_prefix_reparses_as_canonical() {
+        assert_eq!(
+            parse_plan_reference("plans:202607/x.md").unwrap(),
+            ParsedPlanReference {
+                kind: "plan".to_string(),
+                path: "202607/x.md".to_string(),
+                legacy: false,
+                rendered: "plan:202607/x.md".to_string(),
+            }
+        );
     }
 }
