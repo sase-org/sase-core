@@ -20,14 +20,16 @@ use crate::{
         SKILL_DIRECTORY_SEGMENT,
     },
     editor::{find_matching_bracket_for_args, parse_xprompt_reference_body},
-    list_project_records, DocumentSnapshot, EditorRange,
-    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
-    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
-    EditorXpromptCatalogRequestWire, EditorXpromptCatalogResponseWire,
-    MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
-    MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
-    MobileInputChoiceWire, MobileXpromptCatalogEntryWire,
-    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
+    list_project_records,
+    snippet_session::iter_unescaped_tabstops,
+    DocumentSnapshot, EditorRange, EditorSnippetCatalogRequestWire,
+    EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+    EditorSnippetEntryWire, EditorXpromptCatalogRequestWire,
+    EditorXpromptCatalogResponseWire, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire, MobileInputChoiceWire,
+    MobileXpromptCatalogEntryWire, MobileXpromptCatalogStatsWire,
+    MobileXpromptInputWire,
 };
 
 const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
@@ -878,43 +880,6 @@ fn renumber_snippet_segments(segments: &[(usize, String)]) -> String {
 
     rendered.push_str("$0");
     rendered
-}
-
-fn iter_unescaped_tabstops(text: &str) -> Vec<(usize, usize, usize)> {
-    let mut tabstops = Vec::new();
-    let bytes = text.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'$' || is_escaped(text, cursor) {
-            cursor += 1;
-            continue;
-        }
-        let digit_start = cursor + 1;
-        let mut digit_end = digit_start;
-        while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
-            digit_end += 1;
-        }
-        if digit_end == digit_start {
-            cursor += 1;
-            continue;
-        }
-        if let Ok(number) = text[digit_start..digit_end].parse::<usize>() {
-            tabstops.push((cursor, digit_end, number));
-        }
-        cursor = digit_end;
-    }
-    tabstops
-}
-
-fn is_escaped(text: &str, index: usize) -> bool {
-    let mut backslashes = 0usize;
-    let mut cursor = index;
-    let bytes = text.as_bytes();
-    while cursor > 0 && bytes[cursor - 1] == b'\\' {
-        backslashes += 1;
-        cursor -= 1;
-    }
-    backslashes % 2 == 1
 }
 
 #[derive(Debug, Clone, Default)]

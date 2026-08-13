@@ -56,6 +56,7 @@ mod reference_path;
 pub mod referenced_by;
 pub mod runner_limit_override;
 pub mod sections;
+pub mod snippet_session;
 pub mod status;
 mod store_lock;
 pub mod suffix;
