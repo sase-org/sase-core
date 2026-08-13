@@ -1114,6 +1114,16 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         monitor_request_fingerprint: coerce_str(
             data.get("monitor_request_fingerprint"),
         ),
+        monitor_followup_outcome: coerce_str(
+            data.get("monitor_followup_outcome"),
+        ),
+        monitor_followup_error: coerce_str(data.get("monitor_followup_error")),
+        monitor_followup_degraded_reason: coerce_str(
+            data.get("monitor_followup_degraded_reason"),
+        ),
+        monitor_followup_prompt_path: coerce_str(
+            data.get("monitor_followup_prompt_path"),
+        ),
     }
 }
 
@@ -1161,6 +1171,10 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
             data.get("monitor_elapsed_seconds"),
         ),
         status_label: coerce_str(data.get("status_label")),
+        monitor_followup_outcome: coerce_str(
+            data.get("monitor_followup_outcome"),
+        ),
+        monitor_followup_error: coerce_str(data.get("monitor_followup_error")),
     }
 }
 

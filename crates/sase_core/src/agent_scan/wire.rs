@@ -183,6 +183,14 @@ pub struct DoneMarkerWire {
     pub monitor_elapsed_seconds: Option<f64>,
     #[serde(default)]
     pub status_label: Option<String>,
+    /// `--next` launch disposition (`launched` / `launched-degraded` /
+    /// `not-launchable`), when the monitor carried a follow-up action.
+    #[serde(default)]
+    pub monitor_followup_outcome: Option<String>,
+    /// Human-readable reason a `--next` action was dropped or degraded,
+    /// mirroring `agent_meta.json`.
+    #[serde(default)]
+    pub monitor_followup_error: Option<String>,
 }
 
 /// Bounded JSON value stored under `agent_meta.json::output_variables`.
@@ -379,6 +387,21 @@ pub struct AgentMetaWire {
     pub monitor_next_output: Option<String>,
     #[serde(default)]
     pub monitor_request_fingerprint: Option<String>,
+    /// `--next` launch disposition (`launched` / `launched-degraded` /
+    /// `not-launchable`), when the monitor carried a follow-up action.
+    #[serde(default)]
+    pub monitor_followup_outcome: Option<String>,
+    /// Human-readable reason a `--next` action was dropped or degraded.
+    #[serde(default)]
+    pub monitor_followup_error: Option<String>,
+    /// Why a launched follow-up landed in a degraded workspace (e.g. the
+    /// original claim could not transfer).
+    #[serde(default)]
+    pub monitor_followup_degraded_reason: Option<String>,
+    /// Durable artifact path the composed follow-up prompt was persisted to
+    /// when it could not be launched.
+    #[serde(default)]
+    pub monitor_followup_prompt_path: Option<String>,
 }
 
 /// Compact projection of `running.json`.
@@ -708,6 +731,16 @@ mod tests {
             monitor_idle_timeout_seconds: Some(600.0),
             monitor_next_output: Some("tail".to_string()),
             monitor_request_fingerprint: Some("sha256:deadbeef".to_string()),
+            monitor_followup_outcome: Some("launched-degraded".to_string()),
+            monitor_followup_error: Some(
+                "workspace claim transfer failed".to_string(),
+            ),
+            monitor_followup_degraded_reason: Some(
+                "original claim already released".to_string(),
+            ),
+            monitor_followup_prompt_path: Some(
+                "artifacts/followup_prompt.md".to_string(),
+            ),
             ..Default::default()
         };
 
@@ -736,6 +769,10 @@ mod tests {
         assert_eq!(decoded.monitor_idle_timeout_seconds, None);
         assert_eq!(decoded.monitor_next_output, None);
         assert_eq!(decoded.monitor_request_fingerprint, None);
+        assert_eq!(decoded.monitor_followup_outcome, None);
+        assert_eq!(decoded.monitor_followup_error, None);
+        assert_eq!(decoded.monitor_followup_degraded_reason, None);
+        assert_eq!(decoded.monitor_followup_prompt_path, None);
     }
 
     #[test]
@@ -746,6 +783,8 @@ mod tests {
             monitor_exit_code: Some(0),
             monitor_elapsed_seconds: Some(17.5),
             status_label: Some("MONITORED".to_string()),
+            monitor_followup_outcome: Some("not-launchable".to_string()),
+            monitor_followup_error: Some("no lane to launch into".to_string()),
             ..Default::default()
         };
 
