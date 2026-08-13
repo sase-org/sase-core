@@ -1,11 +1,12 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-pub const TASK_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PROC_WIRE_SCHEMA_VERSION: u32 = 2;
 
-/// One durable background-task record.
+/// One durable background proc record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackgroundTaskWire {
-    pub task_id: String,
+pub struct ProcWire {
+    #[serde(alias = "task_id")]
+    pub proc_id: String,
     pub label: String,
     pub kind: String,
     pub status: String,
@@ -30,7 +31,7 @@ pub struct BackgroundTaskWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskStoreStatsWire {
+pub struct ProcStoreStatsWire {
     pub total_lines: u64,
     pub blank_lines: u64,
     pub invalid_json_lines: u64,
@@ -39,26 +40,29 @@ pub struct TaskStoreStatsWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskStoreSnapshotWire {
+pub struct ProcStoreSnapshotWire {
     pub schema_version: u32,
-    pub tasks: Vec<BackgroundTaskWire>,
-    pub stats: TaskStoreStatsWire,
+    #[serde(alias = "tasks")]
+    pub procs: Vec<ProcWire>,
+    pub stats: ProcStoreStatsWire,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskAppendOutcomeWire {
+pub struct ProcAppendOutcomeWire {
     pub schema_version: u32,
-    pub snapshot: TaskStoreSnapshotWire,
-    pub pruned_task_ids: Vec<String>,
+    pub snapshot: ProcStoreSnapshotWire,
+    #[serde(alias = "pruned_task_ids")]
+    pub pruned_proc_ids: Vec<String>,
 }
 
-/// Partial mutation of a task identified by `task_id`.
+/// Partial mutation of a proc identified by `proc_id`.
 ///
 /// Nullable fields use a nested option so callers can distinguish an omitted
 /// field (`None`) from an explicit JSON null (`Some(None)`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskUpdateWire {
-    pub task_id: String,
+pub struct ProcUpdateWire {
+    #[serde(alias = "task_id")]
+    pub proc_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,17 +156,19 @@ pub struct TaskUpdateWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskUpdateOutcomeWire {
+pub struct ProcUpdateOutcomeWire {
     pub schema_version: u32,
-    pub task: Option<BackgroundTaskWire>,
+    #[serde(alias = "task")]
+    pub proc: Option<ProcWire>,
     pub matched: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskPruneOutcomeWire {
+pub struct ProcPruneOutcomeWire {
     pub schema_version: u32,
-    pub snapshot: TaskStoreSnapshotWire,
-    pub pruned_task_ids: Vec<String>,
+    pub snapshot: ProcStoreSnapshotWire,
+    #[serde(alias = "pruned_task_ids")]
+    pub pruned_proc_ids: Vec<String>,
 }
 
 fn deserialize_present_option<'de, D, T>(

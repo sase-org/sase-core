@@ -13,21 +13,22 @@ use crate::store_lock::{
 };
 
 use super::wire::{
-    BackgroundTaskWire, TaskAppendOutcomeWire, TaskPruneOutcomeWire,
-    TaskStoreSnapshotWire, TaskStoreStatsWire, TaskUpdateOutcomeWire,
-    TaskUpdateWire, TASK_WIRE_SCHEMA_VERSION,
+    ProcAppendOutcomeWire, ProcPruneOutcomeWire, ProcStoreSnapshotWire,
+    ProcStoreStatsWire, ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire,
+    PROC_WIRE_SCHEMA_VERSION,
 };
 
-/// Every task kind the store accepts on write.
-const TASK_KINDS: [&str; 3] = ["command", "tui", "detached"];
+/// Every proc kind the store accepts on write.
+const PROC_KINDS: [&str; 3] = ["command", "tui", "detached"];
 
-const LOCK_TIMEOUT_ENV: &str = "SASE_TASK_STORE_LOCK_TIMEOUT";
+const LOCK_TIMEOUT_ENV: &str = "SASE_PROC_STORE_LOCK_TIMEOUT";
+const LEGACY_LOCK_TIMEOUT_ENV: &str = "SASE_TASK_STORE_LOCK_TIMEOUT";
 const LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
-pub enum TaskStoreError {
+pub enum ProcStoreError {
     #[error(
-        "task store lock timed out after {waited_ms}ms waiting for {mode} lock: {}; holder: {holder}",
+        "proc store lock timed out after {waited_ms}ms waiting for {mode} lock: {}; holder: {holder}",
         path.display()
     )]
     LockTimeout {
@@ -37,119 +38,119 @@ pub enum TaskStoreError {
         holder: String,
     },
     #[error(
-        "task {task_id:?} cannot transition from terminal status {from:?} to {to:?}"
+        "proc {proc_id:?} cannot transition from terminal status {from:?} to {to:?}"
     )]
     InvalidTransition {
-        task_id: String,
+        proc_id: String,
         from: String,
         to: String,
     },
-    #[error("invalid task {task_id:?}: {reason}")]
-    InvalidTask { task_id: String, reason: String },
+    #[error("invalid proc {proc_id:?}: {reason}")]
+    InvalidProc { proc_id: String, reason: String },
     #[error("{0}")]
     Store(String),
 }
 
-impl From<String> for TaskStoreError {
+impl From<String> for ProcStoreError {
     fn from(message: String) -> Self {
         Self::Store(message)
     }
 }
 
-type TaskStoreResult<T> = Result<T, TaskStoreError>;
+type ProcStoreResult<T> = Result<T, ProcStoreError>;
 
-/// Read a stable, newest-first snapshot of the task store.
+/// Read a stable, newest-first snapshot of the proc store.
 #[allow(clippy::incompatible_msrv)]
-pub fn read_tasks_snapshot(
+pub fn read_procs_snapshot(
     path: &Path,
-) -> TaskStoreResult<TaskStoreSnapshotWire> {
+) -> ProcStoreResult<ProcStoreSnapshotWire> {
     if !path.exists() {
         return Ok(snapshot_from_rows(
             Vec::new(),
-            TaskStoreStatsWire::default(),
+            ProcStoreStatsWire::default(),
         ));
     }
     let lock = lock_with_timeout(
         path,
         LockMode::Shared,
-        task_store_lock_timeout(),
-        "read_tasks_snapshot",
+        proc_store_lock_timeout(),
+        "read_procs_snapshot",
     )?;
     let result = read_rows_unlocked(path);
     unlock(lock)?;
-    let (tasks, stats) = result?;
-    Ok(snapshot_from_rows(tasks, stats))
+    let (procs, stats) = result?;
+    Ok(snapshot_from_rows(procs, stats))
 }
 
-/// Append a task and enforce terminal-row retention atomically.
-pub fn append_task(
+/// Append a proc and enforce terminal-row retention atomically.
+pub fn append_proc(
     path: &Path,
-    task: &BackgroundTaskWire,
+    proc: &ProcWire,
     history_limit: i64,
-) -> TaskStoreResult<TaskAppendOutcomeWire> {
-    let mut task = task.clone();
-    normalize_and_validate_task(&mut task)?;
+) -> ProcStoreResult<ProcAppendOutcomeWire> {
+    let mut proc = proc.clone();
+    normalize_and_validate_proc(&mut proc)?;
     let lock = lock_with_timeout(
         path,
         LockMode::Exclusive,
-        task_store_lock_timeout(),
-        "append_task",
+        proc_store_lock_timeout(),
+        "append_proc",
     )?;
-    let result: TaskStoreResult<TaskAppendOutcomeWire> = (|| {
+    let result: ProcStoreResult<ProcAppendOutcomeWire> = (|| {
         let (mut rows, _) = read_rows_unlocked(path)?;
-        rows.push(task);
-        let (kept, pruned_task_ids) =
+        rows.push(proc);
+        let (kept, pruned_proc_ids) =
             apply_retention(rows, clamped_history_limit(history_limit));
-        write_tasks_atomic(path, &kept)?;
+        write_procs_atomic(path, &kept)?;
         let (rows, stats) = read_rows_unlocked(path)?;
-        Ok(TaskAppendOutcomeWire {
-            schema_version: TASK_WIRE_SCHEMA_VERSION,
+        Ok(ProcAppendOutcomeWire {
+            schema_version: PROC_WIRE_SCHEMA_VERSION,
             snapshot: snapshot_from_rows(rows, stats),
-            pruned_task_ids,
+            pruned_proc_ids,
         })
     })();
     unlock(lock)?;
     result
 }
 
-/// Apply a partial task update. Missing ids are successful no-ops.
-pub fn update_task(
+/// Apply a partial proc update. Missing ids are successful no-ops.
+pub fn update_proc(
     path: &Path,
-    update: &TaskUpdateWire,
-) -> TaskStoreResult<TaskUpdateOutcomeWire> {
-    if update.task_id.is_empty() {
-        return Err(TaskStoreError::InvalidTask {
-            task_id: String::new(),
-            reason: "task_id must not be empty".to_string(),
+    update: &ProcUpdateWire,
+) -> ProcStoreResult<ProcUpdateOutcomeWire> {
+    if update.proc_id.is_empty() {
+        return Err(ProcStoreError::InvalidProc {
+            proc_id: String::new(),
+            reason: "proc_id must not be empty".to_string(),
         });
     }
     let lock = lock_with_timeout(
         path,
         LockMode::Exclusive,
-        task_store_lock_timeout(),
-        "update_task",
+        proc_store_lock_timeout(),
+        "update_proc",
     )?;
-    let result: TaskStoreResult<TaskUpdateOutcomeWire> = (|| {
+    let result: ProcStoreResult<ProcUpdateOutcomeWire> = (|| {
         let (mut rows, _) = read_rows_unlocked(path)?;
         let matched_index =
-            rows.iter().position(|row| row.task_id == update.task_id);
+            rows.iter().position(|row| row.proc_id == update.proc_id);
         let Some(index) = matched_index else {
             // An update is a rewrite operation even when retention has already
             // removed the id, so malformed rows observed above are cleaned up.
-            write_tasks_atomic(path, &rows)?;
-            return Ok(TaskUpdateOutcomeWire {
-                schema_version: TASK_WIRE_SCHEMA_VERSION,
-                task: None,
+            write_procs_atomic(path, &rows)?;
+            return Ok(ProcUpdateOutcomeWire {
+                schema_version: PROC_WIRE_SCHEMA_VERSION,
+                proc: None,
                 matched: false,
             });
         };
 
         apply_update(&mut rows[index], update)?;
-        let task = rows[index].clone();
-        write_tasks_atomic(path, &rows)?;
-        Ok(TaskUpdateOutcomeWire {
-            schema_version: TASK_WIRE_SCHEMA_VERSION,
-            task: Some(task),
+        let proc = rows[index].clone();
+        write_procs_atomic(path, &rows)?;
+        Ok(ProcUpdateOutcomeWire {
+            schema_version: PROC_WIRE_SCHEMA_VERSION,
+            proc: Some(proc),
             matched: true,
         })
     })();
@@ -157,27 +158,27 @@ pub fn update_task(
     result
 }
 
-/// Enforce terminal-row retention without appending a task.
-pub fn prune_tasks(
+/// Enforce terminal-row retention without appending a proc.
+pub fn prune_procs(
     path: &Path,
     history_limit: i64,
-) -> TaskStoreResult<TaskPruneOutcomeWire> {
+) -> ProcStoreResult<ProcPruneOutcomeWire> {
     let lock = lock_with_timeout(
         path,
         LockMode::Exclusive,
-        task_store_lock_timeout(),
-        "prune_tasks",
+        proc_store_lock_timeout(),
+        "prune_procs",
     )?;
-    let result: TaskStoreResult<TaskPruneOutcomeWire> = (|| {
+    let result: ProcStoreResult<ProcPruneOutcomeWire> = (|| {
         let (rows, _) = read_rows_unlocked(path)?;
-        let (kept, pruned_task_ids) =
+        let (kept, pruned_proc_ids) =
             apply_retention(rows, clamped_history_limit(history_limit));
-        write_tasks_atomic(path, &kept)?;
+        write_procs_atomic(path, &kept)?;
         let (rows, stats) = read_rows_unlocked(path)?;
-        Ok(TaskPruneOutcomeWire {
-            schema_version: TASK_WIRE_SCHEMA_VERSION,
+        Ok(ProcPruneOutcomeWire {
+            schema_version: PROC_WIRE_SCHEMA_VERSION,
             snapshot: snapshot_from_rows(rows, stats),
-            pruned_task_ids,
+            pruned_proc_ids,
         })
     })();
     unlock(lock)?;
@@ -186,18 +187,18 @@ pub fn prune_tasks(
 
 fn read_rows_unlocked(
     path: &Path,
-) -> Result<(Vec<BackgroundTaskWire>, TaskStoreStatsWire), String> {
+) -> Result<(Vec<ProcWire>, ProcStoreStatsWire), String> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok((Vec::new(), TaskStoreStatsWire::default()));
+            return Ok((Vec::new(), ProcStoreStatsWire::default()));
         }
         Err(error) => return Err(error.to_string()),
     };
 
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
-    let mut stats = TaskStoreStatsWire::default();
+    let mut stats = ProcStoreStatsWire::default();
     for line in reader.lines() {
         let line = line.map_err(|error| error.to_string())?;
         stats.total_lines += 1;
@@ -213,70 +214,69 @@ fn read_rows_unlocked(
                 continue;
             }
         };
-        let mut task = match serde_json::from_value::<BackgroundTaskWire>(value)
-        {
-            Ok(task) => task,
+        let mut proc = match serde_json::from_value::<ProcWire>(value) {
+            Ok(proc) => proc,
             Err(_) => {
                 stats.invalid_record_lines += 1;
                 continue;
             }
         };
-        if normalize_and_validate_task(&mut task).is_err() {
+        if normalize_and_validate_proc(&mut proc).is_err() {
             stats.invalid_record_lines += 1;
             continue;
         }
         stats.loaded_rows += 1;
-        rows.push(task);
+        rows.push(proc);
     }
     Ok((rows, stats))
 }
 
 fn snapshot_from_rows(
-    rows: Vec<BackgroundTaskWire>,
-    stats: TaskStoreStatsWire,
-) -> TaskStoreSnapshotWire {
-    TaskStoreSnapshotWire {
-        schema_version: TASK_WIRE_SCHEMA_VERSION,
-        tasks: newest_first(rows),
+    rows: Vec<ProcWire>,
+    stats: ProcStoreStatsWire,
+) -> ProcStoreSnapshotWire {
+    ProcStoreSnapshotWire {
+        schema_version: PROC_WIRE_SCHEMA_VERSION,
+        procs: newest_first(rows),
         stats,
     }
 }
 
-fn newest_first(rows: Vec<BackgroundTaskWire>) -> Vec<BackgroundTaskWire> {
-    let mut indexed: Vec<(usize, BackgroundTaskWire)> =
+fn newest_first(rows: Vec<ProcWire>) -> Vec<ProcWire> {
+    let mut indexed: Vec<(usize, ProcWire)> =
         rows.into_iter().enumerate().collect();
     indexed.sort_by(|(left_index, left), (right_index, right)| {
-        compare_task_recency(*left_index, left, *right_index, right).reverse()
+        compare_proc_recency(*left_index, left, *right_index, right).reverse()
     });
-    indexed.into_iter().map(|(_, task)| task).collect()
+    indexed.into_iter().map(|(_, proc)| proc).collect()
 }
 
-fn compare_task_recency(
+fn compare_proc_recency(
     left_index: usize,
-    left: &BackgroundTaskWire,
+    left: &ProcWire,
     right_index: usize,
-    right: &BackgroundTaskWire,
+    right: &ProcWire,
 ) -> Ordering {
     let left_created = parse_utc_timestamp(&left.created_at)
-        .expect("validated task timestamp must parse");
+        .expect("validated proc timestamp must parse");
     let right_created = parse_utc_timestamp(&right.created_at)
-        .expect("validated task timestamp must parse");
+        .expect("validated proc timestamp must parse");
     left_created
         .cmp(&right_created)
         .then_with(|| left_index.cmp(&right_index))
 }
 
 fn apply_retention(
-    rows: Vec<BackgroundTaskWire>,
+    rows: Vec<ProcWire>,
     history_limit: usize,
-) -> (Vec<BackgroundTaskWire>, Vec<String>) {
-    let mut terminals: Vec<(usize, &BackgroundTaskWire)> = rows
+) -> (Vec<ProcWire>, Vec<String>) {
+    let mut terminals: Vec<(usize, &ProcWire)> = rows
         .iter()
         .enumerate()
-        .filter(|(_, task)| is_terminal_status(&task.status))
+        .filter(|(_, proc)| is_terminal_status(&proc.status))
         .collect();
     terminals.sort_by(|(left_index, left), (right_index, right)| {
-        compare_task_recency(*left_index, left, *right_index, right).reverse()
+        compare_proc_recency(*left_index, left, *right_index, right).reverse()
     });
 
     let mut keep = vec![true; rows.len()];
@@ -285,15 +285,15 @@ fn apply_retention(
     }
 
     let mut kept = Vec::with_capacity(rows.len());
-    let mut pruned_task_ids = Vec::new();
-    for (index, task) in rows.into_iter().enumerate() {
+    let mut pruned_proc_ids = Vec::new();
+    for (index, proc) in rows.into_iter().enumerate() {
         if keep[index] {
-            kept.push(task);
+            kept.push(proc);
         } else {
-            pruned_task_ids.push(task.task_id);
+            pruned_proc_ids.push(proc.proc_id);
         }
     }
-    (kept, pruned_task_ids)
+    (kept, pruned_proc_ids)
 }
 
 fn clamped_history_limit(history_limit: i64) -> usize {
@@ -301,128 +301,126 @@ fn clamped_history_limit(history_limit: i64) -> usize {
 }
 
 fn apply_update(
-    task: &mut BackgroundTaskWire,
-    update: &TaskUpdateWire,
-) -> TaskStoreResult<()> {
-    let was_terminal = is_terminal_status(&task.status);
-    let finished_at_was_set = was_terminal && task.finished_at.is_some();
+    proc: &mut ProcWire,
+    update: &ProcUpdateWire,
+) -> ProcStoreResult<()> {
+    let was_terminal = is_terminal_status(&proc.status);
+    let finished_at_was_set = was_terminal && proc.finished_at.is_some();
 
     if let Some(status) = update.status.as_deref() {
-        validate_status(status).map_err(|reason| invalid_task(task, reason))?;
+        validate_status(status).map_err(|reason| invalid_proc(proc, reason))?;
         if was_terminal && !is_terminal_status(status) {
-            return Err(TaskStoreError::InvalidTransition {
-                task_id: task.task_id.clone(),
-                from: task.status.clone(),
+            return Err(ProcStoreError::InvalidTransition {
+                proc_id: proc.proc_id.clone(),
+                from: proc.status.clone(),
                 to: status.to_string(),
             });
         }
         // The first terminal status is final. Later terminal reports may
         // refine outcome fields, but cannot change the recorded disposition.
         if !was_terminal {
-            task.status = status.to_string();
+            proc.status = status.to_string();
         }
     }
     if let Some(value) = &update.label {
-        task.label.clone_from(value);
+        proc.label.clone_from(value);
     }
     if let Some(value) = &update.kind {
-        task.kind.clone_from(value);
+        proc.kind.clone_from(value);
     }
     if let Some(value) = &update.command {
-        task.command.clone_from(value);
+        proc.command.clone_from(value);
     }
     if let Some(value) = &update.cwd {
-        task.cwd.clone_from(value);
+        proc.cwd.clone_from(value);
     }
     if let Some(value) = &update.project {
-        task.project.clone_from(value);
+        proc.project.clone_from(value);
     }
     if let Some(value) = update.workspace_num {
-        task.workspace_num = value;
+        proc.workspace_num = value;
     }
     if let Some(value) = &update.session_id {
-        task.session_id.clone_from(value);
+        proc.session_id.clone_from(value);
     }
     if let Some(value) = &update.session_label {
-        task.session_label.clone_from(value);
+        proc.session_label.clone_from(value);
     }
     if let Some(value) = &update.origin {
-        task.origin.clone_from(value);
+        proc.origin.clone_from(value);
     }
     if let Some(value) = &update.cl_name {
-        task.cl_name.clone_from(value);
+        proc.cl_name.clone_from(value);
     }
     if let Some(value) = &update.tags {
-        task.tags.clone_from(value);
+        proc.tags.clone_from(value);
     }
     if let Some(value) = update.pid {
-        task.pid = value;
+        proc.pid = value;
     }
     if let Some(value) = update.pgid {
-        task.pgid = value;
+        proc.pgid = value;
     }
     if let Some(value) = update.exit_code {
-        task.exit_code = value;
+        proc.exit_code = value;
     }
     if let Some(value) = &update.phase {
-        task.phase.clone_from(value);
+        proc.phase.clone_from(value);
     }
     if let Some(value) = &update.message {
-        task.message.clone_from(value);
+        proc.message.clone_from(value);
     }
     if let Some(value) = &update.created_at {
-        task.created_at.clone_from(value);
+        proc.created_at.clone_from(value);
     }
     if let Some(value) = &update.started_at {
-        task.started_at.clone_from(value);
+        proc.started_at.clone_from(value);
     }
     if !finished_at_was_set {
         if let Some(value) = &update.finished_at {
-            task.finished_at.clone_from(value);
+            proc.finished_at.clone_from(value);
         }
     }
     if let Some(value) = &update.log_path {
-        task.log_path.clone_from(value);
+        proc.log_path.clone_from(value);
     }
 
-    normalize_and_validate_task(task)
+    normalize_and_validate_proc(proc)
 }
 
-fn normalize_and_validate_task(
-    task: &mut BackgroundTaskWire,
-) -> TaskStoreResult<()> {
-    task.tags.sort();
-    task.tags.dedup();
+fn normalize_and_validate_proc(proc: &mut ProcWire) -> ProcStoreResult<()> {
+    proc.tags.sort();
+    proc.tags.dedup();
 
     for (field, value) in [
-        ("task_id", task.task_id.as_str()),
-        ("label", task.label.as_str()),
-        ("cwd", task.cwd.as_str()),
-        ("origin", task.origin.as_str()),
-        ("created_at", task.created_at.as_str()),
-        ("log_path", task.log_path.as_str()),
+        ("proc_id", proc.proc_id.as_str()),
+        ("label", proc.label.as_str()),
+        ("cwd", proc.cwd.as_str()),
+        ("origin", proc.origin.as_str()),
+        ("created_at", proc.created_at.as_str()),
+        ("log_path", proc.log_path.as_str()),
     ] {
         if value.is_empty() {
-            return Err(invalid_task(
-                task,
+            return Err(invalid_proc(
+                proc,
                 format!("{field} must not be empty"),
             ));
         }
     }
-    validate_kind(&task.kind).map_err(|reason| invalid_task(task, reason))?;
-    validate_status(&task.status)
-        .map_err(|reason| invalid_task(task, reason))?;
-    validate_timestamp_field("created_at", Some(&task.created_at))
-        .map_err(|reason| invalid_task(task, reason))?;
-    validate_timestamp_field("started_at", task.started_at.as_ref())
-        .map_err(|reason| invalid_task(task, reason))?;
-    validate_timestamp_field("finished_at", task.finished_at.as_ref())
-        .map_err(|reason| invalid_task(task, reason))?;
+    validate_kind(&proc.kind).map_err(|reason| invalid_proc(proc, reason))?;
+    validate_status(&proc.status)
+        .map_err(|reason| invalid_proc(proc, reason))?;
+    validate_timestamp_field("created_at", Some(&proc.created_at))
+        .map_err(|reason| invalid_proc(proc, reason))?;
+    validate_timestamp_field("started_at", proc.started_at.as_ref())
+        .map_err(|reason| invalid_proc(proc, reason))?;
+    validate_timestamp_field("finished_at", proc.finished_at.as_ref())
+        .map_err(|reason| invalid_proc(proc, reason))?;
     Ok(())
 }
 
 fn validate_kind(kind: &str) -> Result<(), String> {
-    if TASK_KINDS.contains(&kind) {
+    if PROC_KINDS.contains(&kind) {
         Ok(())
     } else {
         Err(format!("unknown kind {kind:?}"))
@@ -466,17 +464,14 @@ fn parse_utc_timestamp(value: &str) -> Result<DateTime<FixedOffset>, String> {
     Ok(timestamp)
 }
 
-fn invalid_task(task: &BackgroundTaskWire, reason: String) -> TaskStoreError {
-    TaskStoreError::InvalidTask {
-        task_id: task.task_id.clone(),
+fn invalid_proc(proc: &ProcWire, reason: String) -> ProcStoreError {
+    ProcStoreError::InvalidProc {
+        proc_id: proc.proc_id.clone(),
         reason,
     }
 }
 
-fn write_tasks_atomic(
-    path: &Path,
-    tasks: &[BackgroundTaskWire],
-) -> Result<(), String> {
+fn write_procs_atomic(path: &Path, procs: &[ProcWire]) -> Result<(), String> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let tmp_path = temp_path_for(path);
@@ -487,9 +482,9 @@ fn write_tasks_atomic(
             .open(&tmp_path)
             .map_err(|error| error.to_string())?;
         let mut writer = BufWriter::new(file);
-        for task in tasks {
-            serde_json::to_writer(&mut writer, task).map_err(|error| {
-                format!("failed to serialize background task: {error}")
+        for proc in procs {
+            serde_json::to_writer(&mut writer, proc).map_err(|error| {
+                format!("failed to serialize proc: {error}")
             })?;
             writer.write_all(b"\n").map_err(|error| error.to_string())?;
         }
@@ -510,8 +505,12 @@ fn write_tasks_atomic(
     write_result
 }
 
-fn task_store_lock_timeout() -> Duration {
-    timeout_from_env(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT)
+fn proc_store_lock_timeout() -> Duration {
+    if std::env::var_os(LOCK_TIMEOUT_ENV).is_some() {
+        timeout_from_env(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT)
+    } else {
+        timeout_from_env(LEGACY_LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT)
+    }
 }
 
 fn lock_with_timeout(
@@ -519,7 +518,7 @@ fn lock_with_timeout(
     mode: LockMode,
     timeout: Duration,
     operation: &str,
-) -> TaskStoreResult<HeldStoreLock> {
+) -> ProcStoreResult<HeldStoreLock> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let lock_path = lock_path_for(path);
@@ -536,7 +535,7 @@ fn lock_with_timeout(
             lock_path,
             waited_ms,
             holder,
-        } => TaskStoreError::LockTimeout {
+        } => ProcStoreError::LockTimeout {
             mode,
             path: lock_path,
             waited_ms,
@@ -544,7 +543,7 @@ fn lock_with_timeout(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
         },
-        error => TaskStoreError::Store(error.to_string()),
+        error => ProcStoreError::Store(error.to_string()),
     })
 }
 
@@ -552,7 +551,7 @@ fn lock_path_for(path: &Path) -> PathBuf {
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("tasks.jsonl");
+        .unwrap_or("procs.jsonl");
     path.with_file_name(format!("{filename}.lock"))
 }
 
@@ -560,7 +559,7 @@ fn temp_path_for(path: &Path) -> PathBuf {
     let filename = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("tasks.jsonl");
+        .unwrap_or("procs.jsonl");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -570,7 +569,7 @@ fn temp_path_for(path: &Path) -> PathBuf {
 
 fn ensure_parent(path: &Path) -> Result<&Path, String> {
     path.parent().ok_or_else(|| {
-        format!("task store path has no parent: {}", path.display())
+        format!("proc store path has no parent: {}", path.display())
     })
 }
 
@@ -590,14 +589,10 @@ mod tests {
 
     use super::*;
 
-    fn task(
-        task_id: &str,
-        status: &str,
-        created_at: &str,
-    ) -> BackgroundTaskWire {
-        BackgroundTaskWire {
-            task_id: task_id.to_string(),
-            label: format!("Task {task_id}"),
+    fn proc(proc_id: &str, status: &str, created_at: &str) -> ProcWire {
+        ProcWire {
+            proc_id: proc_id.to_string(),
+            label: format!("Proc {proc_id}"),
             kind: "command".to_string(),
             status: status.to_string(),
             command: vec!["true".to_string()],
@@ -621,23 +616,23 @@ mod tests {
             created_at: created_at.to_string(),
             started_at: None,
             finished_at: None,
-            log_path: format!("/tmp/{task_id}.log"),
+            log_path: format!("/tmp/{proc_id}.log"),
         }
     }
 
     #[test]
     fn append_and_read_round_trip_is_newest_first_and_normalizes_tags() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        append_task(
+        let path = temp.path().join("procs.jsonl");
+        append_proc(
             &path,
-            &task("older", "pending", "2026-07-25T12:00:00Z"),
+            &proc("older", "pending", "2026-07-25T12:00:00Z"),
             10,
         )
         .unwrap();
-        let outcome = append_task(
+        let outcome = append_proc(
             &path,
-            &task("newer", "running", "2026-07-25T12:00:01Z"),
+            &proc("newer", "running", "2026-07-25T12:00:01Z"),
             10,
         )
         .unwrap();
@@ -645,36 +640,36 @@ mod tests {
         assert_eq!(
             outcome
                 .snapshot
-                .tasks
+                .procs
                 .iter()
-                .map(|task| task.task_id.as_str())
+                .map(|proc| proc.proc_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["newer", "older"]
         );
-        assert_eq!(outcome.snapshot.tasks[0].tags, vec!["alpha", "zeta"]);
-        assert_eq!(read_tasks_snapshot(&path).unwrap(), outcome.snapshot);
+        assert_eq!(outcome.snapshot.procs[0].tags, vec!["alpha", "zeta"]);
+        assert_eq!(read_procs_snapshot(&path).unwrap(), outcome.snapshot);
     }
 
     #[test]
     fn detached_kind_round_trips_and_unknown_kinds_are_rejected() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        let mut detached = task("detached", "running", "2026-07-25T12:00:00Z");
+        let path = temp.path().join("procs.jsonl");
+        let mut detached = proc("detached", "running", "2026-07-25T12:00:00Z");
         detached.kind = "detached".to_string();
-        let outcome = append_task(&path, &detached, 10).unwrap();
-        assert_eq!(outcome.snapshot.tasks[0].kind, "detached");
+        let outcome = append_proc(&path, &detached, 10).unwrap();
+        assert_eq!(outcome.snapshot.procs[0].kind, "detached");
         assert_eq!(
-            read_tasks_snapshot(&path).unwrap().tasks[0].kind,
+            read_procs_snapshot(&path).unwrap().procs[0].kind,
             "detached"
         );
 
-        let mut unknown = task("unknown", "running", "2026-07-25T12:00:01Z");
+        let mut unknown = proc("unknown", "running", "2026-07-25T12:00:01Z");
         unknown.kind = "daemon".to_string();
-        let error = append_task(&path, &unknown, 10).unwrap_err();
+        let error = append_proc(&path, &unknown, 10).unwrap_err();
         assert!(matches!(
             &error,
-            TaskStoreError::InvalidTask { task_id, reason }
-                if task_id == "unknown"
+            ProcStoreError::InvalidProc { proc_id, reason }
+                if proc_id == "unknown"
                     && reason == "unknown kind \"daemon\""
         ));
     }
@@ -682,37 +677,37 @@ mod tests {
     #[test]
     fn updating_an_existing_row_to_the_detached_kind_validates() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        append_task(
+        let path = temp.path().join("procs.jsonl");
+        append_proc(
             &path,
-            &task("promoted", "running", "2026-07-25T12:00:00Z"),
+            &proc("promoted", "running", "2026-07-25T12:00:00Z"),
             10,
         )
         .unwrap();
 
-        let updated = update_task(
+        let updated = update_proc(
             &path,
-            &TaskUpdateWire {
-                task_id: "promoted".to_string(),
+            &ProcUpdateWire {
+                proc_id: "promoted".to_string(),
                 kind: Some("detached".to_string()),
-                ..TaskUpdateWire::default()
+                ..ProcUpdateWire::default()
             },
         )
         .unwrap();
-        assert_eq!(updated.task.unwrap().kind, "detached");
+        assert_eq!(updated.proc.unwrap().kind, "detached");
 
-        let error = update_task(
+        let error = update_proc(
             &path,
-            &TaskUpdateWire {
-                task_id: "promoted".to_string(),
+            &ProcUpdateWire {
+                proc_id: "promoted".to_string(),
                 kind: Some("daemon".to_string()),
-                ..TaskUpdateWire::default()
+                ..ProcUpdateWire::default()
             },
         )
         .unwrap_err();
-        assert!(matches!(error, TaskStoreError::InvalidTask { .. }));
+        assert!(matches!(error, ProcStoreError::InvalidProc { .. }));
         assert_eq!(
-            read_tasks_snapshot(&path).unwrap().tasks[0].kind,
+            read_procs_snapshot(&path).unwrap().procs[0].kind,
             "detached"
         );
     }
@@ -720,90 +715,90 @@ mod tests {
     #[test]
     fn retention_keeps_newest_terminal_rows_at_and_beyond_limit() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
+        let path = temp.path().join("procs.jsonl");
         for (id, created_at) in [
             ("one", "2026-07-25T12:00:01Z"),
             ("two", "2026-07-25T12:00:02Z"),
             ("three", "2026-07-25T12:00:03Z"),
         ] {
-            append_task(&path, &task(id, "success", created_at), 2).unwrap();
+            append_proc(&path, &proc(id, "success", created_at), 2).unwrap();
         }
 
-        let snapshot = read_tasks_snapshot(&path).unwrap();
+        let snapshot = read_procs_snapshot(&path).unwrap();
         assert_eq!(
             snapshot
-                .tasks
+                .procs
                 .iter()
-                .map(|task| task.task_id.as_str())
+                .map(|proc| proc.proc_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["three", "two"]
         );
 
-        let outcome = prune_tasks(&path, 1).unwrap();
-        assert_eq!(outcome.pruned_task_ids, vec!["two"]);
-        assert_eq!(outcome.snapshot.tasks[0].task_id, "three");
-        assert!(prune_tasks(&path, 0).unwrap().pruned_task_ids.is_empty());
+        let outcome = prune_procs(&path, 1).unwrap();
+        assert_eq!(outcome.pruned_proc_ids, vec!["two"]);
+        assert_eq!(outcome.snapshot.procs[0].proc_id, "three");
+        assert!(prune_procs(&path, 0).unwrap().pruned_proc_ids.is_empty());
     }
 
     #[test]
     fn running_rows_survive_retention() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        append_task(
+        let path = temp.path().join("procs.jsonl");
+        append_proc(
             &path,
-            &task("running-old", "running", "2026-07-25T12:00:00Z"),
+            &proc("running-old", "running", "2026-07-25T12:00:00Z"),
             1,
         )
         .unwrap();
-        append_task(
+        append_proc(
             &path,
-            &task("done-old", "success", "2026-07-25T12:00:01Z"),
+            &proc("done-old", "success", "2026-07-25T12:00:01Z"),
             1,
         )
         .unwrap();
-        let outcome = append_task(
+        let outcome = append_proc(
             &path,
-            &task("done-new", "error", "2026-07-25T12:00:02Z"),
+            &proc("done-new", "error", "2026-07-25T12:00:02Z"),
             1,
         )
         .unwrap();
 
-        assert_eq!(outcome.pruned_task_ids, vec!["done-old"]);
+        assert_eq!(outcome.pruned_proc_ids, vec!["done-old"]);
         assert!(outcome
             .snapshot
-            .tasks
+            .procs
             .iter()
-            .any(|task| task.task_id == "running-old"));
+            .any(|proc| proc.proc_id == "running-old"));
     }
 
     #[test]
     fn terminal_transition_guards_and_repeat_writes_preserve_final_fields() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        let mut finished = task("finished", "success", "2026-07-25T12:00:00Z");
+        let path = temp.path().join("procs.jsonl");
+        let mut finished = proc("finished", "success", "2026-07-25T12:00:00Z");
         finished.finished_at = Some("2026-07-25T12:00:10Z".to_string());
         finished.message = Some("first".to_string());
-        append_task(&path, &finished, 10).unwrap();
+        append_proc(&path, &finished, 10).unwrap();
 
-        let backward = TaskUpdateWire {
-            task_id: "finished".to_string(),
+        let backward = ProcUpdateWire {
+            proc_id: "finished".to_string(),
             status: Some("running".to_string()),
-            ..TaskUpdateWire::default()
+            ..ProcUpdateWire::default()
         };
         assert!(matches!(
-            update_task(&path, &backward),
-            Err(TaskStoreError::InvalidTransition { .. })
+            update_proc(&path, &backward),
+            Err(ProcStoreError::InvalidTransition { .. })
         ));
 
-        let repeated = TaskUpdateWire {
-            task_id: "finished".to_string(),
+        let repeated = ProcUpdateWire {
+            proc_id: "finished".to_string(),
             status: Some("error".to_string()),
             exit_code: Some(Some(7)),
             message: Some(Some("second".to_string())),
             finished_at: Some(Some("2026-07-25T12:00:20Z".to_string())),
-            ..TaskUpdateWire::default()
+            ..ProcUpdateWire::default()
         };
-        let updated = update_task(&path, &repeated).unwrap().task.unwrap();
+        let updated = update_proc(&path, &repeated).unwrap().proc.unwrap();
         assert_eq!(updated.status, "success");
         assert_eq!(updated.exit_code, Some(7));
         assert_eq!(updated.message.as_deref(), Some("second"));
@@ -812,24 +807,24 @@ mod tests {
             Some("2026-07-25T12:00:10Z")
         );
 
-        let missing = update_task(
+        let missing = update_proc(
             &path,
-            &TaskUpdateWire {
-                task_id: "pruned".to_string(),
-                ..TaskUpdateWire::default()
+            &ProcUpdateWire {
+                proc_id: "pruned".to_string(),
+                ..ProcUpdateWire::default()
             },
         )
         .unwrap();
         assert!(!missing.matched);
-        assert!(missing.task.is_none());
+        assert!(missing.proc.is_none());
     }
 
     #[test]
     fn unknown_fields_are_tolerated_and_malformed_rows_are_dropped_on_rewrite()
     {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
-        let mut value = serde_json::to_value(task(
+        let path = temp.path().join("procs.jsonl");
+        let mut value = serde_json::to_value(proc(
             "valid",
             "pending",
             "2026-07-25T12:00:00Z",
@@ -838,25 +833,50 @@ mod tests {
         value["future_field"] = json!({"anything": true});
         fs::write(
             &path,
-            format!("not-json\n{}\n{{\"task_id\":\"broken\"}}\n", value),
+            format!("not-json\n{}\n{{\"proc_id\":\"broken\"}}\n", value),
         )
         .unwrap();
 
-        let snapshot = read_tasks_snapshot(&path).unwrap();
-        assert_eq!(snapshot.tasks.len(), 1);
+        let snapshot = read_procs_snapshot(&path).unwrap();
+        assert_eq!(snapshot.procs.len(), 1);
         assert_eq!(snapshot.stats.invalid_json_lines, 1);
         assert_eq!(snapshot.stats.invalid_record_lines, 1);
 
-        prune_tasks(&path, 10).unwrap();
+        prune_procs(&path, 10).unwrap();
         let rewritten = fs::read_to_string(&path).unwrap();
         assert_eq!(rewritten.lines().count(), 1);
         assert!(!rewritten.contains("future_field"));
     }
 
     #[test]
+    fn legacy_task_id_rows_are_accepted_and_rewritten_with_proc_id() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut value = serde_json::to_value(proc(
+            "legacy",
+            "success",
+            "2026-07-25T12:00:00Z",
+        ))
+        .unwrap();
+        let object = value.as_object_mut().unwrap();
+        let proc_id = object.remove("proc_id").unwrap();
+        object.insert("task_id".to_string(), proc_id);
+        fs::write(&path, format!("{value}\n")).unwrap();
+
+        let snapshot = read_procs_snapshot(&path).unwrap();
+        assert_eq!(snapshot.schema_version, PROC_WIRE_SCHEMA_VERSION);
+        assert_eq!(snapshot.procs[0].proc_id, "legacy");
+
+        prune_procs(&path, 10).unwrap();
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert!(rewritten.contains("\"proc_id\":\"legacy\""));
+        assert!(!rewritten.contains("\"task_id\""));
+    }
+
+    #[test]
     fn concurrent_writers_do_not_lose_rows() {
         let temp = tempdir().unwrap();
-        let path = Arc::new(temp.path().join("tasks.jsonl"));
+        let path = Arc::new(temp.path().join("procs.jsonl"));
         let barrier = Arc::new(Barrier::new(8));
         let mut writers = Vec::new();
         for index in 0..8 {
@@ -864,10 +884,10 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             writers.push(thread::spawn(move || {
                 barrier.wait();
-                append_task(
+                append_proc(
                     &path,
-                    &task(
-                        &format!("task-{index}"),
+                    &proc(
+                        &format!("proc-{index}"),
                         "running",
                         &format!("2026-07-25T12:00:{index:02}Z"),
                     ),
@@ -880,13 +900,13 @@ mod tests {
             writer.join().unwrap();
         }
 
-        assert_eq!(read_tasks_snapshot(&path).unwrap().tasks.len(), 8);
+        assert_eq!(read_procs_snapshot(&path).unwrap().procs.len(), 8);
     }
 
     #[test]
     fn held_exclusive_lock_bounds_reader_and_writer_waits() {
         let temp = tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
+        let path = temp.path().join("procs.jsonl");
         let holder = lock_with_timeout(
             &path,
             LockMode::Exclusive,
@@ -904,7 +924,7 @@ mod tests {
                 "test_contender",
             )
             .unwrap_err();
-            assert!(matches!(&error, TaskStoreError::LockTimeout { .. }));
+            assert!(matches!(&error, ProcStoreError::LockTimeout { .. }));
             assert!(error.to_string().contains("operation=test_holder"));
             assert!(started.elapsed() < Duration::from_secs(1));
         }

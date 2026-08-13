@@ -43,8 +43,9 @@
 use sase_core::{
     AgentCleanupTargetWire, AgentMetaWire, ChangeSpecWire, CommentWire,
     CommitWire, DeltaWire, HookStatusLineWire, HookWire, IssueTypeWire,
-    MentorStatusLineWire, MentorWire, SourceSpanWire, StatusWire,
-    TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    MentorStatusLineWire, MentorWire, ProcStoreSnapshotWire,
+    ProcStoreStatsWire, ProcWire, SourceSpanWire, StatusWire, TimestampWire,
+    CHANGESPEC_WIRE_SCHEMA_VERSION, PROC_WIRE_SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -242,6 +243,140 @@ fn python_fixture_deserializes_into_rust_type() {
     // (modulo defaults) without losing information.
     let cs: ChangeSpecWire = serde_json::from_str(PYTHON_FIXTURE).unwrap();
     assert_eq!(cs, rust_patch());
+}
+
+const PROC_SNAPSHOT_FIXTURE: &str = r#"{
+    "schema_version": 2,
+    "procs": [
+        {
+            "proc_id": "proc-one",
+            "label": "Proc one",
+            "kind": "detached",
+            "status": "running",
+            "command": ["sleep", "1"],
+            "cwd": "/tmp",
+            "project": "sase",
+            "workspace_num": 13,
+            "session_id": "session-one",
+            "session_label": "ACE",
+            "origin": "test",
+            "cl_name": null,
+            "tags": ["alpha"],
+            "pid": 123,
+            "pgid": 456,
+            "exit_code": null,
+            "phase": "queued",
+            "message": null,
+            "created_at": "2026-07-25T12:00:00Z",
+            "started_at": "2026-07-25T12:00:01Z",
+            "finished_at": null,
+            "log_path": "/tmp/proc-one.log"
+        }
+    ],
+    "stats": {
+        "total_lines": 1,
+        "blank_lines": 0,
+        "invalid_json_lines": 0,
+        "invalid_record_lines": 0,
+        "loaded_rows": 1
+    }
+}"#;
+
+const LEGACY_TASK_SNAPSHOT_FIXTURE: &str = r#"{
+    "schema_version": 1,
+    "tasks": [
+        {
+            "task_id": "proc-one",
+            "label": "Proc one",
+            "kind": "detached",
+            "status": "running",
+            "command": ["sleep", "1"],
+            "cwd": "/tmp",
+            "project": "sase",
+            "workspace_num": 13,
+            "session_id": "session-one",
+            "session_label": "ACE",
+            "origin": "test",
+            "cl_name": null,
+            "tags": ["alpha"],
+            "pid": 123,
+            "pgid": 456,
+            "exit_code": null,
+            "phase": "queued",
+            "message": null,
+            "created_at": "2026-07-25T12:00:00Z",
+            "started_at": "2026-07-25T12:00:01Z",
+            "finished_at": null,
+            "log_path": "/tmp/proc-one.log"
+        }
+    ],
+    "stats": {
+        "total_lines": 1,
+        "blank_lines": 0,
+        "invalid_json_lines": 0,
+        "invalid_record_lines": 0,
+        "loaded_rows": 1
+    }
+}"#;
+
+fn rust_proc_snapshot() -> ProcStoreSnapshotWire {
+    ProcStoreSnapshotWire {
+        schema_version: PROC_WIRE_SCHEMA_VERSION,
+        procs: vec![ProcWire {
+            proc_id: "proc-one".to_string(),
+            label: "Proc one".to_string(),
+            kind: "detached".to_string(),
+            status: "running".to_string(),
+            command: vec!["sleep".to_string(), "1".to_string()],
+            cwd: "/tmp".to_string(),
+            project: Some("sase".to_string()),
+            workspace_num: Some(13),
+            session_id: Some("session-one".to_string()),
+            session_label: Some("ACE".to_string()),
+            origin: "test".to_string(),
+            cl_name: None,
+            tags: vec!["alpha".to_string()],
+            pid: Some(123),
+            pgid: Some(456),
+            exit_code: None,
+            phase: Some("queued".to_string()),
+            message: None,
+            created_at: "2026-07-25T12:00:00Z".to_string(),
+            started_at: Some("2026-07-25T12:00:01Z".to_string()),
+            finished_at: None,
+            log_path: "/tmp/proc-one.log".to_string(),
+        }],
+        stats: ProcStoreStatsWire {
+            total_lines: 1,
+            blank_lines: 0,
+            invalid_json_lines: 0,
+            invalid_record_lines: 0,
+            loaded_rows: 1,
+        },
+    }
+}
+
+#[test]
+fn proc_snapshot_json_uses_canonical_proc_keys() {
+    let rust_value: Value = serde_json::to_value(rust_proc_snapshot()).unwrap();
+    let fixture_value: Value =
+        serde_json::from_str(PROC_SNAPSHOT_FIXTURE).unwrap();
+
+    assert_eq!(rust_value, fixture_value);
+}
+
+#[test]
+fn legacy_task_snapshot_deserializes_and_reserializes_as_proc_shape() {
+    let legacy: ProcStoreSnapshotWire =
+        serde_json::from_str(LEGACY_TASK_SNAPSHOT_FIXTURE).unwrap();
+
+    assert_eq!(legacy.procs[0].proc_id, "proc-one");
+    let serialized = serde_json::to_value(legacy).unwrap();
+    assert_eq!(serialized["schema_version"], 1);
+    assert!(serialized.get("procs").is_some());
+    assert!(serialized.get("tasks").is_none());
+    assert_eq!(serialized["procs"][0]["proc_id"], "proc-one");
+    assert!(serialized["procs"][0].get("task_id").is_none());
 }
 
 #[test]

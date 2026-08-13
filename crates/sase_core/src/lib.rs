@@ -46,6 +46,7 @@ pub mod markdown_link_refs;
 pub mod notifications;
 pub mod parser;
 pub mod plan;
+pub mod procs;
 pub mod project_spec;
 pub mod prompt_artifact;
 pub mod prompt_literals;
@@ -60,7 +61,6 @@ pub mod snippet_session;
 pub mod status;
 mod store_lock;
 pub mod suffix;
-pub mod tasks;
 pub mod telemetry;
 pub mod vcs_log;
 pub mod wire;
@@ -594,6 +594,12 @@ pub use plan::{
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };
+pub use procs::{
+    append_proc, prune_procs, read_procs_snapshot, update_proc,
+    ProcAppendOutcomeWire, ProcPruneOutcomeWire, ProcStoreError,
+    ProcStoreSnapshotWire, ProcStoreStatsWire, ProcUpdateOutcomeWire,
+    ProcUpdateWire, ProcWire, PROC_WIRE_SCHEMA_VERSION,
+};
 pub use project_spec::{
     active_project_spec_filename, apply_project_aliases_update,
     apply_project_lifecycle_update, archive_project_spec_filename,
@@ -651,12 +657,6 @@ pub use status::{
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
-pub use tasks::{
-    append_task, prune_tasks, read_tasks_snapshot, update_task,
-    BackgroundTaskWire, TaskAppendOutcomeWire, TaskPruneOutcomeWire,
-    TaskStoreError, TaskStoreSnapshotWire, TaskStoreStatsWire,
-    TaskUpdateOutcomeWire, TaskUpdateWire, TASK_WIRE_SCHEMA_VERSION,
-};
 pub use telemetry::{
     cleanup_matching_labels as telemetry_cleanup_matching_labels,
     prune as telemetry_prune, query_instant as telemetry_query_instant,

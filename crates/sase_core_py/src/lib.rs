@@ -77,10 +77,14 @@
 //! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
 //! - `set_prompt_stash_pinned(path: str, ids: list[str], pinned: bool) -> dict`
 //! - `rewrite_prompt_stash(path: str, entries: list[dict]) -> dict`
-//! - `read_tasks_snapshot(path: str) -> dict`
-//! - `append_task(path: str, task: dict, history_limit: int) -> dict`
-//! - `update_task(path: str, update: dict) -> dict`
-//! - `prune_tasks(path: str, history_limit: int) -> dict`
+//! - `read_procs_snapshot(path: str) -> dict`
+//! - `append_proc(path: str, proc: dict, history_limit: int) -> dict`
+//! - `update_proc(path: str, update: dict) -> dict`
+//! - `prune_procs(path: str, history_limit: int) -> dict`
+//! - `read_tasks_snapshot(path: str) -> dict` (legacy alias)
+//! - `append_task(path: str, task: dict, history_limit: int) -> dict` (legacy alias)
+//! - `update_task(path: str, update: dict) -> dict` (legacy alias)
+//! - `prune_tasks(path: str, history_limit: int) -> dict` (legacy alias)
 //! - `is_agent_name_template(value: str) -> bool`
 //! - `parse_agent_name_template(template: str) -> dict`
 //! - `agent_name_template_key(template: str) -> dict | None`
@@ -677,6 +681,11 @@ use sase_core::plan::{
     PlanError, SddPlanHeaderSectionWire, PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
+use sase_core::procs::{
+    append_proc as core_append_proc, prune_procs as core_prune_procs,
+    read_procs_snapshot as core_read_procs_snapshot,
+    update_proc as core_update_proc, ProcStoreError, ProcUpdateWire, ProcWire,
+};
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
     apply_project_lifecycle_update as core_apply_project_lifecycle_update,
@@ -730,12 +739,6 @@ use sase_core::status::{
     read_status_from_lines as core_read_status_from_lines,
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
-};
-use sase_core::tasks::{
-    append_task as core_append_task, prune_tasks as core_prune_tasks,
-    read_tasks_snapshot as core_read_tasks_snapshot,
-    update_task as core_update_task, BackgroundTaskWire, TaskStoreError,
-    TaskUpdateWire,
 };
 use sase_core::telemetry::{
     cleanup_matching_labels as core_telemetry_cleanup_matching_labels,
@@ -5791,27 +5794,75 @@ fn prompt_stash_entries_from_py_list(
     Ok(values)
 }
 
-// --- Background-task store bindings -------------------------------------
+// --- Background proc store bindings -------------------------------------
 
-fn task_store_error_to_pyerr(error: TaskStoreError) -> PyErr {
+fn proc_store_error_to_pyerr(error: ProcStoreError) -> PyErr {
     match error {
-        error @ TaskStoreError::LockTimeout { .. } => {
+        error @ ProcStoreError::LockTimeout { .. } => {
             PyTimeoutError::new_err(error.to_string())
         }
         error => PyValueError::new_err(error.to_string()),
     }
 }
 
-/// Read the background-task JSONL store and return a snapshot dict.
+/// Read the proc JSONL store and return a snapshot dict.
+#[pyfunction]
+#[pyo3(name = "read_procs_snapshot")]
+fn py_read_procs_snapshot(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| core_read_procs_snapshot(&path));
+    proc_store_result_to_py(py, &snapshot.map_err(proc_store_error_to_pyerr)?)
+}
+
+/// Append one proc dict, enforce retention, and return the outcome dict.
+#[pyfunction]
+#[pyo3(name = "append_proc")]
+fn py_append_proc<'py>(
+    py: Python<'py>,
+    path: &str,
+    proc: &Bound<'py, PyDict>,
+    history_limit: i64,
+) -> PyResult<PyObject> {
+    let proc = proc_from_pydict(proc)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_append_proc(&path, &proc, history_limit));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+/// Apply a partial proc update and return its matched/proc outcome dict.
+#[pyfunction]
+#[pyo3(name = "update_proc")]
+fn py_update_proc<'py>(
+    py: Python<'py>,
+    path: &str,
+    update: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let update = proc_update_from_pydict(update)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_update_proc(&path, &update));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+/// Enforce terminal-proc retention and return the fresh snapshot + pruned ids.
+#[pyfunction]
+#[pyo3(name = "prune_procs")]
+fn py_prune_procs(
+    py: Python<'_>,
+    path: &str,
+    history_limit: i64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_prune_procs(&path, history_limit));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
 #[pyfunction]
 #[pyo3(name = "read_tasks_snapshot")]
 fn py_read_tasks_snapshot(py: Python<'_>, path: &str) -> PyResult<PyObject> {
-    let path = PathBuf::from(path);
-    let snapshot = py.allow_threads(|| core_read_tasks_snapshot(&path));
-    task_store_result_to_py(py, &snapshot.map_err(task_store_error_to_pyerr)?)
+    py_read_procs_snapshot(py, path)
 }
 
-/// Append one task dict, enforce retention, and return the outcome dict.
 #[pyfunction]
 #[pyo3(name = "append_task")]
 fn py_append_task<'py>(
@@ -5820,14 +5871,9 @@ fn py_append_task<'py>(
     task: &Bound<'py, PyDict>,
     history_limit: i64,
 ) -> PyResult<PyObject> {
-    let task = background_task_from_pydict(task)?;
-    let path = PathBuf::from(path);
-    let outcome =
-        py.allow_threads(|| core_append_task(&path, &task, history_limit));
-    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+    py_append_proc(py, path, task, history_limit)
 }
 
-/// Apply a partial task update and return its matched/task outcome dict.
 #[pyfunction]
 #[pyo3(name = "update_task")]
 fn py_update_task<'py>(
@@ -5835,13 +5881,9 @@ fn py_update_task<'py>(
     path: &str,
     update: &Bound<'py, PyDict>,
 ) -> PyResult<PyObject> {
-    let update = task_update_from_pydict(update)?;
-    let path = PathBuf::from(path);
-    let outcome = py.allow_threads(|| core_update_task(&path, &update));
-    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+    py_update_proc(py, path, update)
 }
 
-/// Enforce terminal-task retention and return the fresh snapshot + pruned ids.
 #[pyfunction]
 #[pyo3(name = "prune_tasks")]
 fn py_prune_tasks(
@@ -5849,34 +5891,30 @@ fn py_prune_tasks(
     path: &str,
     history_limit: i64,
 ) -> PyResult<PyObject> {
-    let path = PathBuf::from(path);
-    let outcome = py.allow_threads(|| core_prune_tasks(&path, history_limit));
-    task_store_result_to_py(py, &outcome.map_err(task_store_error_to_pyerr)?)
+    py_prune_procs(py, path, history_limit)
 }
 
-fn background_task_from_pydict(
-    dict: &Bound<'_, PyDict>,
-) -> PyResult<BackgroundTaskWire> {
+fn proc_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<ProcWire> {
     let value = py_to_json_value(dict.as_any())?;
     serde_json::from_value(value).map_err(|error| {
         PyValueError::new_err(format!(
-            "task is not a valid BackgroundTaskWire dict: {error}"
+            "proc is not a valid ProcWire dict: {error}"
         ))
     })
 }
 
-fn task_update_from_pydict(
+fn proc_update_from_pydict(
     dict: &Bound<'_, PyDict>,
-) -> PyResult<TaskUpdateWire> {
+) -> PyResult<ProcUpdateWire> {
     let value = py_to_json_value(dict.as_any())?;
     serde_json::from_value(value).map_err(|error| {
         PyValueError::new_err(format!(
-            "update is not a valid TaskUpdateWire dict: {error}"
+            "update is not a valid ProcUpdateWire dict: {error}"
         ))
     })
 }
 
-fn task_store_result_to_py<T>(py: Python<'_>, result: &T) -> PyResult<PyObject>
+fn proc_store_result_to_py<T>(py: Python<'_>, result: &T) -> PyResult<PyObject>
 where
     T: serde::Serialize,
 {
@@ -8352,6 +8390,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_set_prompt_stash_pinned, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_procs_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_proc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_proc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prune_procs, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
@@ -8964,15 +9006,19 @@ mod tests {
     }
 
     #[test]
-    fn background_task_store_bindings_round_trip_python_dicts() {
+    fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
         pyo3::prepare_freethreaded_python();
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("tasks.jsonl");
+        let path = temp.path().join("procs.jsonl");
         let path = path.to_str().unwrap();
         Python::with_gil(|py| {
             let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
             sase_core_rs(py, &module).unwrap();
             for name in [
+                "read_procs_snapshot",
+                "append_proc",
+                "update_proc",
+                "prune_procs",
                 "read_tasks_snapshot",
                 "append_task",
                 "update_task",
@@ -8984,8 +9030,8 @@ mod tests {
             let task = json_value_to_py(
                 py,
                 &json!({
-                    "task_id": "task-one",
-                    "label": "Binding task",
+                    "task_id": "proc-one",
+                    "label": "Binding proc",
                     "kind": "command",
                     "status": "pending",
                     "command": ["true"],
@@ -9005,23 +9051,23 @@ mod tests {
                     "created_at": "2026-07-25T12:00:00Z",
                     "started_at": null,
                     "finished_at": null,
-                    "log_path": "/tmp/task-one.log"
+                    "log_path": "/tmp/proc-one.log"
                 }),
             )
             .unwrap();
             let task = task.bind(py).downcast::<PyDict>().unwrap();
-            let appended = py_append_task(py, path, task, 10).unwrap();
+            let appended = py_append_proc(py, path, task, 10).unwrap();
             let appended = py_to_json_value(appended.bind(py)).unwrap();
-            assert_eq!(appended["snapshot"]["tasks"][0]["task_id"], "task-one");
+            assert_eq!(appended["snapshot"]["procs"][0]["proc_id"], "proc-one");
             assert_eq!(
-                appended["snapshot"]["tasks"][0]["tags"],
+                appended["snapshot"]["procs"][0]["tags"],
                 json!(["binding"])
             );
 
             let update = json_value_to_py(
                 py,
                 &json!({
-                    "task_id": "task-one",
+                    "task_id": "proc-one",
                     "status": "running",
                     "session_id": null,
                     "phase": null,
@@ -9032,17 +9078,17 @@ mod tests {
             let update = update.bind(py).downcast::<PyDict>().unwrap();
             let updated = py_update_task(py, path, update).unwrap();
             let updated = py_to_json_value(updated.bind(py)).unwrap();
-            assert_eq!(updated["task"]["status"], "running");
-            assert_eq!(updated["task"]["session_id"], JsonValue::Null);
-            assert_eq!(updated["task"]["phase"], JsonValue::Null);
-            assert_eq!(updated["task"]["pid"], 42);
+            assert_eq!(updated["proc"]["status"], "running");
+            assert_eq!(updated["proc"]["session_id"], JsonValue::Null);
+            assert_eq!(updated["proc"]["phase"], JsonValue::Null);
+            assert_eq!(updated["proc"]["pid"], 42);
 
             let snapshot = py_read_tasks_snapshot(py, path).unwrap();
             let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
-            assert_eq!(snapshot["tasks"][0]["task_id"], "task-one");
+            assert_eq!(snapshot["procs"][0]["proc_id"], "proc-one");
             let pruned = py_prune_tasks(py, path, 0).unwrap();
             let pruned = py_to_json_value(pruned.bind(py)).unwrap();
-            assert!(pruned["pruned_task_ids"].as_array().unwrap().is_empty());
+            assert!(pruned["pruned_proc_ids"].as_array().unwrap().is_empty());
         });
     }
 

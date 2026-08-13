@@ -98,6 +98,18 @@ All `rust-*` targets short-circuit with a friendly message when `../sase-core` i
 | `ChangeSpecWire`             | Legacy compatibility record with `commits`         |
 | `ParseErrorWire`             | Shared parser error record                         |
 
+`crates/sase_core/src/procs/wire.rs` owns the durable proc-store wire that backs background-process tracking:
+
+| Rust type                 | Contract role                                  |
+| ------------------------- | ---------------------------------------------- |
+| `ProcWire`                | One durable background proc record             |
+| `ProcStoreStatsWire`      | JSONL read statistics                          |
+| `ProcStoreSnapshotWire`   | Snapshot envelope with canonical `procs` rows  |
+| `ProcAppendOutcomeWire`   | Append outcome plus retention results          |
+| `ProcUpdateWire`          | Partial mutation identified by `proc_id`       |
+| `ProcUpdateOutcomeWire`   | Update outcome with the matched `proc` row     |
+| `ProcPruneOutcomeWire`    | Retention outcome plus pruned proc ids         |
+
 `crates/sase_core/src/agent_scan/wire.rs` mirrors
 `sase_100/src/sase/core/agent_scan_wire.py` (Phase 3B):
 
@@ -126,6 +138,8 @@ JSON shape rules (enforced by tests):
   `commit_entry_num` / `entry_id` keys for installed consumers.
 - Canonical records deserialize legacy keys, and legacy records deserialize canonical keys, so mixed-version producers
   and consumers can overlap during the terminology migration.
+- Proc-store records serialize canonical `procs` / `proc_id` / `pruned_proc_ids` / `proc` keys, while deserializing
+  legacy `tasks` / `task_id` / `pruned_task_ids` / `task` keys during the background-task terminology migration.
 - Field declaration order matches the current Python dataclasses at the legacy boundary, so byte-for-byte parity is
   reachable when both sides preserve declaration order.
 
