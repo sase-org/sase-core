@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 
-use super::tabs::tabs_and_counts_for;
+use super::tabs::{tab_key_for, tabs_and_counts_for};
 use super::wire::{
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
@@ -275,6 +275,18 @@ fn apply_notification_state_update_with_options(
             NotificationStateUpdateWire::MarkAllRead => {
                 for n in &mut rows {
                     if !n.read {
+                        matched_count += 1;
+                        n.read = true;
+                        changed_count += 1;
+                    }
+                }
+            }
+            NotificationStateUpdateWire::MarkTabRead { tab_key } => {
+                for n in &mut rows {
+                    if n.read {
+                        continue;
+                    }
+                    if tab_key_for(n).0 == *tab_key {
                         matched_count += 1;
                         n.read = true;
                         changed_count += 1;

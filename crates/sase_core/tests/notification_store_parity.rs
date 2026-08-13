@@ -345,6 +345,100 @@ fn notification_state_update_counts_skips_returned_snapshot() {
 }
 
 #[test]
+fn notification_mark_tab_read_marks_only_unread_target_tab() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut alpha = notification("alpha");
+    alpha.tags = vec!["alpha".to_string()];
+    let mut read_alpha = notification("read-alpha");
+    read_alpha.tags = vec!["alpha".to_string()];
+    read_alpha.read = true;
+    let mut beta = notification("beta");
+    beta.tags = vec!["beta".to_string()];
+    let general = notification("general");
+    rewrite_notifications(&path, &[alpha, read_alpha, beta, general]).unwrap();
+
+    let outcome = apply_notification_state_update_counts(
+        &path,
+        &NotificationStateUpdateWire::MarkTabRead {
+            tab_key: "alpha".to_string(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(outcome.rewritten);
+    assert!(outcome.notifications.is_empty());
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    for id in ["alpha", "read-alpha"] {
+        let row = snapshot
+            .notifications
+            .iter()
+            .find(|notification| notification.id == id)
+            .unwrap();
+        assert!(row.read);
+    }
+    for id in ["beta", "general"] {
+        let row = snapshot
+            .notifications
+            .iter()
+            .find(|notification| notification.id == id)
+            .unwrap();
+        assert!(!row.read);
+    }
+
+    let repeat = apply_notification_state_update_counts(
+        &path,
+        &NotificationStateUpdateWire::MarkTabRead {
+            tab_key: "alpha".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(repeat.matched_count, 0);
+    assert_eq!(repeat.changed_count, 0);
+    assert!(!repeat.rewritten);
+}
+
+#[test]
+fn notification_mark_tab_read_uses_general_tab_for_untagged_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let general = notification("general");
+    let mut tagged = notification("tagged");
+    tagged.tags = vec!["alpha".to_string()];
+    rewrite_notifications(&path, &[general, tagged]).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkTabRead {
+            tab_key: "general".to_string(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|notification| notification.id == "general")
+            .unwrap()
+            .read
+    );
+    assert!(
+        !outcome
+            .notifications
+            .iter()
+            .find(|notification| notification.id == "tagged")
+            .unwrap()
+            .read
+    );
+}
+
+#[test]
 fn notification_batch_dismiss_and_rewrite_all_update_the_store() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());

@@ -146,6 +146,9 @@ pub enum NotificationStateUpdateWire {
         id: String,
     },
     MarkAllRead,
+    MarkTabRead {
+        tab_key: String,
+    },
     MarkDismissed {
         id: String,
     },
