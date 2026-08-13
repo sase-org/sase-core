@@ -9,11 +9,19 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_width::UnicodeWidthStr;
 
 use super::filter::ArtifactPathFilter;
 use super::validate_artifact_ref_expansion_format;
 use super::wire::ArtifactRefError;
 
+// Adding `icon` as a required field is a breaking wire change, and the textbook
+// move would be to bump this from 1 to 2. Do not: CI installs the published
+// floor `sase-core-rs` and runs it against this checkout, which would reject a
+// `schema_version: 2` spec before core carrying the bump is ever released. A
+// floor core ignores an unknown `icon` field under serde's default handling and
+// keeps validating at version 1, so enforcement simply does not apply until the
+// core carrying it is installed — see plans/202608/artifacts_tab_icons.md (D2).
 pub const ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION: u64 = 1;
 
 const RESERVED_KINDS: &[&str] = &["stitch", "patch", "bead", "agent", "file"];
@@ -42,6 +50,7 @@ pub struct ArtifactRefProviderSpecWire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefProviderRefSpecWire {
     pub kind: String,
+    pub icon: String,
     pub expansion_format: String,
     #[serde(default)]
     pub properties: BTreeMap<String, ArtifactRefPropertySpecWire>,
@@ -105,6 +114,7 @@ pub fn validate_artifact_ref_provider_spec(
             spec.reference.kind
         )));
     }
+    validate_tab_icon(&spec.reference.icon)?;
     validate_artifact_ref_expansion_format(&spec.reference.expansion_format)?;
 
     for (name, property) in &spec.reference.properties {
@@ -176,6 +186,39 @@ pub fn artifact_ref_provider_spec_digest(
     Ok(hex::encode(Sha256::digest(&normalized)))
 }
 
+/// Validate a document provider's Artifacts tab strip mark.
+///
+/// The ceiling is 2 display cells rather than 1 so a two-cell emoji icon
+/// remains legal; the strip's click-range math is cell-accurate, so a
+/// two-cell icon renders and clicks correctly.
+fn validate_tab_icon(icon: &str) -> Result<(), ArtifactRefError> {
+    if icon.is_empty() {
+        return Err(ArtifactRefError::validation("ref icon must not be empty"));
+    }
+    if icon.trim() != icon {
+        return Err(ArtifactRefError::validation(
+            "ref icon must not have leading or trailing whitespace",
+        ));
+    }
+    if icon.chars().any(char::is_control) {
+        return Err(ArtifactRefError::validation(
+            "ref icon must not contain control characters",
+        ));
+    }
+    if icon.chars().count() > 8 || icon.len() > 32 {
+        return Err(ArtifactRefError::validation(
+            "ref icon must be at most 8 chars and 32 UTF-8 bytes",
+        ));
+    }
+    let width = icon.width();
+    if width == 0 || width > 2 {
+        return Err(ArtifactRefError::validation(format!(
+            "ref icon must display as 1 or 2 cells wide, got {width}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_identifier(
     value: &str,
     label: &str,
@@ -205,6 +248,7 @@ mod tests {
             provider: "research".to_string(),
             reference: ArtifactRefProviderRefSpecWire {
                 kind: "research".to_string(),
+                icon: "∴".to_string(),
                 expansion_format: "{kind}:{argument}".to_string(),
                 properties: BTreeMap::from([(
                     "status".to_string(),
@@ -315,5 +359,46 @@ mod tests {
         let mut spec = valid_spec();
         spec.schema_version = 99;
         assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_icon() {
+        let mut spec = valid_spec();
+        spec.reference.icon = "".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.icon = " ∴ ".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.icon = "\u{0007}".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.icon = "a".repeat(33);
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.icon = "中中中".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn accepts_two_cell_emoji_icon() {
+        let mut spec = valid_spec();
+        spec.reference.icon = "🔥".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn digest_changes_when_icon_changes() {
+        let first_spec = valid_spec();
+        let mut second_spec = valid_spec();
+        second_spec.reference.icon = "◆".to_string();
+
+        let first = artifact_ref_provider_spec_digest(&first_spec).unwrap();
+        let second = artifact_ref_provider_spec_digest(&second_spec).unwrap();
+        assert_ne!(first, second);
     }
 }

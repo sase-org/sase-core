@@ -10601,6 +10601,7 @@ MENTORS:
                 "provider": "research",
                 "ref": {
                     "kind": "research",
+                    "icon": "∴",
                     "expansion_format": "{kind}:{argument}",
                     "properties": {},
                     "detail": {"fields": []},
