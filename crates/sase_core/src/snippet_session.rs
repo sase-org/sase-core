@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnippetExpansionPlan {
     pub text: String,
@@ -135,6 +137,289 @@ fn is_escaped(text: &str, index: usize) -> bool {
     backslashes % 2 == 1
 }
 
+/// Bump when the shape of [`SnippetSessionState`] changes in a way that
+/// breaks round-tripping older serialized states.
+pub const SNIPPET_SESSION_SCHEMA_VERSION: u32 = 1;
+
+/// Nesting depth cap. Overflow drops the outermost session rather than
+/// refusing to expand, because a runaway stack is worse than a lost outer
+/// snippet.
+const MAX_SESSION_DEPTH: usize = 8;
+
+/// One tabstop in the flat, document-ordered stop list, tagged with the
+/// session that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnippetStop {
+    pub offset: usize,
+    pub session: u32,
+}
+
+/// The document span of one live expansion, used only for the nesting
+/// containment test and for identifying a session's stops on removal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnippetSpan {
+    pub id: u32,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// A nested snippet session: one flat ordered stop list with a single
+/// cursor, plus the session spans needed to decide nesting. An empty
+/// `stops` list means no active session; [`SnippetSessionState::empty`] is
+/// the canonical representation of that state, and every transition that
+/// would otherwise leave `stops` empty returns exactly that value so state
+/// equality can be used to test for "no active session".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnippetSessionState {
+    pub schema_version: u32,
+    pub stops: Vec<SnippetStop>,
+    pub index: usize,
+    pub sessions: Vec<SnippetSpan>,
+    pub next_session_id: u32,
+}
+
+impl SnippetSessionState {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SNIPPET_SESSION_SCHEMA_VERSION,
+            stops: Vec::new(),
+            index: 0,
+            sessions: Vec::new(),
+            next_session_id: 0,
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        !self.stops.is_empty()
+    }
+}
+
+impl Default for SnippetSessionState {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Apply a new expansion over document range `[range_start, range_end)`.
+///
+/// Nests inside the active session when the range is fully contained in
+/// the innermost session's span; otherwise resets, dropping every prior
+/// session and stop. A plan with no stops never starts a session: nested,
+/// it leaves the enclosing session untouched; not nested, it resets to no
+/// session at all, matching "no markers, no session".
+pub fn expand(
+    mut state: SnippetSessionState,
+    range_start: usize,
+    range_end: usize,
+    plan: &SnippetExpansionPlan,
+) -> SnippetSessionState {
+    let contained = state.sessions.last().is_some_and(|innermost| {
+        range_start >= innermost.start && range_end <= innermost.end
+    });
+
+    if plan.tabstop_offsets.is_empty() {
+        return if contained {
+            state
+        } else {
+            SnippetSessionState::empty()
+        };
+    }
+
+    let session_id = state.next_session_id;
+    let new_span = SnippetSpan {
+        id: session_id,
+        start: range_start,
+        end: range_end,
+    };
+    let new_stops: Vec<SnippetStop> = plan
+        .tabstop_offsets
+        .iter()
+        .map(|&relative_offset| SnippetStop {
+            offset: range_start + relative_offset,
+            session: session_id,
+        })
+        .collect();
+
+    if contained {
+        let insert_at = state.index + 1;
+        state.stops.splice(insert_at..insert_at, new_stops);
+        state.index = insert_at;
+        state.sessions.push(new_span);
+    } else {
+        state.stops = new_stops;
+        state.index = 0;
+        state.sessions = vec![new_span];
+    }
+    state.next_session_id = session_id + 1;
+
+    if state.sessions.len() > MAX_SESSION_DEPTH {
+        if let Some(outermost_id) = state.sessions.first().map(|span| span.id) {
+            remove_session(&mut state, outermost_id);
+        }
+    }
+
+    state
+}
+
+/// Move the cursor to the next stop. Advancing off the last stop ends the
+/// session (clearing all state) and reports no target, exactly like
+/// tabbing off the end of a single un-nested snippet does today.
+pub fn advance(
+    mut state: SnippetSessionState,
+) -> (SnippetSessionState, Option<usize>) {
+    if state.stops.is_empty() {
+        return (state, None);
+    }
+    if state.index + 1 < state.stops.len() {
+        state.index += 1;
+        let offset = state.stops[state.index].offset;
+        (state, Some(offset))
+    } else {
+        (SnippetSessionState::empty(), None)
+    }
+}
+
+/// Move the cursor to the previous stop. Retreating at the first stop
+/// reports no target but leaves the session active, so the caller can
+/// still consume the keypress without disturbing the session.
+pub fn retreat(
+    mut state: SnippetSessionState,
+) -> (SnippetSessionState, Option<usize>) {
+    if state.stops.is_empty() || state.index == 0 {
+        return (state, None);
+    }
+    state.index -= 1;
+    let offset = state.stops[state.index].offset;
+    (state, Some(offset))
+}
+
+/// Remap every stored offset for a document edit `[edit_start, edit_end)`
+/// that inserted `inserted_len` characters. Stops are sticky-right so
+/// typing at a stop grows past it; session spans are sticky-left on
+/// `start` and sticky-right on `end` so a session keeps containing
+/// everything typed inside it. Sessions whose span collapses or that lose
+/// every stop are dropped; if that empties the stop list, all state is
+/// cleared.
+pub fn apply_edit(
+    mut state: SnippetSessionState,
+    edit_start: usize,
+    edit_end: usize,
+    inserted_len: usize,
+) -> SnippetSessionState {
+    if !state.is_active() {
+        return state;
+    }
+    let (edit_start, edit_end) = if edit_start <= edit_end {
+        (edit_start, edit_end)
+    } else {
+        (edit_end, edit_start)
+    };
+
+    for stop in &mut state.stops {
+        stop.offset =
+            remap_sticky_right(stop.offset, edit_start, edit_end, inserted_len);
+    }
+    for session in &mut state.sessions {
+        session.start = remap_sticky_left(
+            session.start,
+            edit_start,
+            edit_end,
+            inserted_len,
+        );
+        session.end =
+            remap_sticky_right(session.end, edit_start, edit_end, inserted_len);
+    }
+
+    let stale_session_ids: Vec<u32> = state
+        .sessions
+        .iter()
+        .filter(|session| {
+            session.end <= session.start
+                || !state.stops.iter().any(|stop| stop.session == session.id)
+        })
+        .map(|session| session.id)
+        .collect();
+
+    for session_id in stale_session_ids {
+        if !state.is_active() {
+            break;
+        }
+        remove_session(&mut state, session_id);
+    }
+
+    state
+}
+
+/// End the session unconditionally, e.g. on `load_text` or leaving INSERT
+/// mode.
+pub fn clear(_state: SnippetSessionState) -> SnippetSessionState {
+    SnippetSessionState::empty()
+}
+
+/// Drop `session_id` and every stop it produced, wherever they occur in
+/// the flat list, and repoint the cursor at the nearest surviving stop at
+/// or before its old position (falling back to the first surviving stop).
+/// If nothing survives, the canonical empty state is installed.
+fn remove_session(state: &mut SnippetSessionState, session_id: u32) {
+    let old_index = state.index;
+    let mut new_stops = Vec::with_capacity(state.stops.len());
+    let mut new_index: Option<usize> = None;
+    for (i, stop) in state.stops.iter().enumerate() {
+        if stop.session == session_id {
+            continue;
+        }
+        new_stops.push(stop.clone());
+        if i <= old_index {
+            new_index = Some(new_stops.len() - 1);
+        }
+    }
+
+    if new_stops.is_empty() {
+        *state = SnippetSessionState::empty();
+        return;
+    }
+
+    state.sessions.retain(|span| span.id != session_id);
+    state.stops = new_stops;
+    state.index = new_index.unwrap_or(0);
+}
+
+/// `offset < edit_start` stays put; `offset >= edit_end` shifts by the
+/// edit's net length delta; an offset inside the deleted range clamps to
+/// just past the inserted text.
+fn remap_sticky_right(
+    offset: usize,
+    edit_start: usize,
+    edit_end: usize,
+    inserted_len: usize,
+) -> usize {
+    if offset < edit_start {
+        offset
+    } else if offset >= edit_end {
+        offset - (edit_end - edit_start) + inserted_len
+    } else {
+        edit_start + inserted_len
+    }
+}
+
+/// Same as [`remap_sticky_right`], except an offset sitting exactly at
+/// `edit_start` stays put instead of shifting, and an offset inside the
+/// deleted range clamps to just before the inserted text.
+fn remap_sticky_left(
+    offset: usize,
+    edit_start: usize,
+    edit_end: usize,
+    inserted_len: usize,
+) -> usize {
+    if offset <= edit_start {
+        offset
+    } else if offset >= edit_end {
+        offset - (edit_end - edit_start) + inserted_len
+    } else {
+        edit_start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +490,403 @@ mod tests {
 
         assert_eq!(planned.text, "α  β ");
         assert_eq!(planned.tabstop_offsets, vec![2, 5]);
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    fn plan(offsets: &[usize]) -> SnippetExpansionPlan {
+        SnippetExpansionPlan {
+            text: String::new(),
+            tabstop_offsets: offsets.to_vec(),
+        }
+    }
+
+    #[test]
+    fn nesting_at_a_stop_resumes_outer_session_after_inner_exhausts() {
+        // The reported bug: expand `foo $1 bar $2 baz $3 buz`, advance to
+        // $2, nest a second snippet there, exhaust the inner stops, and
+        // the next advance must land on the outer $3, not fall off the
+        // end of a discarded session.
+        let outer_plan =
+            plan_snippet_expansion("foo $1 bar $2 baz $3 buz", "", true);
+        assert_eq!(outer_plan.tabstop_offsets, vec![4, 9, 14, 18]);
+
+        let state = expand(SnippetSessionState::empty(), 0, 100, &outer_plan);
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(9));
+
+        let inner_plan = plan_snippet_expansion("inner $1 done", "", true);
+        let state = expand(state, 8, 19, &inner_plan);
+        assert_eq!(state.index, 2);
+        assert_eq!(state.stops[state.index].offset, 14);
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(19), "inner's own last stop");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(14), "resumes outer's $3 after inner exhausts");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(18), "resumes outer's $0");
+
+        let (state, offset) = advance(state);
+        assert_eq!(
+            offset, None,
+            "advancing off the last stop ends the session"
+        );
+        assert_eq!(state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn expand_outside_active_span_resets_instead_of_nesting() {
+        let state = expand(SnippetSessionState::empty(), 5, 20, &plan(&[0, 2]));
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, 0);
+
+        // A whole-document replacement can never be contained in an
+        // existing expansion, so it must reset rather than nest.
+        let state = expand(state, 0, 100, &plan(&[0, 3]));
+
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(
+            state.sessions[0],
+            SnippetSpan {
+                id: 1,
+                start: 0,
+                end: 100
+            }
+        );
+        assert_eq!(
+            state.stops,
+            vec![
+                SnippetStop {
+                    offset: 0,
+                    session: 1
+                },
+                SnippetStop {
+                    offset: 3,
+                    session: 1
+                },
+            ]
+        );
+        assert_eq!(state.index, 0);
+    }
+
+    #[test]
+    fn nesting_a_plan_with_no_stops_leaves_the_enclosing_session_untouched() {
+        let state = expand(SnippetSessionState::empty(), 0, 20, &plan(&[2, 8]));
+        let before = state.clone();
+
+        // A trigger that expands to a static snippet (no tabstops at all)
+        // must not start a session or disturb the one it lands inside.
+        let empty_plan = SnippetExpansionPlan {
+            text: "static".to_string(),
+            tabstop_offsets: vec![],
+        };
+        let state = expand(state, 5, 5, &empty_plan);
+
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn expanding_a_no_stop_plan_outside_any_session_clears_state() {
+        let state = expand(SnippetSessionState::empty(), 0, 20, &plan(&[2, 8]));
+        assert!(state.is_active());
+
+        let empty_plan = SnippetExpansionPlan {
+            text: "static".to_string(),
+            tabstop_offsets: vec![],
+        };
+        // Not contained in the active session, so this must reset -- and
+        // since the new plan has no stops, resetting means clearing.
+        let state = expand(state, 50, 55, &empty_plan);
+
+        assert_eq!(state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn two_levels_of_nesting_resume_enclosing_sessions_in_order() {
+        let outer = plan(&[2, 8, 14]);
+        let middle = plan(&[1, 5]);
+        let inner = plan(&[0, 2]);
+
+        let state = expand(SnippetSessionState::empty(), 0, 20, &outer);
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(8));
+
+        let state = expand(state, 8, 16, &middle);
+        assert_eq!(state.index, 2);
+
+        let state = expand(state, 9, 11, &inner);
+        assert_eq!(state.index, 3);
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(11), "inner's own last stop");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(13), "resumes middle's remaining stop");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(14), "resumes outer's remaining stop");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, None);
+        assert_eq!(state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn depth_cap_drops_outermost_session_on_overflow() {
+        let one_stop = plan(&[0]);
+        let mut state = expand(SnippetSessionState::empty(), 0, 5, &one_stop);
+        for _ in 0..8 {
+            state = expand(state, 0, 5, &one_stop);
+        }
+
+        let ids: Vec<u32> = state.sessions.iter().map(|span| span.id).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            "outermost session (id 0) dropped"
+        );
+        assert!(state.stops.iter().all(|stop| stop.session != 0));
+        assert_eq!(state.stops.len(), 8);
+    }
+
+    #[test]
+    fn retreat_at_start_and_advance_past_end_report_no_target() {
+        let state = expand(SnippetSessionState::empty(), 0, 10, &plan(&[0, 4]));
+
+        let (state, offset) = retreat(state);
+        assert_eq!(offset, None, "retreat at index 0 has no target");
+        assert_eq!(state.index, 0, "but the session stays active");
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, Some(4));
+
+        let (state, offset) = advance(state);
+        assert_eq!(offset, None, "advance off the last stop has no target");
+        assert_eq!(
+            state,
+            SnippetSessionState::empty(),
+            "and clears the session"
+        );
+    }
+
+    #[test]
+    fn advance_and_retreat_on_an_inactive_session_are_no_ops() {
+        let (state, offset) = advance(SnippetSessionState::empty());
+        assert_eq!(offset, None);
+        assert_eq!(state, SnippetSessionState::empty());
+
+        let (state, offset) = retreat(SnippetSessionState::empty());
+        assert_eq!(offset, None);
+        assert_eq!(state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn apply_edit_remaps_stops_before_at_inside_and_after_the_edit() {
+        let state =
+            expand(SnippetSessionState::empty(), 0, 30, &plan(&[5, 10, 20]));
+
+        // Insert after every stop: nothing before the edit moves, but the
+        // containing session's end still grows to keep containing it.
+        let state = apply_edit(state, 25, 25, 3);
+        assert_eq!(
+            state.stops,
+            vec![
+                SnippetStop {
+                    offset: 5,
+                    session: 0
+                },
+                SnippetStop {
+                    offset: 10,
+                    session: 0
+                },
+                SnippetStop {
+                    offset: 20,
+                    session: 0
+                },
+            ]
+        );
+        assert_eq!(
+            state.sessions[0],
+            SnippetSpan {
+                id: 0,
+                start: 0,
+                end: 33
+            }
+        );
+
+        // Insert exactly at a stop: sticky-right means it grows past the
+        // stop rather than pushing the stop ahead of the typed text.
+        let state = apply_edit(state, 10, 10, 4);
+        assert_eq!(
+            state.stops[1],
+            SnippetStop {
+                offset: 14,
+                session: 0
+            }
+        );
+        assert_eq!(
+            state.stops[0],
+            SnippetStop {
+                offset: 5,
+                session: 0
+            },
+            "stop before the edit is untouched"
+        );
+        assert_eq!(
+            state.stops[2],
+            SnippetStop {
+                offset: 24,
+                session: 0
+            },
+            "stop after the edit shifts"
+        );
+
+        // Delete a range that spans a stop: the stop clamps to just past
+        // the (empty) inserted text rather than landing inside deleted
+        // content.
+        let state = apply_edit(state, 12, 16, 0);
+        assert_eq!(
+            state.stops[1],
+            SnippetStop {
+                offset: 12,
+                session: 0
+            },
+            "clamped into the deletion point"
+        );
+        assert_eq!(
+            state.stops[2],
+            SnippetStop {
+                offset: 20,
+                session: 0
+            },
+            "shifts left by the deleted span"
+        );
+    }
+
+    #[test]
+    fn apply_edit_deletes_offsets_falling_before_the_first_stop() {
+        let state =
+            expand(SnippetSessionState::empty(), 10, 20, &plan(&[0, 8]));
+
+        // A deletion entirely before the session's start shifts
+        // everything left, including the session span itself.
+        let state = apply_edit(state, 0, 5, 0);
+
+        assert_eq!(
+            state.sessions[0],
+            SnippetSpan {
+                id: 0,
+                start: 5,
+                end: 15
+            }
+        );
+        assert_eq!(
+            state.stops,
+            vec![
+                SnippetStop {
+                    offset: 5,
+                    session: 0
+                },
+                SnippetStop {
+                    offset: 13,
+                    session: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_a_whole_nested_expansion_drops_it_without_corrupting_the_enclosing_session(
+    ) {
+        let outer = plan(&[2, 25]);
+        let inner = plan(&[0, 5]);
+
+        let state = expand(SnippetSessionState::empty(), 0, 30, &outer);
+        let state = expand(state, 10, 20, &inner);
+        assert_eq!(state.sessions.len(), 2);
+
+        // Delete exactly the inner expansion's span.
+        let state = apply_edit(state, 10, 20, 0);
+
+        assert_eq!(
+            state.sessions,
+            vec![SnippetSpan {
+                id: 0,
+                start: 0,
+                end: 20
+            }]
+        );
+        assert_eq!(
+            state.stops,
+            vec![
+                SnippetStop {
+                    offset: 2,
+                    session: 0
+                },
+                SnippetStop {
+                    offset: 15,
+                    session: 0
+                },
+            ]
+        );
+        assert_eq!(state.index, 0);
+    }
+
+    #[test]
+    fn apply_edit_on_an_inactive_session_is_a_no_op() {
+        let state = apply_edit(SnippetSessionState::empty(), 0, 5, 3);
+        assert_eq!(state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn apply_edit_normalizes_unordered_edit_bounds() {
+        let sorted =
+            expand(SnippetSessionState::empty(), 0, 30, &plan(&[5, 20]));
+        let unsorted = sorted.clone();
+
+        let sorted = apply_edit(sorted, 10, 15, 2);
+        let unsorted = apply_edit(unsorted, 15, 10, 2);
+
+        assert_eq!(sorted, unsorted);
+    }
+
+    #[test]
+    fn clear_ends_an_active_session() {
+        let state = expand(SnippetSessionState::empty(), 0, 10, &plan(&[0, 4]));
+        assert!(state.is_active());
+
+        assert_eq!(clear(state), SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn state_serializes_with_the_documented_field_order() {
+        let state =
+            expand(SnippetSessionState::empty(), 10, 60, &plan(&[32, 37]));
+
+        let value = serde_json::to_value(&state).unwrap();
+        let expected_order = [
+            "schema_version",
+            "stops",
+            "index",
+            "sessions",
+            "next_session_id",
+        ];
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, expected_order);
+
+        let round_tripped: SnippetSessionState =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, state);
     }
 }
