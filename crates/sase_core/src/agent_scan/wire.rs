@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 5;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 6;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -367,6 +367,18 @@ pub struct AgentMetaWire {
     pub monitor_followup_agent: Option<String>,
     #[serde(default)]
     pub monitor_tail_lines: Option<i64>,
+    #[serde(default)]
+    pub monitor_pgid: Option<i64>,
+    #[serde(default)]
+    pub monitor_supervisor_identity: Option<String>,
+    #[serde(default)]
+    pub monitor_settled: bool,
+    #[serde(default)]
+    pub monitor_idle_timeout_seconds: Option<f64>,
+    #[serde(default)]
+    pub monitor_next_output: Option<String>,
+    #[serde(default)]
+    pub monitor_request_fingerprint: Option<String>,
 }
 
 /// Compact projection of `running.json`.
@@ -690,6 +702,12 @@ mod tests {
             monitor_starter_agent: Some("acme--0".to_string()),
             monitor_followup_agent: Some("acme--1".to_string()),
             monitor_tail_lines: Some(200),
+            monitor_pgid: Some(4242),
+            monitor_supervisor_identity: Some("boot-abc123:98765".to_string()),
+            monitor_settled: true,
+            monitor_idle_timeout_seconds: Some(600.0),
+            monitor_next_output: Some("tail".to_string()),
+            monitor_request_fingerprint: Some("sha256:deadbeef".to_string()),
             ..Default::default()
         };
 
@@ -712,6 +730,12 @@ mod tests {
         assert_eq!(decoded.monitor_id, None);
         assert_eq!(decoded.monitor_state, None);
         assert!(!decoded.monitor_output_truncated);
+        assert_eq!(decoded.monitor_pgid, None);
+        assert_eq!(decoded.monitor_supervisor_identity, None);
+        assert!(!decoded.monitor_settled);
+        assert_eq!(decoded.monitor_idle_timeout_seconds, None);
+        assert_eq!(decoded.monitor_next_output, None);
+        assert_eq!(decoded.monitor_request_fingerprint, None);
     }
 
     #[test]

@@ -1102,6 +1102,18 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         monitor_starter_agent: coerce_str(data.get("monitor_starter_agent")),
         monitor_followup_agent: coerce_str(data.get("monitor_followup_agent")),
         monitor_tail_lines: coerce_int(data.get("monitor_tail_lines")),
+        monitor_pgid: coerce_int(data.get("monitor_pgid")),
+        monitor_supervisor_identity: coerce_str(
+            data.get("monitor_supervisor_identity"),
+        ),
+        monitor_settled: coerce_bool_truthy(data.get("monitor_settled")),
+        monitor_idle_timeout_seconds: coerce_float(
+            data.get("monitor_idle_timeout_seconds"),
+        ),
+        monitor_next_output: coerce_str(data.get("monitor_next_output")),
+        monitor_request_fingerprint: coerce_str(
+            data.get("monitor_request_fingerprint"),
+        ),
     }
 }
 
