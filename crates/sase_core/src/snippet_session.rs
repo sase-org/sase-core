@@ -356,6 +356,133 @@ pub fn clear(_state: SnippetSessionState) -> SnippetSessionState {
     SnippetSessionState::empty()
 }
 
+/// Wire-shaped event driving the session engine's single entry point,
+/// tagged by `kind` so a caller across the PyO3 boundary has exactly one
+/// binding to call. Each variant mirrors one of the pure functions above:
+/// `Plan` is the exception, a stateless call over
+/// [`plan_snippet_expansion`] rather than a state transition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnippetSessionEvent {
+    Plan {
+        template: String,
+        line_indent: String,
+        indent_continuation_lines: bool,
+    },
+    Expand {
+        range_start: usize,
+        range_end: usize,
+        tabstop_offsets: Vec<usize>,
+    },
+    Advance,
+    Retreat,
+    ApplyEdit {
+        edit_start: usize,
+        edit_end: usize,
+        inserted_len: usize,
+    },
+    Clear,
+}
+
+/// Result of [`apply_session_event`]. Rectangular: every field is always
+/// present, `None`/empty when the event kind does not populate it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnippetSessionEventResult {
+    pub state: SnippetSessionState,
+    pub cursor_offset: Option<usize>,
+    pub text: Option<String>,
+    pub tabstop_offsets: Vec<usize>,
+}
+
+/// The session engine's single entry point: apply one wire event to the
+/// current state and report the new state plus whatever the event
+/// resolved.
+///
+/// `Expand` reports the offset the cursor now sits at (the new state's
+/// current stop) as a convenience for the caller, even though the pure
+/// [`expand`] transition itself has no notion of "cursor offset". `Plan`
+/// echoes `state` back unchanged, since planning is stateless.
+pub fn apply_session_event(
+    state: SnippetSessionState,
+    event: SnippetSessionEvent,
+) -> SnippetSessionEventResult {
+    match event {
+        SnippetSessionEvent::Plan {
+            template,
+            line_indent,
+            indent_continuation_lines,
+        } => {
+            let planned = plan_snippet_expansion(
+                &template,
+                &line_indent,
+                indent_continuation_lines,
+            );
+            SnippetSessionEventResult {
+                state,
+                cursor_offset: None,
+                text: Some(planned.text),
+                tabstop_offsets: planned.tabstop_offsets,
+            }
+        }
+        SnippetSessionEvent::Expand {
+            range_start,
+            range_end,
+            tabstop_offsets,
+        } => {
+            let plan = SnippetExpansionPlan {
+                text: String::new(),
+                tabstop_offsets,
+            };
+            let state = expand(state, range_start, range_end, &plan);
+            let cursor_offset =
+                state.stops.get(state.index).map(|stop| stop.offset);
+            SnippetSessionEventResult {
+                state,
+                cursor_offset,
+                text: None,
+                tabstop_offsets: Vec::new(),
+            }
+        }
+        SnippetSessionEvent::Advance => {
+            let (state, cursor_offset) = advance(state);
+            SnippetSessionEventResult {
+                state,
+                cursor_offset,
+                text: None,
+                tabstop_offsets: Vec::new(),
+            }
+        }
+        SnippetSessionEvent::Retreat => {
+            let (state, cursor_offset) = retreat(state);
+            SnippetSessionEventResult {
+                state,
+                cursor_offset,
+                text: None,
+                tabstop_offsets: Vec::new(),
+            }
+        }
+        SnippetSessionEvent::ApplyEdit {
+            edit_start,
+            edit_end,
+            inserted_len,
+        } => {
+            let state = apply_edit(state, edit_start, edit_end, inserted_len);
+            SnippetSessionEventResult {
+                state,
+                cursor_offset: None,
+                text: None,
+                tabstop_offsets: Vec::new(),
+            }
+        }
+        SnippetSessionEvent::Clear => SnippetSessionEventResult {
+            state: clear(state),
+            cursor_offset: None,
+            text: None,
+            tabstop_offsets: Vec::new(),
+        },
+    }
+}
+
 /// Drop `session_id` and every stop it produced, wherever they occur in
 /// the flat list, and repoint the cursor at the nearest surviving stop at
 /// or before its old position (falling back to the first surviving stop).
@@ -496,6 +623,7 @@ mod tests {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+    use serde_json::json;
 
     fn plan(offsets: &[usize]) -> SnippetExpansionPlan {
         SnippetExpansionPlan {
@@ -888,5 +1016,192 @@ mod session_tests {
         let round_tripped: SnippetSessionState =
             serde_json::from_value(value).unwrap();
         assert_eq!(round_tripped, state);
+    }
+
+    #[test]
+    fn event_kind_tags_match_the_documented_snake_case_names() {
+        let events = [
+            (
+                json!({
+                    "kind": "plan",
+                    "template": "a $1 b",
+                    "line_indent": "",
+                    "indent_continuation_lines": true
+                }),
+                "Plan",
+            ),
+            (
+                json!({
+                    "kind": "expand",
+                    "range_start": 0,
+                    "range_end": 5,
+                    "tabstop_offsets": [1, 3]
+                }),
+                "Expand",
+            ),
+            (json!({"kind": "advance"}), "Advance"),
+            (json!({"kind": "retreat"}), "Retreat"),
+            (
+                json!({
+                    "kind": "apply_edit",
+                    "edit_start": 0,
+                    "edit_end": 1,
+                    "inserted_len": 2
+                }),
+                "ApplyEdit",
+            ),
+            (json!({"kind": "clear"}), "Clear"),
+        ];
+
+        for (value, expected_variant) in events {
+            let event: SnippetSessionEvent =
+                serde_json::from_value(value).unwrap();
+            let debug = format!("{event:?}");
+            assert!(
+                debug.starts_with(expected_variant),
+                "expected {debug} to start with {expected_variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_session_event_plan_is_stateless_and_echoes_state_unchanged() {
+        let state = expand(SnippetSessionState::empty(), 0, 10, &plan(&[0, 4]));
+
+        let result = apply_session_event(
+            state.clone(),
+            SnippetSessionEvent::Plan {
+                template: "foo $1 bar $2 baz $3 buz".to_string(),
+                line_indent: String::new(),
+                indent_continuation_lines: true,
+            },
+        );
+
+        assert_eq!(result.state, state, "planning must not touch the session");
+        assert_eq!(result.cursor_offset, None);
+        assert_eq!(result.text, Some("foo  bar  baz  buz".to_string()));
+        assert_eq!(result.tabstop_offsets, vec![4, 9, 14, 18]);
+    }
+
+    #[test]
+    fn apply_session_event_expand_reports_the_new_cursor_offset() {
+        let empty = SnippetSessionState::empty();
+
+        let expanded = apply_session_event(
+            empty,
+            SnippetSessionEvent::Expand {
+                range_start: 10,
+                range_end: 20,
+                tabstop_offsets: vec![2, 8],
+            },
+        );
+        assert_eq!(expanded.cursor_offset, Some(12));
+        assert!(expanded.state.is_active());
+
+        // A plan with no stops that isn't contained in the active session
+        // resets to empty, and the reported cursor offset follows: none.
+        let cleared = apply_session_event(
+            expanded.state,
+            SnippetSessionEvent::Expand {
+                range_start: 50,
+                range_end: 55,
+                tabstop_offsets: vec![],
+            },
+        );
+        assert_eq!(cleared.cursor_offset, None);
+        assert_eq!(cleared.state, SnippetSessionState::empty());
+    }
+
+    #[test]
+    fn apply_session_event_drives_the_reported_bug_scenario_end_to_end() {
+        let outer_plan =
+            plan_snippet_expansion("foo $1 bar $2 baz $3 buz", "", true);
+        let state = SnippetSessionState::empty();
+
+        let result = apply_session_event(
+            state,
+            SnippetSessionEvent::Expand {
+                range_start: 0,
+                range_end: 100,
+                tabstop_offsets: outer_plan.tabstop_offsets.clone(),
+            },
+        );
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Advance);
+        assert_eq!(result.cursor_offset, Some(9));
+
+        let inner_plan = plan_snippet_expansion("inner $1 done", "", true);
+        let result = apply_session_event(
+            result.state,
+            SnippetSessionEvent::Expand {
+                range_start: 8,
+                range_end: 19,
+                tabstop_offsets: inner_plan.tabstop_offsets,
+            },
+        );
+
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Advance);
+        assert_eq!(result.cursor_offset, Some(19), "inner's own last stop");
+
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Advance);
+        assert_eq!(
+            result.cursor_offset,
+            Some(14),
+            "resumes outer's $3 after inner exhausts"
+        );
+    }
+
+    #[test]
+    fn apply_session_event_advance_retreat_apply_edit_and_clear_round_trip() {
+        let state = expand(SnippetSessionState::empty(), 0, 10, &plan(&[0, 4]));
+
+        let result = apply_session_event(
+            state,
+            SnippetSessionEvent::ApplyEdit {
+                edit_start: 10,
+                edit_end: 10,
+                inserted_len: 3,
+            },
+        );
+        assert_eq!(result.cursor_offset, None);
+        assert_eq!(result.state.sessions[0].end, 13);
+
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Retreat);
+        assert_eq!(result.cursor_offset, None, "already at index 0");
+
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Advance);
+        assert_eq!(result.cursor_offset, Some(4));
+
+        let result =
+            apply_session_event(result.state, SnippetSessionEvent::Clear);
+        assert_eq!(result.state, SnippetSessionState::empty());
+        assert_eq!(result.cursor_offset, None);
+    }
+
+    #[test]
+    fn event_result_serializes_with_the_documented_field_order() {
+        let result = apply_session_event(
+            SnippetSessionState::empty(),
+            SnippetSessionEvent::Plan {
+                template: "$1$0".to_string(),
+                line_indent: String::new(),
+                indent_continuation_lines: true,
+            },
+        );
+
+        let value = serde_json::to_value(&result).unwrap();
+        let expected_order =
+            ["state", "cursor_offset", "text", "tabstop_offsets"];
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, expected_order);
     }
 }

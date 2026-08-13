@@ -243,6 +243,11 @@
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
 //!   `-> dict` (project-filterable skills and memories plus global documents)
 //! - `compose_snippet_catalog(templates: dict[str, str]) -> dict`
+//! - `apply_snippet_session_event(state: dict, event: dict) -> dict` (the
+//!   nested snippet session engine's single entry point: `event["kind"]`
+//!   is one of `plan`, `expand`, `advance`, `retreat`, `apply_edit`, or
+//!   `clear`; the result dict always has `state`, `cursor_offset`, `text`,
+//!   and `tabstop_offsets`)
 //! - `artifact_ref_kind_catalog() -> list[dict]`
 //! - `artifact_ref_kind_canonicalize(label: str) -> dict`
 //! - `artifact_ref_parse_canonical(value: str) -> dict`
@@ -713,6 +718,10 @@ use sase_core::runner_limit_override::{
     set_runner_limit_override_relative as core_set_runner_limit_override_relative,
     set_runner_limit_override_until as core_set_runner_limit_override_until,
     RunnerLimitOverrideError as RunnerLimitOverrideDomainError,
+};
+use sase_core::snippet_session::{
+    apply_session_event as core_apply_snippet_session_event,
+    SnippetSessionEvent, SnippetSessionState,
 };
 use sase_core::status::{
     apply_status_update as core_apply_status_update,
@@ -1288,6 +1297,41 @@ fn py_compose_snippet_catalog<'py>(
     result.set_item("templates", composed.templates)?;
     result.set_item("alias_provenance", composed.alias_provenance)?;
     Ok(result)
+}
+
+/// The nested snippet session engine's single entry point: apply one wire
+/// event (`plan`, `expand`, `advance`, `retreat`, `apply_edit`, or `clear`)
+/// to the current session state dict and return the new state plus
+/// whatever the event resolved, as a plain `dict` with the keys `state`,
+/// `cursor_offset`, `text`, and `tabstop_offsets` always present.
+///
+/// One binding rather than five keeps the wire surface and the
+/// `schema_version` story small; `event["kind"]` selects the transition.
+#[pyfunction]
+#[pyo3(name = "apply_snippet_session_event")]
+fn py_apply_snippet_session_event<'py>(
+    py: Python<'py>,
+    state: &Bound<'py, PyDict>,
+    event: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let state: SnippetSessionState = serde_json::from_value(py_to_json_value(
+        state.as_any(),
+    )?)
+    .map_err(|error| {
+        PyValueError::new_err(format!("invalid snippet session state: {error}"))
+    })?;
+    let event: SnippetSessionEvent = serde_json::from_value(py_to_json_value(
+        event.as_any(),
+    )?)
+    .map_err(|error| {
+        PyValueError::new_err(format!("invalid snippet session event: {error}"))
+    })?;
+
+    let result = core_apply_snippet_session_event(state, event);
+    let value = serde_json::to_value(&result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Parse a project file's bytes into a `list[dict]` mirroring the
@@ -7956,6 +8000,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_apply_snippet_session_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
@@ -9375,6 +9420,178 @@ mod tests {
                         "Helper": "helper"
                     }
                 })
+            );
+        });
+    }
+
+    #[test]
+    fn apply_snippet_session_event_binding_drives_nesting_through_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_apply_snippet_session_event, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            let apply_event = |state: &PyObject, event: JsonValue| {
+                let state_dict = json_value_to_py(
+                    py,
+                    &py_to_json_value(state.bind(py)).unwrap(),
+                )
+                .unwrap();
+                let event_dict = json_value_to_py(py, &event).unwrap();
+                let result = module
+                    .getattr("apply_snippet_session_event")
+                    .unwrap()
+                    .call1((state_dict, event_dict))
+                    .unwrap();
+                py_to_json_value(&result).unwrap()
+            };
+
+            let empty_state: PyObject = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "stops": [],
+                    "index": 0,
+                    "sessions": [],
+                    "next_session_id": 0
+                }),
+            )
+            .unwrap();
+
+            let planned = apply_event(
+                &empty_state,
+                json!({
+                    "kind": "plan",
+                    "template": "foo $1 bar $2 baz $3 buz",
+                    "line_indent": "",
+                    "indent_continuation_lines": true
+                }),
+            );
+            assert_eq!(planned["text"], json!("foo  bar  baz  buz"));
+            assert_eq!(planned["tabstop_offsets"], json!([4, 9, 14, 18]));
+            assert_eq!(
+                planned["state"],
+                json!({
+                    "schema_version": 1,
+                    "stops": [],
+                    "index": 0,
+                    "sessions": [],
+                    "next_session_id": 0
+                }),
+                "planning is stateless and must echo the input state back"
+            );
+            assert_eq!(planned["cursor_offset"], JsonValue::Null);
+
+            let expanded_state: PyObject =
+                json_value_to_py(py, &planned["state"]).unwrap();
+            let expanded = apply_event(
+                &expanded_state,
+                json!({
+                    "kind": "expand",
+                    "range_start": 0,
+                    "range_end": 100,
+                    "tabstop_offsets": planned["tabstop_offsets"]
+                }),
+            );
+            let after_expand: PyObject =
+                json_value_to_py(py, &expanded["state"]).unwrap();
+
+            let advanced =
+                apply_event(&after_expand, json!({"kind": "advance"}));
+            assert_eq!(advanced["cursor_offset"], json!(9));
+            let after_advance: PyObject =
+                json_value_to_py(py, &advanced["state"]).unwrap();
+
+            let inner_planned = apply_event(
+                &after_advance,
+                json!({
+                    "kind": "plan",
+                    "template": "inner $1 done",
+                    "line_indent": "",
+                    "indent_continuation_lines": true
+                }),
+            );
+
+            let nested = apply_event(
+                &after_advance,
+                json!({
+                    "kind": "expand",
+                    "range_start": 8,
+                    "range_end": 19,
+                    "tabstop_offsets": inner_planned["tabstop_offsets"]
+                }),
+            );
+            let after_nest: PyObject =
+                json_value_to_py(py, &nested["state"]).unwrap();
+
+            let advanced_inner =
+                apply_event(&after_nest, json!({"kind": "advance"}));
+            assert_eq!(
+                advanced_inner["cursor_offset"],
+                json!(19),
+                "inner's own last stop"
+            );
+            let after_inner_advance: PyObject =
+                json_value_to_py(py, &advanced_inner["state"]).unwrap();
+
+            let resumed =
+                apply_event(&after_inner_advance, json!({"kind": "advance"}));
+            assert_eq!(
+                resumed["cursor_offset"],
+                json!(14),
+                "resumes outer's $3 after inner exhausts"
+            );
+        });
+    }
+
+    #[test]
+    fn apply_snippet_session_event_binding_rejects_malformed_input() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_apply_snippet_session_event, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+
+            let valid_state = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "stops": [],
+                    "index": 0,
+                    "sessions": [],
+                    "next_session_id": 0
+                }),
+            )
+            .unwrap();
+            let malformed_state =
+                json_value_to_py(py, &json!({"stops": []})).unwrap();
+            let advance_event =
+                json_value_to_py(py, &json!({"kind": "advance"})).unwrap();
+            let unknown_kind_event =
+                json_value_to_py(py, &json!({"kind": "teleport"})).unwrap();
+
+            let call = |state: &PyObject, event: &PyObject| {
+                module
+                    .getattr("apply_snippet_session_event")
+                    .unwrap()
+                    .call1((state, event))
+            };
+
+            assert!(
+                call(&malformed_state, &advance_event).is_err(),
+                "missing required state fields must be rejected"
+            );
+            assert!(
+                call(&valid_state, &unknown_kind_event).is_err(),
+                "an unrecognized event kind must be rejected"
             );
         });
     }
