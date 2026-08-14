@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.1](https://github.com/sase-org/sase-core/compare/v0.27.0...v0.27.1) - 2026-08-14
+
+### Fixed
+
+- support marking notification tabs read
+
 ## [0.27.0](https://github.com/sase-org/sase-core/compare/v0.26.11...v0.27.0) - 2026-08-13
 
 ### Added
