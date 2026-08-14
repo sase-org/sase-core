@@ -1882,45 +1882,145 @@ fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
     let entries = load_model_catalog(path);
     let needle = partial.to_lowercase();
     let mut candidates = Vec::new();
-    for entry in entries {
-        let value_lower = entry.value.to_lowercase();
-        let matched_alias = entry
-            .aliases
-            .iter()
-            .find(|alias| alias.to_lowercase().starts_with(&needle));
-        let filter_text =
-            if needle.is_empty() || value_lower.starts_with(&needle) {
-                entry.value.clone()
-            } else if let Some(alias) = matched_alias {
-                alias.clone()
-            } else {
-                continue;
-            };
-        let display = if entry.display.is_empty() {
-            entry.value.clone()
+    let matched_entries: Vec<(ModelCompletionEntry, String)> =
+        if needle.starts_with('@') {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    model_alias_entry_filter_text(entry, &needle)
+                        .map(|filter_text| (entry.clone(), filter_text))
+                })
+                .collect()
+        } else if let Some((provider, remainder)) =
+            model_provider_scope(&entries, &needle)
+        {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    scoped_model_entry(entry, &provider, &remainder)
+                })
+                .collect()
         } else {
-            entry.display.clone()
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    model_entry_filter_text(entry, &needle)
+                        .map(|filter_text| (entry.clone(), filter_text))
+                })
+                .collect()
         };
-        let detail = model_completion_detail(&entry);
-        let documentation = model_completion_documentation(&entry);
-        candidates.push(CompletionCandidate {
-            display,
-            insertion: entry.value.clone(),
-            detail,
-            documentation,
-            is_dir: false,
-            name: filter_text,
-            replacement: None,
-            additional_edits: Vec::new(),
-            kind: entry.kind,
-            project: String::new(),
-            status: entry.alias_kind,
-        });
+    for (entry, filter_text) in matched_entries {
+        candidates.push(model_completion_candidate(entry, filter_text));
     }
     CompletionList {
         candidates,
         shared_extension: String::new(),
     }
+}
+
+fn model_completion_candidate(
+    entry: ModelCompletionEntry,
+    filter_text: String,
+) -> CompletionCandidate {
+    let display = if entry.display.is_empty() {
+        entry.value.clone()
+    } else {
+        entry.display.clone()
+    };
+    let detail = model_completion_detail(&entry);
+    let documentation = model_completion_documentation(&entry);
+    CompletionCandidate {
+        display,
+        insertion: entry.value.clone(),
+        detail,
+        documentation,
+        is_dir: entry.kind == "provider",
+        name: filter_text,
+        replacement: None,
+        additional_edits: Vec::new(),
+        kind: entry.kind,
+        project: String::new(),
+        status: entry.alias_kind,
+    }
+}
+
+fn model_alias_entry_filter_text(
+    entry: &ModelCompletionEntry,
+    needle: &str,
+) -> Option<String> {
+    if !is_model_alias_kind(&entry.kind) {
+        return None;
+    }
+    if entry.value.to_lowercase().starts_with(needle) {
+        return Some(entry.value.clone());
+    }
+    entry.aliases.iter().find_map(|alias| {
+        let normalized = format!("@{}", alias.trim_start_matches('@'));
+        normalized
+            .to_lowercase()
+            .starts_with(needle)
+            .then_some(normalized)
+    })
+}
+
+fn model_entry_filter_text(
+    entry: &ModelCompletionEntry,
+    needle: &str,
+) -> Option<String> {
+    if needle.is_empty() || entry.value.to_lowercase().starts_with(needle) {
+        return Some(entry.value.clone());
+    }
+    entry
+        .aliases
+        .iter()
+        .find(|alias| alias.to_lowercase().starts_with(needle))
+        .cloned()
+}
+
+fn model_provider_scope(
+    entries: &[ModelCompletionEntry],
+    needle: &str,
+) -> Option<(String, String)> {
+    let (head, remainder) = needle.split_once('/')?;
+    if head.is_empty() {
+        return None;
+    }
+    let provider_value = format!("{head}/");
+    entries
+        .iter()
+        .find(|entry| {
+            entry.kind == "provider"
+                && entry.value.eq_ignore_ascii_case(&provider_value)
+        })
+        .map(|entry| {
+            let provider = if entry.provider.is_empty() {
+                head.to_string()
+            } else {
+                entry.provider.clone()
+            };
+            (provider, remainder.to_string())
+        })
+}
+
+fn scoped_model_entry(
+    entry: &ModelCompletionEntry,
+    provider: &str,
+    remainder: &str,
+) -> Option<(ModelCompletionEntry, String)> {
+    if entry.kind != "model" || !entry.provider.eq_ignore_ascii_case(provider) {
+        return None;
+    }
+    let filter_suffix = model_entry_filter_text(entry, remainder)?;
+    let prefix = format!("{provider}/");
+    let display = if entry.display.is_empty() {
+        entry.value.as_str()
+    } else {
+        entry.display.as_str()
+    };
+    let mut qualified = entry.clone();
+    qualified.value = format!("{prefix}{}", entry.value);
+    qualified.display = format!("{prefix}{display}");
+    Some((qualified, format!("{prefix}{filter_suffix}")))
 }
 
 fn is_model_alias_kind(kind: &str) -> bool {
@@ -4575,6 +4675,74 @@ mod tests {
         .unwrap();
     }
 
+    fn write_model_catalog_with_providers(path: &Path) {
+        fs::write(
+            path,
+            r#"{
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "value": "claude-fable-5",
+                        "display": "claude-fable-5",
+                        "description": "Claude (fable)",
+                        "kind": "model",
+                        "provider": "claude",
+                        "aliases": ["fable"]
+                    },
+                    {
+                        "value": "opus",
+                        "display": "opus",
+                        "description": "Claude",
+                        "kind": "model",
+                        "provider": "claude",
+                        "aliases": []
+                    },
+                    {
+                        "value": "gpt-5.6-sol",
+                        "display": "gpt-5.6-sol",
+                        "description": "Codex (gpt56sol)",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": ["gpt56sol"]
+                    },
+                    {
+                        "value": "anthropic/claude-sonnet-4-5",
+                        "display": "anthropic/claude-sonnet-4-5",
+                        "description": "OpenCode",
+                        "kind": "model",
+                        "provider": "opencode",
+                        "aliases": []
+                    },
+                    {
+                        "value": "claude/",
+                        "display": "claude/",
+                        "description": "Claude",
+                        "kind": "provider",
+                        "provider": "claude",
+                        "aliases": []
+                    },
+                    {
+                        "value": "codex/",
+                        "display": "codex/",
+                        "description": "Codex",
+                        "kind": "provider",
+                        "provider": "codex",
+                        "aliases": []
+                    },
+                    {
+                        "value": "opencode/",
+                        "display": "opencode/",
+                        "description": "OpenCode",
+                        "kind": "provider",
+                        "provider": "opencode",
+                        "aliases": []
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+    }
+
     fn write_enriched_model_catalog(path: &Path) {
         fs::write(
             path,
@@ -4656,6 +4824,22 @@ mod tests {
                         "pool_total": 3,
                         "config_source": "custom",
                         "bucket": "fast"
+                    },
+                    {
+                        "value": "claude/",
+                        "display": "claude/",
+                        "description": "Claude",
+                        "kind": "provider",
+                        "provider": "claude",
+                        "aliases": []
+                    },
+                    {
+                        "value": "codex/",
+                        "display": "codex/",
+                        "description": "Codex",
+                        "kind": "provider",
+                        "provider": "codex",
+                        "aliases": []
                     }
                 ]
             }"#,
@@ -4765,7 +4949,15 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["opus", "gpt-5.6-sol", "@default", "@claude_coder", "@scout"]
+            vec![
+                "opus",
+                "gpt-5.6-sol",
+                "@default",
+                "@claude_coder",
+                "@scout",
+                "claude/",
+                "codex/"
+            ]
         );
         assert_eq!(
             items.iter().map(|item| item.kind).collect::<Vec<_>>(),
@@ -4775,6 +4967,8 @@ mod tests {
                 Some(CompletionItemKind::ENUM_MEMBER),
                 Some(CompletionItemKind::ENUM_MEMBER),
                 Some(CompletionItemKind::ENUM_MEMBER),
+                Some(CompletionItemKind::VALUE),
+                Some(CompletionItemKind::VALUE),
             ]
         );
         assert_eq!(
@@ -4782,7 +4976,10 @@ mod tests {
                 .iter()
                 .map(|item| item.sort_text.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["0:0000", "0:0001", "1:0002", "1:0003", "1:0004"]
+            vec![
+                "0:0000", "0:0001", "1:0002", "1:0003", "1:0004", "2:0005",
+                "2:0006"
+            ]
         );
 
         let default =
@@ -4826,6 +5023,15 @@ mod tests {
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("custom")
+        );
+        let provider =
+            items.iter().find(|item| item.label == "claude/").unwrap();
+        assert_eq!(
+            provider
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("provider")
         );
         let Some(Documentation::MarkupContent(documentation)) =
             scout.documentation.as_ref()
@@ -4877,6 +5083,176 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| item.kind == Some(CompletionItemKind::ENUM_MEMBER)));
+    }
+
+    #[tokio::test]
+    async fn provider_scoped_model_directive_completion_returns_qualified_rows()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog_with_providers(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "%model:claude/".to_string(),
+                Position::new(0, 14),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude/claude-fable-5", "claude/opus"]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.filter_text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["claude/claude-fable-5", "claude/opus"]
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 7));
+        assert_eq!(edit.range.end, Position::new(0, 14));
+        assert_eq!(edit.new_text, "claude/claude-fable-5");
+    }
+
+    #[tokio::test]
+    async fn provider_scoped_model_directive_completion_matches_short_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog_with_providers(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "%model:claude/fa".to_string(),
+                Position::new(0, 16),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "claude/claude-fable-5");
+        assert_eq!(items[0].filter_text.as_deref(), Some("claude/fable"));
+    }
+
+    #[tokio::test]
+    async fn provider_scoped_model_directive_completion_uses_first_slash() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog_with_providers(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let scoped = server
+            .completion_for_text(
+                "%model:opencode/anthropic/".to_string(),
+                Position::new(0, 26),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(scoped_items) = scoped else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            scoped_items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opencode/anthropic/claude-sonnet-4-5"]
+        );
+
+        let fallback = server
+            .completion_for_text(
+                "%model:anthropic/".to_string(),
+                Position::new(0, 17),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(fallback_items) = fallback else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            fallback_items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anthropic/claude-sonnet-4-5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_scope_requires_provider_catalog_entry_for_old_catalogs() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let response = server
+            .completion_for_text(
+                "%model:claude/".to_string(),
+                Position::new(0, 14),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+
+        assert!(items.is_empty());
     }
 
     #[tokio::test]

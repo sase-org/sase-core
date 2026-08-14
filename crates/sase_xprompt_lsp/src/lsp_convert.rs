@@ -269,7 +269,7 @@ pub fn model_completion_response(
                         &alias_kind,
                     )),
                 });
-                let group = u8::from(is_alias);
+                let group = model_completion_sort_group(&kind);
                 item.sort_text = Some(format!("{group}:{index:04}"));
                 item
             })
@@ -282,6 +282,9 @@ fn is_model_alias_kind(kind: &str) -> bool {
 }
 
 fn model_completion_kind_label(kind: &str, alias_kind: &str) -> String {
+    if kind == "provider" {
+        return "provider".to_string();
+    }
     if !is_model_alias_kind(kind) {
         return "model".to_string();
     }
@@ -294,6 +297,16 @@ fn model_completion_kind_label(kind: &str, alias_kind: &str) -> String {
         _ => "role",
     }
     .to_string()
+}
+
+fn model_completion_sort_group(kind: &str) -> u8 {
+    if is_model_alias_kind(kind) {
+        1
+    } else if kind == "provider" {
+        2
+    } else {
+        0
+    }
 }
 
 /// Render kind-aware wait/fork targets without losing the core candidate order.
@@ -931,6 +944,70 @@ mod tests {
             panic!("expected array response");
         };
         assert!(items[0].text_edit.is_some());
+    }
+
+    #[test]
+    fn model_completion_items_render_provider_label_and_trailing_sort_group() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 7,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 9,
+            },
+        };
+        let candidates = [
+            ("model", "", "opus"),
+            ("implicit_alias", "default", "@default"),
+            ("provider", "", "claude/"),
+        ]
+        .into_iter()
+        .map(|(kind, status, value)| CompletionCandidate {
+            display: value.to_string(),
+            insertion: value.to_string(),
+            detail: None,
+            documentation: None,
+            is_dir: kind == "provider",
+            name: value.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: status.to_string(),
+        })
+        .collect();
+
+        let CompletionResponse::Array(items) = model_completion_response(
+            CompletionList {
+                candidates,
+                shared_extension: String::new(),
+            },
+            range,
+        ) else {
+            panic!("expected array response");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| {
+                    item.label_details
+                        .as_ref()
+                        .and_then(|details| details.description.as_deref())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            vec!["model", "default", "provider"]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.sort_text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["0:0000", "1:0001", "2:0002"]
+        );
     }
 
     #[test]

@@ -5123,6 +5123,19 @@ mod tests {
             classify_completion_context(&doc, pos(11), &catalog).unwrap();
         assert_eq!(context.directive_name.as_deref(), Some("model"));
 
+        // Provider-qualified models keep the slash-bearing model token.
+        let doc = DocumentSnapshot::new("%model:claude/");
+        let context =
+            classify_completion_context(&doc, pos(14), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("model"));
+        assert_eq!(context.token.as_ref().unwrap().text, "claude/");
+
+        let doc = DocumentSnapshot::new("%model:claude/opus@");
+        let context =
+            classify_completion_context(&doc, pos(19), &catalog).unwrap();
+        assert_eq!(context.directive_name.as_deref(), Some("effort"));
+        assert_eq!(context.token.as_ref().unwrap().text, "");
+
         // A leading `@` is the alias marker, not an effort suffix.
         let doc = DocumentSnapshot::new("%model:@oth");
         let context =
