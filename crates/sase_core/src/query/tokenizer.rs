@@ -5,22 +5,12 @@
 //! bare words is preserved as-is (Python's tokenizer also stores those
 //! verbatim in the resulting `Token.value`).
 
+use crate::query::profile::{
+    join_shorthand_list, patch_query_profile, CompiledQueryProfile,
+};
 use crate::query::types::{
     QueryErrorWire, QueryTokenKind, QueryTokenWire, VALID_PROPERTY_KEYS,
 };
-
-/// Status shorthand mappings (Python: `STATUS_SHORTHANDS`).
-fn status_shorthand(c: char) -> Option<&'static str> {
-    match c.to_ascii_lowercase() {
-        'd' => Some("DRAFT"),
-        'm' => Some("MAILED"),
-        'r' => Some("REVERTED"),
-        's' => Some("SUBMITTED"),
-        'w' => Some("WIP"),
-        'y' => Some("READY"),
-        _ => None,
-    }
-}
 
 fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
@@ -38,14 +28,16 @@ struct Tokenizer<'a> {
     src: &'a [u8],
     pos: usize,
     out: Vec<QueryTokenWire>,
+    profile: &'a CompiledQueryProfile,
 }
 
 impl<'a> Tokenizer<'a> {
-    fn new(src: &'a str) -> Self {
+    fn new(src: &'a str, profile: &'a CompiledQueryProfile) -> Self {
         Tokenizer {
             src: src.as_bytes(),
             pos: 0,
             out: Vec::new(),
+            profile,
         }
     }
 
@@ -219,27 +211,40 @@ impl<'a> Tokenizer<'a> {
             }
             // ! family
             if b == b'!' {
-                if self.starts_with(b"!!!") {
+                if self.profile.has_predicate("error_suffix")
+                    && self.starts_with(b"!!!")
+                {
                     self.emit(QueryTokenKind::ErrorSuffix, "!!!", start);
                     self.pos += 3;
                     continue;
                 }
-                if self.starts_with(b"!!") && self.standalone_after(2) {
+                if self.profile.has_predicate("error_suffix")
+                    && self.starts_with(b"!!")
+                    && self.standalone_after(2)
+                {
                     self.emit(QueryTokenKind::NotErrorSuffix, "!!", start);
                     self.pos += 2;
                     continue;
                 }
-                if self.starts_with(b"!@") && self.standalone_after(2) {
+                if self.profile.has_predicate("running_agent")
+                    && self.starts_with(b"!@")
+                    && self.standalone_after(2)
+                {
                     self.emit(QueryTokenKind::NotRunningAgent, "!@", start);
                     self.pos += 2;
                     continue;
                 }
-                if self.starts_with(b"!$") && self.standalone_after(2) {
+                if self.profile.has_predicate("running_process")
+                    && self.starts_with(b"!$")
+                    && self.standalone_after(2)
+                {
                     self.emit(QueryTokenKind::NotRunningProcess, "!$", start);
                     self.pos += 2;
                     continue;
                 }
-                if self.standalone_after(1) {
+                if self.profile.has_predicate("error_suffix")
+                    && self.standalone_after(1)
+                {
                     // Standalone ! → ERROR_SUFFIX (transforms to !!!)
                     self.emit(QueryTokenKind::ErrorSuffix, "!", start);
                     self.pos += 1;
@@ -252,15 +257,17 @@ impl<'a> Tokenizer<'a> {
             }
             // @ family
             if b == b'@' {
-                if self.starts_with(b"@@@") {
-                    self.emit(QueryTokenKind::RunningAgent, "@@@", start);
-                    self.pos += 3;
-                    continue;
-                }
-                if self.standalone_after(1) {
-                    self.emit(QueryTokenKind::RunningAgent, "@", start);
-                    self.pos += 1;
-                    continue;
+                if self.profile.has_predicate("running_agent") {
+                    if self.starts_with(b"@@@") {
+                        self.emit(QueryTokenKind::RunningAgent, "@@@", start);
+                        self.pos += 3;
+                        continue;
+                    }
+                    if self.standalone_after(1) {
+                        self.emit(QueryTokenKind::RunningAgent, "@", start);
+                        self.pos += 1;
+                        continue;
+                    }
                 }
                 return Err(QueryErrorWire::tokenizer(
                     format!("Unexpected character: {}", b as char),
@@ -269,15 +276,17 @@ impl<'a> Tokenizer<'a> {
             }
             // $ family
             if b == b'$' {
-                if self.starts_with(b"$$$") {
-                    self.emit(QueryTokenKind::RunningProcess, "$$$", start);
-                    self.pos += 3;
-                    continue;
-                }
-                if self.standalone_after(1) {
-                    self.emit(QueryTokenKind::RunningProcess, "$", start);
-                    self.pos += 1;
-                    continue;
+                if self.profile.has_predicate("running_process") {
+                    if self.starts_with(b"$$$") {
+                        self.emit(QueryTokenKind::RunningProcess, "$$$", start);
+                        self.pos += 3;
+                        continue;
+                    }
+                    if self.standalone_after(1) {
+                        self.emit(QueryTokenKind::RunningProcess, "$", start);
+                        self.pos += 1;
+                        continue;
+                    }
                 }
                 return Err(QueryErrorWire::tokenizer(
                     format!("Unexpected character: {}", b as char),
@@ -286,7 +295,7 @@ impl<'a> Tokenizer<'a> {
             }
             // * (any-special)
             if b == b'*' {
-                if self.standalone_after(1) {
+                if self.profile.any_special && self.standalone_after(1) {
                     self.emit(QueryTokenKind::AnySpecial, "*", start);
                     self.pos += 1;
                     continue;
@@ -307,74 +316,24 @@ impl<'a> Tokenizer<'a> {
                 self.pos += 1;
                 continue;
             }
-            // %X status shorthand
-            if b == b'%' {
-                self.pos += 1;
-                let next = self.peek_at(0);
-                let mapped = next.and_then(|c| status_shorthand(c as char));
-                if let Some(value) = mapped {
-                    self.pos += 1;
-                    self.emit_property("status", value.to_string(), start);
-                    continue;
-                }
-                return Err(QueryErrorWire::tokenizer(
-                    "Invalid status shorthand (use %d, %m, %r, %s, %w, or %y)",
-                    start,
-                ));
+            // Macro shorthand, e.g. %d
+            if let Some(field_value) = self.try_macro(b as char, start)? {
+                let (field, value) = field_value;
+                self.emit_property(&field, value, start);
+                continue;
             }
-            // +project
-            if b == b'+' {
+            // Field sigil, e.g. +project
+            if let Some(field) = self.profile.sigil_field(b as char) {
+                let field = field.to_string();
                 self.pos += 1;
                 if self.peek_at(0).map(is_alpha_or_underscore).unwrap_or(false)
                 {
                     let value = self.parse_property_value()?;
-                    self.emit_property("project", value, start);
+                    self.emit_property(&field, value, start);
                     continue;
                 }
                 return Err(QueryErrorWire::tokenizer(
-                    "Expected project name after '+'",
-                    start,
-                ));
-            }
-            // ^ancestor
-            if b == b'^' {
-                self.pos += 1;
-                if self.peek_at(0).map(is_alpha_or_underscore).unwrap_or(false)
-                {
-                    let value = self.parse_property_value()?;
-                    self.emit_property("ancestor", value, start);
-                    continue;
-                }
-                return Err(QueryErrorWire::tokenizer(
-                    "Expected ancestor name after '^'",
-                    start,
-                ));
-            }
-            // ~sibling
-            if b == b'~' {
-                self.pos += 1;
-                if self.peek_at(0).map(is_alpha_or_underscore).unwrap_or(false)
-                {
-                    let value = self.parse_property_value()?;
-                    self.emit_property("sibling", value, start);
-                    continue;
-                }
-                return Err(QueryErrorWire::tokenizer(
-                    "Expected sibling name after '~'",
-                    start,
-                ));
-            }
-            // &name
-            if b == b'&' {
-                self.pos += 1;
-                if self.peek_at(0).map(is_alpha_or_underscore).unwrap_or(false)
-                {
-                    let value = self.parse_property_value()?;
-                    self.emit_property("name", value, start);
-                    continue;
-                }
-                return Err(QueryErrorWire::tokenizer(
-                    "Expected name after '&'",
+                    sigil_value_error(b as char, &field),
                     start,
                 ));
             }
@@ -412,18 +371,17 @@ impl<'a> Tokenizer<'a> {
                 }
                 // property filter syntax
                 if self.peek_at(0) == Some(b':') {
-                    if VALID_PROPERTY_KEYS.contains(&lower.as_str()) {
-                        let key = lower.clone();
-                        self.pos += 1; // skip ':'
-                        let value = self.parse_property_value()?;
-                        self.emit_property(&key, value, word_start);
-                        continue;
+                    if let Some(field) = self.profile.field(&lower) {
+                        if field.filterable {
+                            let key = field.key.clone();
+                            self.pos += 1; // skip ':'
+                            let value = self.parse_property_value()?;
+                            self.emit_property(&key, value, word_start);
+                            continue;
+                        }
                     }
                     return Err(QueryErrorWire::tokenizer(
-                        format!(
-                            "Unknown property key: {} (valid keys: status, project, ancestor, name, sibling, origin)",
-                            word
-                        ),
+                        unknown_property_message(word, self.profile),
                         word_start,
                     ));
                 }
@@ -447,6 +405,31 @@ impl<'a> Tokenizer<'a> {
         });
         Ok(self.out)
     }
+
+    fn try_macro(
+        &mut self,
+        trigger: char,
+        start: usize,
+    ) -> Result<Option<(String, String)>, QueryErrorWire> {
+        let macros = self.profile.macros_for_trigger(trigger);
+        if macros.is_empty() {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let next = self.peek_at(0).map(|byte| byte as char);
+        if let Some(letter) = next {
+            if let Some((field, value)) =
+                self.profile.macro_target(trigger, letter)
+            {
+                self.pos += 1;
+                return Ok(Some((field.to_string(), value.to_string())));
+            }
+        }
+        Err(QueryErrorWire::tokenizer(
+            invalid_macro_message(trigger, self.profile),
+            start,
+        ))
+    }
 }
 
 /// UTF-8 leading-byte length. Defaults to 1 for invalid leading or
@@ -468,5 +451,67 @@ fn utf8_char_len(lead: u8) -> usize {
 pub fn tokenize_query(
     query: &str,
 ) -> Result<Vec<QueryTokenWire>, QueryErrorWire> {
-    Tokenizer::new(query).run()
+    tokenize_query_with_profile(query, patch_query_profile())
+}
+
+/// Tokenize `query` against a compiled profile.
+///
+/// Boolean profiles use the Patch-compatible punctuation grammar with
+/// profile-selected keys, sigils, macros, and predicates. Flat profiles
+/// are tokenized by [`crate::query::flat::tokenize_flat`].
+pub fn tokenize_query_with_profile(
+    query: &str,
+    profile: &CompiledQueryProfile,
+) -> Result<Vec<QueryTokenWire>, QueryErrorWire> {
+    if profile.boolean {
+        Tokenizer::new(query, profile).run()
+    } else {
+        crate::query::flat::tokenize_flat(query, profile)
+    }
+}
+
+fn unknown_property_message(
+    word: &str,
+    profile: &CompiledQueryProfile,
+) -> String {
+    let keys = profile.filterable_keys();
+    if keys.as_slice() == VALID_PROPERTY_KEYS {
+        format!(
+            "Unknown property key: {word} (valid keys: status, project, ancestor, name, sibling, origin)"
+        )
+    } else if keys.is_empty() {
+        format!("Unknown property key: {word}")
+    } else {
+        format!(
+            "Unknown property key: {word} (valid keys: {})",
+            keys.join(", ")
+        )
+    }
+}
+
+fn sigil_value_error(sigil: char, field: &str) -> String {
+    if field == "name" {
+        format!("Expected name after '{sigil}'")
+    } else {
+        format!("Expected {field} name after '{sigil}'")
+    }
+}
+
+fn invalid_macro_message(
+    trigger: char,
+    profile: &CompiledQueryProfile,
+) -> String {
+    let macros = profile.macros_for_trigger(trigger);
+    if macros.is_empty() {
+        return format!("Invalid {trigger} shorthand");
+    }
+    let field = macros[0].field.as_str();
+    let tokens: Vec<String> = macros
+        .iter()
+        .map(|item| format!("{trigger}{}", item.letter))
+        .collect();
+    format!(
+        "Invalid {field} shorthand (use {})",
+        join_shorthand_list(&tokens)
+    )
 }

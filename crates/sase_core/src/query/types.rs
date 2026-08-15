@@ -157,6 +157,8 @@ impl QueryExprWire {
 pub struct QueryProgramWire {
     pub source: String,
     pub expr: QueryExprWire,
+    #[serde(default)]
+    pub profile_digest: String,
 }
 
 /// Structured error returned by the tokenizer or parser.
@@ -185,6 +187,22 @@ impl QueryErrorWire {
             kind: "parser".to_string(),
             message: message.into(),
             position: position as u32,
+        }
+    }
+
+    pub(crate) fn profile(message: impl Into<String>) -> Self {
+        QueryErrorWire {
+            kind: "profile".to_string(),
+            message: message.into(),
+            position: 0,
+        }
+    }
+
+    pub(crate) fn row(message: impl Into<String>) -> Self {
+        QueryErrorWire {
+            kind: "row".to_string(),
+            message: message.into(),
+            position: 0,
         }
     }
 }

@@ -11,8 +11,11 @@
 //! Python (`project_name == "core_golden"`).
 
 use sase_core::{
-    compile_query, evaluate_query_many, evaluate_query_many_in_corpus,
-    parse_project_bytes, QueryCorpus, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    canonicalize_query, canonicalize_query_with_profile, compile_query,
+    compile_query_with_profile, evaluate_query_many,
+    evaluate_query_many_in_corpus, parse_project_bytes, parse_query,
+    parse_query_with_profile, patch_query_profile, QueryCorpus,
+    CHANGESPEC_WIRE_SCHEMA_VERSION,
 };
 
 const MYPROJ_SASE: &[u8] = include_bytes!("fixtures/myproj.sase");
@@ -54,6 +57,105 @@ fn corpus_case(query: &str, expected: &[&str], corpus: &QueryCorpus) {
     let expected: Vec<String> =
         expected.iter().map(|s| s.to_string()).collect();
     assert_eq!(got, expected, "query {query}");
+}
+
+fn matches_with_explicit_profile(query: &str) -> Vec<String> {
+    let specs =
+        parse_project_bytes(MYPROJ_PATH, MYPROJ_SASE).expect("parse corpus");
+    let profile = patch_query_profile();
+    let program = compile_query_with_profile(query, profile).expect("compile");
+    let corpus = QueryCorpus::from_patches(specs.clone());
+    let results = evaluate_query_many_in_corpus(&program, &corpus);
+    specs
+        .iter()
+        .zip(results.iter())
+        .filter_map(|(cs, matched)| {
+            if *matched {
+                Some(cs.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+const GOLDEN_MATRIX: &[(&str, &[&str])] = &[
+    ("\"alpha\"", &["alpha", "beta", "beta__260102_010101"]),
+    ("c\"Alpha\"", &[]),
+    ("\"feature\"", &["alpha", "beta", "gamma"]),
+    ("alpha", &["alpha", "beta", "beta__260102_010101"]),
+    ("\"alpha\" \"beta\"", &["beta", "beta__260102_010101"]),
+    ("\"alpha\" AND \"beta\"", &["beta", "beta__260102_010101"]),
+    (
+        "\"alpha\" OR \"beta\"",
+        &["alpha", "beta", "beta__260102_010101"],
+    ),
+    ("NOT \"beta\"", &["alpha", "gamma"]),
+    (
+        "(\"alpha\" OR \"beta\") AND \"feature\"",
+        &["alpha", "beta"],
+    ),
+    (r#""foo\\bar""#, &[]),
+    (r#""line\nbreak""#, &[]),
+    ("!!!", &["alpha"]),
+    ("!", &["alpha"]),
+    ("@@@", &["gamma"]),
+    ("@", &["gamma"]),
+    ("$$$", &[]),
+    ("$", &[]),
+    ("*", &["alpha", "gamma"]),
+    ("!!", &["beta", "beta__260102_010101", "gamma"]),
+    ("!@", &["alpha", "beta", "beta__260102_010101"]),
+    ("!$", &["alpha", "beta", "beta__260102_010101", "gamma"]),
+    ("status:Ready", &["gamma"]),
+    (
+        "status:Reverted OR status:Submitted",
+        &["alpha", "beta__260102_010101"],
+    ),
+    ("project:myproj", &[]),
+    ("ancestor:alpha", &["alpha", "beta", "beta__260102_010101"]),
+    ("name:beta", &["beta"]),
+    ("sibling:beta", &["beta"]),
+    (
+        "origin:unknown",
+        &["alpha", "beta", "beta__260102_010101", "gamma"],
+    ),
+    ("ancestor:alpha AND NOT \"beta\"", &["alpha"]),
+    ("%d", &[]),
+    ("%m", &[]),
+    ("%r", &["beta__260102_010101"]),
+    ("%s", &["alpha"]),
+    ("%w", &["beta"]),
+    ("%y", &["gamma"]),
+    ("+myproj", &[]),
+    ("^alpha", &["alpha", "beta", "beta__260102_010101"]),
+    ("~beta", &["beta"]),
+    ("&beta", &["beta"]),
+    ("\".*\"", &[]),
+];
+
+#[test]
+fn explicit_patch_profile_matches_compatibility_golden_matrix() {
+    for (query, expected) in GOLDEN_MATRIX {
+        let expected: Vec<String> =
+            expected.iter().map(|item| (*item).to_string()).collect();
+        assert_eq!(matches(query), expected, "compat {query}");
+        assert_eq!(
+            matches_with_explicit_profile(query),
+            expected,
+            "profile {query}"
+        );
+        let compat_canonical = canonicalize_query(&parse_query(query).unwrap());
+        let profile_canonical =
+            canonicalize_query_with_profile(query, patch_query_profile())
+                .unwrap();
+        assert_eq!(compat_canonical, profile_canonical, "canonical {query}");
+        assert_eq!(
+            parse_query(query).unwrap(),
+            parse_query_with_profile(query, patch_query_profile()).unwrap(),
+            "ast {query}"
+        );
+    }
 }
 
 #[test]

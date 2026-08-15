@@ -5,11 +5,22 @@
 //! `tests/test_query_property_filters.py`) so behavior parity is enforced
 //! without depending on the Python toolchain.
 
+use crate::query::profile::{
+    profile_from_parts, CompiledQueryProfile, FieldValueKind, QueryFieldSpec,
+    QueryMacroSpec, QuerySigilSpec,
+};
+use crate::query::row::{QueryFieldValues, QueryPredicateFacts, QueryRow};
 use crate::query::types::{
     QueryErrorWire, QueryExprWire, QueryTokenKind, ERROR_SUFFIX_QUERY,
     RUNNING_AGENT_QUERY, RUNNING_PROCESS_QUERY,
 };
-use crate::query::{canonicalize_query, parse_query, tokenize_query};
+use crate::query::{
+    canonicalize_query, canonicalize_query_with_profile, compile_query,
+    compile_query_with_profile, evaluate_query_many_in_corpus, parse_query,
+    parse_query_with_profile, patch_query_profile, tokenize_query,
+    tokenize_query_with_profile, try_evaluate_query_many_in_corpus,
+    QueryCorpus,
+};
 
 // ---------- helpers ----------
 
@@ -592,4 +603,363 @@ fn token_round_trips_through_json() {
     let back: Vec<crate::query::types::QueryTokenWire> =
         serde_json::from_str(&s).unwrap();
     assert_eq!(back, toks);
+}
+
+fn string_field(
+    key: &str,
+    filterable: bool,
+    searchable: bool,
+) -> QueryFieldSpec {
+    QueryFieldSpec {
+        key: key.to_string(),
+        value_kind: FieldValueKind::String,
+        filterable,
+        searchable,
+        repeatable: false,
+        negatable: false,
+        static_values: Vec::new(),
+        hint: String::new(),
+    }
+}
+
+fn notes_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "notes",
+        false,
+        vec![
+            QueryFieldSpec {
+                key: "active".into(),
+                value_kind: FieldValueKind::Bool,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                static_values: vec!["true".into(), "false".into()],
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "count".into(),
+                value_kind: FieldValueKind::Int,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "kind".into(),
+                value_kind: FieldValueKind::Enum,
+                filterable: true,
+                searchable: false,
+                repeatable: true,
+                negatable: true,
+                static_values: vec!["note".into(), "doc".into()],
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "title".into(),
+                value_kind: FieldValueKind::String,
+                filterable: false,
+                searchable: true,
+                repeatable: false,
+                negatable: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+        ],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("notes profile")
+}
+
+fn boolean_custom_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "custom",
+        true,
+        vec![
+            string_field("label", true, true),
+            string_field("owner", true, false),
+            string_field("body", false, true),
+        ],
+        vec![QuerySigilSpec {
+            sigil: "+".into(),
+            field: "owner".into(),
+        }],
+        vec![
+            "error_suffix".into(),
+            "running_agent".into(),
+            "running_process".into(),
+        ],
+        true,
+        vec![QueryMacroSpec {
+            trigger: "%".into(),
+            letter: "x".into(),
+            field: "label".into(),
+            value: "urgent".into(),
+        }],
+    )
+    .expect("custom boolean profile")
+}
+
+#[test]
+fn tokenize_uses_profile_fields_and_sigils() {
+    let profile = boolean_custom_profile();
+    let toks =
+        tokenize_query_with_profile("+alice %x label:ship", &profile).unwrap();
+    assert_eq!(toks[0].property_key.as_deref(), Some("owner"));
+    assert_eq!(toks[0].value, "alice");
+    assert_eq!(toks[1].property_key.as_deref(), Some("label"));
+    assert_eq!(toks[1].value, "urgent");
+    assert_eq!(toks[2].property_key.as_deref(), Some("label"));
+    assert_eq!(toks[2].value, "ship");
+}
+
+#[test]
+fn tokenize_rejects_undeclared_property_and_keeps_span() {
+    let profile = boolean_custom_profile();
+    let err = tokenize_query_with_profile("status:wip", &profile).unwrap_err();
+    assert_eq!(err.kind, "tokenizer");
+    assert_eq!(err.position, 0);
+    assert!(err.message.contains("Unknown property key"), "{err}");
+}
+
+#[test]
+fn tokenize_rejects_disabled_predicate_and_any_special() {
+    let profile = profile_from_parts(
+        "plain",
+        true,
+        vec![string_field("label", true, true)],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .unwrap();
+    for query in ["@", "$", "*"] {
+        let err = tokenize_query_with_profile(query, &profile).unwrap_err();
+        assert!(
+            err.message.contains("Unexpected character"),
+            "{query}: {err}"
+        );
+    }
+    let err = parse_query_with_profile("!!!", &profile).unwrap_err();
+    assert!(err.message.contains("Expected"), "{err}");
+}
+
+#[test]
+fn flat_tokenizer_rejects_boolean_syntax() {
+    let profile = notes_profile();
+    for query in ["foo AND bar", "(foo)", r#"c"Foo""#] {
+        let err = tokenize_query_with_profile(query, &profile).unwrap_err();
+        assert_eq!(err.kind, "tokenizer", "{query}");
+        assert!(err.message.contains("not enabled"), "{query}: {err}");
+    }
+}
+
+#[test]
+fn flat_negation_and_comma_rules() {
+    let profile = notes_profile();
+    let expr =
+        parse_query_with_profile(r#"kind:note,doc -kind:note hello"#, &profile)
+            .unwrap();
+    let QueryExprWire::And { operands } = expr else {
+        panic!("expected And: {expr:?}");
+    };
+    assert!(matches!(operands[0], QueryExprWire::Or { .. }));
+    assert!(matches!(operands[1], QueryExprWire::Not { .. }));
+    assert!(matches!(operands[2], QueryExprWire::StringMatch { .. }));
+}
+
+#[test]
+fn flat_canonical_preserves_source_order_and_quoting() {
+    let profile = notes_profile();
+    let query = r#"hello kind:note "two words" -kind:doc"#;
+    assert_eq!(
+        canonicalize_query_with_profile(query, &profile).unwrap(),
+        query
+    );
+}
+
+#[test]
+fn flat_validates_enum_bool_and_int_literals() {
+    let profile = notes_profile();
+    let enum_err = parse_query_with_profile("kind:task", &profile).unwrap_err();
+    assert!(enum_err.message.contains("must be one of"), "{enum_err}");
+    assert_eq!(enum_err.position, 0);
+
+    let bool_err =
+        parse_query_with_profile("active:maybe", &profile).unwrap_err();
+    assert!(bool_err.message.contains("true or false"), "{bool_err}");
+
+    let int_err = parse_query_with_profile("count:1.5", &profile).unwrap_err();
+    assert!(int_err.message.contains("integer"), "{int_err}");
+}
+
+#[test]
+fn invalid_profile_is_structured_error() {
+    let err = CompiledQueryProfile::from_wire(&serde_json::json!({
+        "pane_id": "",
+        "boolean": false,
+        "fields": [],
+    }))
+    .unwrap_err();
+    assert_eq!(err.kind, "profile");
+    assert!(err.message.contains("pane_id"), "{err}");
+}
+
+#[test]
+fn digest_mismatch_is_rejected_before_evaluation() {
+    let notes = notes_profile();
+    let program = compile_query_with_profile("hello", &notes).unwrap();
+    let corpus = QueryCorpus::from_rows(
+        patch_query_profile(),
+        vec![QueryRow::default()],
+    );
+    let err = try_evaluate_query_many_in_corpus(&program, &corpus).unwrap_err();
+    assert_eq!(err.kind, "profile");
+    assert!(err.message.contains("digest"), "{err}");
+}
+
+#[test]
+fn generic_rows_honor_searchable_fields_and_predicates() {
+    let profile = boolean_custom_profile();
+    let rows = vec![
+        QueryRow {
+            fields: [
+                ("label".into(), QueryFieldValues::from_string("urgent")),
+                ("owner".into(), QueryFieldValues::from_string("ada")),
+                (
+                    "body".into(),
+                    QueryFieldValues::from_string("hidden haystack"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            searchable_text: "urgent\nhidden haystack".into(),
+            predicates: QueryPredicateFacts {
+                error_suffix: true,
+                running_agent: false,
+                running_process: true,
+            },
+        },
+        QueryRow {
+            fields: [("label".into(), QueryFieldValues::from_string("later"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "later".into(),
+            predicates: QueryPredicateFacts {
+                error_suffix: false,
+                running_agent: true,
+                running_process: false,
+            },
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    assert_eq!(matches("haystack"), vec![true, false]);
+    assert_eq!(matches("label:urgent"), vec![true, false]);
+    assert_eq!(matches("!!!"), vec![true, false]);
+    assert_eq!(matches("@@@"), vec![false, true]);
+    assert_eq!(matches("$$$"), vec![true, false]);
+    assert_eq!(matches("*"), vec![true, true]);
+}
+
+#[test]
+fn flat_repeated_values_are_any_match_and_exclusions_negate() {
+    let profile = notes_profile();
+    let rows = vec![
+        QueryRow {
+            fields: [("kind".into(), QueryFieldValues::from_string("note"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "alpha note".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+        QueryRow {
+            fields: [("kind".into(), QueryFieldValues::from_string("doc"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "beta doc".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let program =
+        compile_query_with_profile("kind:note,doc -kind:doc", &profile)
+            .unwrap();
+    assert_eq!(
+        evaluate_query_many_in_corpus(&program, &corpus),
+        vec![true, false]
+    );
+}
+
+#[test]
+fn boolean_precedence_works_on_generic_rows() {
+    let profile = boolean_custom_profile();
+    let rows = vec![
+        QueryRow {
+            fields: [("label".into(), QueryFieldValues::from_string("ship"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "alpha ship".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+        QueryRow {
+            fields: [("label".into(), QueryFieldValues::from_string("hold"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "beta hold".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let program =
+        compile_query_with_profile(r#""alpha" OR "beta" "hold""#, &profile)
+            .unwrap();
+    assert_eq!(
+        evaluate_query_many_in_corpus(&program, &corpus),
+        vec![true, true]
+    );
+}
+
+#[test]
+fn generic_corpus_reuses_indexes_across_evaluations() {
+    let profile = notes_profile();
+    let corpus = QueryCorpus::from_rows(
+        &profile,
+        vec![QueryRow {
+            fields: [("kind".into(), QueryFieldValues::from_string("note"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "alpha".into(),
+            predicates: QueryPredicateFacts::default(),
+        }],
+    );
+    let program = compile_query_with_profile("alpha", &profile).unwrap();
+    let first = evaluate_query_many_in_corpus(&program, &corpus);
+    let second = evaluate_query_many_in_corpus(&program, &corpus);
+    assert_eq!(first, second);
+    assert_eq!(first, vec![true]);
+}
+
+#[test]
+fn patch_wrappers_match_explicit_patch_profile() {
+    let query = r#""alpha" OR status:Ready"#;
+    let via_compat = parse_query(query).unwrap();
+    let via_profile =
+        parse_query_with_profile(query, patch_query_profile()).unwrap();
+    assert_eq!(via_compat, via_profile);
+    assert_eq!(
+        canonicalize_query(&via_compat),
+        canonicalize_query_with_profile(query, patch_query_profile()).unwrap()
+    );
+    let program = compile_query(query).unwrap();
+    assert_eq!(program.profile_digest, patch_query_profile().digest);
 }

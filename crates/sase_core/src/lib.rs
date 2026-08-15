@@ -624,12 +624,17 @@ pub use prompt_stash::{
     PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
-    canonicalize_query, compile_query, effective_project_name,
-    evaluate_query_many, evaluate_query_many_in_corpus, evaluate_query_one,
-    get_base_status, get_searchable_text, has_any_status_suffix, parse_query,
-    project_dir_name, strip_reverted_suffix, tokenize_query, QueryCorpus,
-    QueryErrorWire, QueryEvaluationContext, QueryExprWire, QueryProgram,
-    QueryProgramWire, QueryTokenKind, QueryTokenWire,
+    canonicalize_query, canonicalize_query_with_profile, compile_query,
+    compile_query_with_profile, effective_project_name, evaluate_query_many,
+    evaluate_query_many_in_corpus, evaluate_query_one, get_base_status,
+    get_searchable_text, has_any_status_suffix, parse_query,
+    parse_query_with_profile, patch_query_profile, patch_rows_from_specs,
+    project_dir_name, strip_reverted_suffix, tokenize_query,
+    tokenize_query_with_profile, try_evaluate_query_many_in_corpus,
+    CompiledQueryProfile, FieldValueKind, QueryCorpus, QueryErrorWire,
+    QueryEvaluationContext, QueryExprWire, QueryFieldSpec, QueryFieldValues,
+    QueryMacroSpec, QueryPredicateFacts, QueryProgram, QueryProgramWire,
+    QueryRow, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
 };
 pub use referenced_by::{
     parse_referenced_by_block, remove_referenced_by_block,

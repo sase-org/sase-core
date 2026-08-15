@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(query)* parameterize the parser, corpus, and evaluator by compiled profile
+
 ## [0.27.3](https://github.com/sase-org/sase-core/compare/v0.27.2...v0.27.3) - 2026-08-15
 
 ### Added

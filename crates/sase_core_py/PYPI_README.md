@@ -14,6 +14,9 @@ without a local Rust toolchain.
 - `parse_project_bytes(path, data)` — Patch parser.
 - `tokenize_query`, `parse_query`, `canonicalize_query`,
   `evaluate_query_many` — query language.
+- `tokenize_query_with_profile`, `parse_query_with_profile`,
+  `canonicalize_query_with_profile`, `compile_query_with_profile`,
+  `compile_corpus_with_profile` — profile-driven query language.
 - `scan_agent_artifacts(projects_root, options=None)` — agent-artifact
   filesystem scanner.
 - `remove_workspace_suffix`, `is_valid_status_transition`,

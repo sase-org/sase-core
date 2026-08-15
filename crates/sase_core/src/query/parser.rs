@@ -8,7 +8,8 @@
 //!
 //! Parentheses override precedence. `*` expands to `Or(!!!, @@@, $$$)`.
 
-use crate::query::tokenizer::tokenize_query;
+use crate::query::profile::{patch_query_profile, CompiledQueryProfile};
+use crate::query::tokenizer::tokenize_query_with_profile;
 use crate::query::types::{
     QueryErrorWire, QueryExprWire, QueryTokenKind, QueryTokenWire,
 };
@@ -19,8 +20,11 @@ struct Parser {
 }
 
 impl Parser {
-    fn new(query: &str) -> Result<Self, QueryErrorWire> {
-        let tokens = tokenize_query(query)?;
+    fn new(
+        query: &str,
+        profile: &CompiledQueryProfile,
+    ) -> Result<Self, QueryErrorWire> {
+        let tokens = tokenize_query_with_profile(query, profile)?;
         Ok(Parser { tokens, pos: 0 })
     }
 
@@ -213,8 +217,33 @@ impl Parser {
 
 /// Parse a query string into an AST. Mirrors `parse_query_python`.
 pub fn parse_query(query: &str) -> Result<QueryExprWire, QueryErrorWire> {
-    let mut parser = Parser::new(query)?;
-    parser.parse()
+    parse_query_with_profile(query, patch_query_profile())
+}
+
+/// Parse `query` using the supplied compiled profile.
+pub fn parse_query_with_profile(
+    query: &str,
+    profile: &CompiledQueryProfile,
+) -> Result<QueryExprWire, QueryErrorWire> {
+    if profile.boolean {
+        let mut parser = Parser::new(query, profile)?;
+        parser.parse()
+    } else {
+        crate::query::flat::parse_flat(query, profile)
+    }
+}
+
+/// Canonicalize a query string against a compiled profile.
+pub fn canonicalize_query_with_profile(
+    query: &str,
+    profile: &CompiledQueryProfile,
+) -> Result<String, QueryErrorWire> {
+    if profile.boolean {
+        let expr = parse_query_with_profile(query, profile)?;
+        Ok(canonicalize_query(&expr))
+    } else {
+        crate::query::flat::canonicalize_flat(query, profile)
+    }
 }
 
 /// Convert a query expression to canonical string form. Mirrors

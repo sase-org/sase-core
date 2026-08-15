@@ -9,6 +9,11 @@
 //! - `tokenize_query(query: str) -> list[dict]`
 //! - `parse_query(query: str) -> dict`
 //! - `canonicalize_query(query: str) -> str`
+//! - `tokenize_query_with_profile(query: str, profile: dict) -> list[dict]`
+//! - `parse_query_with_profile(query: str, profile: dict) -> dict`
+//! - `canonicalize_query_with_profile(query: str, profile: dict) -> str`
+//! - `compile_query_with_profile(query: str, profile: dict) -> QueryProgramHandle`
+//! - `compile_corpus_with_profile(profile: dict, rows: list[dict]) -> QueryCorpusHandle`
 //! - `compile_corpus(specs: list[dict]) -> QueryCorpusHandle`
 //! - `compile_query(query: str) -> QueryProgramHandle`
 //! - `evaluate_many(program: QueryProgramHandle, corpus: QueryCorpusHandle) -> list[bool]`
@@ -717,7 +722,13 @@ use sase_core::prompt_stash::{
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
-    QueryCorpus as CoreQueryCorpus, QueryProgram as CoreQueryProgram,
+    canonicalize_query_with_profile as core_canonicalize_query_with_profile,
+    compile_query_with_profile as core_compile_query_with_profile,
+    parse_query_with_profile as core_parse_query_with_profile,
+    tokenize_query_with_profile as core_tokenize_query_with_profile,
+    try_evaluate_query_many_in_corpus as core_try_evaluate_query_many_in_corpus,
+    CompiledQueryProfile, QueryCorpus as CoreQueryCorpus,
+    QueryProgram as CoreQueryProgram, QueryRow,
 };
 use sase_core::referenced_by::{
     parse_referenced_by_block as core_parse_referenced_by_block,
@@ -1445,6 +1456,92 @@ fn py_canonicalize_query(query: &str) -> PyResult<String> {
     Ok(sase_core::canonicalize_query(&expr))
 }
 
+/// Tokenize a query against a compiled profile dict.
+#[pyfunction]
+#[pyo3(name = "tokenize_query_with_profile")]
+fn py_tokenize_query_with_profile<'py>(
+    py: Python<'py>,
+    query: &str,
+    profile: &Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyList>> {
+    let profile = profile_from_pydict(profile)?;
+    let tokens = core_tokenize_query_with_profile(query, &profile)
+        .map_err(query_error_to_pyerr)?;
+    let list = PyList::empty_bound(py);
+    for tok in &tokens {
+        let value = serde_json::to_value(tok).map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+        list.append(json_value_to_py(py, &value)?)?;
+    }
+    Ok(list)
+}
+
+/// Parse a query against a compiled profile dict.
+#[pyfunction]
+#[pyo3(name = "parse_query_with_profile")]
+fn py_parse_query_with_profile<'py>(
+    py: Python<'py>,
+    query: &str,
+    profile: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let profile = profile_from_pydict(profile)?;
+    let expr = core_parse_query_with_profile(query, &profile)
+        .map_err(query_error_to_pyerr)?;
+    let value = expr_to_python_wire(&expr);
+    json_value_to_py(py, &value)
+}
+
+/// Canonicalize a query against a compiled profile dict.
+#[pyfunction]
+#[pyo3(name = "canonicalize_query_with_profile")]
+fn py_canonicalize_query_with_profile<'py>(
+    query: &str,
+    profile: &Bound<'py, PyDict>,
+) -> PyResult<String> {
+    let profile = profile_from_pydict(profile)?;
+    core_canonicalize_query_with_profile(query, &profile)
+        .map_err(query_error_to_pyerr)
+}
+
+/// Compile a query against a compiled profile dict.
+#[pyfunction]
+#[pyo3(name = "compile_query_with_profile")]
+fn py_compile_query_with_profile<'py>(
+    query: &str,
+    profile: &Bound<'py, PyDict>,
+) -> PyResult<PyQueryProgramHandle> {
+    let profile = profile_from_pydict(profile)?;
+    let program = core_compile_query_with_profile(query, &profile)
+        .map_err(query_error_to_pyerr)?;
+    Ok(PyQueryProgramHandle { program })
+}
+
+/// Compile a generic corpus from a compiled profile and precomputed rows.
+///
+/// Profile and row conversion happens while holding the GIL. Indexing
+/// runs without it.
+#[pyfunction]
+#[pyo3(name = "compile_corpus_with_profile")]
+fn py_compile_corpus_with_profile<'py>(
+    py: Python<'py>,
+    profile: &Bound<'py, PyDict>,
+    rows: &Bound<'py, PyList>,
+) -> PyResult<PyQueryCorpusHandle> {
+    let profile = profile_from_pydict(profile)?;
+    let mut wire_rows = Vec::with_capacity(rows.len());
+    for (idx, item) in rows.iter().enumerate() {
+        let json = py_to_json_value(&item)?;
+        let row = QueryRow::from_wire(&json, &profile).map_err(|error| {
+            PyValueError::new_err(format!("rows[{idx}]: {error}"))
+        })?;
+        wire_rows.push(row);
+    }
+    let corpus =
+        py.allow_threads(|| CoreQueryCorpus::from_rows(&profile, wire_rows));
+    Ok(PyQueryCorpusHandle { corpus })
+}
+
 /// Return the schema version for commit-footer binding payloads.
 #[pyfunction]
 #[pyo3(name = "commit_footer_wire_schema_version")]
@@ -1557,12 +1654,14 @@ fn py_evaluate_many<'py>(
     program: &PyQueryProgramHandle,
     corpus: &PyQueryCorpusHandle,
 ) -> PyResult<Bound<'py, PyList>> {
-    let results = py.allow_threads(|| {
-        sase_core::evaluate_query_many_in_corpus(
-            &program.program,
-            &corpus.corpus,
-        )
-    });
+    let results = py
+        .allow_threads(|| {
+            core_try_evaluate_query_many_in_corpus(
+                &program.program,
+                &corpus.corpus,
+            )
+        })
+        .map_err(query_error_to_pyerr)?;
 
     let list = PyList::empty_bound(py);
     for b in results {
@@ -6130,6 +6229,13 @@ fn query_error_to_pyerr(err: QueryErrorWire) -> PyErr {
     PyValueError::new_err(format!("{err}"))
 }
 
+fn profile_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<CompiledQueryProfile> {
+    let value = py_to_json_value(dict.as_any())?;
+    CompiledQueryProfile::from_wire(&value).map_err(query_error_to_pyerr)
+}
+
 fn bead_error_to_pyerr(err: BeadError) -> PyErr {
     PyValueError::new_err(format!("{err}"))
 }
@@ -8175,6 +8281,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tokenize_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonicalize_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tokenize_query_with_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_query_with_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canonicalize_query_with_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_query_with_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_corpus_with_profile, m)?)?;
     m.add_function(wrap_pyfunction!(py_commit_footer_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_commit_footer, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_commit_footer, m)?)?;
@@ -12715,6 +12826,144 @@ MENTORS:
 
             let err = evaluate_many.call1((program, bad)).unwrap_err();
             assert!(err.to_string().contains("QueryCorpusHandle"));
+        });
+    }
+
+    fn notes_profile_dict<'py>(py: Python<'py>) -> Bound<'py, PyDict> {
+        let value = json!({
+            "pane_id": "notes",
+            "boolean": false,
+            "fields": [
+                {
+                    "key": "kind",
+                    "value_kind": "enum",
+                    "filterable": true,
+                    "searchable": false,
+                    "repeatable": true,
+                    "negatable": true,
+                    "static_values": ["note", "doc"],
+                    "hint": ""
+                },
+                {
+                    "key": "title",
+                    "value_kind": "string",
+                    "filterable": false,
+                    "searchable": true,
+                    "repeatable": false,
+                    "negatable": false,
+                    "static_values": [],
+                    "hint": ""
+                }
+            ],
+            "sigils": [],
+            "predicates": [],
+            "any_special": false,
+            "macros": [],
+            "free_text_hint": "title"
+        });
+        json_value_to_py(py, &value)
+            .unwrap()
+            .bind(py)
+            .downcast::<PyDict>()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn profile_binding_round_trips_compiled_profile_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let profile = notes_profile_dict(py);
+            let tokens = py_tokenize_query_with_profile(
+                py,
+                r#"kind:note "hello world""#,
+                &profile,
+            )
+            .unwrap();
+            assert_eq!(tokens.len(), 3);
+            let canonical = py_canonicalize_query_with_profile(
+                r#"kind:note "hello world""#,
+                &profile,
+            )
+            .unwrap();
+            assert_eq!(canonical, r#"kind:note "hello world""#);
+        });
+    }
+
+    #[test]
+    fn profile_binding_evaluates_generic_rows() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let profile = notes_profile_dict(py);
+            let rows = PyList::empty_bound(py);
+            append_json(
+                py,
+                &rows,
+                json!({
+                    "fields": {"kind": ["note"]},
+                    "searchable_text": "alpha hello",
+                    "predicates": {
+                        "error_suffix": false,
+                        "running_agent": false,
+                        "running_process": false
+                    }
+                }),
+            );
+            append_json(
+                py,
+                &rows,
+                json!({
+                    "fields": {"kind": ["doc"]},
+                    "searchable_text": "beta world",
+                    "predicates": {}
+                }),
+            );
+            let corpus =
+                py_compile_corpus_with_profile(py, &profile, &rows).unwrap();
+            let program =
+                py_compile_query_with_profile("kind:note hello", &profile)
+                    .unwrap();
+            let results = py_evaluate_many(py, &program, &corpus).unwrap();
+            assert_eq!(bools_from_py_list(&results), vec![true, false]);
+        });
+    }
+
+    #[test]
+    fn profile_binding_rejects_invalid_profile_and_mismatch() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let bad = PyDict::new_bound(py);
+            bad.set_item("pane_id", "").unwrap();
+            bad.set_item("boolean", false).unwrap();
+            let err = py_compile_query_with_profile("hello", &bad).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("pane_id"), "{err}");
+
+            let profile = notes_profile_dict(py);
+            let rows = PyList::empty_bound(py);
+            append_json(
+                py,
+                &rows,
+                json!({"fields": {}, "searchable_text": "x"}),
+            );
+            let corpus =
+                py_compile_corpus_with_profile(py, &profile, &rows).unwrap();
+            let patch_program = py_compile_query("alpha").unwrap();
+            let err =
+                py_evaluate_many(py, &patch_program, &corpus).unwrap_err();
+            assert!(err.to_string().contains("digest"), "{err}");
+        });
+    }
+
+    #[test]
+    fn legacy_query_handles_still_use_patch_profile() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let specs = spec_list(py, &[spec_json("alpha", "WIP", None)]);
+            let corpus = py_compile_corpus(py, &specs).unwrap();
+            let program = py_compile_query("name:alpha").unwrap();
+            let results = py_evaluate_many(py, &program, &corpus).unwrap();
+            assert_eq!(bools_from_py_list(&results), vec![true]);
         });
     }
 
