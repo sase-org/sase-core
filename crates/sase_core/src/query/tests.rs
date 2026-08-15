@@ -632,6 +632,46 @@ fn exact_string_field(
     }
 }
 
+fn flat_predicate_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "facts",
+        false,
+        vec![
+            QueryFieldSpec {
+                key: "kind".into(),
+                value_kind: FieldValueKind::Enum,
+                filterable: true,
+                searchable: false,
+                repeatable: true,
+                negatable: true,
+                exact_match: false,
+                static_values: vec!["note".into(), "doc".into()],
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "title".into(),
+                value_kind: FieldValueKind::String,
+                filterable: false,
+                searchable: true,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+        ],
+        vec![],
+        vec![
+            "error_suffix".into(),
+            "running_agent".into(),
+            "running_process".into(),
+        ],
+        true,
+        vec![],
+    )
+    .expect("flat predicate profile")
+}
+
 fn notes_profile() -> CompiledQueryProfile {
     profile_from_parts(
         "notes",
@@ -789,12 +829,12 @@ fn flat_negation_and_comma_rules() {
 }
 
 #[test]
-fn flat_canonical_preserves_source_order_and_quoting() {
+fn flat_canonical_groups_fields_then_predicates_then_text() {
     let profile = notes_profile();
     let query = r#"hello kind:note "two words" -kind:doc"#;
     assert_eq!(
         canonicalize_query_with_profile(query, &profile).unwrap(),
-        query
+        r#"kind:note -kind:doc hello "two words""#
     );
 }
 
@@ -883,6 +923,93 @@ fn generic_rows_honor_searchable_fields_and_predicates() {
     assert_eq!(matches("@@@"), vec![false, true]);
     assert_eq!(matches("$$$"), vec![true, false]);
     assert_eq!(matches("*"), vec![true, true]);
+}
+
+#[test]
+fn flat_profile_parses_closed_host_predicates_without_boolean_syntax() {
+    let profile = flat_predicate_profile();
+    for (query, spelling) in [
+        ("!", "!!!"),
+        ("!!!", "!!!"),
+        ("@", "@@@"),
+        ("@@@", "@@@"),
+        ("$", "$$$"),
+        ("$$$", "$$$"),
+        ("*", "*"),
+        ("!!", "!!"),
+        ("!@", "!@"),
+        ("!$", "!$"),
+    ] {
+        let canonical =
+            canonicalize_query_with_profile(query, &profile).unwrap();
+        assert_eq!(canonical, spelling, "{query}");
+        let expr = parse_query_with_profile(query, &profile).unwrap();
+        match query {
+            "!" | "!!!" => assert!(matches!(
+                expr,
+                QueryExprWire::StringMatch {
+                    is_error_suffix: true,
+                    ..
+                }
+            )),
+            "@" | "@@@" => assert!(matches!(
+                expr,
+                QueryExprWire::StringMatch {
+                    is_running_agent: true,
+                    ..
+                }
+            )),
+            "$" | "$$$" => assert!(matches!(
+                expr,
+                QueryExprWire::StringMatch {
+                    is_running_process: true,
+                    ..
+                }
+            )),
+            "*" => assert!(matches!(expr, QueryExprWire::Or { .. })),
+            "!!" | "!@" | "!$" => {
+                assert!(matches!(expr, QueryExprWire::Not { .. }))
+            }
+            _ => unreachable!(),
+        }
+    }
+    let err = parse_query_with_profile("foo AND bar", &profile).unwrap_err();
+    assert!(err.message.contains("not enabled"), "{err}");
+}
+
+#[test]
+fn flat_predicates_evaluate_absent_facts_as_false() {
+    let profile = flat_predicate_profile();
+    let rows = vec![
+        QueryRow {
+            fields: [("kind".into(), QueryFieldValues::from_string("note"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "alpha".into(),
+            predicates: QueryPredicateFacts {
+                error_suffix: true,
+                running_agent: false,
+                running_process: false,
+            },
+        },
+        QueryRow {
+            fields: [("kind".into(), QueryFieldValues::from_string("doc"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "beta".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    assert_eq!(matches("!"), vec![true, false]);
+    assert_eq!(matches("!!"), vec![false, true]);
+    assert_eq!(matches("@"), vec![false, false]);
+    assert_eq!(matches("*"), vec![true, false]);
+    assert_eq!(matches("kind:note !"), vec![true, false]);
 }
 
 #[test]

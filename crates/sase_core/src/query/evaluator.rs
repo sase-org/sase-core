@@ -290,7 +290,10 @@ impl QueryEvaluationContext {
                 let Some(wanted) = parse_int_literal(&query_value) else {
                     return false;
                 };
-                let mut values = field.values.iter().filter_map(|item| parse_int_literal(item));
+                let mut values = field
+                    .values
+                    .iter()
+                    .filter_map(|item| parse_int_literal(item));
                 if key.eq_ignore_ascii_case("since") {
                     values.any(|value| value >= wanted)
                 } else if key.eq_ignore_ascii_case("until") {
@@ -301,7 +304,9 @@ impl QueryEvaluationContext {
             }
             FieldValueKind::String | FieldValueKind::Enum => {
                 let wanted = query_value.to_ascii_lowercase();
-                if matches!(field.kind, FieldValueKind::Enum) || field.exact_match {
+                if matches!(field.kind, FieldValueKind::Enum)
+                    || field.exact_match
+                {
                     field.values_lower.iter().any(|item| item == &wanted)
                 } else {
                     field.values_lower.iter().any(|item| item.contains(&wanted))

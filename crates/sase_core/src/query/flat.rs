@@ -40,6 +40,12 @@ enum FlatClause {
         negated: bool,
         position: u32,
     },
+    Predicate {
+        expr: QueryExprWire,
+        spelling: String,
+        source: String,
+        position: u32,
+    },
 }
 
 pub fn tokenize_flat(
@@ -86,6 +92,11 @@ pub fn tokenize_flat(
                     });
                 }
             }
+            FlatClause::Predicate {
+                source, position, ..
+            } => {
+                tokens.push(predicate_token(&source, position));
+            }
         }
     }
     tokens.push(QueryTokenWire {
@@ -114,7 +125,7 @@ pub fn canonicalize_flat(
     profile: &CompiledQueryProfile,
 ) -> Result<String, QueryErrorWire> {
     let clauses = collect_clauses(query, profile)?;
-    Ok(reprint_clauses(&clauses))
+    Ok(reprint_clauses(profile, &clauses))
 }
 
 fn collect_clauses(
@@ -168,6 +179,9 @@ fn classify_token(
     } else {
         token.quoted.as_slice()
     };
+    if let Some(clause) = classify_predicate(body, negated, &token, profile)? {
+        return Ok(clause);
+    }
     let colon = unquoted_index(body, body_quoted, b':');
     if token.wholly_quoted || colon.is_none() {
         if is_boolean_keyword(body) && !token.wholly_quoted {
@@ -280,11 +294,13 @@ fn compile_clauses(clauses: &[FlatClause]) -> QueryExprWire {
                 negated: true,
                 ..
             } => {
-                for value in values {
-                    operands.push(QueryExprWire::negate(
-                        QueryExprWire::property(key.clone(), value.clone()),
-                    ));
-                }
+                let terms = values
+                    .iter()
+                    .map(|value| {
+                        QueryExprWire::property(key.clone(), value.clone())
+                    })
+                    .collect();
+                operands.push(QueryExprWire::negate(or_of(terms)));
             }
             FlatClause::Field {
                 key,
@@ -307,6 +323,9 @@ fn compile_clauses(clauses: &[FlatClause]) -> QueryExprWire {
                     expr
                 });
             }
+            FlatClause::Predicate { expr, .. } => {
+                operands.push(expr.clone());
+            }
         }
     }
     if operands.len() == 1 {
@@ -324,10 +343,16 @@ fn or_of(mut operands: Vec<QueryExprWire>) -> QueryExprWire {
     }
 }
 
-fn reprint_clauses(clauses: &[FlatClause]) -> String {
-    clauses
-        .iter()
-        .map(|clause| match clause {
+fn reprint_clauses(
+    profile: &CompiledQueryProfile,
+    clauses: &[FlatClause],
+) -> String {
+    let mut positive_fields: HashMap<String, Vec<String>> = HashMap::new();
+    let mut negative_fields: HashMap<String, Vec<String>> = HashMap::new();
+    let mut predicates = Vec::new();
+    let mut text_tokens = Vec::new();
+    for clause in clauses {
+        match clause {
             FlatClause::Text {
                 value,
                 negated,
@@ -335,11 +360,11 @@ fn reprint_clauses(clauses: &[FlatClause]) -> String {
                 ..
             } => {
                 let rendered = quote_value(value, false, *quoted);
-                if *negated {
+                text_tokens.push(if *negated {
                     format!("-{rendered}")
                 } else {
                     rendered
-                }
+                });
             }
             FlatClause::Field {
                 key,
@@ -347,20 +372,52 @@ fn reprint_clauses(clauses: &[FlatClause]) -> String {
                 negated,
                 ..
             } => {
-                let joined = values
-                    .iter()
-                    .map(|value| quote_value(value, true, false))
-                    .collect::<Vec<_>>()
-                    .join(",");
                 if *negated {
-                    format!("-{key}:{joined}")
+                    negative_fields
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(values.clone());
                 } else {
-                    format!("{key}:{joined}")
+                    positive_fields
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(values.clone());
                 }
             }
-        })
+            FlatClause::Predicate { spelling, .. } => {
+                predicates.push(spelling.clone());
+            }
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for field in profile.fields.iter().filter(|field| field.filterable) {
+        if let Some(values) = positive_fields.get(&field.key) {
+            rendered.push(format!(
+                "{}:{}",
+                field.key,
+                render_field_values(values)
+            ));
+        }
+        if let Some(values) = negative_fields.get(&field.key) {
+            rendered.push(format!(
+                "-{}:{}",
+                field.key,
+                render_field_values(values)
+            ));
+        }
+    }
+    rendered.extend(predicates);
+    rendered.extend(text_tokens);
+    rendered.join(" ")
+}
+
+fn render_field_values(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| quote_value(value, true, false))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(",")
 }
 
 fn quote_value(value: &str, keyed: bool, force: bool) -> String {
@@ -443,6 +500,82 @@ impl<'a> FlatLexer<'a> {
         while self.pos < self.src.len() && is_ws(self.src[self.pos]) {
             self.pos += 1;
         }
+    }
+}
+
+fn classify_predicate(
+    body: &str,
+    negated: bool,
+    token: &DecodedToken,
+    profile: &CompiledQueryProfile,
+) -> Result<Option<FlatClause>, QueryErrorWire> {
+    if negated || token.wholly_quoted {
+        return Ok(None);
+    }
+    let classified = match body {
+        "!" | "!!!" if profile.has_predicate("error_suffix") => {
+            Some((QueryExprWire::error_suffix(), "!!!"))
+        }
+        "!!" if profile.has_predicate("error_suffix") => {
+            Some((QueryExprWire::negate(QueryExprWire::error_suffix()), "!!"))
+        }
+        "@" | "@@@" if profile.has_predicate("running_agent") => {
+            Some((QueryExprWire::running_agent(), "@@@"))
+        }
+        "!@" if profile.has_predicate("running_agent") => {
+            Some((QueryExprWire::negate(QueryExprWire::running_agent()), "!@"))
+        }
+        "$" | "$$$" if profile.has_predicate("running_process") => {
+            Some((QueryExprWire::running_process(), "$$$"))
+        }
+        "!$" if profile.has_predicate("running_process") => Some((
+            QueryExprWire::negate(QueryExprWire::running_process()),
+            "!$",
+        )),
+        "*" if profile.any_special => Some((any_special_expr(profile), "*")),
+        _ => None,
+    };
+    let Some((expr, spelling)) = classified else {
+        return Ok(None);
+    };
+    Ok(Some(FlatClause::Predicate {
+        expr,
+        spelling: spelling.to_string(),
+        source: body.to_string(),
+        position: token.start as u32,
+    }))
+}
+
+fn any_special_expr(profile: &CompiledQueryProfile) -> QueryExprWire {
+    let operands = profile
+        .predicates
+        .iter()
+        .map(|name| match name.as_str() {
+            "running_agent" => QueryExprWire::running_agent(),
+            "running_process" => QueryExprWire::running_process(),
+            _ => QueryExprWire::error_suffix(),
+        })
+        .collect();
+    QueryExprWire::Or { operands }
+}
+
+fn predicate_token(source: &str, position: u32) -> QueryTokenWire {
+    let kind = match source {
+        "!" | "!!!" => QueryTokenKind::ErrorSuffix,
+        "!!" => QueryTokenKind::NotErrorSuffix,
+        "@" | "@@@" => QueryTokenKind::RunningAgent,
+        "!@" => QueryTokenKind::NotRunningAgent,
+        "$" | "$$$" => QueryTokenKind::RunningProcess,
+        "!$" => QueryTokenKind::NotRunningProcess,
+        "*" => QueryTokenKind::AnySpecial,
+        _ => QueryTokenKind::String,
+    };
+    QueryTokenWire {
+        kind,
+        value: source.to_string(),
+        case_sensitive: false,
+        position,
+        property_key: None,
     }
 }
 
