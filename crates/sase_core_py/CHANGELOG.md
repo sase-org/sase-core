@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.9](https://github.com/sase-org/sase-core/compare/v0.27.8...v0.27.9) - 2026-08-15
+
+### Added
+
+- parse and resolve output-variable selectors
+
 ## [0.27.8](https://github.com/sase-org/sase-core/compare/v0.27.7...v0.27.8) - 2026-08-15
 
 ### Added
