@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.4](https://github.com/sase-org/sase-core/compare/v0.27.3...v0.27.4) - 2026-08-15
+
+### Added
+
+- *(query)* parameterize the Rust query engine by compiled profile
+
 ### Added
 
 - *(query)* parameterize the parser, corpus, and evaluator by compiled profile
