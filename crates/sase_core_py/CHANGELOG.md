@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.7](https://github.com/sase-org/sase-core/compare/v0.27.6...v0.27.7) - 2026-08-15
+
+### Added
+
+- *(model_route)* add shared size and epic-land routing primitives
+
 ### Added
 
 - *(model_route)* bind size-alias and epic-land model routing primitives
