@@ -610,6 +610,15 @@ fn string_field(
     filterable: bool,
     searchable: bool,
 ) -> QueryFieldSpec {
+    exact_string_field(key, filterable, searchable, false)
+}
+
+fn exact_string_field(
+    key: &str,
+    filterable: bool,
+    searchable: bool,
+    exact_match: bool,
+) -> QueryFieldSpec {
     QueryFieldSpec {
         key: key.to_string(),
         value_kind: FieldValueKind::String,
@@ -617,6 +626,7 @@ fn string_field(
         searchable,
         repeatable: false,
         negatable: false,
+        exact_match,
         static_values: Vec::new(),
         hint: String::new(),
     }
@@ -634,6 +644,7 @@ fn notes_profile() -> CompiledQueryProfile {
                 searchable: false,
                 repeatable: false,
                 negatable: false,
+                exact_match: false,
                 static_values: vec!["true".into(), "false".into()],
                 hint: String::new(),
             },
@@ -644,6 +655,7 @@ fn notes_profile() -> CompiledQueryProfile {
                 searchable: false,
                 repeatable: false,
                 negatable: false,
+                exact_match: false,
                 static_values: Vec::new(),
                 hint: String::new(),
             },
@@ -654,6 +666,7 @@ fn notes_profile() -> CompiledQueryProfile {
                 searchable: false,
                 repeatable: true,
                 negatable: true,
+                exact_match: false,
                 static_values: vec!["note".into(), "doc".into()],
                 hint: String::new(),
             },
@@ -664,6 +677,7 @@ fn notes_profile() -> CompiledQueryProfile {
                 searchable: true,
                 repeatable: false,
                 negatable: false,
+                exact_match: false,
                 static_values: Vec::new(),
                 hint: String::new(),
             },

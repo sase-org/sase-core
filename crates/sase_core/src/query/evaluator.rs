@@ -280,11 +280,32 @@ impl QueryEvaluationContext {
                     .iter()
                     .any(|item| parse_int_literal(item) == Some(wanted))
             }
-            FieldValueKind::String
-            | FieldValueKind::Enum
-            | FieldValueKind::Date => {
+            FieldValueKind::Date => {
+                // Row values are pre-resolved epoch-second integers (the
+                // host resolves relative/absolute date text before a query
+                // ever reaches Rust). `since`/`until` are a closed,
+                // host-owned field-name convention mirroring
+                // `sase.ace.query.profile_evaluator._match_date_field`:
+                // range comparison by name, exact match otherwise.
+                let Some(wanted) = parse_int_literal(&query_value) else {
+                    return false;
+                };
+                let mut values = field.values.iter().filter_map(|item| parse_int_literal(item));
+                if key.eq_ignore_ascii_case("since") {
+                    values.any(|value| value >= wanted)
+                } else if key.eq_ignore_ascii_case("until") {
+                    values.any(|value| value <= wanted)
+                } else {
+                    values.any(|value| value == wanted)
+                }
+            }
+            FieldValueKind::String | FieldValueKind::Enum => {
                 let wanted = query_value.to_ascii_lowercase();
-                field.values_lower.iter().any(|item| item == &wanted)
+                if matches!(field.kind, FieldValueKind::Enum) || field.exact_match {
+                    field.values_lower.iter().any(|item| item == &wanted)
+                } else {
+                    field.values_lower.iter().any(|item| item.contains(&wanted))
+                }
             }
         }
     }

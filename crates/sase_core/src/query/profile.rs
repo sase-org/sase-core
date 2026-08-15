@@ -59,6 +59,12 @@ impl FieldValueKind {
 }
 
 /// One field declared by a compiled profile.
+///
+/// `exact_match` only applies to filterable `string`-kind fields: `true`
+/// requires a `key:value` term to equal a row's value exactly
+/// (case-insensitively); `false` (the default) matches by substring.
+/// `enum`-kind fields are always exact regardless of this flag;
+/// `bool`/`int`/`date` fields have their own typed comparison and ignore it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryFieldSpec {
     pub key: String,
@@ -67,6 +73,8 @@ pub struct QueryFieldSpec {
     pub searchable: bool,
     pub repeatable: bool,
     pub negatable: bool,
+    #[serde(default)]
+    pub exact_match: bool,
     #[serde(default)]
     pub static_values: Vec<String>,
     #[serde(default)]
@@ -216,6 +224,8 @@ struct QueryFieldSpecWire {
     #[serde(default)]
     negatable: bool,
     #[serde(default)]
+    exact_match: bool,
+    #[serde(default)]
     static_values: Vec<String>,
     #[serde(default)]
     hint: String,
@@ -347,6 +357,7 @@ fn validate_field(
         searchable: item.searchable,
         repeatable: item.repeatable,
         negatable: item.negatable,
+        exact_match: item.exact_match,
         static_values: item.static_values.clone(),
         hint: item.hint.clone(),
     })
@@ -598,6 +609,7 @@ fn field_payload(item: &QueryFieldSpec) -> Value {
     map.insert("searchable".into(), Value::Bool(item.searchable));
     map.insert("repeatable".into(), Value::Bool(item.repeatable));
     map.insert("negatable".into(), Value::Bool(item.negatable));
+    map.insert("exact_match".into(), Value::Bool(item.exact_match));
     map.insert(
         "static_values".into(),
         Value::Array(
@@ -792,6 +804,13 @@ fn build_patch_profile() -> CompiledQueryProfile {
     )
 }
 
+/// Build a Patch profile field. Every *filterable* Patch field matches
+/// exactly (never by substring): Patch's boolean grammar has always
+/// compared property values for exact equality. `exact_match` only means
+/// anything for filterable fields (see `QueryFieldSpec`'s doc comment), so
+/// it mirrors `filterable` here to match the Python compiler's payload
+/// byte-for-byte instead of leaving digest-irrelevant search-only fields
+/// with a value Python never sets.
 fn field(
     key: &str,
     value_kind: FieldValueKind,
@@ -806,6 +825,7 @@ fn field(
         searchable,
         repeatable: false,
         negatable: false,
+        exact_match: filterable,
         static_values: Vec::new(),
         hint: hint.to_string(),
     }
@@ -866,7 +886,7 @@ mod tests {
         let profile = patch_query_profile();
         assert_eq!(
             profile.digest,
-            "d93ceed27574ae2a09970b0ecd6dad4f5d63e34cd6dcb6475de471d23f2d81a4"
+            "a679434628641ed40ba1cc46be56255f63960edbd5249ca3acdc96b8b1012180"
         );
         let mut payload = match canonical_payload(
             &profile.pane_id,

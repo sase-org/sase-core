@@ -236,6 +236,7 @@ pub struct IndexedQueryRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedField {
     pub kind: FieldValueKind,
+    pub exact_match: bool,
     pub values: Vec<String>,
     pub values_lower: Vec<String>,
 }
@@ -244,10 +245,11 @@ impl IndexedQueryRow {
     pub fn index(row: QueryRow, profile: &CompiledQueryProfile) -> Self {
         let mut fields = HashMap::new();
         for (key, values) in row.fields {
-            let kind = profile
-                .field(&key)
+            let field_spec = profile.field(&key);
+            let kind = field_spec
                 .map(|field| field.value_kind)
                 .unwrap_or(FieldValueKind::String);
+            let exact_match = field_spec.is_some_and(|field| field.exact_match);
             let values_lower = values
                 .strings
                 .iter()
@@ -257,6 +259,7 @@ impl IndexedQueryRow {
                 key.to_ascii_lowercase(),
                 IndexedField {
                     kind,
+                    exact_match,
                     values: values.strings,
                     values_lower,
                 },
