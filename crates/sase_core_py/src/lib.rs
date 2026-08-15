@@ -147,6 +147,11 @@
 //! - `runner_limit_override_set_relative(sase_home: str, limit: int, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `runner_limit_override_set_until(sase_home: str, limit: int, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `runner_limit_override_clear(sase_home: str) -> bool`
+//! - `provider_disable_wire_schema_version() -> int`
+//! - `provider_disable_get(sase_home: str, now: float | None = None) -> dict`
+//! - `provider_disable_set_relative(sase_home: str, provider: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `provider_disable_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
+//! - `provider_disable_clear(sase_home: str, provider: str) -> bool`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `parse_chop_result(document: str) -> dict`
 //! - `validate_chop_result(result: dict) -> dict`
@@ -719,6 +724,13 @@ use sase_core::prompt_stash::{
     rewrite_prompt_stash as core_rewrite_prompt_stash,
     set_prompt_stash_pinned as core_set_prompt_stash_pinned,
     PromptStashEntryWire, PromptStashStoreError,
+};
+use sase_core::provider_disable::{
+    clear_provider_disable as core_clear_provider_disable,
+    get_provider_disables as core_get_provider_disables,
+    set_provider_disable_relative as core_set_provider_disable_relative,
+    set_provider_disable_until as core_set_provider_disable_until,
+    ProviderDisableError as ProviderDisableDomainError,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -7486,6 +7498,118 @@ fn py_runner_limit_override_clear(sase_home: &str) -> PyResult<bool> {
         .map_err(runner_limit_override_error_to_pyerr)
 }
 
+// --- Temporary LLM provider disables ----------------------------------
+
+fn provider_disable_error_to_pyerr(err: ProviderDisableDomainError) -> PyErr {
+    match err {
+        ProviderDisableDomainError::Validation(message) => {
+            PyValueError::new_err(message)
+        }
+        ProviderDisableDomainError::LockTimeout
+        | ProviderDisableDomainError::Io(_)
+        | ProviderDisableDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+fn provider_disable_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal provider-disable serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_disable_wire_schema_version")]
+fn py_provider_disable_wire_schema_version() -> u32 {
+    sase_core::PROVIDER_DISABLE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_disable_get", signature = (sase_home, now = None))]
+fn py_provider_disable_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let snapshot = core_get_provider_disables(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_disable_error_to_pyerr)?;
+    provider_disable_wire_to_py(py, &snapshot)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_disable_set_relative",
+    signature = (
+        sase_home,
+        provider,
+        source,
+        duration_seconds = None,
+        now = None
+    )
+)]
+fn py_provider_disable_set_relative<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    source: &str,
+    duration_seconds: Option<f64>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_provider_disable_relative(
+        &PathBuf::from(sase_home),
+        provider,
+        duration_seconds,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(provider_disable_error_to_pyerr)?;
+    provider_disable_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_disable_set_until",
+    signature = (sase_home, provider, expires_at, source, now = None)
+)]
+fn py_provider_disable_set_until<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    expires_at: f64,
+    source: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let record = core_set_provider_disable_until(
+        &PathBuf::from(sase_home),
+        provider,
+        expires_at,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(provider_disable_error_to_pyerr)?;
+    provider_disable_wire_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_disable_clear")]
+fn py_provider_disable_clear(
+    sase_home: &str,
+    provider: &str,
+) -> PyResult<bool> {
+    core_clear_provider_disable(&PathBuf::from(sase_home), provider)
+        .map_err(provider_disable_error_to_pyerr)
+}
+
 #[pyfunction]
 #[pyo3(
     name = "resolve_effective_effort",
@@ -8707,6 +8831,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_runner_limit_override_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_runner_limit_override_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_disable_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_set_relative, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_set_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
@@ -10030,6 +10162,104 @@ mod tests {
                 py,
                 &home,
                 1,
+                1.0,
+                "test",
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn provider_disable_bindings_round_trip_and_replace() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_provider_disable_wire_schema_version(),
+                sase_core::PROVIDER_DISABLE_WIRE_SCHEMA_VERSION
+            );
+            let first = py_provider_disable_set_relative(
+                py,
+                &home,
+                "claude",
+                "binding-test",
+                Some(900.0),
+                Some(now),
+            )
+            .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            assert_eq!(
+                first_value,
+                json!({
+                    "version": 1,
+                    "provider": "claude",
+                    "created_at": now,
+                    "expires_at": now + 900.0,
+                    "source": "binding-test",
+                })
+            );
+
+            let codex = py_provider_disable_set_relative(
+                py,
+                &home,
+                "codex",
+                "binding-test",
+                None,
+                Some(now),
+            )
+            .unwrap();
+            let codex_value = py_to_json_value(codex.bind(py)).unwrap();
+            let replacement = py_provider_disable_set_until(
+                py,
+                &home,
+                "claude",
+                now + 60.0,
+                "binding-test",
+                Some(now),
+            )
+            .unwrap();
+            let replacement_value =
+                py_to_json_value(replacement.bind(py)).unwrap();
+
+            let snapshot =
+                py_provider_disable_get(py, &home, Some(now)).unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["version"], json!(1));
+            assert_eq!(
+                snapshot_value["disables"],
+                json!([replacement_value, codex_value])
+            );
+
+            assert!(py_provider_disable_clear(&home, "codex").unwrap());
+            assert!(!py_provider_disable_clear(&home, "codex").unwrap());
+        });
+    }
+
+    #[test]
+    fn provider_disable_binding_rejects_invalid_values() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        Python::with_gil(|py| {
+            let error = py_provider_disable_set_relative(
+                py,
+                &home,
+                "",
+                "test",
+                None,
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = py_provider_disable_set_until(
+                py,
+                &home,
+                "claude",
                 1.0,
                 "test",
                 Some(1.0),

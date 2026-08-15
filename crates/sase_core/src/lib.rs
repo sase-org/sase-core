@@ -52,6 +52,7 @@ pub mod prompt_artifact;
 pub mod prompt_literals;
 mod prompt_rewrite;
 pub mod prompt_stash;
+pub mod provider_disable;
 pub mod query;
 mod reference_path;
 pub mod referenced_by;
@@ -622,6 +623,12 @@ pub use prompt_stash::{
     rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,
     PromptStashPopOutcomeWire, PromptStashSnapshotWire, PromptStashStoreError,
     PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
+};
+pub use provider_disable::{
+    clear_provider_disable, get_provider_disables, provider_disable_state_path,
+    set_provider_disable_relative, set_provider_disable_until,
+    ProviderDisableError, ProviderDisableSnapshotWire, ProviderDisableWire,
+    PROVIDER_DISABLE_STATE_FILENAME, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, canonicalize_query_with_profile, compile_query,
