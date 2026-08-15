@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.6](https://github.com/sase-org/sase-core/compare/v0.27.5...v0.27.6) - 2026-08-15
+
+### Fixed
+
+- *(notifications)* preserve snooze microsecond timestamps
+
 ## [0.27.5](https://github.com/sase-org/sase-core/compare/v0.27.4...v0.27.5) - 2026-08-15
 
 ### Added
