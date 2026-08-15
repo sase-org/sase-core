@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt;
 
 use super::tabs::{tab_key_for, tabs_and_counts_for};
@@ -850,14 +850,14 @@ fn validated_snooze_deadline(value: &str) -> Result<String, String> {
     if deadline <= DateTime::<Utc>::from(SystemTime::now()) {
         return Err("snooze deadline must be in the future".to_string());
     }
-    Ok(deadline.to_rfc3339())
+    Ok(format_utc_python_iso(deadline))
 }
 
 fn expire_snoozes_in_rows(
     rows: &mut [NotificationWire],
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let resurfaced_at = now.to_rfc3339();
+    let resurfaced_at = format_utc_python_iso(now);
     let mut expired_ids = Vec::new();
     for notification in rows {
         if notification.dismissed {
@@ -891,7 +891,18 @@ fn next_snooze_deadline_for(
         .filter_map(|deadline| DateTime::parse_from_rfc3339(deadline).ok())
         .map(|deadline| deadline.with_timezone(&Utc))
         .min()
-        .map(|deadline| deadline.to_rfc3339())
+        .map(format_utc_python_iso)
+}
+
+fn format_utc_python_iso(value: DateTime<Utc>) -> String {
+    let nanos = value.timestamp_subsec_nanos();
+    if nanos == 0 {
+        return value.to_rfc3339_opts(SecondsFormat::Secs, false);
+    }
+    if nanos % 1_000 == 0 {
+        return value.to_rfc3339_opts(SecondsFormat::Micros, false);
+    }
+    value.to_rfc3339_opts(SecondsFormat::Nanos, false)
 }
 
 fn open_lock_file(path: &Path) -> Result<File, String> {

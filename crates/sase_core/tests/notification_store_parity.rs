@@ -710,8 +710,11 @@ fn notification_expire_snoozes_handles_aware_and_naive_timestamps() {
 fn notification_snooze_normalizes_offsets_and_projects_earliest_deadline() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
-    rewrite_notifications(&path, &[notification("a"), notification("b")])
-        .unwrap();
+    rewrite_notifications(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
 
     let first = apply_notification_state_update(
         &path,
@@ -752,6 +755,25 @@ fn notification_snooze_normalizes_offsets_and_projects_earliest_deadline() {
     assert_eq!(
         later.next_snooze_deadline.as_deref(),
         Some("2099-01-01T09:00:00+00:00")
+    );
+
+    let microsecond = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkSnoozed {
+            id: "c".to_string(),
+            until: "2099-01-01T11:00:00.296000+00:00".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        microsecond
+            .notifications
+            .iter()
+            .find(|notification| notification.id == "c")
+            .unwrap()
+            .snooze_until
+            .as_deref(),
+        Some("2099-01-01T11:00:00.296000+00:00")
     );
 }
 
