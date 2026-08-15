@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.3](https://github.com/sase-org/sase-core/compare/v0.27.2...v0.27.3) - 2026-08-15
+
+### Added
+
+- *(procs)* add proc-shell lifecycle operations
+
 ## [0.27.2](https://github.com/sase-org/sase-core/compare/v0.27.1...v0.27.2) - 2026-08-14
 
 ### Added
