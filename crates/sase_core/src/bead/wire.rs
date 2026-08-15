@@ -66,6 +66,9 @@ pub enum PhaseSizeWire {
 }
 
 impl PhaseSizeWire {
+    pub const NAMES: [&'static str; 5] =
+        ["xsmall", "small", "medium", "large", "xlarge"];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Xsmall => "xsmall",
@@ -73,6 +76,17 @@ impl PhaseSizeWire {
             Self::Medium => "medium",
             Self::Large => "large",
             Self::Xlarge => "xlarge",
+        }
+    }
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "xsmall" => Some(Self::Xsmall),
+            "small" => Some(Self::Small),
+            "medium" => Some(Self::Medium),
+            "large" => Some(Self::Large),
+            "xlarge" => Some(Self::Xlarge),
+            _ => None,
         }
     }
 }
@@ -171,15 +185,11 @@ where
     let value = Option::<String>::deserialize(deserializer)?;
     match value.as_deref() {
         None | Some("") => Ok(None),
-        Some("xsmall") => Ok(Some(PhaseSizeWire::Xsmall)),
-        Some("small") => Ok(Some(PhaseSizeWire::Small)),
-        Some("medium") => Ok(Some(PhaseSizeWire::Medium)),
-        Some("large") => Ok(Some(PhaseSizeWire::Large)),
-        Some("xlarge") => Ok(Some(PhaseSizeWire::Xlarge)),
-        Some(value) => Err(de::Error::unknown_variant(
-            value,
-            &["xsmall", "small", "medium", "large", "xlarge"],
-        )),
+        Some(value) => {
+            PhaseSizeWire::from_name(value).map(Some).ok_or_else(|| {
+                de::Error::unknown_variant(value, &PhaseSizeWire::NAMES)
+            })
+        }
     }
 }
 

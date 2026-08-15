@@ -153,6 +153,8 @@
 //! - `provider_disable_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `provider_disable_clear(sase_home: str, provider: str) -> bool`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
+//! - `size_model_route(size: str) -> dict`
+//! - `select_epic_land_model(explicit_model: str | None, phase_count: int, threshold: int, epic_lander_model: str, big_epic_lander_model: str) -> dict`
 //! - `parse_chop_result(document: str) -> dict`
 //! - `validate_chop_result(result: dict) -> dict`
 //! - `validate_chop_proposal(proposal: dict, index: int, prior_ids: list[str]) -> dict`
@@ -659,6 +661,11 @@ use sase_core::markdown_link_refs::{
     scan_markdown_reference_links as core_scan_markdown_reference_links,
     MarkdownReferenceDefinitionWire, MarkdownReferenceScanWire,
     MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
+};
+use sase_core::model_route::{
+    select_epic_land_model as core_select_epic_land_model,
+    size_model_route_from_name as core_size_model_route_from_name,
+    ModelRouteError as ModelRouteDomainError,
 };
 use sase_core::notifications::{
     append_notification as core_append_notification,
@@ -7638,6 +7645,65 @@ fn py_resolve_effective_effort<'py>(
     )
 }
 
+fn model_route_error_to_pyerr(err: ModelRouteDomainError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+fn py_model_route_int(value: &Bound<'_, PyAny>, name: &str) -> PyResult<i64> {
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be an integer, not a boolean"
+        )));
+    }
+    value.extract::<i64>().map_err(|_| {
+        PyValueError::new_err(format!("{name} must be an integer"))
+    })
+}
+
+#[pyfunction]
+#[pyo3(name = "size_model_route")]
+fn py_size_model_route<'py>(py: Python<'py>, size: &str) -> PyResult<PyObject> {
+    effort_wire_to_py(
+        py,
+        &core_size_model_route_from_name(size)
+            .map_err(model_route_error_to_pyerr)?,
+    )
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "select_epic_land_model",
+    signature = (
+        explicit_model,
+        phase_count,
+        threshold,
+        epic_lander_model,
+        big_epic_lander_model
+    )
+)]
+fn py_select_epic_land_model<'py>(
+    py: Python<'py>,
+    explicit_model: Option<&str>,
+    phase_count: Bound<'py, PyAny>,
+    threshold: Bound<'py, PyAny>,
+    epic_lander_model: &str,
+    big_epic_lander_model: &str,
+) -> PyResult<PyObject> {
+    let phase_count = py_model_route_int(&phase_count, "phase_count")?;
+    let threshold = py_model_route_int(&threshold, "threshold")?;
+    effort_wire_to_py(
+        py,
+        &core_select_epic_land_model(
+            explicit_model,
+            phase_count,
+            threshold,
+            epic_lander_model,
+            big_epic_lander_model,
+        )
+        .map_err(model_route_error_to_pyerr)?,
+    )
+}
+
 // --- Canonical project/home content layout -------------------------------
 
 /// Return the shared canonical/legacy SASE content layout and xprompt order.
@@ -8840,6 +8906,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_provider_disable_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
+    m.add_function(wrap_pyfunction!(py_size_model_route, m)?)?;
+    m.add_function(wrap_pyfunction!(py_select_epic_land_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;
@@ -10090,6 +10158,162 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn size_model_route_binding_maps_public_aliases() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for (size, alias) in [
+                ("xsmall", "@xsmall"),
+                ("small", "@small"),
+                ("medium", "@medium"),
+                ("large", "@large"),
+                ("xlarge", "@xlarge"),
+            ] {
+                let routed = py_size_model_route(py, size).unwrap();
+                assert_eq!(
+                    py_to_json_value(routed.bind(py)).unwrap(),
+                    json!({"size": size, "alias": alias})
+                );
+                let from_alias = py_size_model_route(py, alias).unwrap();
+                assert_eq!(
+                    py_to_json_value(from_alias.bind(py)).unwrap(),
+                    json!({"size": size, "alias": alias})
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn size_model_route_binding_rejects_invalid_sizes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            for size in ["", "medium_worker", "@epic_lander", "MEDIUM"] {
+                let error = py_size_model_route(py, size).unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py), "{size:?}");
+                assert!(
+                    error.to_string().contains("size must be one of"),
+                    "{size:?} -> {error}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn epic_land_model_binding_selects_explicit_then_threshold() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_int = |value: i64| {
+                json_value_to_py(py, &json!(value)).unwrap().into_bound(py)
+            };
+            let explicit = py_select_epic_land_model(
+                py,
+                Some("codex/gpt-5.5@xhigh"),
+                py_int(9),
+                py_int(5),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(explicit.bind(py)).unwrap(),
+                json!({
+                    "model": "codex/gpt-5.5@xhigh",
+                    "source": "explicit",
+                    "explicit": true
+                })
+            );
+
+            let normal = py_select_epic_land_model(
+                py,
+                None,
+                py_int(4),
+                py_int(5),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(normal.bind(py)).unwrap(),
+                json!({
+                    "model": "@large",
+                    "source": "epic_lander_model",
+                    "explicit": false
+                })
+            );
+
+            let big = py_select_epic_land_model(
+                py,
+                None,
+                py_int(5),
+                py_int(5),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(big.bind(py)).unwrap(),
+                json!({
+                    "model": "@xlarge",
+                    "source": "big_epic_lander_model",
+                    "explicit": false
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn epic_land_model_binding_rejects_invalid_counts_and_thresholds() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let py_int = |value: i64| {
+                json_value_to_py(py, &json!(value)).unwrap().into_bound(py)
+            };
+            let py_bool =
+                json_value_to_py(py, &json!(true)).unwrap().into_bound(py);
+            let bool_count = py_select_epic_land_model(
+                py,
+                None,
+                py_bool,
+                py_int(5),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap_err();
+            assert!(bool_count.is_instance_of::<PyValueError>(py));
+            assert!(bool_count
+                .to_string()
+                .contains("phase_count must be an integer, not a boolean"));
+
+            let negative = py_select_epic_land_model(
+                py,
+                None,
+                py_int(-1),
+                py_int(5),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap_err();
+            assert!(negative.is_instance_of::<PyValueError>(py));
+            assert!(negative
+                .to_string()
+                .contains("phase_count must be a non-negative integer"));
+
+            let zero_threshold = py_select_epic_land_model(
+                py,
+                None,
+                py_int(2),
+                py_int(0),
+                "@large",
+                "@xlarge",
+            )
+            .unwrap_err();
+            assert!(zero_threshold.is_instance_of::<PyValueError>(py));
+            assert!(zero_threshold
+                .to_string()
+                .contains("threshold must be a positive integer"));
         });
     }
 
