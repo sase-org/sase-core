@@ -200,6 +200,132 @@ pub struct DoneMarkerWire {
 /// name while allowing every JSON scalar and container shape.
 pub type OutputVariableValue = Value;
 
+/// Schema version for indexed output-variable history queries.
+pub const AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION: u32 = 1;
+
+fn default_output_variable_key_limit() -> u32 {
+    20
+}
+
+fn default_output_variable_value_limit() -> u32 {
+    5
+}
+
+/// Query knobs for grouped output-variable history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableHistoryQueryWire {
+    /// Exact project display names to include. Empty means every project.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Agent-name globs to include. `hood.*` also matches the hood root.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// Variable-key globs to include.
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// Case-insensitive substring matches over scalar text and canonical JSON.
+    #[serde(default)]
+    pub values: Vec<String>,
+    /// Exact typed JSON value matches after canonical serialization.
+    #[serde(default)]
+    pub value_json: Vec<OutputVariableValue>,
+    /// Inclusive lower artifact timestamp bound (`YYYYmmddHHMMSS`).
+    #[serde(default)]
+    pub since_timestamp: Option<String>,
+    /// Inclusive upper artifact timestamp bound (`YYYYmmddHHMMSS`).
+    #[serde(default)]
+    pub until_timestamp: Option<String>,
+    #[serde(default)]
+    pub include_hidden: bool,
+    /// Maximum keys returned. Zero means unlimited.
+    #[serde(default = "default_output_variable_key_limit")]
+    pub key_limit: u32,
+    /// Maximum distinct values returned per key. Zero means unlimited.
+    #[serde(default = "default_output_variable_value_limit")]
+    pub value_limit: u32,
+    /// Invert the normal recent-first key and value ordering.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl Default for AgentOutputVariableHistoryQueryWire {
+    fn default() -> Self {
+        Self {
+            projects: Vec::new(),
+            agents: Vec::new(),
+            keys: Vec::new(),
+            values: Vec::new(),
+            value_json: Vec::new(),
+            since_timestamp: None,
+            until_timestamp: None,
+            include_hidden: false,
+            key_limit: default_output_variable_key_limit(),
+            value_limit: default_output_variable_value_limit(),
+            reverse: false,
+        }
+    }
+}
+
+/// Effective limit and truncation metadata for one history dimension.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOutputVariableLimitWire {
+    pub limit: u32,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub truncated: bool,
+}
+
+/// One indexed output-variable occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableOccurrenceWire {
+    pub artifact_dir: String,
+    pub project_name: String,
+    pub workflow_dir_name: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    pub key: String,
+    pub value: OutputVariableValue,
+    pub value_json: String,
+    pub hidden: bool,
+}
+
+/// One distinct typed value for a variable key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableValueGroupWire {
+    pub value: OutputVariableValue,
+    pub value_json: String,
+    pub occurrence_count: u64,
+    pub agent_count: u64,
+    pub agents: Vec<String>,
+    pub projects: Vec<String>,
+    pub first_seen_timestamp: String,
+    pub last_seen_timestamp: String,
+    pub newest: AgentOutputVariableOccurrenceWire,
+}
+
+/// Grouped history for one output-variable key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableKeyGroupWire {
+    pub key: String,
+    pub occurrence_count: u64,
+    pub distinct_value_count: u64,
+    pub values_limit: AgentOutputVariableLimitWire,
+    pub values: Vec<AgentOutputVariableValueGroupWire>,
+}
+
+/// Grouped output-variable history returned by the artifact index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableHistoryWire {
+    pub schema_version: u32,
+    pub index_path: String,
+    pub query: AgentOutputVariableHistoryQueryWire,
+    pub keys_limit: AgentOutputVariableLimitWire,
+    pub groups: Vec<AgentOutputVariableKeyGroupWire>,
+}
+
 /// Compact projection of `agent_meta.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetaWire {

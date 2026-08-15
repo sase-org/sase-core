@@ -6,6 +6,7 @@
 //! queries can return loader-equivalent records without walking every
 //! historical timestamp directory.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -29,11 +30,16 @@ use super::scanner::{
 };
 use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire, DoneMarkerWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire,
+    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
+    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
+    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
+    DoneMarkerWire, OutputVariableValue,
+    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 20;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 21;
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -121,6 +127,7 @@ pub struct AgentArtifactIndexStatusWire {
     pub agent_artifacts_rows: u64,
     pub dismissed_agents_rows: u64,
     pub agent_artifact_aliases_rows: u64,
+    pub agent_output_variables_rows: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -208,6 +215,10 @@ pub fn delete_agent_artifact_index_row_with_busy_timeout(
     let conn = open_index_with_busy_timeout(index_path, busy_timeout)?;
     let artifact_dir =
         resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
+    let _ = conn.execute(
+        "DELETE FROM agent_output_variables WHERE artifact_dir = ?1",
+        [artifact_dir.as_str()],
+    );
     let deleted = conn
         .execute(
             "DELETE FROM agent_artifacts WHERE artifact_dir = ?1",
@@ -430,6 +441,10 @@ pub fn agent_artifact_index_status(
             &conn,
             "agent_artifact_aliases",
         )?,
+        agent_output_variables_rows: count_table_rows(
+            &conn,
+            "agent_output_variables",
+        )?,
     })
 }
 
@@ -541,6 +556,515 @@ pub fn query_agent_artifact_index(
         records,
         clan_context,
     })
+}
+
+/// Query grouped output-variable history from the persistent artifact index.
+pub fn query_agent_output_variable_history(
+    index_path: &Path,
+    query: AgentOutputVariableHistoryQueryWire,
+) -> Result<AgentOutputVariableHistoryWire, String> {
+    if !query.values.is_empty() && !query.value_json.is_empty() {
+        return Err(
+            "values and value_json filters are mutually exclusive".to_string()
+        );
+    }
+
+    let conn = open_index(index_path)?;
+    let exact_value_json = query
+        .value_json
+        .iter()
+        .map(canonical_output_variable_json)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let rows =
+        select_output_variable_occurrences(&conn, &query, &exact_value_json)?;
+    let mut occurrences = Vec::new();
+    for row in rows {
+        let occurrence = row.into_occurrence()?;
+        if !output_variable_occurrence_matches_filters(&occurrence, &query) {
+            continue;
+        }
+        occurrences.push(occurrence);
+    }
+    occurrences.sort_by(compare_output_variable_occurrences_newest);
+
+    let mut keys: BTreeMap<String, OutputVariableKeyAccumulator> =
+        BTreeMap::new();
+    for occurrence in occurrences {
+        keys.entry(occurrence.key.clone())
+            .or_insert_with(|| {
+                OutputVariableKeyAccumulator::new(occurrence.key.clone())
+            })
+            .push(occurrence);
+    }
+
+    let mut key_groups: Vec<AgentOutputVariableKeyGroupWire> = keys
+        .into_values()
+        .map(|accumulator| {
+            accumulator.into_wire(query.value_limit, query.reverse)
+        })
+        .collect();
+    sort_output_variable_key_groups(&mut key_groups, query.reverse);
+
+    let total_key_count = key_groups.len() as u64;
+    let returned_key_count =
+        truncate_to_limit(&mut key_groups, query.key_limit) as u64;
+    let requested_key_limit = query.key_limit;
+
+    Ok(AgentOutputVariableHistoryWire {
+        schema_version: AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+        index_path: index_path.to_string_lossy().into_owned(),
+        query,
+        keys_limit: AgentOutputVariableLimitWire {
+            limit: requested_key_limit,
+            total_count: total_key_count,
+            returned_count: returned_key_count,
+            truncated: returned_key_count < total_key_count,
+        },
+        groups: key_groups,
+    })
+}
+
+fn select_output_variable_occurrences(
+    conn: &Connection,
+    query: &AgentOutputVariableHistoryQueryWire,
+    exact_value_json: &BTreeSet<String>,
+) -> Result<Vec<IndexedOutputVariableOccurrence>, String> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+    if !query.include_hidden {
+        clauses.push("hidden = 0".to_string());
+    }
+    if !query.projects.is_empty() {
+        clauses.push(format!(
+            "project_name IN ({})",
+            placeholders(query.projects.len())
+        ));
+        values.extend(query.projects.iter().cloned());
+    }
+    if let Some(since) = query.since_timestamp.as_ref() {
+        clauses.push("timestamp >= ?".to_string());
+        values.push(since.clone());
+    }
+    if let Some(until) = query.until_timestamp.as_ref() {
+        clauses.push("timestamp <= ?".to_string());
+        values.push(until.clone());
+    }
+    if !exact_value_json.is_empty() {
+        clauses.push(format!(
+            "value_json IN ({})",
+            placeholders(exact_value_json.len())
+        ));
+        values.extend(exact_value_json.iter().cloned());
+    }
+
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    let sql = format!(
+        r#"
+        SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
+               agent_name, cl_name, variable_key, value_json,
+               hidden
+        FROM agent_output_variables
+        {where_sql}
+        ORDER BY timestamp DESC, project_name ASC, artifact_dir ASC,
+                 variable_key ASC
+        "#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params_from_iter(values.iter()))
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push(IndexedOutputVariableOccurrence {
+            artifact_dir: row.get(0).map_err(|e| e.to_string())?,
+            project_name: row.get(1).map_err(|e| e.to_string())?,
+            workflow_dir_name: row.get(2).map_err(|e| e.to_string())?,
+            timestamp: row.get(3).map_err(|e| e.to_string())?,
+            agent_name: row.get(4).map_err(|e| e.to_string())?,
+            cl_name: row.get(5).map_err(|e| e.to_string())?,
+            key: row.get(6).map_err(|e| e.to_string())?,
+            value_json: row.get(7).map_err(|e| e.to_string())?,
+            hidden: row.get::<_, i64>(8).map_err(|e| e.to_string())? != 0,
+        });
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+struct IndexedOutputVariableOccurrence {
+    artifact_dir: String,
+    project_name: String,
+    workflow_dir_name: String,
+    timestamp: String,
+    agent_name: Option<String>,
+    cl_name: Option<String>,
+    key: String,
+    value_json: String,
+    hidden: bool,
+}
+
+impl IndexedOutputVariableOccurrence {
+    fn into_occurrence(
+        self,
+    ) -> Result<AgentOutputVariableOccurrenceWire, String> {
+        let value =
+            serde_json::from_str::<OutputVariableValue>(&self.value_json)
+                .map_err(|e| {
+                    format!(
+                        "invalid indexed output-variable JSON for {}:{}: {e}",
+                        self.artifact_dir, self.key
+                    )
+                })?;
+        Ok(AgentOutputVariableOccurrenceWire {
+            artifact_dir: self.artifact_dir,
+            project_name: self.project_name,
+            workflow_dir_name: self.workflow_dir_name,
+            timestamp: self.timestamp,
+            agent_name: self.agent_name,
+            cl_name: self.cl_name,
+            key: self.key,
+            value,
+            value_json: self.value_json,
+            hidden: self.hidden,
+        })
+    }
+}
+
+fn output_variable_occurrence_matches_filters(
+    occurrence: &AgentOutputVariableOccurrenceWire,
+    query: &AgentOutputVariableHistoryQueryWire,
+) -> bool {
+    if !query.agents.is_empty()
+        && !query.agents.iter().any(|pattern| {
+            occurrence
+                .agent_name
+                .as_deref()
+                .is_some_and(|agent| agent_pattern_matches(pattern, agent))
+        })
+    {
+        return false;
+    }
+    if !query.keys.is_empty()
+        && !query
+            .keys
+            .iter()
+            .any(|pattern| glob_matches(pattern, &occurrence.key))
+    {
+        return false;
+    }
+    if !query.values.is_empty()
+        && !query.values.iter().any(|needle| {
+            output_variable_value_contains(&occurrence.value, needle)
+        })
+    {
+        return false;
+    }
+    true
+}
+
+fn output_variable_value_contains(
+    value: &OutputVariableValue,
+    needle: &str,
+) -> bool {
+    let needle = needle.to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    canonical_output_variable_json(value)
+        .map(|json| json.to_lowercase().contains(&needle))
+        .unwrap_or(false)
+        || output_variable_scalar_text(value)
+            .map(|text| text.to_lowercase().contains(&needle))
+            .unwrap_or(false)
+}
+
+fn agent_pattern_matches(pattern: &str, agent_name: &str) -> bool {
+    if let Some(hood) = pattern.strip_suffix(".*") {
+        if agent_name == hood
+            || agent_name
+                .strip_prefix(hood)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            return true;
+        }
+    }
+    glob_matches(pattern, agent_name)
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut p, mut v) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_value = 0usize;
+    while v < value.len() {
+        if p < pattern.len() && pattern[p] == value[v] {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            star_value = v;
+        } else if let Some(star_index) = star {
+            p = star_index + 1;
+            star_value += 1;
+            v = star_value;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+#[derive(Debug)]
+struct OutputVariableKeyAccumulator {
+    key: String,
+    occurrences: Vec<AgentOutputVariableOccurrenceWire>,
+    values: BTreeMap<String, OutputVariableValueAccumulator>,
+}
+
+impl OutputVariableKeyAccumulator {
+    fn new(key: String) -> Self {
+        Self {
+            key,
+            occurrences: Vec::new(),
+            values: BTreeMap::new(),
+        }
+    }
+
+    fn push(&mut self, occurrence: AgentOutputVariableOccurrenceWire) {
+        self.values
+            .entry(occurrence.value_json.clone())
+            .or_insert_with(|| {
+                OutputVariableValueAccumulator::new(
+                    occurrence.value.clone(),
+                    occurrence.value_json.clone(),
+                )
+            })
+            .push(occurrence.clone());
+        self.occurrences.push(occurrence);
+    }
+
+    fn into_wire(
+        self,
+        value_limit: u32,
+        reverse: bool,
+    ) -> AgentOutputVariableKeyGroupWire {
+        let occurrence_count = self.occurrences.len() as u64;
+        let mut values: Vec<AgentOutputVariableValueGroupWire> = self
+            .values
+            .into_values()
+            .map(OutputVariableValueAccumulator::into_wire)
+            .collect();
+        sort_output_variable_value_groups(&mut values, reverse);
+        let total_value_count = values.len() as u64;
+        let returned_value_count =
+            truncate_to_limit(&mut values, value_limit) as u64;
+        AgentOutputVariableKeyGroupWire {
+            key: self.key,
+            occurrence_count,
+            distinct_value_count: total_value_count,
+            values_limit: AgentOutputVariableLimitWire {
+                limit: value_limit,
+                total_count: total_value_count,
+                returned_count: returned_value_count,
+                truncated: returned_value_count < total_value_count,
+            },
+            values,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OutputVariableValueAccumulator {
+    value: OutputVariableValue,
+    value_json: String,
+    occurrences: Vec<AgentOutputVariableOccurrenceWire>,
+    agent_latest: BTreeMap<String, String>,
+    projects: BTreeSet<String>,
+}
+
+impl OutputVariableValueAccumulator {
+    fn new(value: OutputVariableValue, value_json: String) -> Self {
+        Self {
+            value,
+            value_json,
+            occurrences: Vec::new(),
+            agent_latest: BTreeMap::new(),
+            projects: BTreeSet::new(),
+        }
+    }
+
+    fn push(&mut self, occurrence: AgentOutputVariableOccurrenceWire) {
+        if let Some(agent_name) = occurrence.agent_name.as_ref() {
+            let entry = self.agent_latest.entry(agent_name.clone());
+            entry
+                .and_modify(|timestamp| {
+                    if occurrence.timestamp > *timestamp {
+                        *timestamp = occurrence.timestamp.clone();
+                    }
+                })
+                .or_insert_with(|| occurrence.timestamp.clone());
+        }
+        self.projects.insert(occurrence.project_name.clone());
+        self.occurrences.push(occurrence);
+    }
+
+    fn into_wire(mut self) -> AgentOutputVariableValueGroupWire {
+        self.occurrences
+            .sort_by(compare_output_variable_occurrences_newest);
+        let newest = self.occurrences.first().cloned().unwrap_or_else(|| {
+            AgentOutputVariableOccurrenceWire {
+                artifact_dir: String::new(),
+                project_name: String::new(),
+                workflow_dir_name: String::new(),
+                timestamp: String::new(),
+                agent_name: None,
+                cl_name: None,
+                key: String::new(),
+                value: self.value.clone(),
+                value_json: self.value_json.clone(),
+                hidden: false,
+            }
+        });
+        let first_seen_timestamp = self
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.timestamp.as_str())
+            .min()
+            .unwrap_or("")
+            .to_string();
+        let last_seen_timestamp = self
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.timestamp.as_str())
+            .max()
+            .unwrap_or("")
+            .to_string();
+        let mut agents: Vec<(String, String)> =
+            self.agent_latest.into_iter().collect();
+        agents.sort_by(|left, right| {
+            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+        });
+        let agents: Vec<String> =
+            agents.into_iter().map(|(agent, _)| agent).collect();
+        let agent_count = agents.len() as u64;
+
+        AgentOutputVariableValueGroupWire {
+            value: self.value,
+            value_json: self.value_json,
+            occurrence_count: self.occurrences.len() as u64,
+            agent_count,
+            agents,
+            projects: self.projects.into_iter().collect(),
+            first_seen_timestamp,
+            last_seen_timestamp,
+            newest,
+        }
+    }
+}
+
+fn truncate_to_limit<T>(items: &mut Vec<T>, limit: u32) -> usize {
+    if limit > 0 && items.len() > limit as usize {
+        items.truncate(limit as usize);
+    }
+    items.len()
+}
+
+fn sort_output_variable_key_groups(
+    groups: &mut [AgentOutputVariableKeyGroupWire],
+    reverse: bool,
+) {
+    groups.sort_by(|left, right| {
+        let ordering = compare_output_variable_value_groups_by_seen(
+            representative_value_group_for_key(left, reverse),
+            representative_value_group_for_key(right, reverse),
+            reverse,
+        );
+        ordering.then_with(|| left.key.cmp(&right.key))
+    });
+    for group in groups {
+        sort_output_variable_value_groups(&mut group.values, reverse);
+    }
+}
+
+fn representative_value_group_for_key(
+    group: &AgentOutputVariableKeyGroupWire,
+    reverse: bool,
+) -> Option<&AgentOutputVariableValueGroupWire> {
+    group.values.iter().min_by(|left, right| {
+        compare_output_variable_value_groups_by_seen(
+            Some(*left),
+            Some(*right),
+            reverse,
+        )
+    })
+}
+
+fn sort_output_variable_value_groups(
+    groups: &mut [AgentOutputVariableValueGroupWire],
+    reverse: bool,
+) {
+    groups.sort_by(|left, right| {
+        compare_output_variable_value_groups_by_seen(
+            Some(left),
+            Some(right),
+            reverse,
+        )
+        .then_with(|| left.value_json.cmp(&right.value_json))
+    });
+}
+
+fn compare_output_variable_value_groups_by_seen(
+    left: Option<&AgentOutputVariableValueGroupWire>,
+    right: Option<&AgentOutputVariableValueGroupWire>,
+    reverse: bool,
+) -> Ordering {
+    let Some(left) = left else {
+        return Ordering::Greater;
+    };
+    let Some(right) = right else {
+        return Ordering::Less;
+    };
+    if reverse {
+        left.first_seen_timestamp
+            .cmp(&right.first_seen_timestamp)
+            .then_with(|| {
+                left.newest.project_name.cmp(&right.newest.project_name)
+            })
+            .then_with(|| {
+                left.newest.artifact_dir.cmp(&right.newest.artifact_dir)
+            })
+    } else {
+        right
+            .last_seen_timestamp
+            .cmp(&left.last_seen_timestamp)
+            .then_with(|| {
+                left.newest.project_name.cmp(&right.newest.project_name)
+            })
+            .then_with(|| {
+                left.newest.artifact_dir.cmp(&right.newest.artifact_dir)
+            })
+    }
+}
+
+fn compare_output_variable_occurrences_newest(
+    left: &AgentOutputVariableOccurrenceWire,
+    right: &AgentOutputVariableOccurrenceWire,
+) -> Ordering {
+    right
+        .timestamp
+        .cmp(&left.timestamp)
+        .then_with(|| left.project_name.cmp(&right.project_name))
+        .then_with(|| left.artifact_dir.cmp(&right.artifact_dir))
+        .then_with(|| left.key.cmp(&right.key))
 }
 
 fn select_clan_context(
@@ -755,6 +1279,38 @@ fn open_index_with_busy_timeout(
         );
         CREATE INDEX IF NOT EXISTS idx_agent_artifact_aliases_artifact_dir
             ON agent_artifact_aliases(artifact_dir);
+        CREATE TABLE IF NOT EXISTS agent_output_variables (
+            artifact_dir TEXT NOT NULL,
+            variable_key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            value_scalar_text TEXT,
+            projects_root TEXT NOT NULL,
+            project_name TEXT NOT NULL,
+            project_dir TEXT NOT NULL,
+            project_file TEXT NOT NULL,
+            workflow_dir_name TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            agent_name TEXT,
+            cl_name TEXT,
+            hidden INTEGER NOT NULL,
+            has_done_marker INTEGER NOT NULL,
+            finished_at REAL,
+            status TEXT NOT NULL,
+            agent_type TEXT NOT NULL,
+            indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (artifact_dir, variable_key),
+            FOREIGN KEY (artifact_dir)
+                REFERENCES agent_artifacts(artifact_dir)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_output_variables_recent_key
+            ON agent_output_variables(variable_key, timestamp, project_name, artifact_dir);
+        CREATE INDEX IF NOT EXISTS idx_agent_output_variables_agent_key_time
+            ON agent_output_variables(agent_name, variable_key, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_output_variables_project_time
+            ON agent_output_variables(project_name, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_output_variables_value_json
+            ON agent_output_variables(variable_key, value_json);
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -827,6 +1383,9 @@ fn open_index_with_busy_timeout(
     }
     if prior_version.map_or(true, |v| v < 20) {
         migrate_record_json_refresh_v20(&mut conn)?;
+    }
+    if prior_version.map_or(true, |v| v < 21) {
+        migrate_output_variable_projection_v21(&mut conn)?;
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
@@ -1147,6 +1706,43 @@ fn migrate_record_json_refresh_v20(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v21 adds a regenerable child projection for indexed output variables.
+fn migrate_output_variable_projection_v21(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM agent_output_variables", [])
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, AgentArtifactRecordWire)> = {
+        let mut stmt = tx
+            .prepare("SELECT projects_root, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let projects_root: String =
+                row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let Ok(record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            records.push((projects_root, record));
+        }
+        records
+    };
+    for (projects_root, record) in rows {
+        upsert_output_variables_for_record(
+            &tx,
+            Path::new(&projects_root),
+            &record,
+        )?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn upsert_record(
     conn: &Connection,
     projects_root: &Path,
@@ -1272,7 +1868,84 @@ fn upsert_record(
         ],
     )
     .map_err(|e| e.to_string())?;
+    upsert_output_variables_for_record(conn, projects_root, record)?;
     Ok(())
+}
+
+fn upsert_output_variables_for_record(
+    conn: &Connection,
+    projects_root: &Path,
+    record: &AgentArtifactRecordWire,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM agent_output_variables WHERE artifact_dir = ?1",
+        [record.artifact_dir.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let Some(meta) = record.agent_meta.as_ref() else {
+        return Ok(());
+    };
+    if meta.output_variables.is_empty() {
+        return Ok(());
+    }
+
+    let summary = RecordSummary::from_record(record);
+    let projects_root = projects_root.to_string_lossy().into_owned();
+    for (key, value) in &meta.output_variables {
+        let value_json = canonical_output_variable_json(value)?;
+        let value_scalar_text = output_variable_scalar_text(value);
+        conn.execute(
+            r#"
+            INSERT INTO agent_output_variables (
+                artifact_dir, variable_key, value_json, value_scalar_text,
+                projects_root, project_name, project_dir, project_file,
+                workflow_dir_name, timestamp, agent_name, cl_name, hidden,
+                has_done_marker, finished_at, status, agent_type, indexed_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP
+            )
+            "#,
+            params![
+                record.artifact_dir.as_str(),
+                key.as_str(),
+                value_json.as_str(),
+                value_scalar_text.as_deref(),
+                projects_root.as_str(),
+                record.project_name.as_str(),
+                record.project_dir.as_str(),
+                record.project_file.as_str(),
+                record.workflow_dir_name.as_str(),
+                record.timestamp.as_str(),
+                summary.agent_name.as_deref(),
+                summary.cl_name.as_deref(),
+                summary.hidden as i64,
+                record.has_done_marker as i64,
+                summary.finished_at,
+                summary.status.as_str(),
+                summary.agent_type.as_str(),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn canonical_output_variable_json(
+    value: &OutputVariableValue,
+) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| e.to_string())
+}
+
+fn output_variable_scalar_text(value: &OutputVariableValue) -> Option<String> {
+    match value {
+        serde_json::Value::Null => Some("null".to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+    }
 }
 
 fn repair_stale_rows_for_query(
@@ -2457,6 +3130,214 @@ mod tests {
                 .as_ref()
                 .and_then(|meta| meta.monitor_id.as_deref()),
             Some("m4kq")
+        );
+    }
+
+    #[test]
+    fn output_variable_history_filters_groups_and_truncates() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let build_root =
+            artifact_for_project(&projects, "proj", "20260814101010");
+        let build_worker =
+            artifact_for_project(&projects, "proj", "20260814111111");
+        let deploy = artifact_for_project(&projects, "other", "20260814121212");
+        write_json(
+            &build_root.join("agent_meta.json"),
+            json!({
+                "name": "build",
+                "cl_name": "proj",
+                "output_variables": {
+                    "status": "ok",
+                    "count": 1,
+                    "report": {"z": 2, "a": 1}
+                }
+            }),
+        );
+        write_json(
+            &build_worker.join("agent_meta.json"),
+            json!({
+                "name": "build.worker",
+                "hidden": true,
+                "output_variables": {
+                    "status": "ok",
+                    "count": 1.0
+                }
+            }),
+        );
+        write_json(
+            &deploy.join("agent_meta.json"),
+            json!({
+                "name": "deploy",
+                "output_variables": {
+                    "status": "failed",
+                    "result": "Snowman ☃"
+                }
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let status_history = query_agent_output_variable_history(
+            &index,
+            AgentOutputVariableHistoryQueryWire {
+                keys: vec!["status".to_string()],
+                value_limit: 1,
+                ..AgentOutputVariableHistoryQueryWire::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(status_history.schema_version, 1);
+        assert_eq!(status_history.groups.len(), 1);
+        assert_eq!(status_history.keys_limit.total_count, 1);
+        let status_group = &status_history.groups[0];
+        assert_eq!(status_group.key, "status");
+        assert_eq!(status_group.occurrence_count, 2);
+        assert_eq!(status_group.distinct_value_count, 2);
+        assert!(status_group.values_limit.truncated);
+        assert_eq!(status_group.values[0].value, json!("failed"));
+        assert_eq!(status_group.values[0].agents, vec!["deploy"]);
+
+        let oldest_first_status = query_agent_output_variable_history(
+            &index,
+            AgentOutputVariableHistoryQueryWire {
+                keys: vec!["status".to_string()],
+                reverse: true,
+                value_limit: 0,
+                ..AgentOutputVariableHistoryQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(oldest_first_status.groups[0].values[0].value, json!("ok"));
+
+        let build_counts = query_agent_output_variable_history(
+            &index,
+            AgentOutputVariableHistoryQueryWire {
+                agents: vec!["build.*".to_string()],
+                keys: vec!["count".to_string()],
+                include_hidden: true,
+                value_limit: 0,
+                ..AgentOutputVariableHistoryQueryWire::default()
+            },
+        )
+        .unwrap();
+        let count_values = &build_counts.groups[0].values;
+        assert_eq!(build_counts.groups[0].occurrence_count, 2);
+        assert_eq!(count_values.len(), 2);
+        assert_eq!(count_values[0].value_json, "1.0");
+        assert_eq!(count_values[0].agents, vec!["build.worker"]);
+        assert_eq!(count_values[1].value_json, "1");
+        assert_eq!(count_values[1].agents, vec!["build"]);
+
+        let unicode_result = query_agent_output_variable_history(
+            &index,
+            AgentOutputVariableHistoryQueryWire {
+                values: vec!["snowman".to_string()],
+                projects: vec!["other".to_string()],
+                since_timestamp: Some("20260814000000".to_string()),
+                until_timestamp: Some("20260814235959".to_string()),
+                ..AgentOutputVariableHistoryQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(unicode_result.groups.len(), 1);
+        assert_eq!(unicode_result.groups[0].key, "result");
+        assert_eq!(
+            unicode_result.groups[0].values[0].value,
+            json!("Snowman ☃")
+        );
+    }
+
+    #[test]
+    fn output_variable_projection_backfills_replaces_and_deletes_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260814131313");
+        let meta_path = artifact_dir.join("agent_meta.json");
+        write_json(
+            &meta_path,
+            json!({
+                "name": "writer",
+                "output_variables": {
+                    "status": "old",
+                    "drop_me": true
+                }
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_output_variables_rows,
+            2
+        );
+
+        write_json(
+            &meta_path,
+            json!({
+                "name": "writer",
+                "output_variables": {
+                    "status": "new"
+                }
+            }),
+        );
+        upsert_agent_artifact_index_row(
+            &index,
+            &projects,
+            &artifact_dir,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let refreshed = query_agent_output_variable_history(
+            &index,
+            AgentOutputVariableHistoryQueryWire {
+                value_limit: 0,
+                key_limit: 0,
+                ..AgentOutputVariableHistoryQueryWire::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(refreshed.groups.len(), 1);
+        assert_eq!(refreshed.groups[0].key, "status");
+        assert_eq!(refreshed.groups[0].values[0].value, json!("new"));
+
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute("DELETE FROM agent_output_variables", [])
+                .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '20')",
+                [],
+            )
+            .unwrap();
+        }
+        let backfilled = agent_artifact_index_status(&index).unwrap();
+        assert_eq!(
+            backfilled.schema_version,
+            AGENT_ARTIFACT_INDEX_SCHEMA_VERSION
+        );
+        assert_eq!(backfilled.agent_output_variables_rows, 1);
+
+        delete_agent_artifact_index_row(&index, &artifact_dir).unwrap();
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_output_variables_rows,
+            0
         );
     }
 

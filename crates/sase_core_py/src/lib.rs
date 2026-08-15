@@ -31,6 +31,8 @@
 //! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
 //! - `agent_artifact_index_status(index_path: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
+//! - `agent_output_variable_history_wire_schema_version() -> int`
+//! - `query_agent_output_variable_history(index_path: str, query: dict | None = None) -> dict`
 //! - `query_related_agent_artifact_dirs(index_path: str, artifact_dir: str, seed_timestamps: list[str]) -> list[str]`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
@@ -414,6 +416,7 @@ use sase_core::agent_scan::{
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     query_agent_artifact_index as core_query_agent_artifact_index,
+    query_agent_output_variable_history as core_query_agent_output_variable_history,
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
@@ -426,6 +429,8 @@ use sase_core::agent_scan::{
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
+    AgentOutputVariableHistoryQueryWire,
+    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
@@ -2174,6 +2179,46 @@ fn py_query_agent_artifact_index<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
+fn py_agent_output_variable_history_wire_schema_version() -> u32 {
+    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION
+}
+
+/// Query grouped output-variable history from the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "query_agent_output_variable_history",
+    signature = (index_path, query = None)
+)]
+fn py_query_agent_output_variable_history<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let query_wire = match query {
+        Some(dict) => {
+            let json = py_to_json_value(dict)?;
+            serde_json::from_value::<AgentOutputVariableHistoryQueryWire>(json)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "query is not a valid AgentOutputVariableHistoryQueryWire dict: {e}"
+                    ))
+                })?
+        }
+        None => AgentOutputVariableHistoryQueryWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let history = py
+        .allow_threads(|| {
+            core_query_agent_output_variable_history(&index, query_wire)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&history).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -8519,6 +8564,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_write_agent_artifact_index_meta, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_output_variable_history_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_query_agent_output_variable_history,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
@@ -14032,6 +14085,82 @@ MENTORS:
                 json!(60.0)
             );
             assert_eq!(result["runners"]["trend"].as_array().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn agent_output_variable_history_binding_round_trips_python_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let projects = root.join("projects");
+            let early = projects.join("proj/artifacts/ace-run/20260814120000");
+            let late = projects.join("proj/artifacts/ace-run/20260814130000");
+            fs::create_dir_all(&early).unwrap();
+            fs::create_dir_all(&late).unwrap();
+            fs::write(
+                early.join("agent_meta.json"),
+                serde_json::to_vec(&json!({
+                    "name": "worker",
+                    "output_variables": {"status": "ok"}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                late.join("agent_meta.json"),
+                serde_json::to_vec(&json!({
+                    "name": "worker.child",
+                    "output_variables": {
+                        "status": "ok",
+                        "payload": {"z": 2, "a": 1}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let index = root.join("agent_artifact_index.sqlite");
+            sase_core::rebuild_agent_artifact_index(
+                &index,
+                &projects,
+                sase_core::AgentArtifactScanOptionsWire::default(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                py_agent_output_variable_history_wire_schema_version(),
+                1
+            );
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "agents": ["worker.*"],
+                    "keys": ["status"],
+                    "value_json": ["ok"],
+                    "value_limit": 0
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_query_agent_output_variable_history(
+                py,
+                index.to_str().unwrap(),
+                Some(request),
+            )
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["keys_limit"]["total_count"], json!(1));
+            assert_eq!(result["groups"][0]["key"], json!("status"));
+            assert_eq!(
+                result["groups"][0]["values"][0]["occurrence_count"],
+                json!(2)
+            );
+            assert_eq!(
+                result["groups"][0]["values"][0]["agents"],
+                json!(["worker.child", "worker"])
+            );
         });
     }
 
