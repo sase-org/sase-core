@@ -15,6 +15,7 @@ mod context;
 pub mod index;
 pub mod layout;
 pub mod scanner;
+pub mod selector;
 pub mod wire;
 
 pub use index::{
@@ -41,17 +42,25 @@ pub use layout::{
 pub use scanner::{
     scan_agent_artifact_dir, scan_agent_artifact_dirs, scan_agent_artifacts,
 };
+pub use selector::{
+    parse_output_variable_selector, query_agent_output_variable_selectors,
+    OutputVariableSelectorError,
+};
 pub use wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
     AgentArtifactScanWire, AgentClanContextWire, AgentMetaWire,
     AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
     AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
-    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
-    DoneMarkerWire, OutputVariableValue, PlanPathMarkerWire,
-    PromptStepMarkerWire, RunningMarkerWire, UsedXPromptWire,
-    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
-    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    AgentOutputVariableOccurrenceWire, AgentOutputVariableSelectorMatchWire,
+    AgentOutputVariableSelectorQueryWire,
+    AgentOutputVariableSelectorResultWire, AgentOutputVariableValueGroupWire,
+    DoneMarkerWire, OutputVariableSelectorPathWire,
+    OutputVariableSelectorScopeWire, OutputVariableSelectorWire,
+    OutputVariableValue, PlanPathMarkerWire, PromptStepMarkerWire,
+    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION, DONE_WORKFLOW_DIR_NAMES,
     DONE_WORKFLOW_DIR_PREFIXES, WORKFLOW_STATE_DIR_NAMES,
     WORKFLOW_STATE_DIR_PREFIXES,

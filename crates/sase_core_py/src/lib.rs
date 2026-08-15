@@ -33,6 +33,9 @@
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `agent_output_variable_history_wire_schema_version() -> int`
 //! - `query_agent_output_variable_history(index_path: str, query: dict | None = None) -> dict`
+//! - `agent_output_variable_selector_wire_schema_version() -> int`
+//! - `parse_output_variable_selector(selector: str) -> dict`
+//! - `query_agent_output_variable_selectors(index_path: str, query: dict | None = None) -> dict`
 //! - `query_related_agent_artifact_dirs(index_path: str, artifact_dir: str, seed_timestamps: list[str]) -> list[str]`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
@@ -415,8 +418,10 @@ use sase_core::agent_scan::{
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
+    parse_output_variable_selector as core_parse_output_variable_selector,
     query_agent_artifact_index as core_query_agent_artifact_index,
     query_agent_output_variable_history as core_query_agent_output_variable_history,
+    query_agent_output_variable_selectors as core_query_agent_output_variable_selectors,
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
@@ -429,8 +434,10 @@ use sase_core::agent_scan::{
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    AgentOutputVariableHistoryQueryWire,
+    AgentOutputVariableHistoryQueryWire, AgentOutputVariableSelectorQueryWire,
+    OutputVariableSelectorError,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION,
 };
 use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
@@ -2222,6 +2229,70 @@ fn py_query_agent_output_variable_history<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[pyfunction(name = "agent_output_variable_selector_wire_schema_version")]
+fn py_agent_output_variable_selector_wire_schema_version() -> u32 {
+    AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION
+}
+
+/// Parse one `sase var get` selector into a typed wire dict.
+#[pyfunction]
+#[pyo3(name = "parse_output_variable_selector")]
+fn py_parse_output_variable_selector<'py>(
+    py: Python<'py>,
+    selector: &str,
+) -> PyResult<PyObject> {
+    let parsed = core_parse_output_variable_selector(selector)
+        .map_err(selector_error_to_pyerr)?;
+    let value = serde_json::to_value(&parsed).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Resolve output-variable selectors against the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "query_agent_output_variable_selectors",
+    signature = (index_path, query = None)
+)]
+fn py_query_agent_output_variable_selectors<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let query_wire = match query {
+        Some(dict) => {
+            let json = py_to_json_value(dict)?;
+            serde_json::from_value::<AgentOutputVariableSelectorQueryWire>(json)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "query is not a valid AgentOutputVariableSelectorQueryWire dict: {e}"
+                    ))
+                })?
+        }
+        None => AgentOutputVariableSelectorQueryWire::default(),
+    };
+    let index = PathBuf::from(index_path);
+    let result = py
+        .allow_threads(|| {
+            core_query_agent_output_variable_selectors(&index, query_wire)
+        })
+        .map_err(selector_error_to_pyerr)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+fn selector_error_to_pyerr(err: OutputVariableSelectorError) -> PyErr {
+    match err {
+        OutputVariableSelectorError::Invalid { .. } => {
+            PyValueError::new_err(err.to_string())
+        }
+        _ => PyRuntimeError::new_err(err.to_json_string()),
+    }
 }
 
 #[pyfunction]
@@ -8570,6 +8641,15 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_query_agent_output_variable_history,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_output_variable_selector_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_parse_output_variable_selector, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_query_agent_output_variable_selectors,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;

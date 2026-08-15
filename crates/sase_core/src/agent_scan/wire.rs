@@ -326,6 +326,95 @@ pub struct AgentOutputVariableHistoryWire {
     pub groups: Vec<AgentOutputVariableKeyGroupWire>,
 }
 
+/// Schema version for output-variable selector parse and get queries.
+pub const AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION: u32 = 1;
+
+fn default_output_variable_selector_limit() -> u32 {
+    20
+}
+
+/// Scope of one output-variable selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputVariableSelectorScopeWire {
+    Unscoped,
+    Global,
+    Exact { name: String },
+    Hood { name: String },
+}
+
+/// One JSON-path step applied after an occurrence is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutputVariableSelectorPathWire {
+    Index { index: u64 },
+    Key { key: String },
+}
+
+/// Parsed `sase var get` selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputVariableSelectorWire {
+    pub raw: String,
+    pub scope: OutputVariableSelectorScopeWire,
+    /// `None` means the key wildcard `*`.
+    pub key: Option<String>,
+    #[serde(default)]
+    pub path: Vec<OutputVariableSelectorPathWire>,
+}
+
+/// Query knobs for selector-based output-variable retrieval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableSelectorQueryWire {
+    pub selectors: Vec<OutputVariableSelectorWire>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub include_hidden: bool,
+    /// Maximum matches returned from wildcard expansion. Zero is unlimited.
+    #[serde(default = "default_output_variable_selector_limit")]
+    pub limit: u32,
+}
+
+impl Default for AgentOutputVariableSelectorQueryWire {
+    fn default() -> Self {
+        Self {
+            selectors: Vec::new(),
+            projects: Vec::new(),
+            include_hidden: false,
+            limit: default_output_variable_selector_limit(),
+        }
+    }
+}
+
+/// One attributed selector match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableSelectorMatchWire {
+    pub selector: String,
+    pub key: String,
+    pub path: Vec<OutputVariableSelectorPathWire>,
+    pub value: OutputVariableValue,
+    pub value_json: String,
+    pub artifact_dir: String,
+    pub project_name: String,
+    pub workflow_dir_name: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    pub hidden: bool,
+}
+
+/// Selector matches returned by the artifact index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentOutputVariableSelectorResultWire {
+    pub schema_version: u32,
+    pub index_path: String,
+    pub query: AgentOutputVariableSelectorQueryWire,
+    pub matches_limit: AgentOutputVariableLimitWire,
+    pub matches: Vec<AgentOutputVariableSelectorMatchWire>,
+}
+
 /// Compact projection of `agent_meta.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetaWire {

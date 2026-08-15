@@ -624,6 +624,30 @@ pub fn query_agent_output_variable_history(
     })
 }
 
+/// Load indexed output-variable occurrences for selector resolution.
+pub(crate) fn load_output_variable_occurrences(
+    index_path: &Path,
+    projects: &[String],
+    include_hidden: bool,
+) -> Result<Vec<AgentOutputVariableOccurrenceWire>, String> {
+    let query = AgentOutputVariableHistoryQueryWire {
+        projects: projects.to_vec(),
+        include_hidden,
+        key_limit: 0,
+        value_limit: 0,
+        ..AgentOutputVariableHistoryQueryWire::default()
+    };
+    let conn = open_index(index_path)?;
+    let rows =
+        select_output_variable_occurrences(&conn, &query, &BTreeSet::new())?;
+    let mut occurrences = Vec::new();
+    for row in rows {
+        occurrences.push(row.into_occurrence()?);
+    }
+    occurrences.sort_by(compare_output_variable_occurrences_newest);
+    Ok(occurrences)
+}
+
 fn select_output_variable_occurrences(
     conn: &Connection,
     query: &AgentOutputVariableHistoryQueryWire,
@@ -1055,7 +1079,7 @@ fn compare_output_variable_value_groups_by_seen(
     }
 }
 
-fn compare_output_variable_occurrences_newest(
+pub(crate) fn compare_output_variable_occurrences_newest(
     left: &AgentOutputVariableOccurrenceWire,
     right: &AgentOutputVariableOccurrenceWire,
 ) -> Ordering {
@@ -1932,7 +1956,7 @@ fn upsert_output_variables_for_record(
     Ok(())
 }
 
-fn canonical_output_variable_json(
+pub(crate) fn canonical_output_variable_json(
     value: &OutputVariableValue,
 ) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| e.to_string())
