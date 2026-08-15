@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.5](https://github.com/sase-org/sase-core/compare/v0.27.4...v0.27.5) - 2026-08-15
+
+### Added
+
+- support host predicates in flat query profiles
+
+### Fixed
+
+- *(query)* correct exact-match, date-range, and digest handling in the profile engine
+
 ## [0.27.4](https://github.com/sase-org/sase-core/compare/v0.27.3...v0.27.4) - 2026-08-15
 
 ### Added
