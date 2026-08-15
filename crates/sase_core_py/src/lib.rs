@@ -682,9 +682,15 @@ use sase_core::plan::{
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::procs::{
-    append_proc as core_append_proc, prune_procs as core_prune_procs,
+    append_proc as core_append_proc,
+    begin_proc_settlement as core_begin_proc_settlement,
+    claim_proc_supervisor as core_claim_proc_supervisor,
+    finish_proc as core_finish_proc, prune_procs as core_prune_procs,
     read_procs_snapshot as core_read_procs_snapshot,
-    update_proc as core_update_proc, ProcStoreError, ProcUpdateWire, ProcWire,
+    request_proc_stop as core_request_proc_stop,
+    reserve_proc as core_reserve_proc, update_proc as core_update_proc,
+    ProcFinishWire, ProcReserveWire, ProcSettlementWire, ProcStopRequestWire,
+    ProcStoreError, ProcSupervisorClaimWire, ProcUpdateWire, ProcWire,
 };
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
@@ -5830,6 +5836,22 @@ fn py_append_proc<'py>(
     proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
 }
 
+/// Reserve one proc-shell row, replaying an identical active request.
+#[pyfunction]
+#[pyo3(name = "reserve_proc")]
+fn py_reserve_proc<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+    history_limit: i64,
+) -> PyResult<PyObject> {
+    let request = proc_reserve_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_reserve_proc(&path, &request, history_limit));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
 /// Apply a partial proc update and return its matched/proc outcome dict.
 #[pyfunction]
 #[pyo3(name = "update_proc")]
@@ -5841,6 +5863,60 @@ fn py_update_proc<'py>(
     let update = proc_update_from_pydict(update)?;
     let path = PathBuf::from(path);
     let outcome = py.allow_threads(|| core_update_proc(&path, &update));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+#[pyfunction]
+#[pyo3(name = "claim_proc_supervisor")]
+fn py_claim_proc_supervisor<'py>(
+    py: Python<'py>,
+    path: &str,
+    claim: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let claim = proc_supervisor_claim_from_pydict(claim)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_claim_proc_supervisor(&path, &claim));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+#[pyfunction]
+#[pyo3(name = "request_proc_stop")]
+fn py_request_proc_stop<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = proc_stop_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_request_proc_stop(&path, &request));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+#[pyfunction]
+#[pyo3(name = "begin_proc_settlement")]
+fn py_begin_proc_settlement<'py>(
+    py: Python<'py>,
+    path: &str,
+    settlement: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let settlement = proc_settlement_from_pydict(settlement)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_begin_proc_settlement(&path, &settlement));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+#[pyfunction]
+#[pyo3(name = "finish_proc")]
+fn py_finish_proc<'py>(
+    py: Python<'py>,
+    path: &str,
+    finish: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let finish = proc_finish_from_pydict(finish)?;
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_finish_proc(&path, &finish));
     proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
 }
 
@@ -5903,6 +5979,17 @@ fn proc_from_pydict(dict: &Bound<'_, PyDict>) -> PyResult<ProcWire> {
     })
 }
 
+fn proc_reserve_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ProcReserveWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "reserve request is not a valid ProcReserveWire dict: {error}"
+        ))
+    })
+}
+
 fn proc_update_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<ProcUpdateWire> {
@@ -5910,6 +5997,50 @@ fn proc_update_from_pydict(
     serde_json::from_value(value).map_err(|error| {
         PyValueError::new_err(format!(
             "update is not a valid ProcUpdateWire dict: {error}"
+        ))
+    })
+}
+
+fn proc_supervisor_claim_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ProcSupervisorClaimWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "supervisor claim is not a valid ProcSupervisorClaimWire dict: {error}"
+        ))
+    })
+}
+
+fn proc_stop_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ProcStopRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "stop request is not a valid ProcStopRequestWire dict: {error}"
+        ))
+    })
+}
+
+fn proc_settlement_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ProcSettlementWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "settlement request is not a valid ProcSettlementWire dict: {error}"
+        ))
+    })
+}
+
+fn proc_finish_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ProcFinishWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "finish request is not a valid ProcFinishWire dict: {error}"
         ))
     })
 }
@@ -8392,7 +8523,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_procs_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_proc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reserve_proc, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_proc, m)?)?;
+    m.add_function(wrap_pyfunction!(py_claim_proc_supervisor, m)?)?;
+    m.add_function(wrap_pyfunction!(py_request_proc_stop, m)?)?;
+    m.add_function(wrap_pyfunction!(py_begin_proc_settlement, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finish_proc, m)?)?;
     m.add_function(wrap_pyfunction!(py_prune_procs, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
@@ -9017,7 +9153,12 @@ mod tests {
             for name in [
                 "read_procs_snapshot",
                 "append_proc",
+                "reserve_proc",
                 "update_proc",
+                "claim_proc_supervisor",
+                "request_proc_stop",
+                "begin_proc_settlement",
+                "finish_proc",
                 "prune_procs",
                 "read_tasks_snapshot",
                 "append_task",

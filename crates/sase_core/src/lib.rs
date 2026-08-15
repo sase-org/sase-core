@@ -595,10 +595,14 @@ pub use plan::{
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,
 };
 pub use procs::{
-    append_proc, prune_procs, read_procs_snapshot, update_proc,
-    ProcAppendOutcomeWire, ProcPruneOutcomeWire, ProcStoreError,
-    ProcStoreSnapshotWire, ProcStoreStatsWire, ProcUpdateOutcomeWire,
+    append_proc, begin_proc_settlement, claim_proc_supervisor, finish_proc,
+    prune_procs, read_procs_snapshot, request_proc_stop, reserve_proc,
+    update_proc, ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,
+    ProcReserveOutcomeWire, ProcReserveWire, ProcSettlementWire,
+    ProcStopRequestWire, ProcStoreError, ProcStoreSnapshotWire,
+    ProcStoreStatsWire, ProcSupervisorClaimWire, ProcUpdateOutcomeWire,
     ProcUpdateWire, ProcWire, PROC_WIRE_SCHEMA_VERSION,
+    SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };
 pub use project_spec::{
     active_project_spec_filename, apply_project_aliases_update,
