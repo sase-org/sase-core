@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- bind `bead_needs_flag_type_migration` and `bead_flag_type_migration_sql`
 - bind `query_agent_alias_history` for schema-22 alias history
 
 ## [0.27.10](https://github.com/sase-org/sase-core/compare/v0.27.9...v0.27.10) - 2026-08-16

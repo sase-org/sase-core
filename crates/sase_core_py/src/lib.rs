@@ -253,6 +253,8 @@
 //! - `bead_task_ready_migration_sql() -> str`
 //! - `bead_needs_snoozed_status_migration(create_table_sql: str | None) -> bool`
 //! - `bead_snoozed_status_migration_sql() -> str`
+//! - `bead_needs_flag_type_migration(create_table_sql: str | None) -> bool`
+//! - `bead_flag_type_migration_sql() -> str`
 //! - `bead_needs_external_ref_migration(create_table_sql: str | None) -> bool`
 //! - `bead_external_ref_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -563,12 +565,14 @@ use sase_core::bead::{
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     external_ref_migration_sql as core_bead_external_ref_migration_sql,
+    flag_type_migration_sql as core_bead_flag_type_migration_sql,
     get_epic_children as core_bead_get_epic_children,
     init_store as core_bead_init_store, list_issues as core_bead_list_issues,
     mark_ready_to_work as core_bead_mark_ready_to_work,
     merge_bead_event_streams as core_merge_bead_event_streams,
     merge_bead_event_streams_with_relocation as core_merge_bead_event_streams_with_relocation,
     needs_external_ref_migration as core_bead_needs_external_ref_migration,
+    needs_flag_type_migration as core_bead_needs_flag_type_migration,
     needs_plus_one_evidence_migration as core_bead_needs_plus_one_evidence_migration,
     needs_resolution_migration as core_bead_needs_resolution_migration,
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
@@ -3336,6 +3340,21 @@ fn py_bead_needs_snoozed_status_migration(
 #[pyo3(name = "bead_snoozed_status_migration_sql")]
 fn py_bead_snoozed_status_migration_sql() -> &'static str {
     core_bead_snoozed_status_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_needs_flag_type_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_flag_type_migration(create_table_sql: Option<&str>) -> bool {
+    core_bead_needs_flag_type_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_flag_type_migration_sql")]
+fn py_bead_flag_type_migration_sql() -> &'static str {
+    core_bead_flag_type_migration_sql()
 }
 
 #[pyfunction]
@@ -8789,6 +8808,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_snoozed_status_migration_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_needs_flag_type_migration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_flag_type_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_external_ref_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_external_ref_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_resolution_migration, m)?)?;
@@ -9147,7 +9168,7 @@ pub use sase_core as core;
 mod tests {
     use super::*;
     use pyo3::Python;
-    use sase_core::bead::IssueTypeWire;
+    use sase_core::bead::{BeadFlagWire, IssueTypeWire};
     use serde_json::json;
     use std::fs;
     use std::path::Path;
@@ -9607,6 +9628,8 @@ mod tests {
                 "bead_snooze_cancel",
                 "bead_needs_snoozed_status_migration",
                 "bead_snoozed_status_migration_sql",
+                "bead_needs_flag_type_migration",
+                "bead_flag_type_migration_sql",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -9641,6 +9664,68 @@ mod tests {
             let canceled = py_to_json_value(canceled.bind(py)).unwrap();
             assert_eq!(canceled["issue"]["status"], "ready");
             assert!(canceled["issue"].get("snooze").is_none());
+        });
+    }
+
+    #[test]
+    fn bead_flag_bindings_round_trip_create_update_and_close() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let created = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Retire demo_key".to_string(),
+                issue_type: IssueTypeWire::Flag,
+                flag: Some(BeadFlagWire {
+                    key: "demo_key".to_string(),
+                    remove_by_date: "2026-12-01".to_string(),
+                    remove_by_release: "0.19.0".to_string(),
+                }),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(created.issue_type, IssueTypeWire::Flag);
+        assert_eq!(created.flag.as_ref().unwrap().key, "demo_key");
+
+        let updated = core_bead_update_issue(
+            &beads_dir,
+            &created.id,
+            BeadUpdateFieldsWire {
+                flag: Some(BeadFlagWire {
+                    key: "demo_key".to_string(),
+                    remove_by_date: "2026-12-15".to_string(),
+                    remove_by_release: "0.20.0".to_string(),
+                }),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(updated.flag.as_ref().unwrap().remove_by_date, "2026-12-15");
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_needs_flag_type_migration").is_ok());
+            assert!(module.getattr("bead_flag_type_migration_sql").is_ok());
+            assert!(py_bead_needs_flag_type_migration(Some(
+                "CHECK(issue_type IN ('plan','phase','task'))"
+            )));
+            assert!(!py_bead_needs_flag_type_migration(Some(
+                "CHECK(issue_type IN ('plan','phase','task','flag'))"
+            )));
+            assert_eq!(
+                py_bead_flag_type_migration_sql(),
+                core_bead_flag_type_migration_sql()
+            );
         });
     }
 

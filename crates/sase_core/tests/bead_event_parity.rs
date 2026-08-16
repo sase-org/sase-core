@@ -9,7 +9,7 @@ use sase_core::{
     merge_bead_event_streams, parse_issues_jsonl, reduce_event_streams,
     BeadError, BeadEventOperationWire, BeadEventPayloadWire,
     BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadIssueUpdateEventFieldsWire, BeadTierWire, DependencyWire,
+    BeadFlagWire, BeadIssueUpdateEventFieldsWire, BeadTierWire, DependencyWire,
     IssueTypeWire, IssueWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
@@ -2116,6 +2116,114 @@ fn is_content_hashed_event_id(event_id: &str) -> bool {
     })
 }
 
+#[test]
+fn flag_bead_create_update_and_close_reduce() {
+    let mut created = issue(
+        "sase-flag",
+        "Retire demo_key",
+        IssueTypeWire::Flag,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    created.flag = Some(BeadFlagWire {
+        key: "demo_key".to_string(),
+        remove_by_date: "2026-12-01".to_string(),
+        remove_by_release: "0.19.0".to_string(),
+    });
+    let stream = BeadEventStreamWire {
+        stream_id: "sase-flag".to_string(),
+        root_issue_id: "sase-flag".to_string(),
+        events: vec![
+            event(
+                "sase-flag",
+                "2026-01-01T00:00:00Z",
+                BeadEventOperationWire::IssueCreated,
+                BeadEventPayloadWire::IssueCreated {
+                    issue: created.clone(),
+                },
+            ),
+            event(
+                "sase-flag",
+                "2026-01-02T00:00:00Z",
+                BeadEventOperationWire::IssueUpdated,
+                BeadEventPayloadWire::IssueUpdated {
+                    fields: BeadIssueUpdateEventFieldsWire {
+                        flag: Some(BeadFlagWire {
+                            key: "demo_key".to_string(),
+                            remove_by_date: "2026-12-15".to_string(),
+                            remove_by_release: "0.20.0".to_string(),
+                        }),
+                        ..BeadIssueUpdateEventFieldsWire::default()
+                    },
+                },
+            ),
+            event(
+                "sase-flag",
+                "2026-01-03T00:00:00Z",
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed {
+                    close_reason: Some("flag removed".to_string()),
+                    resolution: Some(sase_core::BeadResolutionWire::Done),
+                    forced_descendant_ids: Vec::new(),
+                },
+            ),
+        ],
+    };
+
+    let reduced = reduce_event_streams(&[stream]).unwrap();
+    assert_eq!(reduced.len(), 1);
+    assert_eq!(reduced[0].issue_type, IssueTypeWire::Flag);
+    assert_eq!(reduced[0].status, StatusWire::Closed);
+    let flag = reduced[0].flag.as_ref().unwrap();
+    assert_eq!(flag.key, "demo_key");
+    assert_eq!(flag.remove_by_date, "2026-12-15");
+    assert_eq!(flag.remove_by_release, "0.20.0");
+}
+
+#[test]
+fn flag_validation_errors_reject_import() {
+    let mut missing = issue(
+        "sase-flag",
+        "Missing record",
+        IssueTypeWire::Flag,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    assert_eq!(
+        import_issues_to_event_streams(&[missing.clone()])
+            .unwrap_err()
+            .message,
+        "flag issues must carry flag metadata"
+    );
+
+    missing.flag = Some(BeadFlagWire {
+        key: "demo_key".to_string(),
+        remove_by_date: "2026-12-01".to_string(),
+        remove_by_release: "0.19.0".to_string(),
+    });
+    missing.parent_id = Some("sase-1".to_string());
+    assert_eq!(
+        import_issues_to_event_streams(&[missing.clone()])
+            .unwrap_err()
+            .message,
+        "Flag issues cannot have a parent_id"
+    );
+
+    missing.parent_id = None;
+    missing.flag.as_mut().unwrap().remove_by_date = "soon".to_string();
+    assert!(import_issues_to_event_streams(&[missing.clone()])
+        .unwrap_err()
+        .message
+        .contains("remove_by_date must be an ISO date"));
+
+    missing.flag.as_mut().unwrap().remove_by_date = "2026-12-01".to_string();
+    missing.flag.as_mut().unwrap().key = "Not_Snake".to_string();
+    assert!(import_issues_to_event_streams(&[missing])
+        .unwrap_err()
+        .message
+        .contains("key must be non-empty snake_case"));
+}
+
 fn issue(
     id: &str,
     title: &str,
@@ -2132,6 +2240,7 @@ fn issue(
             IssueTypeWire::Plan => Some(BeadTierWire::Epic),
             IssueTypeWire::Phase => None,
             IssueTypeWire::Task => None,
+            IssueTypeWire::Flag => None,
         },
         parent_id: parent_id.map(str::to_string),
         owner: "owner@example.com".to_string(),
@@ -2149,6 +2258,7 @@ fn issue(
         refs: Vec::new(),
         plus_one_evidence: Vec::new(),
         snooze: None,
+        flag: None,
         model: String::new(),
         size: None,
         is_ready_to_work: false,

@@ -14,9 +14,10 @@ use crate::serde_option::deserialize_present_option;
 
 use super::wire::{
     parse_task_plus_one_observed_since, validate_unique_external_refs,
-    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
-    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    BeadCloseRecordWire, BeadError, BeadFlagWire, BeadReopenCauseWire,
+    BeadResolutionWire, BeadSnoozeWire, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -369,6 +370,8 @@ pub struct BeadIssueUpdateEventFieldsWire {
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<BeadFlagWire>,
 }
 
 impl BeadIssueUpdateEventFieldsWire {
@@ -389,6 +392,7 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.external_ref.is_none()
             && self.tier.is_none()
             && self.is_ready_to_work.is_none()
+            && self.flag.is_none()
         {
             return Err(BeadError::validation(
                 "issue_updated event has no fields",
@@ -1456,6 +1460,9 @@ fn apply_update_event_fields(
     if let Some(value) = fields.is_ready_to_work {
         issue.is_ready_to_work = value;
     }
+    if let Some(value) = &fields.flag {
+        issue.flag = Some(value.clone());
+    }
     if fields
         .status
         .as_ref()
@@ -1580,6 +1587,7 @@ fn event_issue_key(issue: &IssueWire) -> (u8, String) {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
         IssueTypeWire::Task => 2,
+        IssueTypeWire::Flag => 3,
     };
     (kind_order, issue.id.clone())
 }
@@ -1591,7 +1599,7 @@ fn root_issue_ids(issues: &[IssueWire]) -> BTreeMap<String, String> {
     for issue in issues {
         let root = if matches!(
             issue.issue_type,
-            IssueTypeWire::Plan | IssueTypeWire::Task
+            IssueTypeWire::Plan | IssueTypeWire::Task | IssueTypeWire::Flag
         ) {
             issue.id.clone()
         } else {
@@ -1726,6 +1734,7 @@ mod tests {
             refs,
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

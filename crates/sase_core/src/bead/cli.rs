@@ -27,8 +27,8 @@ use super::read::{
 };
 use super::search::{search_issues_in_issues_with_matcher, SearchMatcher};
 use super::wire::{
-    BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
-    DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    BeadError, BeadFlagWire, BeadResolutionWire, BeadSearchMatchWire,
+    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::plan::refs::{parse_plan_reference, resolve_plan_reference};
 
@@ -515,7 +515,7 @@ fn handle_stats(
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
     let stats = stats_for_issues(&issues);
     let stdout = format!(
-        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  Ready:       {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n  Tasks:       {}\n",
+        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  Ready:       {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n  Tasks:       {}\n  Flags:       {}\n",
         stats.get("total").copied().unwrap_or(0),
         stats.get("open").copied().unwrap_or(0),
         stats.get("claimed").copied().unwrap_or(0),
@@ -525,6 +525,7 @@ fn handle_stats(
         stats.get("plan").copied().unwrap_or(0),
         stats.get("phase").copied().unwrap_or(0),
         stats.get("task").copied().unwrap_or(0),
+        stats.get("flag").copied().unwrap_or(0),
     );
     Ok(success(stdout))
 }
@@ -535,6 +536,7 @@ struct CreateArgs {
     issue_type: IssueTypeWire,
     parent_id: Option<String>,
     plan_path: Option<String>,
+    flag: Option<BeadFlagWire>,
     description: String,
     assignee: String,
     tier: Option<BeadTierWire>,
@@ -609,6 +611,7 @@ fn handle_create(
         changespec_bug_id: parsed.changespec_bug_id,
         external_ref: parsed.external_ref,
         refs: parsed.refs,
+        flag: parsed.flag,
         ..BeadCreateRequestWire::default()
     };
     match create_issue(write_beads_dir, request) {
@@ -839,12 +842,13 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
     let (Some(title), Some(type_arg)) = (title, type_arg) else {
         return Ok(None);
     };
-    let (issue_type, plan_path, parent_id) = parse_create_type(&type_arg)?;
+    let parsed_type = parse_create_type(&type_arg)?;
     Ok(Some(CreateArgs {
         title,
-        issue_type,
-        parent_id,
-        plan_path,
+        issue_type: parsed_type.issue_type,
+        parent_id: parsed_type.parent_id,
+        plan_path: parsed_type.plan_path,
+        flag: parsed_type.flag,
         description,
         assignee,
         tier,
@@ -856,20 +860,33 @@ fn parse_create_args(args: &[String]) -> Result<Option<CreateArgs>, String> {
     }))
 }
 
-fn parse_create_type(
-    value: &str,
-) -> Result<(IssueTypeWire, Option<String>, Option<String>), String> {
+const CREATE_TYPE_EXPECTED: &str = "Expected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), flag(<key>,<YYYY-MM-DD>,<release>), or task";
+
+#[derive(Debug)]
+struct ParsedCreateType {
+    issue_type: IssueTypeWire,
+    plan_path: Option<String>,
+    parent_id: Option<String>,
+    flag: Option<BeadFlagWire>,
+}
+
+fn parse_create_type(value: &str) -> Result<ParsedCreateType, String> {
     if value == "task" {
-        return Ok((IssueTypeWire::Task, None, None));
+        return Ok(ParsedCreateType {
+            issue_type: IssueTypeWire::Task,
+            plan_path: None,
+            parent_id: None,
+            flag: None,
+        });
     }
     let Some((kind, rest)) = value.split_once('(') else {
         return Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
+            "invalid --type value: {value}\n{CREATE_TYPE_EXPECTED}"
         ));
     };
     let Some(inner) = rest.strip_suffix(')') else {
         return Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
+            "invalid --type value: {value}\n{CREATE_TYPE_EXPECTED}"
         ));
     };
     let parts = inner
@@ -878,31 +895,50 @@ fn parse_create_type(
         .map(str::to_string)
         .collect::<Vec<_>>();
     match (kind, parts.as_slice()) {
-        ("plan", [path]) => Ok((
-            IssueTypeWire::Plan,
-            Some(path.clone()),
-            None,
-        )),
-        ("plan", [path, parent]) => Ok((
-            IssueTypeWire::Plan,
-            Some(path.clone()),
-            Some(parent.clone()),
-        )),
+        ("plan", [path]) => Ok(ParsedCreateType {
+            issue_type: IssueTypeWire::Plan,
+            plan_path: Some(path.clone()),
+            parent_id: None,
+            flag: None,
+        }),
+        ("plan", [path, parent]) => Ok(ParsedCreateType {
+            issue_type: IssueTypeWire::Plan,
+            plan_path: Some(path.clone()),
+            parent_id: Some(parent.clone()),
+            flag: None,
+        }),
         ("plan", _) => Err(format!(
             "plan() expects 1 or 2 arguments, got {}",
             parts.len()
         )),
-        ("phase", [parent]) => Ok((
-            IssueTypeWire::Phase,
-            None,
-            Some(parent.clone()),
-        )),
+        ("phase", [parent]) => Ok(ParsedCreateType {
+            issue_type: IssueTypeWire::Phase,
+            plan_path: None,
+            parent_id: Some(parent.clone()),
+            flag: None,
+        }),
         ("phase", _) => Err(format!(
             "phase() expects exactly 1 argument, got {}",
             parts.len()
         )),
+        ("flag", [key, remove_by_date, remove_by_release]) => {
+            Ok(ParsedCreateType {
+                issue_type: IssueTypeWire::Flag,
+                plan_path: None,
+                parent_id: None,
+                flag: Some(BeadFlagWire {
+                    key: key.clone(),
+                    remove_by_date: remove_by_date.clone(),
+                    remove_by_release: remove_by_release.clone(),
+                }),
+            })
+        }
+        ("flag", _) => Err(format!(
+            "flag() expects exactly 3 arguments, got {}",
+            parts.len()
+        )),
         _ => Err(format!(
-            "invalid --type value: {value}\nExpected: plan(<plan_file>), plan(<plan_file>,<parent_id>), phase(<parent_id>), or task"
+            "invalid --type value: {value}\n{CREATE_TYPE_EXPECTED}"
         )),
     }
 }
@@ -2188,6 +2224,7 @@ const ANSI_BRIGHT_BLACK: &str = "\x1b[90m";
 const ANSI_TYPE_PLAN: &str = "\x1b[38;5;220m";
 const ANSI_TYPE_PHASE: &str = "\x1b[38;5;117m";
 const ANSI_TYPE_TASK: &str = "\x1b[38;5;177m";
+const ANSI_TYPE_FLAG: &str = "\x1b[38;5;209m";
 
 /// CLI glyph and ANSI metadata mirrored from SASE's shared Python
 /// presentation modules. Keeping each glyph beside its style prevents the
@@ -2241,6 +2278,10 @@ fn issue_type_presentation(issue_type: &IssueTypeWire) -> CliPresentation {
             glyph: "◆",
             cli_style: ANSI_TYPE_TASK,
         },
+        IssueTypeWire::Flag => CliPresentation {
+            glyph: "⚑",
+            cli_style: ANSI_TYPE_FLAG,
+        },
     }
 }
 
@@ -2264,6 +2305,7 @@ fn compact_type_width() -> usize {
         IssueTypeWire::Plan,
         IssueTypeWire::Phase,
         IssueTypeWire::Task,
+        IssueTypeWire::Flag,
     ]
     .iter()
     .map(|issue_type| issue_type_presentation(issue_type).glyph.width())
@@ -2422,6 +2464,7 @@ fn parse_issue_type(value: &str) -> Option<IssueTypeWire> {
         "plan" => Some(IssueTypeWire::Plan),
         "phase" => Some(IssueTypeWire::Phase),
         "task" => Some(IssueTypeWire::Task),
+        "flag" => Some(IssueTypeWire::Flag),
         _ => None,
     }
 }
@@ -2465,6 +2508,7 @@ fn issue_type_value(issue_type: &IssueTypeWire) -> &'static str {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
         IssueTypeWire::Task => "task",
+        IssueTypeWire::Flag => "flag",
     }
 }
 
@@ -2917,6 +2961,7 @@ mod tests {
                 "  Plans:       0\n",
                 "  Phases:      3\n",
                 "  Tasks:       1\n",
+                "  Flags:       0\n",
             )
         );
     }
@@ -3359,6 +3404,62 @@ mod tests {
         assert_eq!(removed.exit_code, 0);
         assert_eq!(removed.mutation_summary.unwrap().operation, "rm");
         assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_create_type_accepts_flag_form_and_rejects_arity() {
+        let parsed =
+            parse_create_type("flag(demo_key,2026-12-01,0.19.0)").unwrap();
+        assert_eq!(parsed.issue_type, IssueTypeWire::Flag);
+        assert_eq!(parsed.plan_path, None);
+        assert_eq!(parsed.parent_id, None);
+        assert_eq!(
+            parsed.flag,
+            Some(BeadFlagWire {
+                key: "demo_key".to_string(),
+                remove_by_date: "2026-12-01".to_string(),
+                remove_by_release: "0.19.0".to_string(),
+            })
+        );
+
+        let error = parse_create_type("flag(demo_key,2026-12-01)").unwrap_err();
+        assert_eq!(error, "flag() expects exactly 3 arguments, got 2");
+
+        let error = parse_create_type("flag").unwrap_err();
+        assert!(error.contains(CREATE_TYPE_EXPECTED));
+    }
+
+    #[test]
+    fn create_round_trips_a_flag_bead() {
+        let store = seed_issues(Vec::new());
+
+        let created = execute_search(
+            &store.beads_dir,
+            &[
+                "create",
+                "--title",
+                "Retire demo_key",
+                "--type",
+                "flag(demo_key,2026-12-01,0.19.0)",
+            ],
+        );
+        assert_eq!(created.exit_code, 0, "{}", created.stderr);
+        assert!(created.stdout.contains("Created flag:"));
+
+        let issues = read_store_issues(&store.beads_dir).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].issue_type, IssueTypeWire::Flag);
+        let flag = issues[0].flag.clone().unwrap();
+        assert_eq!(flag.key, "demo_key");
+        assert_eq!(flag.remove_by_date, "2026-12-01");
+        assert_eq!(flag.remove_by_release, "0.19.0");
+
+        let listed = execute_search(
+            &store.beads_dir,
+            &["list", "--format", "compact", "--color", "never"],
+        );
+        assert!(listed.stdout.contains("⚑"));
+        assert!(listed.stdout.contains("Retire demo_key"));
     }
 
     #[test]
@@ -4146,6 +4247,7 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

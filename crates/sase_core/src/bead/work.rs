@@ -312,6 +312,7 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

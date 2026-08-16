@@ -319,6 +319,7 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
         IssueTypeWire::Task => 2,
+        IssueTypeWire::Flag => 3,
     };
     (kind_order, issue.id.as_str())
 }
@@ -467,6 +468,7 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

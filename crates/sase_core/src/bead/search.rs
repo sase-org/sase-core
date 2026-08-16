@@ -343,6 +343,7 @@ fn issue_type_value(issue_type: &IssueTypeWire) -> &'static str {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
         IssueTypeWire::Task => "task",
+        IssueTypeWire::Flag => "flag",
     }
 }
 
@@ -1007,6 +1008,7 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: None,
             model: String::new(),
             size: None,
             is_ready_to_work: false,

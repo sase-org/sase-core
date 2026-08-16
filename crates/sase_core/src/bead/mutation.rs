@@ -31,9 +31,9 @@ use super::read::resolve_issue_id_in_issues;
 use super::wire::{
     deserialize_option_phase_size, parse_snooze_timestamp,
     validate_model_value, validate_unique_external_refs, BeadError,
-    BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
-    DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    BeadFlagWire, BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire,
+    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
+    StatusWire, TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -75,6 +75,8 @@ pub struct BeadCreateRequestWire {
     pub changespec_bug_id: String,
     #[serde(default)]
     pub external_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<BeadFlagWire>,
     #[serde(default)]
     pub now: Option<String>,
 }
@@ -113,6 +115,8 @@ pub struct BeadUpdateFieldsWire {
     pub tier: Option<BeadTierWire>,
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<BeadFlagWire>,
     #[serde(default)]
     pub now: Option<String>,
 }
@@ -258,6 +262,7 @@ pub fn create_issue(
             refs: references.clone(),
             plus_one_evidence: Vec::new(),
             snooze: None,
+            flag: request.flag,
             model: normalize_model(request.model)?,
             size: request.size,
             is_ready_to_work: false,
@@ -2185,6 +2190,9 @@ fn apply_update_fields(
     if let Some(value) = fields.tier {
         issue.tier = Some(value);
     }
+    if let Some(value) = fields.flag {
+        issue.flag = Some(value);
+    }
     // Archive last, matching `apply_update_event_fields`, so an explicit
     // closed_at/close_reason/resolution in the same update is archived rather
     // than surviving a move away from closed.
@@ -2228,6 +2236,7 @@ fn event_fields_from_update_fields(
         external_ref: fields.external_ref.clone(),
         tier: fields.tier.clone(),
         is_ready_to_work: fields.is_ready_to_work,
+        flag: fields.flag.clone(),
     };
     if event_fields == BeadIssueUpdateEventFieldsWire::default() {
         return Err(BeadError::validation(
@@ -2246,6 +2255,7 @@ fn default_create_tier(
         }
         IssueTypeWire::Phase => request.tier.clone(),
         IssueTypeWire::Task => request.tier.clone(),
+        IssueTypeWire::Flag => request.tier.clone(),
     }
 }
 
@@ -2867,6 +2877,132 @@ mod tests {
         let projected =
             import_issues_from_jsonl(&beads_dir.join("issues.jsonl")).unwrap();
         assert_eq!(projected.issues, vec![issue]);
+    }
+
+    #[test]
+    fn flag_bead_create_update_and_close_round_trip() {
+        let (_temp, beads_dir) = external_ref_store();
+        let created = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Retire demo_key".to_string(),
+                issue_type: IssueTypeWire::Flag,
+                flag: Some(BeadFlagWire {
+                    key: "demo_key".to_string(),
+                    remove_by_date: "2026-12-01".to_string(),
+                    remove_by_release: "0.19.0".to_string(),
+                }),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(created.issue_type, IssueTypeWire::Flag);
+        assert_eq!(created.flag.as_ref().unwrap().remove_by_date, "2026-12-01");
+
+        let updated = update_issue(
+            &beads_dir,
+            &created.id,
+            BeadUpdateFieldsWire {
+                flag: Some(BeadFlagWire {
+                    key: "demo_key".to_string(),
+                    remove_by_date: "2026-12-15".to_string(),
+                    remove_by_release: "0.20.0".to_string(),
+                }),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(updated.flag.as_ref().unwrap().remove_by_date, "2026-12-15");
+        assert_eq!(updated.flag.as_ref().unwrap().remove_by_release, "0.20.0");
+
+        let closed = close_issues(
+            &beads_dir,
+            std::slice::from_ref(&created.id),
+            Some("flag removed".to_string()),
+            Some(BeadResolutionWire::Done),
+            false,
+            Some("2026-01-03T00:00:00Z".to_string()),
+        )
+        .unwrap()
+        .issues
+        .remove(0);
+        assert_eq!(closed.status, StatusWire::Closed);
+        assert_eq!(closed.flag.as_ref().unwrap().key, "demo_key");
+        assert_eq!(reduces_to_store(&beads_dir), vec![closed.clone()]);
+
+        let projected =
+            import_issues_from_jsonl(&beads_dir.join("issues.jsonl")).unwrap();
+        assert_eq!(projected.issues, vec![closed]);
+    }
+
+    #[test]
+    fn flag_create_rejects_the_four_new_validation_errors() {
+        let (_temp, beads_dir) = external_ref_store();
+        let base = || BeadCreateRequestWire {
+            title: "Retire demo_key".to_string(),
+            issue_type: IssueTypeWire::Flag,
+            flag: Some(BeadFlagWire {
+                key: "demo_key".to_string(),
+                remove_by_date: "2026-12-01".to_string(),
+                remove_by_release: "0.19.0".to_string(),
+            }),
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let missing = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                flag: None,
+                ..base()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(missing.message, "flag issues must carry flag metadata");
+
+        let parented = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                parent_id: Some("sase-1".to_string()),
+                ..base()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(parented.message, "Flag issues cannot have a parent_id");
+
+        let bad_date = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                flag: Some(BeadFlagWire {
+                    remove_by_date: "soon".to_string(),
+                    ..base().flag.unwrap()
+                }),
+                ..base()
+            },
+        )
+        .unwrap_err();
+        assert!(bad_date
+            .message
+            .contains("remove_by_date must be an ISO date"));
+
+        let bad_key = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                flag: Some(BeadFlagWire {
+                    key: "Demo-Key".to_string(),
+                    ..base().flag.unwrap()
+                }),
+                ..base()
+            },
+        )
+        .unwrap_err();
+        assert!(bad_key.message.contains("key must be non-empty snake_case"));
     }
 
     #[test]
