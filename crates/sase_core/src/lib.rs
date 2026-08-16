@@ -68,6 +68,7 @@ pub mod suffix;
 pub mod telemetry;
 pub mod vcs_log;
 pub mod wire;
+pub mod workspace_lease;
 pub mod xprompt_catalog;
 
 /// Return launch-inert literal zones as UTF-8 byte ranges.
@@ -730,6 +731,16 @@ pub use wire::{
     PatchHookStatusLineWire, PatchHookWire, PatchMentorWire, PatchWire,
     SourceSpanWire, StitchWire, TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
     PATCH_WIRE_SCHEMA_VERSION,
+};
+pub use workspace_lease::{
+    authorize_operational_lease_workspace, is_operational_lease_policy_kind,
+    is_operational_lease_workspace, normalize_workspace_num,
+    operational_lease_failure_message, operational_lease_pool_bounds,
+    validate_operational_lease_policy, OperationalLeaseError,
+    OperationalLeaseFailureKind, OperationalLeasePolicyWire,
+    LEGACY_PRIMARY_WORKSPACE_NUM, MACHINE_OWNED_MIN_WORKSPACE,
+    OPERATIONAL_LEASE_POLICY_KIND, PRIMARY_WORKSPACE_NUM,
+    UNIFIED_MAX_WORKSPACE,
 };
 pub use xprompt_catalog::{
     compose_snippet_catalog, load_editor_snippet_catalog,
