@@ -1368,7 +1368,8 @@ pub fn build_agent_completion_candidates(
             display: insertion.to_string(),
             insertion: insertion.to_string(),
             detail,
-            documentation: None,
+            documentation: (!entry.documentation.is_empty())
+                .then(|| entry.documentation.clone()),
             is_dir: false,
             name: filter_name,
             replacement: replacement_range.map(|range| EditorTextEdit {
@@ -3032,6 +3033,7 @@ mod tests {
             kind: kind.to_string(),
             member_count,
             detail: detail.to_string(),
+            documentation: String::new(),
         }
     }
 
@@ -4927,6 +4929,7 @@ mod tests {
                 kind: String::new(),
                 member_count: 0,
                 detail: String::new(),
+                documentation: String::new(),
             },
             AgentCompletionEntry {
                 name: "coder".to_string(),
@@ -4935,6 +4938,7 @@ mod tests {
                 kind: String::new(),
                 member_count: 0,
                 detail: String::new(),
+                documentation: String::new(),
             },
             AgentCompletionEntry {
                 name: "reviewer.@".to_string(),
@@ -4943,6 +4947,7 @@ mod tests {
                 kind: String::new(),
                 member_count: 0,
                 detail: String::new(),
+                documentation: String::new(),
             },
         ];
         let list = build_agent_completion_candidates(
@@ -5007,6 +5012,28 @@ mod tests {
             build_agent_completion_candidates("@rev", None, &entries, &[]);
         assert_eq!(sigil_tribe.candidates[0].insertion, "@reviewers");
         assert_eq!(sigil_tribe.candidates[0].name, "@reviewers");
+    }
+
+    #[test]
+    fn agent_candidates_carry_documentation_only_when_present() {
+        let mut documented =
+            agent_target("review", "family", 3, "family · 3 members");
+        documented.documentation = "# review\n\nplan preview".to_string();
+        let bare = agent_target("builders", "clan", 2, "clan · 2 members");
+        let entries = vec![documented, bare];
+
+        let list = build_agent_completion_candidates("", None, &entries, &[]);
+        let documentation = |name: &str| {
+            list.candidates
+                .iter()
+                .find(|candidate| candidate.insertion == name)
+                .and_then(|candidate| candidate.documentation.clone())
+        };
+        assert_eq!(
+            documentation("review"),
+            Some("# review\n\nplan preview".to_string())
+        );
+        assert_eq!(documentation("builders"), None);
     }
 
     #[test]

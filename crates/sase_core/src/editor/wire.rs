@@ -269,6 +269,11 @@ pub struct AgentCompletionEntry {
     pub member_count: usize,
     #[serde(default)]
     pub detail: String,
+    /// Optional markdown block supplied by the Python editor helper, rendered
+    /// in the editor's documentation popup. Empty when the helper has nothing
+    /// to show.
+    #[serde(default)]
+    pub documentation: String,
 }
 
 pub const AGENT_CATALOG_SCHEMA_VERSION: u32 = 1;

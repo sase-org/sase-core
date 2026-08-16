@@ -2943,8 +2943,8 @@ mod tests {
         CodeActionOrCommand, CompletionClientCapabilities, CompletionContext,
         CompletionItemCapability, CompletionItemKind, CompletionResponse,
         CompletionTextEdit, CompletionTriggerKind, Documentation,
-        GotoDefinitionResponse, Hover, InsertTextFormat, Position, Range,
-        TextDocumentClientCapabilities, TextDocumentIdentifier,
+        GotoDefinitionResponse, Hover, InsertTextFormat, MarkupKind, Position,
+        Range, TextDocumentClientCapabilities, TextDocumentIdentifier,
         TextDocumentPositionParams, Uri,
     };
     use sase_core::{
@@ -3633,7 +3633,7 @@ mod tests {
                 "message": "",
                 "entries": [
                     {"name": "planner", "status": "RUNNING", "project": "sase"},
-                    {"name": "review", "kind": "family", "member_count": 2, "detail": "family · 2 members"},
+                    {"name": "review", "kind": "family", "member_count": 2, "detail": "family · 2 members", "documentation": "# review\n\nplan preview"},
                     {"name": "builders", "kind": "clan", "member_count": 3, "detail": "clan · 3 members"},
                     {"name": "@ops", "kind": "tribe", "member_count": 4, "detail": "tribe · 4 agents"}
                 ]
@@ -3682,6 +3682,14 @@ mod tests {
                 .and_then(|details| details.description.as_deref()),
             Some("clan · 3 members")
         );
+        assert!(items[4].documentation.is_none());
+        let Some(Documentation::MarkupContent(review_doc)) =
+            items[5].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation for review family entry");
+        };
+        assert_eq!(review_doc.kind, MarkupKind::Markdown);
+        assert_eq!(review_doc.value, "# review\n\nplan preview");
 
         let response = server
             .completion_for_text("%wait:op".to_string(), Position::new(0, 8))

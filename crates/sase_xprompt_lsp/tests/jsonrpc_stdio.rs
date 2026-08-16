@@ -39,6 +39,7 @@ impl HelperHostBridge for FixtureBridge {
                     kind: String::new(),
                     member_count: 0,
                     detail: String::new(),
+                    documentation: String::new(),
                 },
                 AgentCompletionEntry {
                     name: "coder".to_string(),
@@ -47,6 +48,7 @@ impl HelperHostBridge for FixtureBridge {
                     kind: String::new(),
                     member_count: 0,
                     detail: String::new(),
+                    documentation: String::new(),
                 },
             ],
         })
