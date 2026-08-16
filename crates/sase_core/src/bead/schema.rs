@@ -77,7 +77,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON dependencies(depends_on_id);
 "#;
 
@@ -186,9 +187,11 @@ pub fn needs_external_ref_migration(create_table_sql: Option<&str>) -> bool {
 
 pub fn external_ref_migration_sql() -> &'static str {
     r#"ALTER TABLE issues ADD COLUMN external_ref TEXT;
+DROP INDEX IF EXISTS idx_issues_external_ref;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';"#
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';"#
 }
 
 pub fn needs_size_migration(create_table_sql: Option<&str>) -> bool {
@@ -288,7 +291,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -387,7 +391,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -491,7 +496,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -582,7 +588,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != '';
+    WHERE external_ref IS NOT NULL AND external_ref != ''
+      AND issue_type != 'flag';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -1018,6 +1025,15 @@ mod tests {
                 id, title, status, issue_type, created_at, updated_at, external_ref
              ) VALUES (
                 'legacy-2', 'Other', 'open', 'plan', 'now', 'now', 'bug:sase#42'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, external_ref
+             ) VALUES (
+                'legacy-flag', 'Flag', 'open', 'flag', 'now', 'now', 'bug:sase#42'
              )",
             [],
         )

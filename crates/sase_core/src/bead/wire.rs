@@ -475,6 +475,37 @@ pub fn parse_flag_remove_by_release(value: &str) -> Result<&str, BeadError> {
     }
 }
 
+/// Return whether a flag's calendar and release thresholds are both reached.
+pub fn flag_removal_due(
+    flag: &BeadFlagWire,
+    today: NaiveDate,
+    release: &str,
+) -> bool {
+    let Ok(remove_by_date) = parse_flag_remove_by_date(&flag.remove_by_date)
+    else {
+        return false;
+    };
+    let Some(current_release) = release_tuple(release) else {
+        return false;
+    };
+    let Some(remove_by_release) = release_tuple(&flag.remove_by_release) else {
+        return false;
+    };
+    today >= remove_by_date && current_release >= remove_by_release
+}
+
+fn release_tuple(value: &str) -> Option<(u64, u64, u64)> {
+    let core = value.trim().split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 fn is_snake_case_key(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -786,6 +817,9 @@ pub(crate) fn validate_unique_external_refs(
 ) -> Result<(), BeadError> {
     let mut owner_by_ref: BTreeSet<(&str, &str)> = BTreeSet::new();
     for issue in issues {
+        if issue.issue_type == IssueTypeWire::Flag {
+            continue;
+        }
         let external_ref = issue.external_ref.trim();
         if external_ref.is_empty() {
             continue;

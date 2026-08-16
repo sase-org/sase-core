@@ -6376,6 +6376,62 @@ mod tests {
     }
 
     #[test]
+    fn flag_external_ref_does_not_reserve_external_issue_identity() {
+        let (_temp, beads_dir) = external_ref_store();
+        let flag = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Temporary flag".to_string(),
+                issue_type: IssueTypeWire::Flag,
+                flag: Some(BeadFlagWire {
+                    key: "demo_key".to_string(),
+                    remove_by_date: "2026-12-01".to_string(),
+                    remove_by_release: "0.19.0".to_string(),
+                }),
+                external_ref: "bug:sase#42".to_string(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Mirrored issue".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                external_ref: "bug:sase#42".to_string(),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Duplicate mirror".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                external_ref: "bug:sase#42".to_string(),
+                now: Some("2026-01-01T00:02:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "conflict");
+        assert!(error.message.contains(&task.id));
+        assert!(!error.message.contains(&flag.id));
+        assert_eq!(read_store_issues(&beads_dir).unwrap().len(), 2);
+    }
+
+    #[test]
     fn external_ref_create_update_clear_and_batch_conflicts_are_atomic() {
         let (_temp, beads_dir) = external_ref_store();
         let plan =

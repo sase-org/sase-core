@@ -547,6 +547,9 @@ pub fn reduce_event_streams(
 fn collapse_duplicate_external_refs(issues: Vec<IssueWire>) -> Vec<IssueWire> {
     let mut winner_index_by_ref: BTreeMap<String, usize> = BTreeMap::new();
     for (index, issue) in issues.iter().enumerate() {
+        if issue.issue_type == IssueTypeWire::Flag {
+            continue;
+        }
         let external_ref = issue.external_ref.trim();
         if external_ref.is_empty() {
             continue;
@@ -569,7 +572,8 @@ fn collapse_duplicate_external_refs(issues: Vec<IssueWire>) -> Vec<IssueWire> {
         .into_iter()
         .enumerate()
         .filter(|(index, issue)| {
-            issue.external_ref.trim().is_empty()
+            issue.issue_type == IssueTypeWire::Flag
+                || issue.external_ref.trim().is_empty()
                 || winning_indexes.contains(index)
         })
         .map(|(_, issue)| issue)
@@ -1785,6 +1789,20 @@ mod tests {
         issue
     }
 
+    fn flag_issue() -> IssueWire {
+        let mut issue = issue_with_refs(Vec::new());
+        issue.id = "sase-flag".to_string();
+        issue.title = "Flag".to_string();
+        issue.issue_type = IssueTypeWire::Flag;
+        issue.tier = None;
+        issue.flag = Some(BeadFlagWire {
+            key: "demo_key".to_string(),
+            remove_by_date: "2026-12-01".to_string(),
+            remove_by_release: "0.19.0".to_string(),
+        });
+        issue
+    }
+
     fn plus_one_event(event_id: &str, reporter: &str) -> BeadEventRecordWire {
         let evidence = TaskPlusOneEvidenceWire {
             timestamp: "2026-01-02T00:00:00Z".to_string(),
@@ -1994,6 +2012,30 @@ mod tests {
             assert_eq!(reduced[0].id, "sase-1");
             assert_eq!(reduced[0].external_ref, "bug:sase#42");
         }
+    }
+
+    #[test]
+    fn reduction_keeps_flag_rows_out_of_external_ref_collapse() {
+        let mut flag = flag_issue();
+        flag.external_ref = "bug:sase#42".to_string();
+        let mut task = task_issue();
+        task.id = "sase-task".to_string();
+        task.external_ref = "bug:sase#42".to_string();
+        let mut duplicate_task = task_issue();
+        duplicate_task.id = "sase-other".to_string();
+        duplicate_task.external_ref = "bug:sase#42".to_string();
+        duplicate_task.created_at = "2026-02-01T00:00:00Z".to_string();
+
+        let reduced = reduce_event_streams(&[
+            created_stream(&flag),
+            created_stream(&task),
+            created_stream(&duplicate_task),
+        ])
+        .unwrap();
+
+        let ids: BTreeSet<&str> =
+            reduced.iter().map(|issue| issue.id.as_str()).collect();
+        assert_eq!(ids, BTreeSet::from(["sase-task", "sase-flag"]));
     }
 
     #[test]

@@ -10,7 +10,9 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
@@ -27,8 +29,9 @@ use super::read::{
 };
 use super::search::{search_issues_in_issues_with_matcher, SearchMatcher};
 use super::wire::{
-    BeadError, BeadFlagWire, BeadResolutionWire, BeadSearchMatchWire,
-    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    flag_removal_due, BeadError, BeadFlagWire, BeadResolutionWire,
+    BeadSearchMatchWire, BeadTierWire, DependencyWire, IssueTypeWire,
+    IssueWire, StatusWire,
 };
 use crate::plan::refs::{parse_plan_reference, resolve_plan_reference};
 
@@ -515,7 +518,7 @@ fn handle_stats(
     let issues = read_issues(read_beads_dirs, write_beads_dir)?;
     let stats = stats_for_issues(&issues);
     let stdout = format!(
-        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  Ready:       {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n  Tasks:       {}\n  Flags:       {}\n",
+        "Issue Statistics\n  Total:       {}\n  Open:        {}\n  Claimed:     {}\n  Ready:       {}\n  In Progress: {}\n  Closed:      {}\n  Plans:       {}\n  Phases:      {}\n  Tasks:       {}\n  Flags:       {}\n  Due Flags:   {}\n",
         stats.get("total").copied().unwrap_or(0),
         stats.get("open").copied().unwrap_or(0),
         stats.get("claimed").copied().unwrap_or(0),
@@ -526,6 +529,7 @@ fn handle_stats(
         stats.get("phase").copied().unwrap_or(0),
         stats.get("task").copied().unwrap_or(0),
         stats.get("flag").copied().unwrap_or(0),
+        stats.get("due_flag").copied().unwrap_or(0),
     );
     Ok(success(stdout))
 }
@@ -2406,6 +2410,8 @@ fn has_active_blocker(
 fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
     let mut stats = BTreeMap::new();
     let mut plus_one_total = 0;
+    let today = current_date();
+    let release = env!("CARGO_PKG_VERSION");
     for issue in issues {
         *stats
             .entry(status_value(&issue.status).to_string())
@@ -2413,11 +2419,23 @@ fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
         *stats
             .entry(issue_type_value(&issue.issue_type).to_string())
             .or_insert(0) += 1;
+        if issue
+            .flag
+            .as_ref()
+            .is_some_and(|flag| flag_removal_due(flag, today, release))
+        {
+            *stats.entry("due_flag".to_string()).or_insert(0) += 1;
+        }
         plus_one_total += issue.plus_one_count();
     }
     stats.insert("total".to_string(), issues.len());
     stats.insert("plus_one".to_string(), plus_one_total);
     stats
+}
+
+fn current_date() -> NaiveDate {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.date_naive()
 }
 
 fn mutation_summary(
@@ -2962,6 +2980,7 @@ mod tests {
                 "  Phases:      3\n",
                 "  Tasks:       1\n",
                 "  Flags:       0\n",
+                "  Due Flags:   0\n",
             )
         );
     }

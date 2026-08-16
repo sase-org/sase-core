@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::events::{
@@ -16,7 +16,8 @@ use super::jsonl::{
     import_issues_from_jsonl, read_event_store,
 };
 use super::wire::{
-    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+    flag_removal_due, BeadError, BeadTierWire, IssueTypeWire, IssueWire,
+    StatusWire,
 };
 use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
@@ -873,6 +874,8 @@ fn has_active_blocker(
 fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
     let mut stats = BTreeMap::new();
     let mut plus_one_total = 0;
+    let today = current_date();
+    let release = env!("CARGO_PKG_VERSION");
     for issue in issues {
         *stats
             .entry(status_as_str(&issue.status).to_string())
@@ -880,11 +883,23 @@ fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
         *stats
             .entry(issue_type_as_str(&issue.issue_type).to_string())
             .or_insert(0) += 1;
+        if issue
+            .flag
+            .as_ref()
+            .is_some_and(|flag| flag_removal_due(flag, today, release))
+        {
+            *stats.entry("due_flag".to_string()).or_insert(0) += 1;
+        }
         plus_one_total += issue.plus_one_count();
     }
     stats.insert("total".to_string(), issues.len());
     stats.insert("plus_one".to_string(), plus_one_total);
     stats
+}
+
+fn current_date() -> NaiveDate {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.date_naive()
 }
 
 fn parse_statuses(
