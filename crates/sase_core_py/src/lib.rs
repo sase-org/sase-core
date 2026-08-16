@@ -259,6 +259,7 @@
 //! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
+//! - `perf_logs_query(request: dict) -> dict`
 //! - `agent_stats_query_runs(index_path: str, request: dict) -> dict` (run,
 //!   runtime, project, and Patch work rollups)
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
@@ -690,6 +691,9 @@ use sase_core::notifications::{
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
+};
+use sase_core::perf_logs::{
+    perf_logs_query as core_perf_logs_query, PerfLogsQueryWire,
 };
 use sase_core::plan::{
     canonicalize_plan_reference as core_canonicalize_plan_reference,
@@ -8442,6 +8446,21 @@ fn py_agent_stats_query_runs<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Aggregate durable TUI and launch performance JSONL logs.
+#[pyfunction]
+#[pyo3(name = "perf_logs_query")]
+fn py_perf_logs_query<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PerfLogsQueryWire =
+        telemetry_request_from_pydict(request, "PerfLogsQueryWire")?;
+    let result = py
+        .allow_threads(|| core_perf_logs_query(request))
+        .map_err(PyRuntimeError::new_err)?;
+    telemetry_result_to_py(py, &result)
+}
+
 /// Aggregate durable skill, memory, question, and plan activity.
 #[pyfunction]
 #[pyo3(name = "agent_stats_query_activity")]
@@ -9077,6 +9096,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_query_range, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_prune, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_store_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(py_perf_logs_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_activity, m)?)?;
     Ok(())
@@ -14165,6 +14185,53 @@ MENTORS:
                 json!(60.0)
             );
             assert_eq!(result["runners"]["trend"].as_array().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn perf_logs_query_binding_round_trips_python_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let startup = temp.path().join("tui_startup.jsonl");
+            fs::write(
+                &startup,
+                serde_json::to_string(&json!({
+                    "timestamp": "1970-01-01T00:02:30Z",
+                    "event": "tui_startup",
+                    "initial_tab": "agents",
+                    "visible_ready_seconds": 1.25,
+                    "all_surfaces_ready_seconds": 1.75
+                }))
+                .unwrap()
+                    + "\n",
+            )
+            .unwrap();
+
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "start_ts": 100,
+                    "end_ts": 200,
+                    "sources": [{
+                        "id": "startup",
+                        "path": startup.to_str().unwrap()
+                    }]
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_perf_logs_query(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["startup"]["sessions"], json!(1));
+            assert_eq!(
+                result["startup"]["visible_ready_series"][0]
+                    ["visible_ready_seconds"],
+                json!(1.25)
+            );
+            assert_eq!(result["coverage"][0]["records_in_window"], json!(1));
         });
     }
 

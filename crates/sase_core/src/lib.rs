@@ -46,6 +46,7 @@ pub mod markdown_link_refs;
 pub mod model_route;
 pub mod notifications;
 pub mod parser;
+pub mod perf_logs;
 pub mod plan;
 pub mod procs;
 pub mod project_spec;
@@ -599,6 +600,16 @@ pub use notifications::{
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::{parse_patch_project_bytes, parse_project_bytes};
+pub use perf_logs::{
+    perf_logs_query, PerfAgentLoadStageWire, PerfAgentLoadsSnapshotWire,
+    PerfCountWire, PerfExternalToolWaitsSnapshotWire, PerfGitOpsSnapshotWire,
+    PerfLaunchStageWire, PerfLaunchesSnapshotWire, PerfLogCoverageWire,
+    PerfLogSourceIdWire, PerfLogSourceWire, PerfLogsQueryWire,
+    PerfLogsSnapshotWire, PerfNumericSummaryWire, PerfStageSummaryWire,
+    PerfStallEventStatsWire, PerfStallsSnapshotWire,
+    PerfStartupSeriesPointWire, PerfStartupSessionWire,
+    PerfStartupSnapshotWire, PERF_LOGS_WIRE_SCHEMA_VERSION,
+};
 pub use plan::{
     canonicalize_plan_reference, parse_plan_reference, parse_sdd_artifact_link,
     plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
