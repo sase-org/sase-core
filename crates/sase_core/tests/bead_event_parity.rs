@@ -1,3 +1,6 @@
+use std::fs;
+
+use sase_core::bead::jsonl::{read_event_store, write_event_store};
 use sase_core::bead::{
     BeadReopenCauseWire, BeadResolutionWire, TaskPlusOneEvidenceWire,
 };
@@ -9,6 +12,7 @@ use sase_core::{
     BeadIssueUpdateEventFieldsWire, BeadTierWire, DependencyWire,
     IssueTypeWire, IssueWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
 };
+use tempfile::tempdir;
 
 const EVENT_ROUNDTRIP_SCHEMA: &str =
     include_str!("fixtures/bead/jsonl/event_roundtrip_schema.jsonl");
@@ -22,6 +26,8 @@ const EVENT_MANIFEST: &str =
     include_str!("fixtures/bead/events/event_roundtrip/manifest.json");
 const EVENT_GOLD_1_STREAM: &str =
     include_str!("fixtures/bead/events/event_roundtrip/streams/gold-1.jsonl");
+const RESOLUTION_NULL_STREAM: &str =
+    include_str!("fixtures/bead/events/resolution_null_stream.jsonl");
 
 #[test]
 fn jsonl_import_to_events_reduces_to_byte_compatible_projection() {
@@ -95,6 +101,74 @@ fn serialized_event_store_fixture_matches_import_and_reduces() {
         export_issues_to_jsonl(&reduce_event_streams(&imported).unwrap())
             .unwrap(),
         EVENT_ROUNDTRIP_SCHEMA
+    );
+}
+
+#[test]
+fn write_event_store_leaves_an_unrelated_streams_bytes_unchanged_across_a_mutation(
+) {
+    // Reproduces the append-only guard wedge from the
+    // bead_event_resolution_roundtrip tale: the fixture stream carries a
+    // committed event that explicitly clears `resolution` (an
+    // issue_updated with `"resolution": null`), and it must never be the
+    // stream that changes when an unrelated stream is mutated.
+    let untouched_stream =
+        event_stream_fixture("gold-3", RESOLUTION_NULL_STREAM);
+    let untouched_stream_id = untouched_stream.stream_id.clone();
+
+    let mutated_issue = issue(
+        "sase-note",
+        "Gets a note",
+        IssueTypeWire::Task,
+        None,
+        "2026-08-01T00:02:00Z",
+    );
+    let mutated_stream = BeadEventStreamWire {
+        stream_id: "sase-note".to_string(),
+        root_issue_id: "sase-note".to_string(),
+        events: vec![numbered_event(
+            "sase-note",
+            1,
+            "2026-08-01T00:02:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated {
+                issue: mutated_issue,
+            },
+        )],
+    };
+
+    let dir = tempdir().unwrap();
+    let beads_dir = dir.path();
+    write_event_store(beads_dir, &[untouched_stream, mutated_stream]).unwrap();
+
+    let untouched_path = beads_dir
+        .join("events/streams")
+        .join(format!("{untouched_stream_id}.jsonl"));
+    let bytes_before = fs::read(&untouched_path).unwrap();
+
+    let (_manifest, mut streams) = read_event_store(beads_dir).unwrap();
+    let target = streams
+        .iter_mut()
+        .find(|stream| stream.stream_id == "sase-note")
+        .unwrap();
+    target.events.push(numbered_event(
+        "sase-note",
+        2,
+        "2026-08-01T00:03:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "probe".to_string(),
+        },
+    ));
+
+    write_event_store(beads_dir, &streams).unwrap();
+
+    let bytes_after = fs::read(&untouched_path).unwrap();
+    assert_eq!(
+        bytes_before, bytes_after,
+        "an unrelated mutation rewrote {untouched_stream_id}.jsonl's bytes; \
+         the resolution:null event must round-trip byte-for-byte through \
+         read_event_store/write_event_store"
     );
 }
 

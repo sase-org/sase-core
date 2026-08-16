@@ -1,4 +1,6 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+
+use crate::serde_option::deserialize_present_option;
 
 pub const PROC_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS: [u32; 3] =
@@ -437,14 +439,4 @@ fn default_log_owner() -> String {
 
 fn default_shell_kind() -> Option<String> {
     Some("proc".to_string())
-}
-
-fn deserialize_present_option<'de, D, T>(
-    deserializer: D,
-) -> Result<Option<Option<T>>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
 }

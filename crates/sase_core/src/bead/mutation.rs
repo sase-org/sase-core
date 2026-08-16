@@ -2203,10 +2203,14 @@ fn event_fields_from_update_fields(
     fields: &BeadUpdateFieldsWire,
 ) -> Result<BeadIssueUpdateEventFieldsWire, BeadError> {
     let status = fields.status.as_deref().map(parse_status).transpose()?;
-    let resolution = match (&status, &fields.resolution) {
-        (Some(status), None) if *status != StatusWire::Closed => Some(None),
-        _ => fields.resolution.clone(),
-    };
+    // Pass `resolution` through unchanged, exactly like `closed_at` and
+    // `close_reason`: `archive_close_metadata` already archives-then-clears
+    // it on any reopen, on both the direct-mutation and reducer paths. An
+    // explicit `Some(None)` here used to be silently dropped by a
+    // deserializer bug (see bead_event_resolution_roundtrip), so replay
+    // never actually applied it; now that it round-trips, applying it
+    // before `archive_close_metadata` runs would wipe the value that needs
+    // to be archived into `close_history`.
     let event_fields = BeadIssueUpdateEventFieldsWire {
         title: fields.title.clone(),
         status,
@@ -2218,7 +2222,7 @@ fn event_fields_from_update_fields(
         size: fields.size.clone(),
         closed_at: fields.closed_at.clone(),
         close_reason: fields.close_reason.clone(),
-        resolution,
+        resolution: fields.resolution.clone(),
         changespec_name: fields.changespec_name.clone(),
         changespec_bug_id: fields.changespec_bug_id.clone(),
         external_ref: fields.external_ref.clone(),
