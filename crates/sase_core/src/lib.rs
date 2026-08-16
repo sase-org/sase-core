@@ -664,8 +664,10 @@ pub use prompt_stash::{
 pub use provider_disable::{
     clear_provider_disable, get_provider_disables, provider_disable_state_path,
     set_provider_disable_relative, set_provider_disable_until,
+    try_set_provider_disable_relative, try_set_provider_disable_until,
     ProviderDisableError, ProviderDisableSnapshotWire, ProviderDisableWire,
-    PROVIDER_DISABLE_STATE_FILENAME, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+    ProviderDisableWriteOutcomeWire, PROVIDER_DISABLE_STATE_FILENAME,
+    PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, canonicalize_query_with_profile, compile_query,

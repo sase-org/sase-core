@@ -158,6 +158,8 @@
 //! - `provider_disable_get(sase_home: str, now: float | None = None) -> dict`
 //! - `provider_disable_set_relative(sase_home: str, provider: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `provider_disable_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
+//! - `provider_disable_try_set_relative(sase_home: str, provider: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `provider_disable_try_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `provider_disable_clear(sase_home: str, provider: str) -> bool`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `size_model_route(size: str) -> dict`
@@ -761,6 +763,8 @@ use sase_core::provider_disable::{
     get_provider_disables as core_get_provider_disables,
     set_provider_disable_relative as core_set_provider_disable_relative,
     set_provider_disable_until as core_set_provider_disable_until,
+    try_set_provider_disable_relative as core_try_set_provider_disable_relative,
+    try_set_provider_disable_until as core_try_set_provider_disable_until,
     ProviderDisableError as ProviderDisableDomainError,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
@@ -7781,6 +7785,60 @@ fn py_provider_disable_set_until<'py>(
 }
 
 #[pyfunction]
+#[pyo3(
+    name = "provider_disable_try_set_relative",
+    signature = (
+        sase_home,
+        provider,
+        source,
+        duration_seconds = None,
+        now = None
+    )
+)]
+fn py_provider_disable_try_set_relative<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    source: &str,
+    duration_seconds: Option<f64>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let outcome = core_try_set_provider_disable_relative(
+        &PathBuf::from(sase_home),
+        provider,
+        duration_seconds,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(provider_disable_error_to_pyerr)?;
+    provider_disable_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_disable_try_set_until",
+    signature = (sase_home, provider, expires_at, source, now = None)
+)]
+fn py_provider_disable_try_set_until<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    expires_at: f64,
+    source: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let outcome = core_try_set_provider_disable_until(
+        &PathBuf::from(sase_home),
+        provider,
+        expires_at,
+        source,
+        effort_override_now(now)?,
+    )
+    .map_err(provider_disable_error_to_pyerr)?;
+    provider_disable_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_disable_clear")]
 fn py_provider_disable_clear(
     sase_home: &str,
@@ -9116,6 +9174,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_provider_disable_get, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_set_relative, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_set_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_try_set_relative, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_disable_try_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_clear, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_size_model_route, m)?)?;
@@ -10741,6 +10801,53 @@ mod tests {
     }
 
     #[test]
+    fn provider_disable_try_set_bindings_report_first_writer() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            let first = py_provider_disable_try_set_relative(
+                py,
+                &home,
+                "claude",
+                "usage_limit",
+                Some(900.0),
+                Some(now),
+            )
+            .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            assert_eq!(
+                first_value,
+                json!({
+                    "version": 1,
+                    "inserted": true,
+                    "record": {
+                        "version": 1,
+                        "provider": "claude",
+                        "created_at": now,
+                        "expires_at": now + 900.0,
+                        "source": "usage_limit",
+                    },
+                })
+            );
+
+            let lost = py_provider_disable_try_set_until(
+                py,
+                &home,
+                "claude",
+                now + 3_600.0,
+                "ace",
+                Some(now),
+            )
+            .unwrap();
+            let lost_value = py_to_json_value(lost.bind(py)).unwrap();
+            assert_eq!(lost_value["inserted"], json!(false));
+            assert_eq!(lost_value["record"], first_value["record"]);
+        });
+    }
+
+    #[test]
     fn provider_disable_binding_rejects_invalid_values() {
         pyo3::prepare_freethreaded_python();
         let temp = tempfile::tempdir().unwrap();
@@ -10758,6 +10865,28 @@ mod tests {
             assert!(error.is_instance_of::<PyValueError>(py));
 
             let error = py_provider_disable_set_until(
+                py,
+                &home,
+                "claude",
+                1.0,
+                "test",
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = py_provider_disable_try_set_relative(
+                py,
+                &home,
+                "",
+                "test",
+                None,
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = py_provider_disable_try_set_until(
                 py,
                 &home,
                 "claude",

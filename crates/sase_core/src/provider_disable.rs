@@ -42,6 +42,18 @@ pub struct ProviderDisableSnapshotWire {
     pub disables: Vec<ProviderDisableWire>,
 }
 
+/// Outcome of a conditional first-writer provider-disable write.
+///
+/// `inserted` is true only when this caller created the active record.
+/// Losing callers receive the unchanged stored record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDisableWriteOutcomeWire {
+    pub version: u32,
+    pub inserted: bool,
+    pub record: ProviderDisableWire,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ProviderDisableStateWire {
     version: u32,
@@ -100,20 +112,7 @@ pub fn set_provider_disable_relative(
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
     validate_now(now)?;
-    if let Some(duration) = duration_seconds {
-        if !duration.is_finite() || duration <= 0.0 {
-            return Err(ProviderDisableError::Validation(
-                "duration_seconds must be finite and positive or None"
-                    .to_string(),
-            ));
-        }
-    }
-    let expires_at = duration_seconds.map(|duration| now + duration);
-    if expires_at.is_some_and(|expiry| !expiry.is_finite()) {
-        return Err(ProviderDisableError::Validation(
-            "computed expires_at must be finite".to_string(),
-        ));
-    }
+    let expires_at = validate_relative_expires_at(duration_seconds, now)?;
     write_provider_record(sase_home, &provider, &source, now, expires_at)
 }
 
@@ -128,17 +127,46 @@ pub fn set_provider_disable_until(
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
     validate_now(now)?;
-    if !expires_at.is_finite() {
-        return Err(ProviderDisableError::Validation(
-            "expires_at must be finite".to_string(),
-        ));
-    }
-    if expires_at <= now {
-        return Err(ProviderDisableError::Validation(
-            "expires_at must be in the future".to_string(),
-        ));
-    }
+    let expires_at = validate_until_expires_at(expires_at, now)?;
     write_provider_record(sase_home, &provider, &source, now, Some(expires_at))
+}
+
+/// Write a relative-duration disable only when no active record exists.
+pub fn try_set_provider_disable_relative(
+    sase_home: &Path,
+    provider: &str,
+    duration_seconds: Option<f64>,
+    source: &str,
+    now: f64,
+) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
+    let provider = validate_provider(provider)?;
+    let source = validate_source(source)?;
+    validate_now(now)?;
+    let expires_at = validate_relative_expires_at(duration_seconds, now)?;
+    write_provider_record_if_absent(
+        sase_home, &provider, &source, now, expires_at,
+    )
+}
+
+/// Write an exact-expiry disable only when no active record exists.
+pub fn try_set_provider_disable_until(
+    sase_home: &Path,
+    provider: &str,
+    expires_at: f64,
+    source: &str,
+    now: f64,
+) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
+    let provider = validate_provider(provider)?;
+    let source = validate_source(source)?;
+    validate_now(now)?;
+    let expires_at = validate_until_expires_at(expires_at, now)?;
+    write_provider_record_if_absent(
+        sase_home,
+        &provider,
+        &source,
+        now,
+        Some(expires_at),
+    )
 }
 
 /// Clear one provider disable. Missing state is a successful idempotent no-op.
@@ -170,19 +198,58 @@ fn write_provider_record(
     now: f64,
     expires_at: Option<f64>,
 ) -> Result<ProviderDisableWire, ProviderDisableError> {
-    let record = ProviderDisableWire {
-        version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
-        provider: provider.to_string(),
-        created_at: now,
-        expires_at,
-        source: source.to_string(),
-    };
+    let record = candidate_record(provider, source, now, expires_at);
     with_lock(sase_home, || {
         let mut records = read_records_locked(sase_home, Some(now))?;
         records.insert(provider.to_string(), record.clone());
         write_state_atomic(&provider_disable_state_path(sase_home), &records)?;
         Ok(record.clone())
     })
+}
+
+fn write_provider_record_if_absent(
+    sase_home: &Path,
+    provider: &str,
+    source: &str,
+    now: f64,
+    expires_at: Option<f64>,
+) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
+    let candidate = candidate_record(provider, source, now, expires_at);
+    with_lock(sase_home, || {
+        let mut records = read_records_locked(sase_home, Some(now))?;
+        if let Some(existing) = records.get(provider) {
+            return Ok(write_outcome(false, existing.clone()));
+        }
+        records.insert(provider.to_string(), candidate.clone());
+        write_state_atomic(&provider_disable_state_path(sase_home), &records)?;
+        Ok(write_outcome(true, candidate))
+    })
+}
+
+fn candidate_record(
+    provider: &str,
+    source: &str,
+    now: f64,
+    expires_at: Option<f64>,
+) -> ProviderDisableWire {
+    ProviderDisableWire {
+        version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+        provider: provider.to_string(),
+        created_at: now,
+        expires_at,
+        source: source.to_string(),
+    }
+}
+
+fn write_outcome(
+    inserted: bool,
+    record: ProviderDisableWire,
+) -> ProviderDisableWriteOutcomeWire {
+    ProviderDisableWriteOutcomeWire {
+        version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+        inserted,
+        record,
+    }
 }
 
 fn read_records_locked(
@@ -299,6 +366,44 @@ fn validate_now(now: f64) -> Result<(), ProviderDisableError> {
         ));
     }
     Ok(())
+}
+
+fn validate_relative_expires_at(
+    duration_seconds: Option<f64>,
+    now: f64,
+) -> Result<Option<f64>, ProviderDisableError> {
+    if let Some(duration) = duration_seconds {
+        if !duration.is_finite() || duration <= 0.0 {
+            return Err(ProviderDisableError::Validation(
+                "duration_seconds must be finite and positive or None"
+                    .to_string(),
+            ));
+        }
+    }
+    let expires_at = duration_seconds.map(|duration| now + duration);
+    if expires_at.is_some_and(|expiry| !expiry.is_finite()) {
+        return Err(ProviderDisableError::Validation(
+            "computed expires_at must be finite".to_string(),
+        ));
+    }
+    Ok(expires_at)
+}
+
+fn validate_until_expires_at(
+    expires_at: f64,
+    now: f64,
+) -> Result<f64, ProviderDisableError> {
+    if !expires_at.is_finite() {
+        return Err(ProviderDisableError::Validation(
+            "expires_at must be finite".to_string(),
+        ));
+    }
+    if expires_at <= now {
+        return Err(ProviderDisableError::Validation(
+            "expires_at must be in the future".to_string(),
+        ));
+    }
+    Ok(expires_at)
 }
 
 fn is_valid_record_for_key(key: &str, record: &ProviderDisableWire) -> bool {
@@ -675,6 +780,184 @@ mod tests {
         FileExt::lock_exclusive(&holder).unwrap();
         let started = Instant::now();
         let result = get_provider_disables(temp.path(), NOW);
+        assert!(matches!(result, Err(ProviderDisableError::LockTimeout)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        FileExt::unlock(&holder).unwrap();
+    }
+
+    #[test]
+    fn first_writer_wins_under_contention_without_extending_or_losing_siblings()
+    {
+        let temp = tempdir().unwrap();
+        let sibling = set_provider_disable_relative(
+            temp.path(),
+            "codex",
+            Some(1_200.0),
+            "sibling",
+            NOW,
+        )
+        .unwrap();
+        let home = Arc::new(temp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(9));
+        let mut handles = vec![];
+        for index in 0..8 {
+            let home = Arc::clone(&home);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                try_set_provider_disable_relative(
+                    &home,
+                    "claude",
+                    Some(60.0 + f64::from(index)),
+                    &format!("contender-{index}"),
+                    NOW + f64::from(index),
+                )
+                .unwrap()
+            }));
+        }
+        barrier.wait();
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        let winners: Vec<_> =
+            outcomes.iter().filter(|outcome| outcome.inserted).collect();
+        assert_eq!(winners.len(), 1);
+        let winner = winners[0];
+        for outcome in &outcomes {
+            assert_eq!(outcome.record, winner.record);
+            assert_eq!(outcome.version, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION);
+        }
+
+        let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
+        assert_eq!(snapshot.disables, vec![winner.record.clone(), sibling]);
+        assert_eq!(winner.record.provider, "claude");
+        assert_eq!(
+            winner.record.expires_at,
+            Some(
+                winner.record.created_at + 60.0 + {
+                    let source =
+                        winner.record.source.strip_prefix("contender-");
+                    source.unwrap().parse::<f64>().unwrap()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn try_set_returns_existing_record_without_mutating_it() {
+        let temp = tempdir().unwrap();
+        let first = set_provider_disable_until(
+            temp.path(),
+            "claude",
+            NOW + 30.0,
+            "usage_limit",
+            NOW,
+        )
+        .unwrap();
+        let lost = try_set_provider_disable_until(
+            temp.path(),
+            "claude",
+            NOW + 3_600.0,
+            "ace",
+            NOW + 1.0,
+        )
+        .unwrap();
+
+        assert!(!lost.inserted);
+        assert_eq!(lost.record, first);
+        assert_eq!(
+            get_provider_disables(temp.path(), NOW).unwrap().disables,
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn try_set_replaces_an_expired_record() {
+        let temp = tempdir().unwrap();
+        set_provider_disable_until(
+            temp.path(),
+            "claude",
+            NOW + 10.0,
+            "usage_limit",
+            NOW,
+        )
+        .unwrap();
+        let replacement = try_set_provider_disable_relative(
+            temp.path(),
+            "claude",
+            Some(60.0),
+            "usage_limit",
+            NOW + 10.0,
+        )
+        .unwrap();
+
+        assert!(replacement.inserted);
+        assert_eq!(replacement.record.created_at, NOW + 10.0);
+        assert_eq!(replacement.record.expires_at, Some(NOW + 70.0));
+        assert_eq!(
+            get_provider_disables(temp.path(), NOW + 10.0)
+                .unwrap()
+                .disables,
+            vec![replacement.record]
+        );
+    }
+
+    #[test]
+    fn try_set_rejects_invalid_inputs_and_times_out_on_lock() {
+        let temp = tempdir().unwrap();
+        for provider in ["", " ", "claude\n"] {
+            assert!(try_set_provider_disable_relative(
+                temp.path(),
+                provider,
+                Some(1.0),
+                "ace",
+                NOW
+            )
+            .is_err());
+        }
+        for duration in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(try_set_provider_disable_relative(
+                temp.path(),
+                "claude",
+                Some(duration),
+                "ace",
+                NOW
+            )
+            .is_err());
+        }
+        for expiry in [NOW, NOW - 1.0, f64::NAN, f64::INFINITY] {
+            assert!(try_set_provider_disable_until(
+                temp.path(),
+                "claude",
+                expiry,
+                "ace",
+                NOW
+            )
+            .is_err());
+        }
+        assert!(try_set_provider_disable_relative(
+            temp.path(),
+            "claude",
+            Some(1.0),
+            " ",
+            NOW
+        )
+        .is_err());
+
+        fs::create_dir_all(temp.path()).unwrap();
+        let holder =
+            File::create(provider_disable_lock_path(temp.path())).unwrap();
+        FileExt::lock_exclusive(&holder).unwrap();
+        let started = Instant::now();
+        let result = try_set_provider_disable_relative(
+            temp.path(),
+            "claude",
+            Some(1.0),
+            "ace",
+            NOW,
+        );
         assert!(matches!(result, Err(ProviderDisableError::LockTimeout)));
         assert!(started.elapsed() < Duration::from_secs(2));
         FileExt::unlock(&holder).unwrap();

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(provider_disable)* bind atomic first-writer set outcomes
+
 ## [0.27.14](https://github.com/sase-org/sase-core/compare/v0.27.13...v0.27.14) - 2026-08-16
 
 ### Added
