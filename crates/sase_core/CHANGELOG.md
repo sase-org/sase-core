@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.11](https://github.com/sase-org/sase-core/compare/v0.27.10...v0.27.11) - 2026-08-16
+
+### Fixed
+
+- *(bead)* make issue_updated resolution round-trip stable
+
 ## [0.27.10](https://github.com/sase-org/sase-core/compare/v0.27.9...v0.27.10) - 2026-08-16
 
 ### Added
