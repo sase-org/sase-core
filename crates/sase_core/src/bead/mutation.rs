@@ -25,7 +25,7 @@ use super::events::{
 };
 use super::jsonl::{
     event_store_present, import_issues_from_jsonl, read_event_store,
-    write_event_store, write_issues_jsonl,
+    write_event_store_changed, write_issues_jsonl,
 };
 use super::read::resolve_issue_id_in_issues;
 use super::wire::{
@@ -2282,11 +2282,71 @@ fn tier_label(tier: Option<&BeadTierWire>) -> &'static str {
     }
 }
 
+mod tracked_streams {
+    use std::collections::BTreeSet;
+
+    use super::{BeadError, BeadEventStreamWire};
+
+    pub(super) struct TrackedEventStreams {
+        streams: Vec<BeadEventStreamWire>,
+        changed: BTreeSet<String>,
+    }
+
+    impl TrackedEventStreams {
+        pub(super) fn loaded(streams: Vec<BeadEventStreamWire>) -> Self {
+            Self {
+                streams,
+                changed: BTreeSet::new(),
+            }
+        }
+
+        pub(super) fn imported(streams: Vec<BeadEventStreamWire>) -> Self {
+            let changed = streams
+                .iter()
+                .map(|stream| stream.stream_id.clone())
+                .collect();
+            Self { streams, changed }
+        }
+
+        pub(super) fn all(&self) -> &[BeadEventStreamWire] {
+            &self.streams
+        }
+
+        pub(super) fn changed(&self) -> &BTreeSet<String> {
+            &self.changed
+        }
+
+        pub(super) fn stream_mut(
+            &mut self,
+            stream_id: &str,
+        ) -> Result<&mut BeadEventStreamWire, BeadError> {
+            self.changed.insert(stream_id.to_string());
+            if let Some(index) = self
+                .streams
+                .iter()
+                .position(|stream| stream.stream_id == stream_id)
+            {
+                return Ok(&mut self.streams[index]);
+            }
+            self.streams.push(BeadEventStreamWire {
+                stream_id: stream_id.to_string(),
+                root_issue_id: stream_id.to_string(),
+                events: Vec::new(),
+            });
+            self.streams.last_mut().ok_or_else(|| {
+                BeadError::validation(format!(
+                    "failed to create bead event stream {stream_id}"
+                ))
+            })
+        }
+    }
+}
+
 struct MutableStore {
     beads_dir: PathBuf,
     config: BeadConfigWire,
     issues: Vec<IssueWire>,
-    streams: Vec<BeadEventStreamWire>,
+    streams: tracked_streams::TrackedEventStreams,
 }
 
 impl MutableStore {
@@ -2302,13 +2362,19 @@ impl MutableStore {
         let (issues, streams) = if event_store_present(beads_dir) {
             let (_manifest, streams) = read_event_store(beads_dir)?;
             let issues = reduce_event_streams(&streams)?;
-            (issues, streams)
+            (
+                issues,
+                tracked_streams::TrackedEventStreams::loaded(streams),
+            )
         } else {
             let issues =
                 import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))?
                     .issues;
             let streams = import_issues_to_event_streams(&issues)?;
-            (issues, streams)
+            (
+                issues,
+                tracked_streams::TrackedEventStreams::imported(streams),
+            )
         };
         validate_unique_external_refs(&issues)?;
         Ok(Self {
@@ -2329,7 +2395,11 @@ impl MutableStore {
             issue.validate()?;
         }
         validate_unique_external_refs(&self.issues)?;
-        write_event_store(&self.beads_dir, &self.streams)?;
+        write_event_store_changed(
+            &self.beads_dir,
+            self.streams.all(),
+            self.streams.changed(),
+        )?;
         save_config(&self.beads_dir, &self.config)?;
         self.save_issues()
     }
@@ -2385,23 +2455,7 @@ impl MutableStore {
         &mut self,
         stream_id: &str,
     ) -> Result<&mut BeadEventStreamWire, BeadError> {
-        if let Some(index) = self
-            .streams
-            .iter()
-            .position(|stream| stream.stream_id == stream_id)
-        {
-            return Ok(&mut self.streams[index]);
-        }
-        self.streams.push(BeadEventStreamWire {
-            stream_id: stream_id.to_string(),
-            root_issue_id: stream_id.to_string(),
-            events: Vec::new(),
-        });
-        self.streams.last_mut().ok_or_else(|| {
-            BeadError::validation(format!(
-                "failed to create bead event stream {stream_id}"
-            ))
-        })
+        self.streams.stream_mut(stream_id)
     }
 
     fn stream_id_for_issue(&self, issue_id: &str) -> Result<String, BeadError> {
@@ -2732,11 +2786,13 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
     use tempfile::tempdir;
 
+    use super::super::jsonl::write_event_store;
     use super::super::read::read_store_issues;
 
     fn task_plus_one_fixture(
@@ -2822,6 +2878,29 @@ mod tests {
         init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
         let beads_dir = temp.path().join("beads");
         (temp, beads_dir)
+    }
+
+    fn multi_stream_store() -> (tempfile::TempDir, PathBuf, Vec<String>) {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let mut ids = Vec::new();
+        for index in 0..3 {
+            let issue = create_issue(
+                &beads_dir,
+                BeadCreateRequestWire {
+                    title: format!("Plan {}", index + 1),
+                    issue_type: IssueTypeWire::Plan,
+                    now: Some(format!("2026-01-01T00:0{index}:00Z")),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .issue
+            .unwrap();
+            ids.push(issue.id);
+        }
+        (temp, beads_dir, ids)
     }
 
     fn create_plan_with_external_ref(
@@ -3304,7 +3383,7 @@ mod tests {
                 "owner",
             )
             .unwrap();
-        write_event_store(&beads_dir, &store.streams).unwrap();
+        write_event_store(&beads_dir, store.streams.all()).unwrap();
 
         let issue = read_store_issues(&beads_dir)
             .unwrap()
@@ -4888,6 +4967,7 @@ mod tests {
         }
         let opened_ids: Vec<String> = store
             .streams
+            .all()
             .iter()
             .flat_map(|stream| &stream.events)
             .filter(|event| {
@@ -6625,6 +6705,7 @@ mod tests {
             assert_eq!(issue.updated_at, "2026-01-01T00:02:00Z");
             let stream = store
                 .streams
+                .all()
                 .iter()
                 .find(|stream| stream.root_issue_id == *issue_id)
                 .unwrap();
@@ -7494,6 +7575,126 @@ mod tests {
     }
 
     #[test]
+    fn one_mutation_touches_only_the_mutated_stream_file() {
+        let (_temp, beads_dir, ids) = multi_stream_store();
+        let before = persisted_stream_files(&beads_dir);
+        let mutated_file = format!("{}.jsonl", ids[1]);
+
+        append_issue_note(
+            &beads_dir,
+            &ids[1],
+            "probe",
+            Some("owner@example.com".to_string()),
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap();
+
+        let after = persisted_stream_files(&beads_dir);
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>()
+        );
+        for (name, before_file) in before {
+            let after_file = after.get(&name).unwrap();
+            if name == mutated_file {
+                assert_ne!(after_file.bytes, before_file.bytes, "{name}");
+            } else {
+                assert_eq!(after_file.bytes, before_file.bytes, "{name}");
+                assert_eq!(after_file.modified, before_file.modified, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn sase_mk_blast_radius_regression_preserves_unrelated_stream_bytes() {
+        let (_temp, beads_dir, ids) = multi_stream_store();
+        let unrelated_path = beads_dir
+            .join("events/streams")
+            .join(format!("{}.jsonl", ids[0]));
+        let canonical = fs::read_to_string(&unrelated_path).unwrap();
+        let reordered = canonical
+            .lines()
+            .map(reordered_event_json_object)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        assert_ne!(reordered, canonical);
+        fs::write(&unrelated_path, &reordered).unwrap();
+
+        append_issue_note(
+            &beads_dir,
+            &ids[2],
+            "mutate a different stream",
+            Some("owner@example.com".to_string()),
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&unrelated_path).unwrap(), reordered);
+    }
+
+    #[test]
+    fn legacy_jsonl_migration_first_save_writes_every_imported_stream() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            [
+                issue(
+                    "sase-1",
+                    "First",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:00:00Z",
+                ),
+                issue(
+                    "sase-2",
+                    "Second",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:01:00Z",
+                ),
+                issue(
+                    "sase-3",
+                    "Third",
+                    "plan",
+                    None,
+                    "open",
+                    "2026-01-01T00:02:00Z",
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        assert!(!beads_dir.join("events").exists());
+
+        append_issue_note(
+            &beads_dir,
+            "sase-2",
+            "migrate and mutate",
+            Some("owner@example.com".to_string()),
+            Some("2026-01-01T00:10:00Z".to_string()),
+        )
+        .unwrap();
+
+        let (manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert_eq!(manifest.stream_count, 3);
+        assert_eq!(
+            streams
+                .iter()
+                .map(|stream| stream.stream_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-1", "sase-2", "sase-3"]
+        );
+    }
+
+    #[test]
     fn mutations_create_canonical_events_and_regenerate_projection() {
         let temp = tempdir().unwrap();
         let beads_dir = temp.path().join("sdd/beads");
@@ -7701,10 +7902,10 @@ mod tests {
                 .unwrap();
         }
 
-        let alpha_id = &alpha.streams[0].events.last().unwrap().event_id;
+        let alpha_id = &alpha.streams.all()[0].events.last().unwrap().event_id;
         let duplicate_id =
-            &duplicate.streams[0].events.last().unwrap().event_id;
-        let beta_id = &beta.streams[0].events.last().unwrap().event_id;
+            &duplicate.streams.all()[0].events.last().unwrap().event_id;
+        let beta_id = &beta.streams.all()[0].events.last().unwrap().event_id;
 
         assert_eq!(alpha_id, duplicate_id);
         assert_ne!(alpha_id, beta_id);
@@ -8427,6 +8628,51 @@ mod tests {
         .unwrap();
 
         (temp, beads_dir, phase.id)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PersistedStreamFile {
+        bytes: Vec<u8>,
+        modified: SystemTime,
+    }
+
+    fn persisted_stream_files(
+        beads_dir: &Path,
+    ) -> BTreeMap<String, PersistedStreamFile> {
+        let streams_dir = beads_dir.join("events/streams");
+        fs::read_dir(streams_dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    PersistedStreamFile {
+                        bytes: fs::read(&path).unwrap(),
+                        modified: fs::metadata(&path)
+                            .unwrap()
+                            .modified()
+                            .unwrap(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn reordered_event_json_object(line: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let object = value.as_object().unwrap();
+        format!(
+            r#"{{"payload":{},"issue_id":{},"operation":{},"actor":{},"timestamp":{},"event_id":{},"schema_version":{}}}"#,
+            serde_json::to_string(object.get("payload").unwrap()).unwrap(),
+            serde_json::to_string(object.get("issue_id").unwrap()).unwrap(),
+            serde_json::to_string(object.get("operation").unwrap()).unwrap(),
+            serde_json::to_string(object.get("actor").unwrap()).unwrap(),
+            serde_json::to_string(object.get("timestamp").unwrap()).unwrap(),
+            serde_json::to_string(object.get("event_id").unwrap()).unwrap(),
+            serde_json::to_string(object.get("schema_version").unwrap())
+                .unwrap(),
+        )
     }
 
     fn persisted_claim_state(

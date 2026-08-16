@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -289,29 +289,65 @@ pub fn write_event_store(
     beads_dir: &Path,
     streams: &[BeadEventStreamWire],
 ) -> Result<(), BeadError> {
+    write_event_store_inner(beads_dir, streams, None)
+}
+
+pub fn write_event_store_changed(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+    changed_stream_ids: &BTreeSet<String>,
+) -> Result<(), BeadError> {
+    write_event_store_inner(beads_dir, streams, Some(changed_stream_ids))
+}
+
+fn write_event_store_inner(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+    changed_stream_ids: Option<&BTreeSet<String>>,
+) -> Result<(), BeadError> {
     let events_dir = beads_dir.join("events");
     let streams_dir = event_streams_dir(beads_dir);
-    fs::create_dir_all(&streams_dir)?;
 
-    let mut streams = streams.to_vec();
-    streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
-    for stream in &streams {
+    let mut sorted_streams: Vec<&BeadEventStreamWire> =
+        streams.iter().collect();
+    sorted_streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
+    for stream in &sorted_streams {
         stream.validate()?;
+    }
+
+    fs::create_dir_all(&streams_dir)?;
+    for stream in &sorted_streams {
+        if !selected_for_write(stream, changed_stream_ids) {
+            continue;
+        }
         let mut output = String::new();
         for event in &stream.events {
             output.push_str(&serde_json::to_string(event)?);
             output.push('\n');
         }
-        write_file_atomic(
+        write_file_atomic_if_changed(
             &streams_dir.join(format!("{}.jsonl", stream.stream_id)),
             output.as_bytes(),
         )?;
     }
 
-    let manifest = BeadEventStoreManifestWire::from_streams(&streams);
+    let manifest = BeadEventStoreManifestWire::from_streams(streams);
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-    write_file_atomic(&events_dir.join("manifest.json"), &manifest_json)?;
+    write_file_atomic_if_changed(
+        &events_dir.join("manifest.json"),
+        &manifest_json,
+    )?;
     Ok(())
+}
+
+fn selected_for_write(
+    stream: &BeadEventStreamWire,
+    changed_stream_ids: Option<&BTreeSet<String>>,
+) -> bool {
+    match changed_stream_ids {
+        Some(ids) => ids.contains(&stream.stream_id),
+        None => true,
+    }
 }
 
 fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
@@ -408,6 +444,24 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
     Ok(())
 }
 
+fn write_file_atomic_if_changed(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<bool, BeadError> {
+    match fs::read(path) {
+        Ok(existing) if existing == bytes => Ok(false),
+        Ok(_) => {
+            write_file_atomic(path, bytes)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            write_file_atomic(path, bytes)?;
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn atomic_temp_path(path: &Path) -> Result<PathBuf, BeadError> {
     let file_name = path.file_name().ok_or_else(|| {
         BeadError::io(format!(
@@ -442,6 +496,9 @@ pub(crate) fn apply_missing_tiers(issues: &mut [IssueWire]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bead::events::{
+        BeadEventOperationWire, BeadEventPayloadWire, BEAD_EVENT_SCHEMA_VERSION,
+    };
     use crate::bead::wire::{DependencyWire, StatusWire};
     use tempfile::tempdir;
 
@@ -479,6 +536,24 @@ mod tests {
         }
     }
 
+    fn event_stream(id: &str, title: &str) -> BeadEventStreamWire {
+        let mut issue = plan(id);
+        issue.title = title.to_string();
+        BeadEventStreamWire {
+            stream_id: id.to_string(),
+            root_issue_id: id.to_string(),
+            events: vec![BeadEventRecordWire {
+                schema_version: BEAD_EVENT_SCHEMA_VERSION,
+                event_id: format!("{id}:1"),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                actor: "test".to_string(),
+                operation: BeadEventOperationWire::IssueCreated,
+                issue_id: id.to_string(),
+                payload: BeadEventPayloadWire::IssueCreated { issue },
+            }],
+        }
+    }
+
     #[test]
     fn atomic_temp_paths_are_unique_per_process() {
         let target = Path::new("/tmp/issues.jsonl");
@@ -500,6 +575,72 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with(&expected_prefix));
+    }
+
+    #[test]
+    fn atomic_if_changed_skips_identical_bytes() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("nested/file.jsonl");
+
+        assert!(write_file_atomic_if_changed(&path, b"one\n").unwrap());
+        let modified_before = fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert!(!write_file_atomic_if_changed(&path, b"one\n").unwrap());
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            modified_before
+        );
+
+        assert!(write_file_atomic_if_changed(&path, b"two\n").unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"two\n");
+    }
+
+    #[test]
+    fn write_event_store_changed_writes_selected_streams_and_reloads() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let alpha = event_stream("alpha", "Alpha");
+        let beta = event_stream("beta", "Beta");
+        write_event_store(beads_dir, &[alpha.clone(), beta.clone()]).unwrap();
+
+        let streams_dir = beads_dir.join("events/streams");
+        let alpha_path = streams_dir.join("alpha.jsonl");
+        let beta_path = streams_dir.join("beta.jsonl");
+        let gamma_path = streams_dir.join("gamma.jsonl");
+        let alpha_before = fs::read(&alpha_path).unwrap();
+        let beta_before = fs::read(&beta_path).unwrap();
+        let alpha_modified_before =
+            fs::metadata(&alpha_path).unwrap().modified().unwrap();
+
+        let alpha_changed = event_stream("alpha", "Alpha changed");
+        let beta_changed = event_stream("beta", "Beta changed");
+        let gamma = event_stream("gamma", "Gamma");
+        let changed_stream_ids =
+            BTreeSet::from(["beta".to_string(), "gamma".to_string()]);
+        write_event_store_changed(
+            beads_dir,
+            &[alpha_changed, beta_changed, gamma],
+            &changed_stream_ids,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&alpha_path).unwrap(), alpha_before);
+        assert_eq!(
+            fs::metadata(&alpha_path).unwrap().modified().unwrap(),
+            alpha_modified_before
+        );
+        assert_ne!(fs::read(&beta_path).unwrap(), beta_before);
+        assert!(gamma_path.exists());
+
+        let (manifest, streams) = read_event_store(beads_dir).unwrap();
+        assert_eq!(manifest.stream_count, 3);
+        assert_eq!(
+            streams
+                .iter()
+                .map(|stream| stream.stream_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta", "gamma"]
+        );
     }
 
     #[test]
