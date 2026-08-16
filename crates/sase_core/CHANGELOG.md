@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.15](https://github.com/sase-org/sase-core/compare/v0.27.14...v0.27.15) - 2026-08-16
+
+### Added
+
+- *(provider_disable)* add atomic first-writer disable
+- *(editor)* pass through agent-family completion documentation
+
 ### Added
 
 - *(provider_disable)* add atomic first-writer set that leaves an active record unchanged
