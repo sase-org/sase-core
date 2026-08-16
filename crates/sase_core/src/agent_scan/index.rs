@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,16 +30,125 @@ use super::scanner::{
 };
 use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
     AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
     AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
     AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
-    DoneMarkerWire, OutputVariableValue,
+    DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 21;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 22;
+
+/// Schema version for indexed model-alias history queries.
+pub const AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION: u32 = 1;
+
+fn default_alias_history_limit() -> u32 {
+    10
+}
+
+fn default_alias_history_prompt_snippet_bytes() -> u32 {
+    240
+}
+
+fn default_alias_history_freshness() -> AgentArtifactIndexFreshnessWire {
+    AgentArtifactIndexFreshnessWire::Cached
+}
+
+/// Query knobs for bounded per-alias agent history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAliasHistoryQueryWire {
+    /// Bare alias names to report on. Empty is an error.
+    pub aliases: Vec<String>,
+    /// Maximum runs returned per alias. Zero means unlimited.
+    #[serde(default = "default_alias_history_limit")]
+    pub limit_per_alias: u32,
+    #[serde(default)]
+    pub include_hidden: bool,
+    /// Exact ProjectSpec keys. Empty means every project.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Bounded read budget per returned run. Zero skips prompt reads.
+    #[serde(default = "default_alias_history_prompt_snippet_bytes")]
+    pub prompt_snippet_bytes: u32,
+    /// Cached by default; `revalidate` refreshes matching artifact rows.
+    #[serde(default = "default_alias_history_freshness")]
+    pub freshness: AgentArtifactIndexFreshnessWire,
+}
+
+/// Effective limit and truncation metadata for one alias group.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAliasHistoryLimitWire {
+    pub limit: u32,
+    pub total_count: u64,
+    pub returned_count: u64,
+    pub truncated: bool,
+}
+
+/// One indexed run that used a requested model alias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentAliasRunWire {
+    pub artifact_dir: String,
+    pub project_name: String,
+    pub workflow_dir_name: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub workflow_name: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub model_alias: Option<String>,
+    #[serde(default)]
+    pub model_alias_origin: Option<String>,
+    #[serde(default)]
+    pub model_alias_trail: Vec<String>,
+    pub alias_position: u32,
+    pub status: String,
+    #[serde(default)]
+    pub workflow_status: Option<String>,
+    pub has_done_marker: bool,
+    pub hidden: bool,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<f64>,
+    #[serde(default)]
+    pub retry_attempt: Option<i64>,
+    #[serde(default)]
+    pub bead_id: Option<String>,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    #[serde(default)]
+    pub workspace_num: Option<i64>,
+    #[serde(default)]
+    pub prompt_snippet: Option<String>,
+    #[serde(default)]
+    pub used_xprompts: Vec<UsedXPromptWire>,
+}
+
+/// History group for one requested alias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentAliasHistoryGroupWire {
+    pub alias: String,
+    pub runs_limit: AgentAliasHistoryLimitWire,
+    pub runs: Vec<AgentAliasRunWire>,
+}
+
+/// Bounded alias history returned by the artifact index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentAliasHistoryWire {
+    pub schema_version: u32,
+    pub index_path: String,
+    pub query: AgentAliasHistoryQueryWire,
+    pub groups: Vec<AgentAliasHistoryGroupWire>,
+}
 
 const MARKER_FILES: &[&str] = &[
     "agent_meta.json",
@@ -128,6 +237,7 @@ pub struct AgentArtifactIndexStatusWire {
     pub dismissed_agents_rows: u64,
     pub agent_artifact_aliases_rows: u64,
     pub agent_output_variables_rows: u64,
+    pub agent_artifact_model_aliases_rows: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -217,6 +327,10 @@ pub fn delete_agent_artifact_index_row_with_busy_timeout(
         resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
     let _ = conn.execute(
         "DELETE FROM agent_output_variables WHERE artifact_dir = ?1",
+        [artifact_dir.as_str()],
+    );
+    let _ = conn.execute(
+        "DELETE FROM agent_artifact_model_aliases WHERE artifact_dir = ?1",
         [artifact_dir.as_str()],
     );
     let deleted = conn
@@ -445,6 +559,10 @@ pub fn agent_artifact_index_status(
             &conn,
             "agent_output_variables",
         )?,
+        agent_artifact_model_aliases_rows: count_table_rows(
+            &conn,
+            "agent_artifact_model_aliases",
+        )?,
     })
 }
 
@@ -622,6 +740,347 @@ pub fn query_agent_output_variable_history(
         },
         groups: key_groups,
     })
+}
+
+/// Query bounded per-alias agent history from the persistent artifact index.
+pub fn query_agent_alias_history(
+    index_path: &Path,
+    query: AgentAliasHistoryQueryWire,
+) -> Result<AgentAliasHistoryWire, String> {
+    if query.aliases.is_empty() {
+        return Err("aliases must be a non-empty list".to_string());
+    }
+
+    let conn = open_index(index_path)?;
+    if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+        refresh_alias_history_candidates(
+            &conn,
+            &query.aliases,
+            &query.projects,
+        )?;
+    }
+
+    let mut groups = Vec::with_capacity(query.aliases.len());
+    for alias in &query.aliases {
+        groups.push(select_alias_history_group(&conn, alias, &query)?);
+    }
+
+    Ok(AgentAliasHistoryWire {
+        schema_version: AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
+        index_path: index_path.to_string_lossy().into_owned(),
+        query,
+        groups,
+    })
+}
+
+fn refresh_alias_history_candidates(
+    conn: &Connection,
+    aliases: &[String],
+    projects: &[String],
+) -> Result<(), String> {
+    if aliases.is_empty() {
+        return Ok(());
+    }
+    let mut clauses = vec![format!(
+        "artifact_dir IN (SELECT artifact_dir \
+         FROM agent_artifact_model_aliases WHERE alias IN ({}))",
+        placeholders(aliases.len())
+    )];
+    let mut values: Vec<String> = aliases.to_vec();
+    if !projects.is_empty() {
+        clauses.push(format!(
+            "project_name IN ({})",
+            placeholders(projects.len())
+        ));
+        values.extend(projects.iter().cloned());
+    }
+    let sql = format!(
+        "SELECT artifact_dir, projects_root, \
+         agent_meta_sig, done_sig, running_sig, waiting_sig, \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig, xprompts_sig FROM agent_artifacts \
+         WHERE {}",
+        clauses.join(" AND ")
+    );
+    let mut pending: Vec<PendingRefreshRow> = Vec::new();
+    {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(values.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            pending.push(pending_refresh_row_from_sql(row)?);
+        }
+    }
+
+    let options = AgentArtifactScanOptionsWire::default();
+    for row in pending {
+        let current = MarkerSignatures::from_artifact_dir(&row.artifact_dir);
+        if row.stored == current {
+            continue;
+        }
+        let projects_root = PathBuf::from(&row.row_projects_root);
+        let artifact_dir = PathBuf::from(&row.artifact_dir);
+        if let Some(refreshed) =
+            scan_agent_artifact_dir(&projects_root, &artifact_dir, &options)
+        {
+            let _ = upsert_record(conn, &projects_root, &refreshed);
+        }
+    }
+    Ok(())
+}
+
+fn select_alias_history_group(
+    conn: &Connection,
+    alias: &str,
+    query: &AgentAliasHistoryQueryWire,
+) -> Result<AgentAliasHistoryGroupWire, String> {
+    let (where_sql, values) = alias_history_where_clause(alias, query);
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM agent_artifact_model_aliases ma \
+         INNER JOIN agent_artifacts a ON a.artifact_dir = ma.artifact_dir \
+         {where_sql}"
+    );
+    let total_count: i64 = conn
+        .query_row(&count_sql, params_from_iter(values.iter()), |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let total_count = u64::try_from(total_count).map_err(|e| e.to_string())?;
+
+    let mut select_sql = format!(
+        "SELECT a.artifact_dir, a.project_name, a.workflow_dir_name, \
+                a.timestamp, a.agent_name, a.workflow_name, a.model, \
+                a.llm_provider, a.status, a.workflow_status, \
+                a.has_done_marker, a.hidden, a.started_at, a.finished_at, \
+                a.retry_attempt, a.cl_name, ma.position, a.record_json \
+         FROM agent_artifact_model_aliases ma \
+         INNER JOIN agent_artifacts a ON a.artifact_dir = ma.artifact_dir \
+         {where_sql} \
+         ORDER BY a.timestamp DESC, a.artifact_dir DESC"
+    );
+    let mut select_values = values.clone();
+    if query.limit_per_alias > 0 {
+        select_sql.push_str(" LIMIT ?");
+        select_values.push(query.limit_per_alias.to_string());
+    }
+
+    let mut stmt = conn.prepare(&select_sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params_from_iter(select_values.iter()))
+        .map_err(|e| e.to_string())?;
+    let mut runs = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        if let Ok(Some(run)) =
+            alias_run_from_sql_row(row, query.prompt_snippet_bytes)
+        {
+            runs.push(run);
+        }
+    }
+
+    let returned_count = runs.len() as u64;
+    Ok(AgentAliasHistoryGroupWire {
+        alias: alias.to_string(),
+        runs_limit: AgentAliasHistoryLimitWire {
+            limit: query.limit_per_alias,
+            total_count,
+            returned_count,
+            truncated: returned_count < total_count,
+        },
+        runs,
+    })
+}
+
+fn alias_history_where_clause(
+    alias: &str,
+    query: &AgentAliasHistoryQueryWire,
+) -> (String, Vec<String>) {
+    let mut clauses = vec!["ma.alias = ?".to_string()];
+    let mut values = vec![alias.to_string()];
+    if !query.include_hidden {
+        clauses.push("a.hidden = 0".to_string());
+    }
+    if !query.projects.is_empty() {
+        clauses.push(format!(
+            "a.project_name IN ({})",
+            placeholders(query.projects.len())
+        ));
+        values.extend(query.projects.iter().cloned());
+    }
+    (format!("WHERE {}", clauses.join(" AND ")), values)
+}
+
+fn alias_run_from_sql_row(
+    row: &rusqlite::Row<'_>,
+    prompt_snippet_bytes: u32,
+) -> Result<Option<AgentAliasRunWire>, String> {
+    let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+    let project_name: String = row.get(1).map_err(|e| e.to_string())?;
+    let workflow_dir_name: String = row.get(2).map_err(|e| e.to_string())?;
+    let timestamp: String = row.get(3).map_err(|e| e.to_string())?;
+    let agent_name: Option<String> = row.get(4).map_err(|e| e.to_string())?;
+    let workflow_name: Option<String> =
+        row.get(5).map_err(|e| e.to_string())?;
+    let model: Option<String> = row.get(6).map_err(|e| e.to_string())?;
+    let llm_provider: Option<String> = row.get(7).map_err(|e| e.to_string())?;
+    let status: String = row.get(8).map_err(|e| e.to_string())?;
+    let workflow_status: Option<String> =
+        row.get(9).map_err(|e| e.to_string())?;
+    let has_done_marker =
+        row.get::<_, i64>(10).map_err(|e| e.to_string())? != 0;
+    let hidden = row.get::<_, i64>(11).map_err(|e| e.to_string())? != 0;
+    let started_at: Option<String> = row.get(12).map_err(|e| e.to_string())?;
+    let finished_at: Option<f64> = row.get(13).map_err(|e| e.to_string())?;
+    let retry_attempt: Option<i64> = row.get(14).map_err(|e| e.to_string())?;
+    let cl_name: Option<String> = row.get(15).map_err(|e| e.to_string())?;
+    let alias_position =
+        u32::try_from(row.get::<_, i64>(16).map_err(|e| e.to_string())?)
+            .unwrap_or(0);
+    let record_json: String = row.get(17).map_err(|e| e.to_string())?;
+    let Ok(record) =
+        serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+    else {
+        return Ok(None);
+    };
+    let meta = record.agent_meta.as_ref();
+    let trail = meta.map(effective_model_alias_trail).unwrap_or_default();
+    Ok(Some(AgentAliasRunWire {
+        artifact_dir: artifact_dir.clone(),
+        project_name,
+        workflow_dir_name,
+        timestamp,
+        agent_name,
+        workflow_name,
+        model,
+        llm_provider,
+        reasoning_effort: meta.and_then(|m| m.reasoning_effort.clone()),
+        model_alias: meta.and_then(|m| m.model_alias.clone()),
+        model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
+        model_alias_trail: trail,
+        alias_position,
+        status,
+        workflow_status,
+        has_done_marker,
+        hidden,
+        started_at,
+        finished_at,
+        retry_attempt,
+        bead_id: meta.and_then(|m| m.bead_id.clone()),
+        cl_name,
+        workspace_num: meta.and_then(|m| m.workspace_num),
+        prompt_snippet: read_alias_history_prompt_snippet(
+            &artifact_dir,
+            prompt_snippet_bytes,
+        ),
+        used_xprompts: record.used_xprompts,
+    }))
+}
+
+const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
+const ALIAS_HISTORY_PROMPT_SNIPPET_ELLIPSIS: &str = "...";
+
+fn effective_model_alias_trail(meta: &AgentMetaWire) -> Vec<String> {
+    let trail: Vec<String> = meta
+        .model_alias_trail
+        .iter()
+        .map(|alias| alias.trim())
+        .filter(|alias| !alias.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if !trail.is_empty() {
+        return trail;
+    }
+    meta.model_alias
+        .as_deref()
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .map(|alias| vec![alias.to_string()])
+        .unwrap_or_default()
+}
+
+fn read_alias_history_prompt_snippet(
+    artifact_dir: &str,
+    max_bytes: u32,
+) -> Option<String> {
+    if max_bytes == 0 {
+        return None;
+    }
+    let path = Path::new(artifact_dir).join(RAW_PROMPT_FILE);
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return None,
+    };
+    let reader = BufReader::new(file);
+    let mut body = String::new();
+    let mut skipping = true;
+    let read_cap = (max_bytes as usize)
+        .saturating_mul(4)
+        .max(max_bytes as usize);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => return None,
+        };
+        if skipping {
+            if is_leading_prompt_prefix_line(&line) {
+                continue;
+            }
+            skipping = false;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+        if body.len() >= read_cap {
+            break;
+        }
+    }
+    Some(truncate_prompt_snippet(
+        &collapse_prompt_whitespace(&body),
+        max_bytes as usize,
+    ))
+}
+
+fn is_leading_prompt_prefix_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with('%') || trimmed.starts_with('#')
+}
+
+fn collapse_prompt_whitespace(text: &str) -> String {
+    let mut out = String::new();
+    let mut prev_ws = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !prev_ws && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_ws = true;
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    out
+}
+
+fn truncate_prompt_snippet(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let ellipsis = ALIAS_HISTORY_PROMPT_SNIPPET_ELLIPSIS;
+    let budget = max_bytes.saturating_sub(ellipsis.len());
+    let mut out = String::new();
+    let mut bytes = 0usize;
+    for ch in text.chars() {
+        let next = bytes + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        out.push(ch);
+        bytes = next;
+    }
+    out.push_str(ellipsis);
+    out
 }
 
 /// Load indexed output-variable occurrences for selector resolution.
@@ -1335,6 +1794,17 @@ fn open_index_with_busy_timeout(
             ON agent_output_variables(project_name, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_output_variables_value_json
             ON agent_output_variables(variable_key, value_json);
+        CREATE TABLE IF NOT EXISTS agent_artifact_model_aliases (
+            artifact_dir TEXT NOT NULL,
+            alias        TEXT NOT NULL,
+            position     INTEGER NOT NULL,
+            PRIMARY KEY (artifact_dir, alias),
+            FOREIGN KEY (artifact_dir)
+                REFERENCES agent_artifacts(artifact_dir)
+                ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_artifact_model_aliases_alias
+            ON agent_artifact_model_aliases(alias, artifact_dir);
         "#,
     )
     .map_err(|e| e.to_string())?;
@@ -1410,6 +1880,10 @@ fn open_index_with_busy_timeout(
     }
     if prior_version.map_or(true, |v| v < 21) {
         migrate_output_variable_projection_v21(&mut conn)?;
+    }
+    if prior_version.map_or(true, |v| v < 22) {
+        ensure_agent_artifacts_column(&conn, "model_alias_origin", "TEXT")?;
+        migrate_model_alias_projection_v22(&mut conn)?;
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
@@ -1730,6 +2204,61 @@ fn migrate_record_json_refresh_v20(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v22 adds a regenerable child projection for launch-time model aliases.
+///
+/// The migration is a pure `record_json` re-projection: it performs no
+/// filesystem reads and skips malformed legacy payloads so index open
+/// cannot fail on a single bad row.
+fn migrate_model_alias_projection_v22(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM agent_artifact_model_aliases", [])
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, AgentArtifactRecordWire)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT artifact_dir, projects_root, record_json \
+                 FROM agent_artifacts",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let projects_root: String =
+                row.get(1).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(2).map_err(|e| e.to_string())?;
+            let Ok(record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            records.push((artifact_dir, projects_root, record));
+        }
+        records
+    };
+    for (artifact_dir, projects_root, record) in rows {
+        upsert_model_aliases_for_record(
+            &tx,
+            Path::new(&projects_root),
+            &record,
+        )?;
+        let origin = record
+            .agent_meta
+            .as_ref()
+            .and_then(|meta| meta.model_alias_origin.clone());
+        tx.execute(
+            "UPDATE agent_artifacts SET model_alias_origin = ?1 \
+             WHERE artifact_dir = ?2",
+            params![origin, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -1790,13 +2319,13 @@ fn upsert_record(
             running_sig, waiting_sig, pending_question_sig,
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
-            indexed_at
+            model_alias_origin, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -1842,6 +2371,7 @@ fn upsert_record(
             clan_tribe = excluded.clan_tribe,
             clan_summary = excluded.clan_summary,
             record_json = excluded.record_json,
+            model_alias_origin = excluded.model_alias_origin,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -1889,10 +2419,50 @@ fn upsert_record(
             summary.clan_tribe,
             summary.clan_summary,
             record_json,
+            summary.model_alias_origin,
         ],
     )
     .map_err(|e| e.to_string())?;
     upsert_output_variables_for_record(conn, projects_root, record)?;
+    upsert_model_aliases_for_record(conn, projects_root, record)?;
+    Ok(())
+}
+
+fn upsert_model_aliases_for_record(
+    conn: &Connection,
+    _projects_root: &Path,
+    record: &AgentArtifactRecordWire,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM agent_artifact_model_aliases WHERE artifact_dir = ?1",
+        [record.artifact_dir.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let Some(meta) = record.agent_meta.as_ref() else {
+        return Ok(());
+    };
+    let mut seen = BTreeSet::new();
+    for (position, alias) in
+        effective_model_alias_trail(meta).into_iter().enumerate()
+    {
+        if !seen.insert(alias.clone()) {
+            continue;
+        }
+        conn.execute(
+            r#"
+            INSERT INTO agent_artifact_model_aliases (
+                artifact_dir, alias, position
+            ) VALUES (?1, ?2, ?3)
+            "#,
+            params![
+                record.artifact_dir.as_str(),
+                alias.as_str(),
+                position as i64,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -2853,6 +3423,7 @@ struct RecordSummary {
     retried_as_timestamp: Option<String>,
     retry_chain_root_timestamp: Option<String>,
     retry_attempt: Option<i64>,
+    model_alias_origin: Option<String>,
 }
 
 impl RecordSummary {
@@ -2941,6 +3512,7 @@ impl RecordSummary {
                     done.and_then(|d| d.retry_chain_root_timestamp.clone())
                 }),
             retry_attempt: meta.and_then(|m| m.retry_attempt),
+            model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
         }
     }
 }
@@ -3025,6 +3597,7 @@ fn marker_signature(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -3363,6 +3936,538 @@ mod tests {
                 .agent_output_variables_rows,
             0
         );
+    }
+
+    fn write_text(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    fn alias_query(aliases: &[&str]) -> AgentAliasHistoryQueryWire {
+        AgentAliasHistoryQueryWire {
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+            limit_per_alias: 10,
+            include_hidden: false,
+            projects: Vec::new(),
+            prompt_snippet_bytes: 240,
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+        }
+    }
+
+    #[test]
+    fn alias_history_preserves_request_order_and_empty_groups() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let older = artifact(&projects, "20260816010101");
+        let newer = artifact(&projects, "20260816020202");
+        write_json(
+            &older.join("agent_meta.json"),
+            json!({
+                "name": "older",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_json(
+            &newer.join("agent_meta.json"),
+            json!({
+                "name": "newer",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "default_model"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let history = query_agent_alias_history(
+            &index,
+            alias_query(&["missing", "large", "coder"]),
+        )
+        .unwrap();
+        assert_eq!(history.schema_version, 1);
+        assert_eq!(history.groups.len(), 3);
+        assert_eq!(history.groups[0].alias, "missing");
+        assert!(history.groups[0].runs.is_empty());
+        assert_eq!(history.groups[0].runs_limit.total_count, 0);
+        assert_eq!(history.groups[1].alias, "large");
+        assert_eq!(history.groups[1].runs.len(), 2);
+        assert_eq!(
+            history.groups[1].runs[0].agent_name.as_deref(),
+            Some("newer")
+        );
+        assert_eq!(
+            history.groups[1].runs[1].agent_name.as_deref(),
+            Some("older")
+        );
+        assert_eq!(history.groups[1].runs[1].alias_position, 1);
+        assert_eq!(history.groups[2].alias, "coder");
+        assert_eq!(history.groups[2].runs.len(), 1);
+        assert_eq!(history.groups[2].runs[0].alias_position, 0);
+    }
+
+    #[test]
+    fn alias_history_truncates_newest_first_and_reports_counts() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for (ts, name) in [
+            ("20260816010101", "one"),
+            ("20260816020202", "two"),
+            ("20260816030303", "three"),
+        ] {
+            let dir = artifact(&projects, ts);
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({
+                    "name": name,
+                    "model_alias": "large",
+                    "model_alias_trail": ["large"],
+                    "model_alias_origin": "directive"
+                }),
+            );
+        }
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let mut query = alias_query(&["large"]);
+        query.limit_per_alias = 2;
+        let history = query_agent_alias_history(&index, query).unwrap();
+        let group = &history.groups[0];
+        assert_eq!(group.runs_limit.limit, 2);
+        assert_eq!(group.runs_limit.total_count, 3);
+        assert_eq!(group.runs_limit.returned_count, 2);
+        assert!(group.runs_limit.truncated);
+        assert_eq!(group.runs[0].agent_name.as_deref(), Some("three"));
+        assert_eq!(group.runs[1].agent_name.as_deref(), Some("two"));
+
+        let mut unlimited = alias_query(&["large"]);
+        unlimited.limit_per_alias = 0;
+        let all = query_agent_alias_history(&index, unlimited).unwrap();
+        assert_eq!(all.groups[0].runs.len(), 3);
+        assert!(!all.groups[0].runs_limit.truncated);
+    }
+
+    #[test]
+    fn alias_history_filters_hidden_and_project_keys() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let visible = artifact_for_project(&projects, "proj", "20260816040404");
+        let hidden = artifact_for_project(&projects, "proj", "20260816050505");
+        let other = artifact_for_project(&projects, "other", "20260816060606");
+        write_json(
+            &visible.join("agent_meta.json"),
+            json!({
+                "name": "visible",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_json(
+            &hidden.join("agent_meta.json"),
+            json!({
+                "name": "hidden",
+                "hidden": true,
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_json(
+            &other.join("agent_meta.json"),
+            json!({
+                "name": "other",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let default =
+            query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+        assert_eq!(default.groups[0].runs.len(), 2);
+
+        let mut hidden_query = alias_query(&["large"]);
+        hidden_query.include_hidden = true;
+        hidden_query.projects = vec!["proj".to_string()];
+        let filtered = query_agent_alias_history(&index, hidden_query).unwrap();
+        assert_eq!(filtered.groups[0].runs.len(), 2);
+        assert!(filtered.groups[0]
+            .runs
+            .iter()
+            .all(|run| run.project_name == "proj"));
+        assert!(filtered.groups[0]
+            .runs
+            .iter()
+            .any(|run| run.agent_name.as_deref() == Some("hidden")));
+    }
+
+    #[test]
+    fn alias_history_falls_back_to_legacy_first_hop() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260816070707");
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({
+                "name": "legacy",
+                "model_alias": "large"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let history =
+            query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+        assert_eq!(history.groups[0].runs.len(), 1);
+        assert_eq!(history.groups[0].runs[0].alias_position, 0);
+        assert_eq!(
+            history.groups[0].runs[0].model_alias.as_deref(),
+            Some("large")
+        );
+        assert_eq!(
+            history.groups[0].runs[0].model_alias_trail,
+            vec!["large".to_string()]
+        );
+        assert_eq!(history.groups[0].runs[0].model_alias_origin, None);
+    }
+
+    #[test]
+    fn alias_history_projection_replaces_and_deletes_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260816080808");
+        let meta_path = dir.join("agent_meta.json");
+        write_json(
+            &meta_path,
+            json!({
+                "name": "writer",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_artifact_model_aliases_rows,
+            2
+        );
+
+        write_json(
+            &meta_path,
+            json!({
+                "name": "writer",
+                "model_alias": "medium",
+                "model_alias_trail": ["medium"],
+                "model_alias_origin": "default_model"
+            }),
+        );
+        upsert_agent_artifact_index_row(
+            &index,
+            &projects,
+            &dir,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let after_replace = query_agent_alias_history(
+            &index,
+            alias_query(&["coder", "medium", "large"]),
+        )
+        .unwrap();
+        assert!(after_replace.groups[0].runs.is_empty());
+        assert_eq!(after_replace.groups[1].runs.len(), 1);
+        assert!(after_replace.groups[2].runs.is_empty());
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_artifact_model_aliases_rows,
+            1
+        );
+
+        delete_agent_artifact_index_row(&index, &dir).unwrap();
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_artifact_model_aliases_rows,
+            0
+        );
+    }
+
+    #[test]
+    fn schema_v21_upgrade_backfills_model_alias_projection() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260816090909");
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({
+                "name": "legacy",
+                "model_alias": "large",
+                "model_alias_origin": "directive",
+                "model_alias_trail": ["coder", "large"]
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute("DELETE FROM agent_artifact_model_aliases", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO agent_artifacts (
+                    artifact_dir, projects_root, project_name, project_dir,
+                    project_file, workflow_dir_name, timestamp, status,
+                    agent_type, has_done_marker, has_running_marker,
+                    has_waiting_marker, has_workflow_state, hidden,
+                    record_json
+                ) VALUES (
+                    'malformed', 'root', 'proj', 'dir', 'file', 'ace-run',
+                    '20260816000000', 'done', 'agent', 1, 0, 0, 0, 0,
+                    '{not-json'
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) \
+                 VALUES ('schema_version', '21')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let status = agent_artifact_index_status(&index).unwrap();
+        assert_eq!(status.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
+        assert_eq!(status.agent_artifact_model_aliases_rows, 2);
+        let history =
+            query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+        assert_eq!(history.groups[0].runs.len(), 1);
+        assert_eq!(history.groups[0].runs[0].alias_position, 1);
+    }
+
+    #[test]
+    fn alias_history_prompt_snippets_strip_collapse_and_truncate() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let readable = artifact(&projects, "20260816101010");
+        let directives = artifact(&projects, "20260816111111");
+        let missing = artifact(&projects, "20260816121212");
+        write_json(
+            &readable.join("agent_meta.json"),
+            json!({
+                "name": "readable",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_text(
+            &readable.join("raw_xprompt.md"),
+            "%model:@large\n#gh:sase\n\nRefactor   the\nworkspace ☃ module\n",
+        );
+        write_json(
+            &directives.join("agent_meta.json"),
+            json!({
+                "name": "directives",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_text(
+            &directives.join("raw_xprompt.md"),
+            "%model:@large\n#gh:sase\n\n",
+        );
+        write_json(
+            &missing.join("agent_meta.json"),
+            json!({
+                "name": "missing",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let history =
+            query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+        let by_name: BTreeMap<_, _> = history.groups[0]
+            .runs
+            .iter()
+            .map(|run| (run.agent_name.clone().unwrap(), run.clone()))
+            .collect();
+        assert_eq!(
+            by_name["readable"].prompt_snippet.as_deref(),
+            Some("Refactor the workspace ☃ module")
+        );
+        assert_eq!(by_name["directives"].prompt_snippet.as_deref(), Some(""));
+        assert_eq!(by_name["missing"].prompt_snippet, None);
+
+        let mut short = alias_query(&["large"]);
+        short.prompt_snippet_bytes = 12;
+        let truncated = query_agent_alias_history(&index, short).unwrap();
+        let readable_snip = truncated.groups[0]
+            .runs
+            .iter()
+            .find(|run| run.agent_name.as_deref() == Some("readable"))
+            .unwrap()
+            .prompt_snippet
+            .as_deref()
+            .unwrap();
+        assert!(readable_snip.ends_with("..."));
+        assert!(readable_snip.is_char_boundary(readable_snip.len()));
+        assert!(readable_snip.len() <= 12);
+        assert!(!readable_snip.contains("☃") || readable_snip.ends_with("..."));
+
+        let mut skipped = alias_query(&["large"]);
+        skipped.prompt_snippet_bytes = 0;
+        let no_reads = query_agent_alias_history(&index, skipped).unwrap();
+        assert!(no_reads.groups[0]
+            .runs
+            .iter()
+            .all(|run| run.prompt_snippet.is_none()));
+    }
+
+    #[test]
+    fn alias_history_rejects_empty_aliases() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        drop(open_index(&index).unwrap());
+        let err =
+            query_agent_alias_history(&index, alias_query(&[])).unwrap_err();
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn alias_history_revalidate_refreshes_candidate_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260816131313");
+        let meta_path = dir.join("agent_meta.json");
+        write_json(
+            &meta_path,
+            json!({
+                "name": "before",
+                "model_alias": "large",
+                "model_alias_trail": ["large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        write_json(
+            &meta_path,
+            json!({
+                "name": "after",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let cached =
+            query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+        assert_eq!(
+            cached.groups[0].runs[0].agent_name.as_deref(),
+            Some("before")
+        );
+        assert_eq!(cached.groups[0].runs[0].alias_position, 0);
+
+        let mut revalidate = alias_query(&["large"]);
+        revalidate.freshness = AgentArtifactIndexFreshnessWire::Revalidate;
+        let fresh = query_agent_alias_history(&index, revalidate).unwrap();
+        assert_eq!(
+            fresh.groups[0].runs[0].agent_name.as_deref(),
+            Some("after")
+        );
+        assert_eq!(fresh.groups[0].runs[0].alias_position, 1);
+        assert_eq!(
+            fresh.groups[0].runs[0].model_alias_trail,
+            vec!["coder".to_string(), "large".to_string()]
+        );
+    }
+
+    #[test]
+    fn prompt_snippet_truncation_stays_on_utf8_char_boundary() {
+        let truncated = truncate_prompt_snippet("ab☃cd", 5);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.len() <= 5);
+        assert_eq!(truncated, "ab...");
+    }
+
+    #[test]
+    fn alias_history_status_counts_projection_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260816141414");
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({
+                "name": "counted",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let status = agent_artifact_index_status(&index).unwrap();
+        assert_eq!(status.schema_version, 22);
+        assert_eq!(status.agent_artifact_model_aliases_rows, 2);
     }
 
     #[test]

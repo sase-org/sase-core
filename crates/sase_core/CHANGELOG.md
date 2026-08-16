@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(agent_scan)* project launch-time model-alias trails in schema 22 and query bounded alias history
+
 ## [0.27.12](https://github.com/sase-org/sase-core/compare/v0.27.11...v0.27.12) - 2026-08-16
 
 ### Added

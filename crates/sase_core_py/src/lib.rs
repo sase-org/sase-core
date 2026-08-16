@@ -33,6 +33,8 @@
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `agent_output_variable_history_wire_schema_version() -> int`
 //! - `query_agent_output_variable_history(index_path: str, query: dict | None = None) -> dict`
+//! - `agent_alias_history_wire_schema_version() -> int`
+//! - `query_agent_alias_history(index_path: str, query: dict) -> dict`
 //! - `agent_output_variable_selector_wire_schema_version() -> int`
 //! - `parse_output_variable_selector(selector: str) -> dict`
 //! - `query_agent_output_variable_selectors(index_path: str, query: dict | None = None) -> dict`
@@ -420,6 +422,7 @@ use sase_core::agent_scan::{
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     parse_output_variable_selector as core_parse_output_variable_selector,
+    query_agent_alias_history as core_query_agent_alias_history,
     query_agent_artifact_index as core_query_agent_artifact_index,
     query_agent_output_variable_history as core_query_agent_output_variable_history,
     query_agent_output_variable_selectors as core_query_agent_output_variable_selectors,
@@ -434,9 +437,10 @@ use sase_core::agent_scan::{
     terminalize_stale_active_agent_artifact_index_rows as core_terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
-    AgentArtifactIndexQueryWire, AgentArtifactScanOptionsWire,
-    AgentOutputVariableHistoryQueryWire, AgentOutputVariableSelectorQueryWire,
-    OutputVariableSelectorError,
+    AgentAliasHistoryQueryWire, AgentArtifactIndexQueryWire,
+    AgentArtifactScanOptionsWire, AgentOutputVariableHistoryQueryWire,
+    AgentOutputVariableSelectorQueryWire, OutputVariableSelectorError,
+    AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION,
 };
@@ -2228,6 +2232,36 @@ fn py_query_agent_output_variable_history<'py>(
         .allow_threads(|| {
             core_query_agent_output_variable_history(&index, query_wire)
         })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&history).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction(name = "agent_alias_history_wire_schema_version")]
+fn py_agent_alias_history_wire_schema_version() -> u32 {
+    AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION
+}
+
+/// Query bounded per-alias agent history from the persistent artifact index.
+#[pyfunction]
+#[pyo3(name = "query_agent_alias_history")]
+fn py_query_agent_alias_history<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let json = py_to_json_value(query)?;
+    let query_wire = serde_json::from_value::<AgentAliasHistoryQueryWire>(json)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "query is not a valid AgentAliasHistoryQueryWire dict: {e}"
+            ))
+        })?;
+    let index = PathBuf::from(index_path);
+    let history = py
+        .allow_threads(|| core_query_agent_alias_history(&index, query_wire))
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&history).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
@@ -8663,6 +8697,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        py_agent_alias_history_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_query_agent_alias_history, m)?)?;
+    m.add_function(wrap_pyfunction!(
         py_agent_output_variable_selector_wire_schema_version,
         m
     )?)?;
@@ -14308,6 +14347,88 @@ MENTORS:
                 result["groups"][0]["values"][0]["agents"],
                 json!(["worker.child", "worker"])
             );
+        });
+    }
+
+    #[test]
+    fn agent_alias_history_binding_round_trips_python_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let projects = root.join("projects");
+            let artifact =
+                projects.join("proj/artifacts/ace-run/20260816140000");
+            fs::create_dir_all(&artifact).unwrap();
+            fs::write(
+                artifact.join("agent_meta.json"),
+                serde_json::to_vec(&json!({
+                    "name": "alias-worker",
+                    "model": "claude-opus",
+                    "llm_provider": "claude",
+                    "reasoning_effort": "xhigh",
+                    "model_alias": "coder",
+                    "model_alias_trail": ["coder", "large"],
+                    "model_alias_origin": "directive",
+                    "bead_id": "sase-n8.2",
+                    "workspace_num": 15
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                artifact.join("raw_xprompt.md"),
+                "%model:@coder\n#gh:sase\nRefactor the workspace module\n",
+            )
+            .unwrap();
+            let index = root.join("agent_artifact_index.sqlite");
+            sase_core::rebuild_agent_artifact_index(
+                &index,
+                &projects,
+                sase_core::AgentArtifactScanOptionsWire::default(),
+            )
+            .unwrap();
+
+            assert_eq!(py_agent_alias_history_wire_schema_version(), 1);
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "aliases": ["large", "missing"],
+                    "limit_per_alias": 10
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_query_agent_alias_history(
+                py,
+                index.to_str().unwrap(),
+                request,
+            )
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["query"]["aliases"], json!(["large", "missing"]));
+            assert_eq!(result["query"]["freshness"], json!("cached"));
+            assert_eq!(result["groups"].as_array().unwrap().len(), 2);
+            assert_eq!(result["groups"][0]["alias"], json!("large"));
+            assert_eq!(
+                result["groups"][0]["runs_limit"]["total_count"],
+                json!(1)
+            );
+            assert_eq!(
+                result["groups"][0]["runs"][0]["alias_position"],
+                json!(1)
+            );
+            assert_eq!(
+                result["groups"][0]["runs"][0]["model_alias_trail"],
+                json!(["coder", "large"])
+            );
+            assert_eq!(
+                result["groups"][0]["runs"][0]["prompt_snippet"],
+                json!("Refactor the workspace module")
+            );
+            assert_eq!(result["groups"][1]["alias"], json!("missing"));
+            assert!(result["groups"][1]["runs"].as_array().unwrap().is_empty());
         });
     }
 

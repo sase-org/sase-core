@@ -1042,6 +1042,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         llm_provider: coerce_str(data.get("llm_provider")),
         reasoning_effort: coerce_str(data.get("reasoning_effort")),
         model_alias: coerce_str(data.get("model_alias")),
+        model_alias_trail: coerce_str_list(data.get("model_alias_trail")),
+        model_alias_origin: coerce_str(data.get("model_alias_origin")),
         vcs_provider: coerce_str(data.get("vcs_provider")),
         role_suffix: coerce_str(data.get("role_suffix")),
         parent_timestamp: coerce_str(data.get("parent_timestamp")),
@@ -1299,6 +1301,8 @@ fn prompt_step_from_object(
         llm_provider: coerce_str(data.get("llm_provider")),
         reasoning_effort: coerce_str(data.get("reasoning_effort")),
         model_alias: coerce_str(data.get("model_alias")),
+        model_alias_trail: coerce_str_list(data.get("model_alias_trail")),
+        model_alias_origin: coerce_str(data.get("model_alias_origin")),
         output: coerce_object(data.get("output")),
         output_types: coerce_str_str_map(data.get("output_types")),
     }
@@ -1307,5 +1311,111 @@ fn prompt_step_from_object(
 fn plan_path_from_object(data: &Map<String, Value>) -> PlanPathMarkerWire {
     PlanPathMarkerWire {
         plan_path: coerce_str(data.get("plan_path")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use serde_json::{json, Value};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_json(path: &Path, payload: Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_string(&payload).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn scanner_round_trips_alias_trail_and_origin() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260816120000");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "trail-agent",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+        write_json(
+            &artifact.join("prompt_step_001_plan.json"),
+            json!({
+                "workflow_name": "wf",
+                "step_name": "plan",
+                "step_type": "agent",
+                "status": "completed",
+                "model_alias": "coder",
+                "model_alias_trail": ["coder", "large"],
+                "model_alias_origin": "directive"
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(meta.model_alias.as_deref(), Some("coder"));
+        assert_eq!(
+            meta.model_alias_trail,
+            vec!["coder".to_string(), "large".to_string()]
+        );
+        assert_eq!(meta.model_alias_origin.as_deref(), Some("directive"));
+        let step = &snapshot.records[0].prompt_steps[0];
+        assert_eq!(
+            step.model_alias_trail,
+            vec!["coder".to_string(), "large".to_string()]
+        );
+        assert_eq!(step.model_alias_origin.as_deref(), Some("directive"));
+    }
+
+    #[test]
+    fn scanner_defaults_absent_alias_trail_and_origin() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260816120100");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "legacy-agent",
+                "model_alias": "large"
+            }),
+        );
+        write_json(
+            &artifact.join("prompt_step_001_plan.json"),
+            json!({
+                "workflow_name": "wf",
+                "step_name": "plan",
+                "step_type": "agent",
+                "status": "completed",
+                "model_alias": "large"
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(meta.model_alias.as_deref(), Some("large"));
+        assert!(meta.model_alias_trail.is_empty());
+        assert_eq!(meta.model_alias_origin, None);
+        let step = &snapshot.records[0].prompt_steps[0];
+        assert!(step.model_alias_trail.is_empty());
+        assert_eq!(step.model_alias_origin, None);
     }
 }

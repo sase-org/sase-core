@@ -495,6 +495,10 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub model_alias: Option<String>,
     #[serde(default)]
+    pub model_alias_trail: Vec<String>,
+    #[serde(default)]
+    pub model_alias_origin: Option<String>,
+    #[serde(default)]
     pub vcs_provider: Option<String>,
     #[serde(default)]
     pub role_suffix: Option<String>,
@@ -799,6 +803,10 @@ pub struct PromptStepMarkerWire {
     #[serde(default)]
     pub model_alias: Option<String>,
     #[serde(default)]
+    pub model_alias_trail: Vec<String>,
+    #[serde(default)]
+    pub model_alias_origin: Option<String>,
+    #[serde(default)]
     pub output: Option<Map<String, Value>>,
     #[serde(default)]
     pub output_types: Option<BTreeMap<String, String>>,
@@ -988,6 +996,84 @@ mod tests {
         assert_eq!(decoded.monitor_followup_error, None);
         assert_eq!(decoded.monitor_followup_degraded_reason, None);
         assert_eq!(decoded.monitor_followup_prompt_path, None);
+        assert!(decoded.model_alias_trail.is_empty());
+        assert_eq!(decoded.model_alias_origin, None);
+    }
+
+    #[test]
+    fn agent_meta_wire_round_trips_alias_trail_and_origin() {
+        let meta = AgentMetaWire {
+            name: Some("trail-agent".to_string()),
+            model_alias: Some("coder".to_string()),
+            model_alias_trail: vec!["coder".to_string(), "large".to_string()],
+            model_alias_origin: Some("directive".to_string()),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&meta).unwrap();
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
+        assert_eq!(
+            decoded.model_alias_trail,
+            vec!["coder".to_string(), "large".to_string()]
+        );
+        assert_eq!(decoded.model_alias_origin.as_deref(), Some("directive"));
+    }
+
+    #[test]
+    fn prompt_step_marker_wire_defaults_absent_alias_trail() {
+        let old_record = serde_json::json!({
+            "file_name": "prompt_step_001_plan.json",
+            "workflow_name": "wf",
+            "step_name": "plan",
+            "step_type": "agent",
+            "status": "completed",
+            "model_alias": "medium",
+        });
+
+        let decoded: PromptStepMarkerWire =
+            serde_json::from_value(old_record).unwrap();
+
+        assert_eq!(decoded.model_alias.as_deref(), Some("medium"));
+        assert!(decoded.model_alias_trail.is_empty());
+        assert_eq!(decoded.model_alias_origin, None);
+    }
+
+    #[test]
+    fn prompt_step_marker_wire_round_trips_alias_trail_and_origin() {
+        let step = PromptStepMarkerWire {
+            file_name: "prompt_step_001_plan.json".to_string(),
+            workflow_name: "wf".to_string(),
+            step_name: "plan".to_string(),
+            step_type: "agent".to_string(),
+            step_source: None,
+            step_index: Some(1),
+            total_steps: Some(2),
+            parent_step_index: None,
+            parent_total_steps: None,
+            status: "completed".to_string(),
+            hidden: false,
+            is_pre_prompt_step: false,
+            embedded_workflow_name: None,
+            artifacts_dir: None,
+            diff_path: None,
+            response_path: None,
+            error: None,
+            traceback: None,
+            model: Some("claude-opus".to_string()),
+            llm_provider: Some("claude".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            model_alias: Some("coder".to_string()),
+            model_alias_trail: vec!["coder".to_string(), "large".to_string()],
+            model_alias_origin: Some("default_model".to_string()),
+            output: None,
+            output_types: None,
+        };
+
+        let encoded = serde_json::to_value(&step).unwrap();
+        let decoded: PromptStepMarkerWire =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, step);
     }
 
     #[test]
