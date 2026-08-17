@@ -4269,6 +4269,8 @@ mod tests {
             flag: None,
             model: String::new(),
             size: None,
+            task_type: None,
+            task_type_fields: BTreeMap::new(),
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),

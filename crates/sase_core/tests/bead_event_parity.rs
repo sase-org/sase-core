@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 
 use sase_core::bead::jsonl::{read_event_store, write_event_store};
@@ -2261,6 +2262,8 @@ fn issue(
         flag: None,
         model: String::new(),
         size: None,
+        task_type: None,
+        task_type_fields: BTreeMap::new(),
         is_ready_to_work: false,
         changespec_name: String::new(),
         changespec_bug_id: String::new(),

@@ -259,6 +259,8 @@
 //! - `bead_flag_type_migration_sql() -> str`
 //! - `bead_needs_external_ref_migration(create_table_sql: str | None) -> bool`
 //! - `bead_external_ref_migration_sql() -> str`
+//! - `bead_needs_task_type_migration(create_table_sql: str | None) -> bool`
+//! - `bead_task_type_migration_sql() -> str`
 //! - `telemetry_cleanup_matching_labels(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_record_batch(store_path: str, batch: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_query_instant(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
@@ -580,6 +582,7 @@ use sase_core::bead::{
     needs_size_check_relax_migration as core_bead_needs_size_check_relax_migration,
     needs_snoozed_status_migration as core_bead_needs_snoozed_status_migration,
     needs_task_ready_migration as core_bead_needs_task_ready_migration,
+    needs_task_type_migration as core_bead_needs_task_type_migration,
     open_issue as core_bead_open_issue,
     plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
@@ -603,6 +606,7 @@ use sase_core::bead::{
     snoozed_status_migration_sql as core_bead_snoozed_status_migration_sql,
     stats as core_bead_stats, sync_is_clean as core_bead_sync_is_clean,
     task_ready_migration_sql as core_bead_task_ready_migration_sql,
+    task_type_migration_sql as core_bead_task_type_migration_sql,
     unmark_ready_to_work as core_bead_unmark_ready_to_work,
     update_issue as core_bead_update_issue,
     update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
@@ -3408,6 +3412,21 @@ fn py_bead_needs_plus_one_evidence_migration(
 #[pyo3(name = "bead_plus_one_evidence_migration_sql")]
 fn py_bead_plus_one_evidence_migration_sql() -> &'static str {
     core_bead_plus_one_evidence_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "bead_needs_task_type_migration",
+    signature = (create_table_sql=None)
+)]
+fn py_bead_needs_task_type_migration(create_table_sql: Option<&str>) -> bool {
+    core_bead_needs_task_type_migration(create_table_sql)
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_task_type_migration_sql")]
+fn py_bead_task_type_migration_sql() -> &'static str {
+    core_bead_task_type_migration_sql()
 }
 
 #[pyfunction]
@@ -8880,6 +8899,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_bead_plus_one_evidence_migration_sql,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_needs_task_type_migration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_task_type_migration_sql, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
@@ -13524,6 +13545,8 @@ MENTORS:
                 "bead_size_check_relax_migration_sql",
                 "bead_needs_task_ready_migration",
                 "bead_task_ready_migration_sql",
+                "bead_needs_task_type_migration",
+                "bead_task_type_migration_sql",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -13568,6 +13591,57 @@ MENTORS:
             assert_eq!(
                 py_bead_resolution_migration_sql(),
                 core_bead_resolution_migration_sql()
+            );
+            assert!(!py_bead_needs_task_type_migration(None));
+            assert!(py_bead_needs_task_type_migration(Some(
+                "CREATE TABLE issues(id TEXT)"
+            )));
+            assert!(!py_bead_needs_task_type_migration(Some(
+                "task_type_fields TEXT NOT NULL DEFAULT '{}'"
+            )));
+            assert_eq!(
+                py_bead_task_type_migration_sql(),
+                core_bead_task_type_migration_sql()
+            );
+        });
+    }
+
+    #[test]
+    fn bead_create_binding_round_trips_task_type_and_fields() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+
+        Python::with_gil(|py| {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "title": "Flaky test",
+                    "issue_type": "task",
+                    "size": "small",
+                    "task_type": "flake",
+                    "task_type_fields": {
+                        "node_id": "tests/foo.py::test_bar",
+                        "evidence": "failed then passed"
+                    },
+                    "now": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let created =
+                py_bead_create(py, beads_dir.to_str().unwrap(), request)
+                    .unwrap();
+            let value = py_to_json_value(created.bind(py)).unwrap();
+            assert_eq!(value["issue"]["task_type"], "flake");
+            assert_eq!(
+                value["issue"]["task_type_fields"]["node_id"],
+                "tests/foo.py::test_bar"
+            );
+            assert_eq!(
+                value["issue"]["task_type_fields"]["evidence"],
+                "failed then passed"
             );
         });
     }

@@ -37,6 +37,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
                     (issue_type IN ('phase', 'task') AND
                      size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
                   ),
+    task_type   TEXT,
+    task_type_fields TEXT NOT NULL DEFAULT '{}',
     is_ready_to_work INTEGER NOT NULL DEFAULT 0,
     changespec_name TEXT NOT NULL DEFAULT '',
     changespec_bug_id TEXT NOT NULL DEFAULT '',
@@ -58,7 +60,8 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
     ),
-    CHECK(changespec_name != '' OR changespec_bug_id = '')
+    CHECK(changespec_name != '' OR changespec_bug_id = ''),
+    CHECK(task_type IS NULL OR issue_type = 'task')
 );
 
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -75,6 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
 CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
 CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
 CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE INDEX IF NOT EXISTS idx_issues_task_type ON issues(task_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
     WHERE external_ref IS NOT NULL AND external_ref != ''
@@ -650,6 +654,25 @@ pub fn resolution_migration_sql() -> &'static str {
     "ALTER TABLE issues ADD COLUMN resolution TEXT CHECK(resolution IN ('done','canceled','superseded'))"
 }
 
+/// Whether a pre-existing `issues` table predates optional task-type columns.
+///
+/// These are new columns on a rebuildable mirror, so a plain `ALTER TABLE`
+/// is enough. Detection keys on `task_type_fields` because that identifier
+/// cannot appear in the older `issue_type` column definition.
+pub fn needs_task_type_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => !sql.contains("task_type_fields"),
+    }
+}
+
+/// Add `task_type`, `task_type_fields`, and the `task_type` index.
+pub fn task_type_migration_sql() -> &'static str {
+    r#"ALTER TABLE issues ADD COLUMN task_type TEXT CHECK(task_type IS NULL OR issue_type = 'task');
+ALTER TABLE issues ADD COLUMN task_type_fields TEXT NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_issues_task_type ON issues(task_type);"#
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +707,11 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("refs        TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("plus_one_evidence TEXT"));
         assert!(BEAD_SQLITE_SCHEMA.contains("size        TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("task_type   TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("task_type_fields TEXT"));
+        assert!(BEAD_SQLITE_SCHEMA
+            .contains("CHECK(task_type IS NULL OR issue_type = 'task')"));
+        assert!(BEAD_SQLITE_SCHEMA.contains("idx_issues_task_type"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xsmall'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'xlarge'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("issue_type = 'phase'"));
@@ -946,6 +974,25 @@ mod tests {
             resolution_migration_sql(),
             "ALTER TABLE issues ADD COLUMN resolution TEXT CHECK(resolution IN ('done','canceled','superseded'))"
         );
+
+        assert!(!needs_task_type_migration(None));
+        assert!(needs_task_type_migration(Some(
+            "CREATE TABLE issues(id TEXT)"
+        )));
+        assert!(needs_task_type_migration(Some(
+            "issue_type TEXT, size TEXT"
+        )));
+        assert!(!needs_task_type_migration(Some(
+            "task_type TEXT, task_type_fields TEXT NOT NULL DEFAULT '{}'"
+        )));
+        assert!(task_type_migration_sql().contains(
+            "ALTER TABLE issues ADD COLUMN task_type TEXT CHECK(task_type IS NULL OR issue_type = 'task')"
+        ));
+        assert!(task_type_migration_sql().contains(
+            "ALTER TABLE issues ADD COLUMN task_type_fields TEXT NOT NULL DEFAULT '{}'"
+        ));
+        assert!(task_type_migration_sql()
+            .contains("CREATE INDEX IF NOT EXISTS idx_issues_task_type"));
     }
 
     #[test]
@@ -1522,5 +1569,164 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing rebuilt index {index}");
         }
+    }
+
+    #[test]
+    fn fresh_schema_enforces_task_type_check_and_accepts_task_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(BEAD_SQLITE_SCHEMA).unwrap();
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at,
+                task_type, task_type_fields
+             ) VALUES (
+                'task-typed', 'Typed task', 'open', 'task',
+                'now', 'now', 'flake', '{\"node_id\":\"tests/foo.py::test_bar\"}'
+             )",
+            [],
+        )
+        .unwrap();
+        let stored: (Option<String>, String) = conn
+            .query_row(
+                "SELECT task_type, task_type_fields
+                 FROM issues WHERE id='task-typed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0.as_deref(), Some("flake"));
+        assert_eq!(stored.1, "{\"node_id\":\"tests/foo.py::test_bar\"}");
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at
+             ) VALUES (
+                'task-untyped', 'Legacy task', 'open', 'task', 'now', 'now'
+             )",
+            [],
+        )
+        .unwrap();
+        let untyped: (Option<String>, String) = conn
+            .query_row(
+                "SELECT task_type, task_type_fields
+                 FROM issues WHERE id='task-untyped'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(untyped.0, None);
+        assert_eq!(untyped.1, "{}");
+
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, tier,
+                    created_at, updated_at, task_type
+                 ) VALUES (
+                    'plan-typed', 'Typed plan', 'open', 'plan', 'epic',
+                    'now', 'now', 'flake'
+                 )",
+                [],
+            )
+            .is_err());
+
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='index' AND name='idx_issues_task_type'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists);
+    }
+
+    #[test]
+    fn task_type_migration_adds_columns_index_and_check() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issues (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                issue_type TEXT NOT NULL DEFAULT 'phase',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at
+            ) VALUES (
+                'legacy-task', 'Legacy', 'open', 'task', 'now', 'now'
+            );",
+        )
+        .unwrap();
+        let create_table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(needs_task_type_migration(Some(&create_table_sql)));
+
+        conn.execute_batch(task_type_migration_sql()).unwrap();
+
+        let fields: String = conn
+            .query_row(
+                "SELECT task_type_fields FROM issues WHERE id='legacy-task'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fields, "{}");
+
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at,
+                task_type
+             ) VALUES (
+                'task-typed', 'Typed', 'open', 'task', 'now', 'now', 'bug'
+             )",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO issues (
+                    id, title, status, issue_type, created_at, updated_at,
+                    task_type
+                 ) VALUES (
+                    'plan-typed', 'Typed plan', 'open', 'plan',
+                    'now', 'now', 'bug'
+                 )",
+                [],
+            )
+            .is_err());
+
+        let index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='index' AND name='idx_issues_task_type'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists);
+
+        let migrated_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='issues'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!needs_task_type_migration(Some(&migrated_sql)));
     }
 }

@@ -1,6 +1,6 @@
 //! Bead wire records matching `sase_100/src/sase/bead/model.py`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -167,7 +167,7 @@ pub fn validate_model_value(model: &str) -> Result<(), BeadError> {
     Ok(())
 }
 
-fn deserialize_option_non_empty_string<'de, D>(
+pub(crate) fn deserialize_option_non_empty_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
 where
@@ -506,6 +506,58 @@ fn release_tuple(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+const TASK_TYPE_SLUG_MAX_LEN: usize = 32;
+const TASK_TYPE_FIELD_NAME_MAX_LEN: usize = 64;
+
+fn validate_task_type_metadata(
+    issue_type: &IssueTypeWire,
+    task_type: Option<&str>,
+    task_type_fields: &BTreeMap<String, String>,
+) -> Result<(), BeadError> {
+    if *issue_type != IssueTypeWire::Task {
+        if task_type.is_some() || !task_type_fields.is_empty() {
+            return Err(BeadError::validation(
+                "Only task issues can carry task_type metadata",
+            ));
+        }
+        return Ok(());
+    }
+    if task_type.is_none() && !task_type_fields.is_empty() {
+        return Err(BeadError::validation(
+            "task_type_fields requires task_type",
+        ));
+    }
+    if let Some(task_type) = task_type {
+        validate_snake_case_slug(
+            task_type,
+            "task_type",
+            TASK_TYPE_SLUG_MAX_LEN,
+        )?;
+    }
+    for key in task_type_fields.keys() {
+        validate_snake_case_slug(
+            key,
+            "task_type_fields key",
+            TASK_TYPE_FIELD_NAME_MAX_LEN,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_snake_case_slug(
+    value: &str,
+    what: &str,
+    max_len: usize,
+) -> Result<(), BeadError> {
+    if value.len() <= max_len && is_snake_case_key(value) {
+        Ok(())
+    } else {
+        Err(BeadError::validation(format!(
+            "{what} must be a non-empty snake_case slug at most {max_len} characters: {value:?}"
+        )))
+    }
+}
+
 fn is_snake_case_key(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -640,6 +692,14 @@ pub struct IssueWire {
         deserialize_with = "deserialize_option_phase_size"
     )]
     pub size: Option<PhaseSizeWire>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_option_non_empty_string"
+    )]
+    pub task_type: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_type_fields: BTreeMap<String, String>,
     #[serde(default = "false_value")]
     pub is_ready_to_work: bool,
     #[serde(
@@ -731,6 +791,11 @@ impl IssueWire {
                 "Only phase and task issues can carry size metadata",
             ));
         }
+        validate_task_type_metadata(
+            &self.issue_type,
+            self.task_type.as_deref(),
+            &self.task_type_fields,
+        )?;
         if self.issue_type != IssueTypeWire::Plan
             && (!self.changespec_name.is_empty()
                 || !self.changespec_bug_id.is_empty())
@@ -876,6 +941,8 @@ mod tests {
             flag: None,
             model: String::new(),
             size: None,
+            task_type: None,
+            task_type_fields: BTreeMap::new(),
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
@@ -1584,5 +1651,142 @@ mod tests {
             issue.validate().unwrap_err().message,
             "Only task issues can carry +1 evidence"
         );
+    }
+
+    fn typed_task(
+        task_type: Option<&str>,
+        fields: BTreeMap<String, String>,
+    ) -> IssueWire {
+        let mut issue = phase(None);
+        issue.issue_type = IssueTypeWire::Task;
+        issue.task_type = task_type.map(str::to_string);
+        issue.task_type_fields = fields;
+        issue
+    }
+
+    #[test]
+    fn task_type_round_trips_and_stays_absent_when_empty() {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "node_id".to_string(),
+            "tests/foo.py::test_bar".to_string(),
+        );
+        fields.insert("evidence".to_string(), "failed then passed".to_string());
+        let issue = typed_task(Some("flake"), fields);
+        issue.validate().unwrap();
+
+        let encoded = serde_json::to_value(&issue).unwrap();
+        assert_eq!(encoded["task_type"], "flake");
+        assert_eq!(
+            encoded["task_type_fields"],
+            json!({
+                "evidence": "failed then passed",
+                "node_id": "tests/foo.py::test_bar",
+            })
+        );
+        let decoded: IssueWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, issue);
+
+        let untyped = typed_task(None, BTreeMap::new());
+        untyped.validate().unwrap();
+        let without_type = serde_json::to_value(&untyped).unwrap();
+        assert!(without_type.get("task_type").is_none());
+        assert!(without_type.get("task_type_fields").is_none());
+        let legacy = serde_json::from_value::<IssueWire>(without_type).unwrap();
+        assert_eq!(legacy.task_type, None);
+        assert!(legacy.task_type_fields.is_empty());
+    }
+
+    #[test]
+    fn empty_task_type_normalizes_to_none() {
+        let mut value =
+            serde_json::to_value(typed_task(None, BTreeMap::new())).unwrap();
+        value["task_type"] = json!("");
+        let issue: IssueWire = serde_json::from_value(value).unwrap();
+        assert_eq!(issue.task_type, None);
+        issue.validate().unwrap();
+    }
+
+    #[test]
+    fn task_type_is_rejected_on_non_task_issues() {
+        for (issue_type, parent_id, tier, flag) in [
+            (IssueTypeWire::Phase, Some("test-0"), None, None),
+            (IssueTypeWire::Plan, None, Some(BeadTierWire::Epic), None),
+            (IssueTypeWire::Flag, None, None, Some(flag_record())),
+        ] {
+            let mut issue = phase(parent_id);
+            issue.issue_type = issue_type;
+            issue.parent_id = parent_id.map(str::to_string);
+            issue.tier = tier;
+            issue.flag = flag;
+            issue.task_type = Some("flake".to_string());
+            assert_eq!(
+                issue.validate().unwrap_err().message,
+                "Only task issues can carry task_type metadata"
+            );
+
+            issue.task_type = None;
+            issue
+                .task_type_fields
+                .insert("node_id".to_string(), "x".to_string());
+            assert_eq!(
+                issue.validate().unwrap_err().message,
+                "Only task issues can carry task_type metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn task_type_fields_require_task_type() {
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "node_id".to_string(),
+            "tests/foo.py::test_bar".to_string(),
+        );
+        let issue = typed_task(None, fields);
+        assert_eq!(
+            issue.validate().unwrap_err().message,
+            "task_type_fields requires task_type"
+        );
+    }
+
+    #[test]
+    fn task_type_and_field_keys_must_be_bounded_snake_case() {
+        let issue = typed_task(Some("Not_Snake"), BTreeMap::new());
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("task_type must be a non-empty snake_case slug"));
+
+        let issue = typed_task(Some(&"a".repeat(33)), BTreeMap::new());
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("at most 32 characters"));
+
+        let issue = typed_task(Some("flake"), BTreeMap::new());
+        issue.validate().unwrap();
+
+        let mut fields = BTreeMap::new();
+        fields.insert("Node-Id".to_string(), "x".to_string());
+        let issue = typed_task(Some("flake"), fields);
+        assert!(issue.validate().unwrap_err().message.contains(
+            "task_type_fields key must be a non-empty snake_case slug"
+        ));
+
+        let mut fields = BTreeMap::new();
+        fields.insert("a".repeat(65), "x".to_string());
+        let issue = typed_task(Some("flake"), fields);
+        assert!(issue
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("at most 64 characters"));
+
+        let mut fields = BTreeMap::new();
+        fields.insert("node_id".to_string(), String::new());
+        typed_task(Some("github"), fields).validate().unwrap();
     }
 }

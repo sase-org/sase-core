@@ -1,6 +1,6 @@
 //! Bead store mutations backed by JSONL persistence.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,11 +29,12 @@ use super::jsonl::{
 };
 use super::read::resolve_issue_id_in_issues;
 use super::wire::{
-    deserialize_option_phase_size, parse_snooze_timestamp,
-    validate_model_value, validate_unique_external_refs, BeadError,
-    BeadFlagWire, BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire,
-    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire,
-    StatusWire, TaskPlusOneEvidenceWire,
+    deserialize_option_non_empty_string, deserialize_option_phase_size,
+    parse_snooze_timestamp, validate_model_value,
+    validate_unique_external_refs, BeadError, BeadFlagWire,
+    BeadReopenCauseWire, BeadResolutionWire, BeadSnoozeWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire,
 };
 
 // Reuse the ignored compatibility database as the advisory lock file so a
@@ -65,6 +66,10 @@ pub struct BeadCreateRequestWire {
     pub model: String,
     #[serde(default, deserialize_with = "deserialize_option_phase_size")]
     pub size: Option<PhaseSizeWire>,
+    #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
+    pub task_type: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_type_fields: BTreeMap<String, String>,
     #[serde(default)]
     pub assignee: String,
     #[serde(default)]
@@ -265,6 +270,8 @@ pub fn create_issue(
             flag: request.flag,
             model: normalize_model(request.model)?,
             size: request.size,
+            task_type: request.task_type,
+            task_type_fields: request.task_type_fields,
             is_ready_to_work: false,
             changespec_name: request.changespec_name,
             changespec_bug_id: request.changespec_bug_id,
@@ -4311,6 +4318,133 @@ mod tests {
             error.message,
             "Only phase and task issues can carry size metadata"
         );
+    }
+
+    #[test]
+    fn task_type_round_trips_through_create_events_and_projection() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "node_id".to_string(),
+            "tests/foo.py::test_bar".to_string(),
+        );
+        fields.insert("evidence".to_string(), "failed then passed".to_string());
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Flaky test".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                task_type: Some("flake".to_string()),
+                task_type_fields: fields.clone(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(task.task_type.as_deref(), Some("flake"));
+        assert_eq!(task.task_type_fields, fields);
+
+        let jsonl = fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+        assert!(jsonl.contains(r#""task_type":"flake""#));
+        assert!(jsonl.contains(r#""node_id":"tests/foo.py::test_bar""#));
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        assert!(streams.iter().flat_map(|stream| &stream.events).any(
+            |event| {
+                matches!(
+                    &event.payload,
+                    BeadEventPayloadWire::IssueCreated { issue }
+                        if issue.task_type.as_deref() == Some("flake")
+                            && issue.task_type_fields == fields
+                )
+            }
+        ));
+        let reloaded = MutableStore::load(&beads_dir).unwrap();
+        let stored = reloaded.get_issue(&task.id).unwrap();
+        assert_eq!(stored.task_type.as_deref(), Some("flake"));
+        assert_eq!(stored.task_type_fields, fields);
+        assert_eq!(reduces_to_store(&beads_dir), vec![stored.clone()]);
+
+        let untyped = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Legacy untyped task".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                now: Some("2026-01-01T00:01:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(untyped.task_type, None);
+        assert!(untyped.task_type_fields.is_empty());
+    }
+
+    #[test]
+    fn task_type_create_rejects_cross_field_and_slug_errors() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+
+        let on_plan = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                task_type: Some("flake".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            on_plan.message,
+            "Only task issues can carry task_type metadata"
+        );
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "node_id".to_string(),
+            "tests/foo.py::test_bar".to_string(),
+        );
+        let fields_without_type = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Untyped fields".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                task_type_fields: fields,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            fields_without_type.message,
+            "task_type_fields requires task_type"
+        );
+
+        let bad_slug = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Bad slug".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                task_type: Some("Not_Snake".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(bad_slug
+            .message
+            .contains("task_type must be a non-empty snake_case slug"));
     }
 
     #[test]

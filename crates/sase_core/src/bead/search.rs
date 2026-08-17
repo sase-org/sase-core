@@ -361,6 +361,7 @@ fn phase_size_value(size: &PhaseSizeWire) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::fs;
 
     use super::super::wire::{
@@ -1011,6 +1012,8 @@ mod tests {
             flag: None,
             model: String::new(),
             size: None,
+            task_type: None,
+            task_type_fields: BTreeMap::new(),
             is_ready_to_work: false,
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
