@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 5;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 6;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -152,8 +152,14 @@ pub struct AgentCommitDistributionWire {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentCommitStatsWire {
     pub total_commits: u64,
+    /// Distinct agent names with at least one commit in the window.
     pub committing_agents: u64,
+    /// Runs that produced at least one commit.
+    #[serde(default)]
+    pub committing_runs: u64,
+    /// `total_commits` divided by `committing_agents`.
     pub average_per_committing_agent: f64,
+    /// Per-run commit-count buckets, including runs with zero commits.
     pub distribution: AgentCommitDistributionWire,
     #[serde(default)]
     pub top_repos: Vec<AgentStatsCountWire>,
@@ -246,7 +252,8 @@ pub struct AgentWorkStatsWire {
         alias = "truncated_patch_rows"
     )]
     pub truncated_patch_rows: u64,
-    /// Missing, unreadable, or malformed active/archive project files.
+    /// Existing active/archive project files that could not be read or parsed.
+    /// A missing archive file is not counted.
     pub malformed_spec_files_skipped: u64,
 }
 
@@ -276,6 +283,15 @@ pub struct AgentXPromptStatsRowWire {
     pub models: Vec<AgentStatsCountWire>,
     pub projects: Vec<AgentStatsCountWire>,
     pub partners: Vec<AgentStatsCountWire>,
+    /// Model rows omitted by `xprompt_breakdown_top_n`.
+    #[serde(default)]
+    pub models_truncated: u64,
+    /// Project rows omitted by `xprompt_breakdown_top_n`.
+    #[serde(default)]
+    pub projects_truncated: u64,
+    /// Partner rows omitted by `xprompt_breakdown_top_n`.
+    #[serde(default)]
+    pub partners_truncated: u64,
 }
 
 /// Full launch-boundary usage breakdown for one requested xprompt.
@@ -372,7 +388,8 @@ pub struct AgentRunnerStatsWire {
     /// Runner-eligible lanes omitted because no trustworthy end was available.
     #[serde(default)]
     pub lanes_without_end_skipped: u64,
-    /// Candidate rows omitted because `agent_meta.hidden` records user intent.
+    /// Runner-eligible candidate rows omitted because `agent_meta.hidden`
+    /// records user intent.
     #[serde(default)]
     pub user_hidden_skipped: u64,
     /// Overlap candidates whose cached `record_json` could not be decoded.
@@ -517,5 +534,37 @@ mod tests {
         assert_eq!(decoded.xprompt_top_n, 40);
         assert_eq!(decoded.xprompt_breakdown_top_n, 5);
         assert_eq!(decoded.xprompt_focus, None);
+    }
+
+    #[test]
+    fn older_commit_stats_without_committing_runs_default() {
+        let mut payload =
+            serde_json::to_value(AgentCommitStatsWire::default()).unwrap();
+        let Value::Object(fields) = &mut payload else {
+            panic!("commit stats must serialize as an object");
+        };
+        fields.remove("committing_runs");
+
+        let decoded: AgentCommitStatsWire =
+            serde_json::from_value(payload).unwrap();
+        assert_eq!(decoded.committing_runs, 0);
+    }
+
+    #[test]
+    fn older_xprompt_row_without_truncation_counts_defaults() {
+        let mut payload =
+            serde_json::to_value(AgentXPromptStatsRowWire::default()).unwrap();
+        let Value::Object(fields) = &mut payload else {
+            panic!("xprompt row must serialize as an object");
+        };
+        fields.remove("models_truncated");
+        fields.remove("projects_truncated");
+        fields.remove("partners_truncated");
+
+        let decoded: AgentXPromptStatsRowWire =
+            serde_json::from_value(payload).unwrap();
+        assert_eq!(decoded.models_truncated, 0);
+        assert_eq!(decoded.projects_truncated, 0);
+        assert_eq!(decoded.partners_truncated, 0);
     }
 }

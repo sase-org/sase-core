@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::agent_runtime::parse_runtime_timestamp;
+use crate::agent_runtime::{
+    is_runner_eligible_record, parse_runtime_timestamp,
+};
 use crate::agent_scan::index::cl_name_is_unknownish;
 use crate::agent_scan::{AgentArtifactRecordWire, ACE_RUN_WORKFLOW_DIR};
 use crate::effort::{is_valid_effort, EFFORT_LEVELS_ORDERED};
@@ -258,6 +261,7 @@ fn query_run_stats_with_liveness(
         }),
     };
     let mut runner_stats = RunnerStatsBuilder::default();
+    let mut committing_names = BTreeSet::<String>::new();
     let question_answer_times = resolved_question_answer_times(index_path);
     let requested_start = request.start_ts as f64;
     let requested_end = request.end_ts as f64;
@@ -285,7 +289,9 @@ fn query_run_stats_with_liveness(
             continue;
         };
         if record_is_user_hidden(&record) {
-            runner_stats.record_user_hidden();
+            if runner_candidate && is_runner_eligible_record(&record) {
+                runner_stats.record_user_hidden();
+            }
             continue;
         }
         if runner_candidate {
@@ -348,8 +354,15 @@ fn query_run_stats_with_liveness(
             }
         }
 
+        let agent = resolved_agent_name(&record, &row);
         fold_retries(&record, &row, &mut response.retries, &mut retry_chains);
-        fold_commits(&record, &mut response.commits, &mut repo_counts);
+        fold_commits(
+            &record,
+            &agent,
+            &mut response.commits,
+            &mut repo_counts,
+            &mut committing_names,
+        );
         fold_plans(
             &record,
             outcome.as_deref(),
@@ -361,6 +374,7 @@ fn query_run_stats_with_liveness(
         fold_work(
             &record,
             &row,
+            &agent,
             launch_ts,
             duration,
             outcome.as_deref(),
@@ -374,6 +388,7 @@ fn query_run_stats_with_liveness(
     response.providers = finish_providers(providers);
     response.commits.top_repos =
         ranked_counts(repo_counts, Some(request.top_n as usize));
+    response.commits.committing_agents = committing_names.len() as u64;
     response.commits.average_per_committing_agent =
         if response.commits.committing_agents == 0 {
             0.0
@@ -684,8 +699,10 @@ fn fold_retries(
 
 fn fold_commits(
     record: &AgentArtifactRecordWire,
+    agent: &str,
     commits: &mut AgentCommitStatsWire,
     repo_counts: &mut BTreeMap<String, u64>,
+    committing_names: &mut BTreeSet<String>,
 ) {
     let meta_commits = record
         .done
@@ -705,7 +722,8 @@ fn fold_commits(
     }
     commits.total_commits += count;
     if count > 0 {
-        commits.committing_agents += 1;
+        commits.committing_runs += 1;
+        committing_names.insert(agent.to_string());
     }
     match count {
         0 => commits.distribution.zero += 1,
@@ -915,25 +933,39 @@ fn finish_xprompts(
     let mut rows = xprompts
         .by_name
         .into_iter()
-        .map(|(name, value)| AgentXPromptStatsRowWire {
-            name,
-            kind: value.kind,
-            tags: value.tags,
-            runs: value.runs,
-            references: value.references,
-            distinct_agents: value.agents.len() as u64,
-            completed: value.completed,
-            failed: value.failed,
-            success_rate: ratio(value.completed, value.runs),
-            total_runtime_seconds: value.total_runtime_seconds,
-            mean_runtime_seconds: (value.duration_count > 0).then_some(
-                value.total_runtime_seconds / value.duration_count as f64,
-            ),
-            first_run_ts: value.first_run_ts,
-            last_run_ts: value.last_run_ts,
-            models: ranked_counts(value.models, Some(breakdown_top_n)),
-            projects: ranked_counts(value.projects, Some(breakdown_top_n)),
-            partners: ranked_counts(value.partners, Some(breakdown_top_n)),
+        .map(|(name, value)| {
+            let models_total = value.models.len() as u64;
+            let projects_total = value.projects.len() as u64;
+            let partners_total = value.partners.len() as u64;
+            let models = ranked_counts(value.models, Some(breakdown_top_n));
+            let projects = ranked_counts(value.projects, Some(breakdown_top_n));
+            let partners = ranked_counts(value.partners, Some(breakdown_top_n));
+            AgentXPromptStatsRowWire {
+                name,
+                kind: value.kind,
+                tags: value.tags,
+                runs: value.runs,
+                references: value.references,
+                distinct_agents: value.agents.len() as u64,
+                completed: value.completed,
+                failed: value.failed,
+                success_rate: ratio(value.completed, value.runs),
+                total_runtime_seconds: value.total_runtime_seconds,
+                mean_runtime_seconds: (value.duration_count > 0).then_some(
+                    value.total_runtime_seconds / value.duration_count as f64,
+                ),
+                first_run_ts: value.first_run_ts,
+                last_run_ts: value.last_run_ts,
+                models_truncated: models_total
+                    .saturating_sub(models.len() as u64),
+                projects_truncated: projects_total
+                    .saturating_sub(projects.len() as u64),
+                partners_truncated: partners_total
+                    .saturating_sub(partners.len() as u64),
+                models,
+                projects,
+                partners,
+            }
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
@@ -1065,9 +1097,11 @@ fn is_project_identity_placeholder(
     name == repo || name == format!("{owner}/{repo}")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fold_work(
     record: &AgentArtifactRecordWire,
     row: &IndexRunRow,
+    agent: &str,
     launch_ts: f64,
     duration: Option<f64>,
     outcome: Option<&str>,
@@ -1101,13 +1135,6 @@ fn fold_work(
         return;
     }
 
-    let agent = normalized(
-        record
-            .agent_meta
-            .as_ref()
-            .and_then(|meta| meta.name.as_deref())
-            .or(row.agent_name.as_deref()),
-    );
     for attributed in &attribution.patches {
         project.patches.insert(attributed.name.clone());
         let patch = work
@@ -1116,7 +1143,7 @@ fn fold_work(
             .or_default();
         let first_patch_run = patch.runs == 0;
         patch.runs += 1;
-        patch.agents.insert(agent.clone());
+        patch.agents.insert(agent.to_string());
         patch.commits += attributed.commits;
         if let Some(duration) = duration {
             patch.total_runtime_seconds += duration;
@@ -1225,9 +1252,15 @@ fn load_patch_metadata(
             paths.push(archive);
         }
         for path in paths {
-            let Ok(content) = fs::read(&path) else {
-                malformed += 1;
-                continue;
+            let content = match fs::read(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(_) => {
+                    malformed += 1;
+                    continue;
+                }
             };
             let Ok(specs) =
                 parse_project_bytes(&path.to_string_lossy(), &content)
@@ -1400,6 +1433,19 @@ fn normalized(value: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(UNKNOWN)
         .to_string()
+}
+
+fn resolved_agent_name(
+    record: &AgentArtifactRecordWire,
+    row: &IndexRunRow,
+) -> String {
+    normalized(
+        record
+            .agent_meta
+            .as_ref()
+            .and_then(|meta| meta.name.as_deref())
+            .or(row.agent_name.as_deref()),
+    )
 }
 
 #[cfg(test)]
@@ -1759,6 +1805,7 @@ mod tests {
 
         assert_eq!(result.commits.total_commits, 6);
         assert_eq!(result.commits.committing_agents, 3);
+        assert_eq!(result.commits.committing_runs, 3);
         assert_eq!(result.commits.average_per_committing_agent, 2.0);
         assert_eq!(
             result.commits.distribution,
@@ -1816,6 +1863,91 @@ mod tests {
         // decoding. Keep the variable live to make that relationship clear.
         assert!(first.exists());
         assert_eq!(result.work.projects[0].runs, 4);
+    }
+
+    #[test]
+    fn committing_agents_counts_distinct_names_not_runs() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        add_run(
+            &projects,
+            "20260710010000",
+            json!({
+                "name": "alpha",
+                "run_started_at": "2026-07-10T01:00:00Z"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "step_output": {"meta_commits": [
+                    {"sha": "1", "repo_name": "sase"}
+                ]}
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            "20260710020000",
+            json!({
+                "name": "alpha",
+                "run_started_at": "2026-07-10T02:00:00Z"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "step_output": {"meta_commits": [
+                    {"sha": "2", "repo_name": "sase"}
+                ]}
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            "20260710030000",
+            json!({
+                "name": "beta",
+                "run_started_at": "2026-07-10T03:00:00Z"
+            }),
+            Some(json!({
+                "outcome": "completed",
+                "step_output": {"meta_commits": [
+                    {"sha": "3", "repo_name": "core"},
+                    {"sha": "4", "repo_name": "core"}
+                ]}
+            })),
+            false,
+        );
+        add_run(
+            &projects,
+            "20260710040000",
+            json!({
+                "name": "gamma",
+                "run_started_at": "2026-07-10T04:00:00Z"
+            }),
+            Some(json!({"outcome": "completed"})),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let result = query_run_stats(&index, request()).unwrap();
+        assert_eq!(result.commits.total_commits, 4);
+        assert_eq!(result.commits.committing_runs, 3);
+        assert_eq!(result.commits.committing_agents, 2);
+        assert_eq!(result.commits.average_per_committing_agent, 2.0);
+        assert_eq!(
+            result.commits.distribution,
+            AgentCommitDistributionWire {
+                zero: 1,
+                one: 2,
+                two: 1,
+                three_plus: 0,
+            }
+        );
     }
 
     #[test]
@@ -1919,7 +2051,7 @@ mod tests {
         focused_request.xprompt_breakdown_top_n = 1;
         focused_request.xprompt_focus = Some("gh".to_string());
         let result = query_run_stats(&index, focused_request).unwrap();
-        assert_eq!(result.schema_version, 5);
+        assert_eq!(result.schema_version, 6);
         let xprompts = result.xprompts.as_ref().unwrap();
         assert_eq!(xprompts.runs_with_xprompts, 3);
         assert_eq!(xprompts.runs_without_xprompts, 1);
@@ -1948,8 +2080,10 @@ mod tests {
         assert_eq!(gh.mean_runtime_seconds, Some(45.0));
         assert_eq!(gh.models.len(), 1);
         assert_eq!(gh.models[0].name, "gpt-5");
+        assert_eq!(gh.models_truncated, 1);
         assert_eq!(gh.projects.len(), 1);
         assert_eq!(gh.projects[0].name, "alpha-project");
+        assert_eq!(gh.projects_truncated, 1);
         assert_eq!(
             gh.partners
                 .iter()
@@ -1957,6 +2091,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("split_file", 1)]
         );
+        assert_eq!(gh.partners_truncated, 0);
 
         let focus = xprompts.focus.as_ref().unwrap();
         assert!(focus.found);
@@ -2359,7 +2494,7 @@ mod tests {
         let all_projects = query_run_stats(&index, by_project).unwrap();
         assert_eq!(all_projects.totals.runs, 8);
         assert_eq!(all_projects.work.projects.len(), 2);
-        assert_eq!(all_projects.work.malformed_spec_files_skipped, 2);
+        assert_eq!(all_projects.work.malformed_spec_files_skipped, 1);
         assert_eq!(
             all_projects
                 .runtime_groups
@@ -2369,6 +2504,43 @@ mod tests {
                 .total_seconds,
             125.0
         );
+    }
+
+    #[test]
+    fn missing_archive_spec_is_not_malformed() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let project = "clean";
+        fs::create_dir_all(projects.join(project)).unwrap();
+        fs::write(
+            projects.join(project).join("clean.sase"),
+            "NAME: clean-spec\nSTATUS: Ready\n",
+        )
+        .unwrap();
+        add_project_run(
+            &projects,
+            project,
+            "20260710010000",
+            json!({
+                "name": "clean-agent",
+                "run_started_at": "2026-07-10T01:00:00Z",
+                "cl_name": "clean-spec"
+            }),
+            Some(json!({"outcome": "completed"})),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let result = query_run_stats(&index, request()).unwrap();
+        assert_eq!(result.work.malformed_spec_files_skipped, 0);
+        assert_eq!(result.work.patches[0].name, "clean-spec");
+        assert_eq!(result.work.patches[0].status, "Ready");
     }
 
     #[test]
@@ -2479,7 +2651,7 @@ mod tests {
         .unwrap();
         let runners = result.runners.as_ref().unwrap();
 
-        assert_eq!(result.schema_version, 5);
+        assert_eq!(result.schema_version, 6);
         assert_eq!(result.totals.runs, 4);
         assert_eq!(runners.start_ts, RUNNER_BASE as f64);
         assert_eq!(runners.end_ts, (RUNNER_BASE + 100) as f64);
@@ -2922,6 +3094,73 @@ mod tests {
         assert_eq!(runners.lanes_without_end_skipped, 1);
         assert_eq!(runners.user_hidden_skipped, 1);
         assert_eq!(runners.invalid_intervals_skipped, 0);
+        assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn user_hidden_skipped_counts_only_runner_eligible_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let terminal = || {
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + 100) as f64
+            }))
+        };
+
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "hidden-runner",
+                "run_started_at": runner_time(0),
+                "hidden": true
+            }),
+            terminal(),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(1),
+            json!({
+                "name": "hidden-serial",
+                "run_started_at": runner_time(0),
+                "parent_timestamp": "parent",
+                "hidden": true
+            }),
+            terminal(),
+            false,
+        );
+        let hidden_hook = artifact_for_workflow(
+            &projects,
+            "proj",
+            "hook-run",
+            &runner_artifact_timestamp(2),
+        );
+        write_json(
+            &hidden_hook.join("agent_meta.json"),
+            json!({
+                "name": "hidden-hook",
+                "run_started_at": runner_time(0),
+                "hidden": true
+            }),
+        );
+        write_json(&hidden_hook.join("done.json"), terminal().unwrap());
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let result =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = result.runners.as_ref().unwrap();
+
+        assert_eq!(result.totals.runs, 0);
+        assert_eq!(runners.user_hidden_skipped, 1);
+        assert_eq!(runners.lanes_counted, 0);
         assert_runner_conservation(runners);
     }
 

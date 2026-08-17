@@ -14408,9 +14408,11 @@ MENTORS:
                 py_agent_stats_query_runs(py, index.to_str().unwrap(), request)
                     .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(5));
+            assert_eq!(result["schema_version"], json!(6));
             assert_eq!(result["totals"]["runs"], json!(1));
             assert_eq!(result["totals"]["completed"], json!(1));
+            assert_eq!(result["commits"]["committing_runs"], json!(1));
+            assert_eq!(result["commits"]["committing_agents"], json!(1));
             assert_eq!(result["providers"][0]["effort"], json!("high"));
             assert_eq!(
                 result["runtime_groups"][0]["total_seconds"],
@@ -14711,7 +14713,7 @@ MENTORS:
             )
             .unwrap();
             let result = py_to_json_value(result.bind(py)).unwrap();
-            assert_eq!(result["schema_version"], json!(5));
+            assert_eq!(result["schema_version"], json!(6));
             assert_eq!(result["skills"][0]["name"], json!("review"));
             assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
             assert_eq!(result["questions"]["sessions"], json!(1));
