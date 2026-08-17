@@ -45,6 +45,7 @@ pub use list::{
     normalize_artifact_ref_list, parse_artifact_ref_list,
     resolve_artifact_ref_list,
 };
+pub(crate) use provider_spec::is_known_property_type;
 pub use provider_spec::{
     artifact_ref_provider_spec_digest, validate_artifact_ref_provider_spec,
     ArtifactRefDetailSpecWire, ArtifactRefIdentitySpecWire,

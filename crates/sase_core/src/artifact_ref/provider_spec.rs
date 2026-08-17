@@ -25,7 +25,7 @@ use super::wire::ArtifactRefError;
 pub const ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION: u64 = 1;
 
 const RESERVED_KINDS: &[&str] = &["stitch", "patch", "bead", "agent", "file"];
-const PROPERTY_TYPES: &[&str] = &[
+pub(crate) const PROPERTY_TYPES: &[&str] = &[
     "string",
     "enum",
     "boolean",
@@ -35,6 +35,10 @@ const PROPERTY_TYPES: &[&str] = &[
     "datetime",
     "string_list",
 ];
+
+pub(crate) fn is_known_property_type(value: &str) -> bool {
+    PROPERTY_TYPES.contains(&value)
+}
 const PUBLICATION_LINKS: &[&str] = &["vcs_permalink", "agents_object", "none"];
 const PUBLICATION_REFERENCED_BY: &[&str] = &["markdown_table", "none"];
 const PROPERTY_SOURCES: &[&str] = &["markdown_frontmatter", "provider"];

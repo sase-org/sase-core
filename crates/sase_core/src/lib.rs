@@ -65,6 +65,7 @@ pub mod snippet_session;
 pub mod status;
 mod store_lock;
 pub mod suffix;
+pub mod task_type;
 pub mod telemetry;
 pub mod vcs_log;
 pub mod wire;
@@ -713,6 +714,15 @@ pub use status::{
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
+pub use task_type::{
+    parse_task_type_snapshot, render_task_type_body,
+    serialize_task_type_snapshot, task_type_spec_digest,
+    validate_task_type_field_values, validate_task_type_spec, TaskTypeError,
+    TaskTypeFieldSpecWire, TaskTypeFieldValueError, TaskTypeSnapshotEntryWire,
+    TaskTypeSnapshotWire, TaskTypeSourceWire, TaskTypeSpecWire,
+    TaskTypeTriageWire, RESERVED_TASK_TYPE_SLUGS, TASK_TYPE_FIELD_ROLES,
+    TASK_TYPE_FIELD_TYPES, TASK_TYPE_SPEC_WIRE_SCHEMA_VERSION,
+};
 pub use telemetry::{
     cleanup_matching_labels as telemetry_cleanup_matching_labels,
     prune as telemetry_prune, query_instant as telemetry_query_instant,

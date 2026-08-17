@@ -288,6 +288,13 @@
 //! - `artifact_ref_provider_spec_validate(spec: dict) -> None`
 //! - `artifact_ref_provider_spec_digest(spec: dict) -> str`
 //! - `artifact_ref_provider_spec_wire_schema_version() -> int`
+//! - `validate_task_type_spec(spec: dict) -> None`
+//! - `task_type_spec_digest(spec: dict) -> str`
+//! - `validate_task_type_field_values(spec: dict, values: dict[str, str]) -> list[dict]`
+//! - `render_task_type_body(spec: dict, values: dict[str, str]) -> str`
+//! - `parse_task_type_snapshot(data: str) -> dict`
+//! - `serialize_task_type_snapshot(snapshot: dict) -> str`
+//! - `task_type_spec_wire_schema_version() -> int`
 //! - `artifact_ref_entry_validate(entry: dict) -> None`
 //! - `artifact_ref_entry_wire_schema_version() -> int`
 //! - `artifact_ref_use_manifest_parse(data: bytes) -> list[dict]`
@@ -807,6 +814,15 @@ use sase_core::status::{
     read_status_from_lines as core_read_status_from_lines,
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
+};
+use sase_core::task_type::{
+    parse_task_type_snapshot as core_parse_task_type_snapshot,
+    render_task_type_body as core_render_task_type_body,
+    serialize_task_type_snapshot as core_serialize_task_type_snapshot,
+    task_type_spec_digest as core_task_type_spec_digest,
+    validate_task_type_field_values as core_validate_task_type_field_values,
+    validate_task_type_spec as core_validate_task_type_spec, TaskTypeError,
+    TaskTypeSnapshotWire, TaskTypeSpecWire, TASK_TYPE_SPEC_WIRE_SCHEMA_VERSION,
 };
 use sase_core::telemetry::{
     cleanup_matching_labels as core_telemetry_cleanup_matching_labels,
@@ -4063,6 +4079,111 @@ fn py_artifact_ref_provider_spec_digest(
 #[pyo3(name = "artifact_ref_provider_spec_wire_schema_version")]
 fn py_artifact_ref_provider_spec_wire_schema_version() -> u64 {
     ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION
+}
+
+fn task_type_spec_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<TaskTypeSpecWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "spec is not a valid TaskTypeSpecWire dict: {error}"
+        ))
+    })
+}
+
+fn task_type_error_to_pyerr(error: TaskTypeError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Validate one assembled task-type spec.
+#[pyfunction]
+#[pyo3(name = "validate_task_type_spec")]
+fn py_validate_task_type_spec(spec: &Bound<'_, PyDict>) -> PyResult<()> {
+    let spec = task_type_spec_from_pydict(spec)?;
+    core_validate_task_type_spec(&spec).map_err(task_type_error_to_pyerr)
+}
+
+/// Compute a stable sha256 hex digest over the normalized task-type spec.
+#[pyfunction]
+#[pyo3(name = "task_type_spec_digest")]
+fn py_task_type_spec_digest(spec: &Bound<'_, PyDict>) -> PyResult<String> {
+    let spec = task_type_spec_from_pydict(spec)?;
+    core_task_type_spec_digest(&spec).map_err(task_type_error_to_pyerr)
+}
+
+/// Validate field values against a spec.
+///
+/// Returns one typed error dict per problem. An empty list means the values
+/// are valid. An invalid spec is raised as `ValueError`.
+#[pyfunction]
+#[pyo3(name = "validate_task_type_field_values")]
+fn py_validate_task_type_field_values<'py>(
+    py: Python<'py>,
+    spec: &Bound<'_, PyDict>,
+    values: BTreeMap<String, String>,
+) -> PyResult<PyObject> {
+    let spec = task_type_spec_from_pydict(spec)?;
+    let errors = core_validate_task_type_field_values(&spec, &values)
+        .map_err(task_type_error_to_pyerr)?;
+    let value = serde_json::to_value(errors).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal task type field-value serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Render the Markdown body block for a spec and its field values.
+#[pyfunction]
+#[pyo3(name = "render_task_type_body")]
+fn py_render_task_type_body(
+    spec: &Bound<'_, PyDict>,
+    values: BTreeMap<String, String>,
+) -> PyResult<String> {
+    let spec = task_type_spec_from_pydict(spec)?;
+    core_render_task_type_body(&spec, &values).map_err(task_type_error_to_pyerr)
+}
+
+/// Parse a committed task-type catalog snapshot.
+#[pyfunction]
+#[pyo3(name = "parse_task_type_snapshot")]
+fn py_parse_task_type_snapshot<'py>(
+    py: Python<'py>,
+    data: &str,
+) -> PyResult<PyObject> {
+    let snapshot = core_parse_task_type_snapshot(data)
+        .map_err(task_type_error_to_pyerr)?;
+    let value = serde_json::to_value(snapshot).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal task type snapshot serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Serialize a committed task-type catalog snapshot deterministically.
+#[pyfunction]
+#[pyo3(name = "serialize_task_type_snapshot")]
+fn py_serialize_task_type_snapshot(
+    snapshot: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let snapshot: TaskTypeSnapshotWire = serde_json::from_value(
+        py_to_json_value(snapshot.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "snapshot is not a valid TaskTypeSnapshotWire dict: {error}"
+        ))
+    })?;
+    core_serialize_task_type_snapshot(&snapshot)
+        .map_err(task_type_error_to_pyerr)
+}
+
+/// Return the task-type spec wire schema version.
+#[pyfunction]
+#[pyo3(name = "task_type_spec_wire_schema_version")]
+fn py_task_type_spec_wire_schema_version() -> u64 {
+    TASK_TYPE_SPEC_WIRE_SCHEMA_VERSION
 }
 
 /// Validate one normalized artifact entry.
@@ -8971,6 +9092,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_ref_provider_spec_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_validate_task_type_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(py_task_type_spec_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_task_type_field_values, m)?)?;
+    m.add_function(wrap_pyfunction!(py_render_task_type_body, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_task_type_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_serialize_task_type_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_task_type_spec_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_entry_validate, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_ref_entry_wire_schema_version,
@@ -12114,6 +12245,129 @@ MENTORS:
             );
             assert_eq!(py_referenced_by_block_remove(&upserted), "Body\n");
             assert_eq!(py_referenced_by_block_strip(&upserted), "Body");
+        });
+    }
+
+    #[test]
+    fn task_type_spec_bindings_round_trip_validation_digest_and_snapshot() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "validate_task_type_spec",
+                "task_type_spec_digest",
+                "validate_task_type_field_values",
+                "render_task_type_body",
+                "parse_task_type_snapshot",
+                "serialize_task_type_snapshot",
+                "task_type_spec_wire_schema_version",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let spec_value = json!({
+                "schema_version": 1,
+                "task_type": "flake",
+                "label": "Flaky test",
+                "summary": "A test that fails and then passes on an unchanged tree.",
+                "when_to_use": "File one when a test failed then passed.",
+                "glyph": "≈",
+                "accent_color": "#00D7D7",
+                "fields": [
+                    {
+                        "name": "node_id",
+                        "type": "string",
+                        "required": true,
+                        "pattern": "\\S+::\\S+"
+                    },
+                    {
+                        "name": "evidence",
+                        "type": "string",
+                        "required": true,
+                        "role": ["template"]
+                    }
+                ],
+                "body_template": "## Flake report\n\n- **Test:** `{{ node_id }}`\n\n{{ evidence }}\n",
+                "triage": {"min_plus_ones": 1}
+            });
+            let spec_object = json_value_to_py(py, &spec_value).unwrap();
+            let spec = spec_object.bind(py).downcast::<PyDict>().unwrap();
+            py_validate_task_type_spec(spec).unwrap();
+            let digest = py_task_type_spec_digest(spec).unwrap();
+            assert_eq!(digest.len(), 64);
+            assert_eq!(py_task_type_spec_wire_schema_version(), 1);
+
+            let values = BTreeMap::from([
+                ("node_id".to_string(), "tests/foo.py::test_bar".to_string()),
+                ("evidence".to_string(), "failed then passed".to_string()),
+            ]);
+            let field_errors =
+                py_validate_task_type_field_values(py, spec, values.clone())
+                    .unwrap();
+            let field_errors = py_to_json_value(field_errors.bind(py)).unwrap();
+            assert_eq!(field_errors, json!([]));
+            assert_eq!(
+                py_render_task_type_body(spec, values).unwrap(),
+                "## Flake report\n\n- **Test:** `tests/foo.py::test_bar`\n\nfailed then passed\n"
+            );
+
+            let missing = BTreeMap::from([(
+                "node_id".to_string(),
+                "not-a-node".to_string(),
+            )]);
+            let field_errors =
+                py_validate_task_type_field_values(py, spec, missing).unwrap();
+            let field_errors = py_to_json_value(field_errors.bind(py)).unwrap();
+            assert_eq!(
+                field_errors[0]["kind"],
+                json!("invalid_string_pattern")
+            );
+            assert_eq!(field_errors[1]["kind"], json!("missing_required"));
+
+            let reserved = spec_value.clone();
+            let reserved_object = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "task_type": "task",
+                    "label": reserved["label"],
+                    "summary": reserved["summary"],
+                    "when_to_use": reserved["when_to_use"],
+                }),
+            )
+            .unwrap();
+            let reserved_spec =
+                reserved_object.bind(py).downcast::<PyDict>().unwrap();
+            assert!(py_validate_task_type_spec(reserved_spec).is_err());
+
+            let snapshot_value = json!({
+                "types": [{
+                    "task_type": spec_value["task_type"],
+                    "label": spec_value["label"],
+                    "summary": spec_value["summary"],
+                    "when_to_use": spec_value["when_to_use"],
+                    "glyph": spec_value["glyph"],
+                    "accent_color": spec_value["accent_color"],
+                    "agent_creatable": true,
+                    "fields": spec_value["fields"],
+                    "body_template": spec_value["body_template"],
+                    "triage": spec_value["triage"],
+                    "source": "builtin",
+                    "package": "sase",
+                    "digest": digest
+                }]
+            });
+            let snapshot_object =
+                json_value_to_py(py, &snapshot_value).unwrap();
+            let snapshot =
+                snapshot_object.bind(py).downcast::<PyDict>().unwrap();
+            let encoded = py_serialize_task_type_snapshot(snapshot).unwrap();
+            assert!(encoded.ends_with('\n'));
+            let parsed = py_parse_task_type_snapshot(py, &encoded).unwrap();
+            let parsed = py_to_json_value(parsed.bind(py)).unwrap();
+            assert_eq!(parsed["types"][0]["task_type"], json!("flake"));
+            assert_eq!(parsed["types"][0]["digest"], json!(digest));
         });
     }
 
