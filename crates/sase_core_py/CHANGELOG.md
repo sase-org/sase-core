@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.19](https://github.com/sase-org/sase-core/compare/v0.27.18...v0.27.19) - 2026-08-17
+
+### Added
+
+- *(bead)* add optional task_type to the issue wire and store
+
 ## [0.27.18](https://github.com/sase-org/sase-core/compare/v0.27.17...v0.27.18) - 2026-08-17
 
 ### Fixed
