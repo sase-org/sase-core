@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.18](https://github.com/sase-org/sase-core/compare/v0.27.17...v0.27.18) - 2026-08-17
+
+### Fixed
+
+- *(agent_stats)* correct commit, spec, runner, and xprompt counters
+
 ## [0.27.15](https://github.com/sase-org/sase-core/compare/v0.27.14...v0.27.15) - 2026-08-16
 
 ### Added
