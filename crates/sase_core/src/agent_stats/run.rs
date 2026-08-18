@@ -8,7 +8,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::agent_runtime::{
-    is_runner_eligible_record, parse_runtime_timestamp,
+    is_runner_occupancy_record, parse_runtime_timestamp,
 };
 use crate::agent_scan::index::cl_name_is_unknownish;
 use crate::agent_scan::{AgentArtifactRecordWire, ACE_RUN_WORKFLOW_DIR};
@@ -289,7 +289,7 @@ fn query_run_stats_with_liveness(
             continue;
         };
         if record_is_user_hidden(&record) {
-            if runner_candidate && is_runner_eligible_record(&record) {
+            if runner_candidate && is_runner_occupancy_record(&record) {
                 runner_stats.record_user_hidden();
             }
             continue;
@@ -504,11 +504,16 @@ fn runner_overlap_candidate(
     if row.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
         return false;
     }
-    let Some(started) = row.started_at.as_deref().and_then(parse_timestamp)
+    let Some(started) = row
+        .started_at
+        .as_deref()
+        .and_then(parse_timestamp)
+        .or_else(|| parse_artifact_timestamp(&row.timestamp))
     else {
-        // A record that never reached run_started_at never held a runner slot.
-        // Keep this cached-column rejection ahead of JSON decoding so old
-        // waiting/abandoned artifacts do not become interval diagnostics.
+        // Prefer run_started_at so never-started agent shells stay out of
+        // occupancy. Fall back to the artifact stamp so a monitor that
+        // already recorded a pid — but not yet run_started_at — still
+        // reaches JSON decode and the monitor-aware occupancy start.
         return false;
     };
     if row
@@ -3019,12 +3024,104 @@ mod tests {
         let result = query_run_stats(&index, filtered).unwrap();
         let runners = result.runners.as_ref().unwrap();
 
-        assert_eq!(runners.peak_runners, 3);
-        assert_eq!(runners.runner_seconds, 300.0);
-        assert_eq!(runners.distribution[3].seconds, 100.0);
-        assert_eq!(runners.lanes_counted, 3);
+        // root, parallel, serial (now occupancy-eligible without agent_family),
+        // and workflow-agent. The serial child is its own family because it
+        // has no agent_family, matching the Python grouping fallback.
+        assert_eq!(runners.peak_runners, 4);
+        assert_eq!(runners.runner_seconds, 400.0);
+        assert_eq!(runners.distribution[4].seconds, 100.0);
+        assert_eq!(runners.lanes_counted, 4);
         assert_eq!(runners.user_hidden_skipped, 1);
         assert_eq!(runners.invalid_intervals_skipped, 0);
+        assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_occupancy_merges_serial_family_and_counts_parallel() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let terminal_at = |offset: i64| {
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + offset) as f64
+            }))
+        };
+
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "root",
+                "agent_family": "fam",
+                "run_started_at": runner_time(0)
+            }),
+            terminal_at(20),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(30),
+            json!({
+                "name": "monitor",
+                "agent_family": "fam",
+                "monitor_id": "mon-1",
+                "run_started_at": runner_time(30)
+            }),
+            terminal_at(80),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(80),
+            json!({
+                "name": "followup",
+                "agent_family": "fam",
+                "parent_timestamp": runner_artifact_timestamp(0),
+                "run_started_at": runner_time(80)
+            }),
+            terminal_at(100),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(70),
+            json!({
+                "name": "parallel",
+                "agent_family": "fam",
+                "parent_timestamp": runner_artifact_timestamp(0),
+                "agent_family_parallel": true,
+                "run_started_at": runner_time(70)
+            }),
+            terminal_at(90),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let result =
+            query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
+        let runners = result.runners.as_ref().unwrap();
+
+        // Serial family occupies [0, 100] after the starter-to-monitor gap is
+        // filled and the follow-up abuts the monitor. The parallel member
+        // adds a second slot on [70, 90].
+        assert_eq!(runners.peak_runners, 2);
+        assert_eq!(runners.runner_seconds, 120.0);
+        assert_eq!(runners.busy_seconds, 100.0);
+        assert_eq!(
+            runners
+                .distribution
+                .iter()
+                .map(|row| (row.runners, row.seconds))
+                .collect::<Vec<_>>(),
+            vec![(0, 0.0), (1, 80.0), (2, 20.0)]
+        );
+        assert_eq!(runners.lanes_counted, 4);
         assert_runner_conservation(runners);
     }
 
@@ -3159,7 +3256,7 @@ mod tests {
         let runners = result.runners.as_ref().unwrap();
 
         assert_eq!(result.totals.runs, 0);
-        assert_eq!(runners.user_hidden_skipped, 1);
+        assert_eq!(runners.user_hidden_skipped, 2);
         assert_eq!(runners.lanes_counted, 0);
         assert_runner_conservation(runners);
     }

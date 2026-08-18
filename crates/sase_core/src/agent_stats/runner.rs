@@ -8,8 +8,10 @@ use crate::agent_launch::{
     list_workspace_claims_from_content, WorkspaceClaimWire,
 };
 use crate::agent_runtime::{
-    derive_active_intervals, is_runner_eligible_record, ActiveInterval,
-    ActiveIntervalError, ClanRuntimeMemberWire, WaitPolicy,
+    derive_active_intervals, is_runner_occupancy_record,
+    merge_family_occupancy_intervals, occupancy_member_start,
+    runner_slot_family_key, ActiveInterval, ActiveIntervalError,
+    ClanRuntimeMemberWire, RunnerOccupancyContribution, WaitPolicy,
 };
 use crate::agent_scan::{AgentArtifactRecordWire, RunningMarkerWire};
 
@@ -182,7 +184,7 @@ fn process_exists(_pid: i32) -> bool {
 
 #[derive(Debug, Default)]
 pub(super) struct RunnerStatsBuilder {
-    intervals: Vec<ActiveInterval>,
+    contributions: Vec<RunnerOccupancyContribution>,
     diagnostics: RunnerDiagnostics,
 }
 
@@ -219,10 +221,10 @@ impl RunnerStatsBuilder {
         resolved_question_answers: &[f64],
         liveness: &dyn RunnerLivenessProbe,
     ) {
-        if !is_runner_eligible_record(record) {
+        if !is_runner_occupancy_record(record) {
             return;
         }
-        let member = ClanRuntimeMemberWire::from_record(record);
+        let member = occupancy_runtime_member(record);
         let derived = match derive_active_intervals(
             &member,
             requested_end,
@@ -247,19 +249,20 @@ impl RunnerStatsBuilder {
             self.diagnostics.lanes_without_end_skipped += 1;
             return;
         }
-        let clipped = derived
-            .intervals
-            .into_iter()
-            .filter_map(|interval| {
-                let start = interval.start.max(requested_start);
-                let end = interval.end.min(requested_end);
-                (end > start).then_some(ActiveInterval { start, end })
-            })
-            .collect::<Vec<_>>();
-        if !clipped.is_empty() {
+        if derived.intervals.iter().any(|interval| {
+            interval.end > requested_start && interval.start < requested_end
+        }) {
             self.diagnostics.lanes_counted += 1;
-            self.intervals.extend(clipped);
         }
+        let meta = record.agent_meta.as_ref();
+        self.contributions.push(RunnerOccupancyContribution {
+            family_key: runner_slot_family_key(record),
+            parallel: meta.is_some_and(|value| value.agent_family_parallel),
+            monitor: meta.is_some_and(|value| {
+                value.monitor_id.as_deref().is_some_and(|id| !id.is_empty())
+            }),
+            intervals: derived.intervals,
+        });
     }
 
     pub(super) fn finish(
@@ -269,8 +272,9 @@ impl RunnerStatsBuilder {
         bucket_seconds: u64,
         all_time: bool,
     ) -> Option<AgentRunnerStatsWire> {
+        let intervals = merge_family_occupancy_intervals(&self.contributions);
         let effective_start = if all_time {
-            self.intervals
+            intervals
                 .iter()
                 .map(|interval| interval.start)
                 .min_by(f64::total_cmp)?
@@ -278,7 +282,7 @@ impl RunnerStatsBuilder {
             requested_start
         };
         let segments =
-            occupancy_segments(&self.intervals, effective_start, requested_end);
+            occupancy_segments(&intervals, effective_start, requested_end);
         Some(finish_stats(
             effective_start,
             requested_end,
@@ -287,6 +291,16 @@ impl RunnerStatsBuilder {
             self.diagnostics,
         ))
     }
+}
+
+fn occupancy_runtime_member(
+    record: &AgentArtifactRecordWire,
+) -> ClanRuntimeMemberWire {
+    let mut member = ClanRuntimeMemberWire::from_record(record);
+    if let Some(start) = occupancy_member_start(record) {
+        member.run_started_at = Some(start);
+    }
+    member
 }
 
 fn occupancy_segments(
@@ -631,5 +645,129 @@ mod tests {
         )
         .unwrap();
         assert!(!HostRunnerLivenessProbe::default().is_live(&record));
+    }
+
+    fn family_record(
+        name: &str,
+        start: &str,
+        extra_meta: serde_json::Value,
+    ) -> AgentArtifactRecordWire {
+        let mut record = open_record(name, Some(start));
+        let meta = record.agent_meta.as_mut().unwrap();
+        if let Some(family) = extra_meta
+            .get("agent_family")
+            .and_then(|value| value.as_str())
+        {
+            meta.agent_family = Some(family.to_string());
+        }
+        if extra_meta
+            .get("agent_family_parallel")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+        {
+            meta.agent_family_parallel = true;
+        }
+        if let Some(parent) = extra_meta
+            .get("parent_timestamp")
+            .and_then(|value| value.as_str())
+        {
+            meta.parent_timestamp = Some(parent.to_string());
+        }
+        if let Some(monitor_id) = extra_meta
+            .get("monitor_id")
+            .and_then(|value| value.as_str())
+        {
+            meta.monitor_id = Some(monitor_id.to_string());
+        }
+        if let Some(end) = extra_meta
+            .get("stopped_at")
+            .and_then(|value| value.as_str())
+        {
+            meta.stopped_at = Some(end.to_string());
+        }
+        record
+    }
+
+    #[test]
+    fn overlapping_serial_family_shells_count_as_one_slot() {
+        let mut builder = RunnerStatsBuilder::default();
+        let live = |_: &AgentArtifactRecordWire| false;
+        builder.add_record(
+            &family_record(
+                "root",
+                "0",
+                json!({
+                    "agent_family": "fam",
+                    "stopped_at": "50"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+        builder.add_record(
+            &family_record(
+                "serial",
+                "20",
+                json!({
+                    "agent_family": "fam",
+                    "parent_timestamp": "root",
+                    "stopped_at": "60"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+
+        let result = builder.finish(0.0, 100.0, 100, false).unwrap();
+        assert_eq!(result.runner_seconds, 60.0);
+        assert_eq!(result.peak_runners, 1);
+        assert_eq!(result.distribution[0].seconds, 40.0);
+        assert_eq!(result.distribution[1].seconds, 60.0);
+        assert_eq!(result.lanes_counted, 2);
+    }
+
+    #[test]
+    fn monitor_handoff_gap_does_not_reopen_family_interval() {
+        let mut builder = RunnerStatsBuilder::default();
+        let live = |_: &AgentArtifactRecordWire| false;
+        builder.add_record(
+            &family_record(
+                "20260710000000",
+                "0",
+                json!({
+                    "agent_family": "fam",
+                    "stopped_at": "20"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+        builder.add_record(
+            &family_record(
+                "20260710000030",
+                "30",
+                json!({
+                    "agent_family": "fam",
+                    "monitor_id": "mon-1",
+                    "stopped_at": "80"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+
+        let result = builder.finish(0.0, 100.0, 100, false).unwrap();
+        assert_eq!(result.runner_seconds, 80.0);
+        assert_eq!(result.peak_runners, 1);
+        assert_eq!(result.distribution[0].seconds, 20.0);
+        assert_eq!(result.distribution[1].seconds, 80.0);
     }
 }
