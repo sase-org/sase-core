@@ -372,6 +372,8 @@ pub struct BeadIssueUpdateEventFieldsWire {
     pub is_ready_to_work: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<BeadFlagWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type_fields: Option<BTreeMap<String, String>>,
 }
 
 impl BeadIssueUpdateEventFieldsWire {
@@ -393,6 +395,7 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.tier.is_none()
             && self.is_ready_to_work.is_none()
             && self.flag.is_none()
+            && self.task_type_fields.is_none()
         {
             return Err(BeadError::validation(
                 "issue_updated event has no fields",
@@ -1467,6 +1470,9 @@ fn apply_update_event_fields(
     if let Some(value) = &fields.flag {
         issue.flag = Some(value.clone());
     }
+    if let Some(value) = &fields.task_type_fields {
+        issue.task_type_fields = value.clone();
+    }
     if fields
         .status
         .as_ref()
@@ -2390,6 +2396,13 @@ mod tests {
             },
             BeadIssueUpdateEventFieldsWire {
                 is_ready_to_work: Some(true),
+                ..Default::default()
+            },
+            BeadIssueUpdateEventFieldsWire {
+                task_type_fields: Some(BTreeMap::from([(
+                    "remove_by_date".to_string(),
+                    "2026-12-15".to_string(),
+                )])),
                 ..Default::default()
             },
         ];

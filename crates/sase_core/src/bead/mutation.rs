@@ -122,6 +122,8 @@ pub struct BeadUpdateFieldsWire {
     pub is_ready_to_work: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flag: Option<BeadFlagWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_type_fields: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub now: Option<String>,
 }
@@ -2206,6 +2208,9 @@ fn apply_update_fields(
     if let Some(value) = fields.flag {
         issue.flag = Some(value);
     }
+    if let Some(value) = fields.task_type_fields {
+        issue.task_type_fields = value;
+    }
     // Archive last, matching `apply_update_event_fields`, so an explicit
     // closed_at/close_reason/resolution in the same update is archived rather
     // than surviving a move away from closed.
@@ -2250,6 +2255,7 @@ fn event_fields_from_update_fields(
         tier: fields.tier.clone(),
         is_ready_to_work: fields.is_ready_to_work,
         flag: fields.flag.clone(),
+        task_type_fields: fields.task_type_fields.clone(),
     };
     if event_fields == BeadIssueUpdateEventFieldsWire::default() {
         return Err(BeadError::validation(
@@ -4404,6 +4410,73 @@ mod tests {
         assert_eq!(stored.task_type.as_deref(), Some("flake"));
         assert_eq!(stored.task_type_fields, fields);
         assert_eq!(reduces_to_store(&beads_dir), vec![stored.clone()]);
+    }
+
+    #[test]
+    fn update_replaces_task_type_fields_and_replays_from_events() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "")).unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+        let mut fields = BTreeMap::new();
+        fields.insert("key".to_string(), "demo_key".to_string());
+        fields.insert("kind".to_string(), "beta".to_string());
+        fields.insert("remove_by_date".to_string(), "2026-12-01".to_string());
+        fields.insert("remove_by_release".to_string(), "0.19.0".to_string());
+        let task = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Retire demo_key".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                task_type: Some("flag".to_string()),
+                task_type_fields: fields.clone(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        fields.insert("remove_by_date".to_string(), "2026-12-15".to_string());
+        fields.insert("remove_by_release".to_string(), "0.20.0".to_string());
+        let updated = update_issue(
+            &beads_dir,
+            &task.id,
+            BeadUpdateFieldsWire {
+                task_type_fields: Some(fields.clone()),
+                now: Some("2026-01-02T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        assert_eq!(
+            updated
+                .task_type_fields
+                .get("remove_by_date")
+                .map(String::as_str),
+            Some("2026-12-15")
+        );
+        assert_eq!(
+            updated
+                .task_type_fields
+                .get("remove_by_release")
+                .map(String::as_str),
+            Some("0.20.0")
+        );
+        assert_eq!(updated.task_type.as_deref(), Some("flag"));
+        let stored = MutableStore::load(&beads_dir)
+            .unwrap()
+            .get_issue(&task.id)
+            .unwrap()
+            .clone();
+        assert_eq!(stored.task_type_fields, fields);
+        assert_eq!(reduces_to_store(&beads_dir), vec![stored]);
 
         let untyped = create_issue(
             &beads_dir,
