@@ -9696,6 +9696,7 @@ mod tests {
                 title: "First task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
                 ..Default::default()
             },
@@ -9709,6 +9710,7 @@ mod tests {
                 title: "Second task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 now: Some("2026-01-01T00:01:00Z".to_string()),
                 ..Default::default()
             },
@@ -9779,6 +9781,7 @@ mod tests {
                 title: "Task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 created_by: Some("creator-agent".to_string()),
                 ..Default::default()
             },
@@ -9823,6 +9826,7 @@ mod tests {
                 title: "Task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 created_by: Some("creator-agent".to_string()),
                 ..Default::default()
             },

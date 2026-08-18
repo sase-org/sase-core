@@ -208,6 +208,12 @@ pub fn create_issue(
             "new task issue creation requires an explicit size",
         ));
     }
+    if request.issue_type == IssueTypeWire::Task && request.task_type.is_none()
+    {
+        return Err(BeadError::validation(
+            "new task issue creation requires an explicit task type",
+        ));
+    }
     with_bead_mutation_lock(beads_dir, "create", || {
         let mut store = MutableStore::load(beads_dir)?;
         let tier = default_create_tier(&request);
@@ -2821,6 +2827,7 @@ mod tests {
                 title: "Corroborated task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 created_by: Some("creator-agent".to_string()),
                 assignee: assignee.to_string(),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
@@ -3900,6 +3907,29 @@ mod tests {
     }
 
     #[test]
+    fn create_requires_task_type_only_for_new_tasks() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Missing task type".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("requires an explicit task type"));
+        assert_eq!(fs::read(beads_dir.join("issues.jsonl")).unwrap(), before);
+    }
+
+    #[test]
     fn create_add_and_remove_references_use_individual_events_and_noop_cleanly()
     {
         let temp = tempdir().unwrap();
@@ -4062,6 +4092,7 @@ mod tests {
                 title: "Attributed task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 refs: vec!["bead:sase-parent".to_string()],
                 created_by: Some("  bbugyi200.athena.q8  ".to_string()),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
@@ -4109,6 +4140,7 @@ mod tests {
                 title: "Blank explicit creator".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 created_by: Some("   ".to_string()),
                 ..Default::default()
             },
@@ -4123,6 +4155,7 @@ mod tests {
                 title: "Absent explicit creator".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 ..Default::default()
             },
         )
@@ -4382,11 +4415,9 @@ mod tests {
                 ..Default::default()
             },
         )
-        .unwrap()
-        .issue
-        .unwrap();
-        assert_eq!(untyped.task_type, None);
-        assert!(untyped.task_type_fields.is_empty());
+        .unwrap_err();
+        assert_eq!(untyped.kind, "validation");
+        assert!(untyped.message.contains("requires an explicit task type"));
     }
 
     #[test]
@@ -4426,10 +4457,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(
-            fields_without_type.message,
-            "task_type_fields requires task_type"
-        );
+        assert!(fields_without_type
+            .message
+            .contains("requires an explicit task type"));
 
         let bad_slug = create_issue(
             &beads_dir,
@@ -4461,6 +4491,7 @@ mod tests {
                 title: "Discovered follow-up".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Medium),
+                task_type: Some("bug".to_string()),
                 now: Some("2026-01-01T00:00:00Z".to_string()),
                 ..Default::default()
             },
@@ -6491,6 +6522,7 @@ mod tests {
                 title: "Duplicate".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 external_ref: "bug:sase#42".to_string(),
                 now: Some("2026-01-01T00:01:00Z".to_string()),
                 ..Default::default()
@@ -6537,6 +6569,7 @@ mod tests {
                 title: "Mirrored issue".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 external_ref: "bug:sase#42".to_string(),
                 now: Some("2026-01-01T00:01:00Z".to_string()),
                 ..Default::default()
@@ -6552,6 +6585,7 @@ mod tests {
                 title: "Duplicate mirror".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 external_ref: "bug:sase#42".to_string(),
                 now: Some("2026-01-01T00:02:00Z".to_string()),
                 ..Default::default()
@@ -6590,6 +6624,7 @@ mod tests {
                 title: "Task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 external_ref: "bug:sase#44".to_string(),
                 now: Some("2026-01-01T00:02:00Z".to_string()),
                 ..Default::default()
@@ -8435,6 +8470,7 @@ mod tests {
                 title: "Task".to_string(),
                 issue_type: IssueTypeWire::Task,
                 size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
                 created_by: Some("creator-agent".to_string()),
                 now: Some("2026-01-01T00:00:02Z".to_string()),
                 ..Default::default()
