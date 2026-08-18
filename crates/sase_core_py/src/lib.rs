@@ -142,6 +142,7 @@
 //! - `plan_claim_workspace_from_content(content: str, request: dict) -> dict`
 //! - `plan_transfer_workspace_claim_from_content(content: str, request: dict) -> dict`
 //! - `allocate_and_claim_workspace_from_content(content: str, min_workspace: int, max_workspace: int, request: dict) -> dict`
+//! - `decide_workspace_occupant_conflict(occupant: dict | None, caller: dict, occupant_pid_alive: bool, running_claim: dict | None, running_claim_pid_alive: bool) -> dict`
 //! - `config_field_model(schema: dict) -> dict`
 //! - `config_inventory(request: dict) -> dict`
 //! - `config_plan_edit(request: dict) -> dict`
@@ -404,12 +405,14 @@ use sase_core::agent_identity::{
 use sase_core::agent_launch::{
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
+    decide_workspace_occupant_conflict as core_decide_workspace_occupant_conflict,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
     prepare_agent_launch as core_prepare_agent_launch, AgentLaunchPreparedWire,
-    AgentLaunchRequestWire, WorkspaceClaimRequestWire,
+    AgentLaunchRequestWire, OccupancyCallerWire, OccupantRecordWire,
+    WorkspaceClaimRequestWire, WorkspaceClaimWire,
 };
 use sase_core::agent_name_template::{
     agent_name_template_key as core_agent_name_template_key,
@@ -8426,6 +8429,72 @@ fn py_allocate_and_claim_workspace_from_content<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Decide whether a destructive workspace-preparation step may proceed
+/// against a checkout that may be occupied by another live agent.
+#[pyfunction]
+#[pyo3(
+    name = "decide_workspace_occupant_conflict",
+    signature = (occupant, caller, occupant_pid_alive, running_claim, running_claim_pid_alive)
+)]
+fn py_decide_workspace_occupant_conflict<'py>(
+    py: Python<'py>,
+    occupant: Option<&Bound<'py, PyDict>>,
+    caller: &Bound<'py, PyDict>,
+    occupant_pid_alive: bool,
+    running_claim: Option<&Bound<'py, PyDict>>,
+    running_claim_pid_alive: bool,
+) -> PyResult<PyObject> {
+    let occupant_wire =
+        occupant.map(occupant_record_from_pydict).transpose()?;
+    let caller_wire = occupancy_caller_from_pydict(caller)?;
+    let running_claim_wire =
+        running_claim.map(workspace_claim_from_pydict).transpose()?;
+    let decision = core_decide_workspace_occupant_conflict(
+        occupant_wire.as_ref(),
+        &caller_wire,
+        occupant_pid_alive,
+        running_claim_wire.as_ref(),
+        running_claim_pid_alive,
+    );
+    let value = serde_json::to_value(&decision).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+fn occupant_record_from_pydict(
+    record: &Bound<'_, PyDict>,
+) -> PyResult<OccupantRecordWire> {
+    let value = py_to_json_value(record.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "occupant is not a valid OccupantRecordWire dict: {e}"
+        ))
+    })
+}
+
+fn occupancy_caller_from_pydict(
+    caller: &Bound<'_, PyDict>,
+) -> PyResult<OccupancyCallerWire> {
+    let value = py_to_json_value(caller.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "caller is not a valid OccupancyCallerWire dict: {e}"
+        ))
+    })
+}
+
+fn workspace_claim_from_pydict(
+    claim: &Bound<'_, PyDict>,
+) -> PyResult<WorkspaceClaimWire> {
+    let value = py_to_json_value(claim.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "running_claim is not a valid WorkspaceClaimWire dict: {e}"
+        ))
+    })
+}
+
 fn spawn_prepared_detached_process(
     prepared: AgentLaunchPreparedWire,
     env: BTreeMap<String, String>,
@@ -9360,6 +9429,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_allocate_and_claim_workspace_from_content,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_workspace_occupant_conflict,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_cleanup_matching_labels, m)?)?;

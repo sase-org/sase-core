@@ -62,6 +62,42 @@ pub struct WorkspaceClaimPlanWire {
     pub changed: bool,
 }
 
+/// The per-checkout occupant marker written to
+/// `<checkout>/.sase/occupant.json` when an agent takes a workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OccupantRecordWire {
+    pub pid: u32,
+    #[serde(default)]
+    pub artifacts_timestamp: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    pub workflow: String,
+    pub project: String,
+    pub workspace_num: u32,
+    #[serde(default)]
+    pub cl_name: Option<String>,
+    pub claimed_at: f64,
+}
+
+/// The identity of the process asking whether it may destructively prepare
+/// a checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccupancyCallerWire {
+    pub pid: u32,
+    pub workspace_num: u32,
+    pub project: String,
+    pub workflow: String,
+    #[serde(default)]
+    pub artifacts_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccupancyConflictDecisionWire {
+    pub may_proceed: bool,
+    pub conflict: bool,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunchRequestWire {
     pub schema_version: u32,
@@ -2003,6 +2039,101 @@ fn claim_plan(
     }
 }
 
+/// Decide whether a destructive workspace-preparation step (clean, reset,
+/// checkout) may proceed against a checkout that may be occupied by another
+/// live agent.
+///
+/// `occupant` is the parsed `.sase/occupant.json` record for the checkout,
+/// if one exists; a missing record is always treated as unoccupied so
+/// checkouts created before this guard existed are never bricked.
+/// `occupant_pid_alive` and `running_claim_pid_alive` are supplied by the
+/// caller, which alone knows how to probe process liveness.  `running_claim`
+/// is the RUNNING-field claim row for `caller.workspace_num`, used only to
+/// cross-check against the occupant record; a disagreement between the two
+/// sources of truth is itself treated as a conflict.
+pub fn decide_workspace_occupant_conflict(
+    occupant: Option<&OccupantRecordWire>,
+    caller: &OccupancyCallerWire,
+    occupant_pid_alive: bool,
+    running_claim: Option<&WorkspaceClaimWire>,
+    running_claim_pid_alive: bool,
+) -> OccupancyConflictDecisionWire {
+    let Some(occupant) = occupant else {
+        return OccupancyConflictDecisionWire {
+            may_proceed: true,
+            conflict: false,
+            reason:
+                "no occupant record present; treating checkout as unoccupied"
+                    .to_string(),
+        };
+    };
+
+    let occupant_is_live_other =
+        occupant.pid != caller.pid && occupant_pid_alive;
+    let claim_is_live_other = running_claim
+        .map(|claim| claim.pid != caller.pid && running_claim_pid_alive)
+        .unwrap_or(false);
+
+    if !occupant_is_live_other {
+        if claim_is_live_other {
+            let claim =
+                running_claim.expect("claim_is_live_other implies Some");
+            return OccupancyConflictDecisionWire {
+                may_proceed: false,
+                conflict: true,
+                reason: format!(
+                    "occupant record for workspace #{} is stale but the RUNNING \
+                     field still claims it for pid {} (workflow {}); refusing to \
+                     prepare until that claim is resolved",
+                    caller.workspace_num, claim.pid, claim.workflow
+                ),
+            };
+        }
+        return OccupancyConflictDecisionWire {
+            may_proceed: true,
+            conflict: false,
+            reason: if occupant.pid == caller.pid {
+                "caller already holds this checkout".to_string()
+            } else {
+                format!(
+                    "occupant pid {} is not alive; treating as stale and allowing \
+                     takeover",
+                    occupant.pid
+                )
+            },
+        };
+    }
+
+    let disagrees_with_running_field = match running_claim {
+        Some(claim) => claim.pid != occupant.pid,
+        None => true,
+    };
+    let occupant_label = occupant
+        .agent_name
+        .clone()
+        .unwrap_or_else(|| occupant.workflow.clone());
+    let artifacts_part = occupant
+        .artifacts_timestamp
+        .as_ref()
+        .map(|ts| format!(", artifacts {ts}"))
+        .unwrap_or_default();
+    let mut reason = format!(
+        "workspace #{} checkout is occupied by {} (pid {}, live{})",
+        caller.workspace_num, occupant_label, occupant.pid, artifacts_part
+    );
+    if disagrees_with_running_field {
+        reason.push_str(
+            "; RUNNING field and occupant record disagree, which itself \
+             indicates a corrupted claim state",
+        );
+    }
+    OccupancyConflictDecisionWire {
+        may_proceed: false,
+        conflict: true,
+        reason,
+    }
+}
+
 fn running_claim_lines(lines: &[String]) -> impl Iterator<Item = &str> {
     let (start, end) = find_running_field_bounds(lines);
     let start = start.unwrap_or(0);
@@ -3511,5 +3642,135 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("%{"), "message was {message:?}");
         assert!(message.contains('}'), "message was {message:?}");
+    }
+
+    fn occupancy_caller(pid: u32) -> OccupancyCallerWire {
+        OccupancyCallerWire {
+            pid,
+            workspace_num: 17,
+            project: "sase".to_string(),
+            workflow: "ace(run)-260818_120000".to_string(),
+            artifacts_timestamp: Some("20260818T120000".to_string()),
+        }
+    }
+
+    fn occupant(pid: u32) -> OccupantRecordWire {
+        OccupantRecordWire {
+            pid,
+            artifacts_timestamp: Some("20260818T115900".to_string()),
+            agent_name: Some("06e--plan".to_string()),
+            workflow: "ace(run)-260818_115900".to_string(),
+            project: "sase".to_string(),
+            workspace_num: 17,
+            cl_name: Some("demo".to_string()),
+            claimed_at: 1_755_000_000.0,
+        }
+    }
+
+    fn claim(pid: u32) -> WorkspaceClaimWire {
+        WorkspaceClaimWire {
+            workspace_num: 17,
+            workflow: "ace(run)-260818_115900".to_string(),
+            cl_name: Some("demo".to_string()),
+            pid,
+            artifacts_timestamp: Some("20260818T115900".to_string()),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn occupancy_proceeds_when_no_occupant_record() {
+        let decision = decide_workspace_occupant_conflict(
+            None,
+            &occupancy_caller(500),
+            false,
+            Some(&claim(999)),
+            true,
+        );
+        assert!(decision.may_proceed);
+        assert!(!decision.conflict);
+    }
+
+    #[test]
+    fn occupancy_proceeds_when_occupant_is_caller() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(500)),
+            &occupancy_caller(500),
+            true,
+            Some(&claim(500)),
+            true,
+        );
+        assert!(decision.may_proceed);
+        assert!(!decision.conflict);
+    }
+
+    #[test]
+    fn occupancy_proceeds_when_occupant_pid_is_dead() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(111)),
+            &occupancy_caller(500),
+            false,
+            None,
+            false,
+        );
+        assert!(decision.may_proceed);
+        assert!(!decision.conflict);
+    }
+
+    #[test]
+    fn occupancy_refuses_when_occupant_is_live_other_pid() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(111)),
+            &occupancy_caller(500),
+            true,
+            Some(&claim(111)),
+            true,
+        );
+        assert!(!decision.may_proceed);
+        assert!(decision.conflict);
+        assert!(decision.reason.contains("06e--plan"));
+        assert!(decision.reason.contains("111"));
+    }
+
+    #[test]
+    fn occupancy_refuses_when_running_field_disagrees_with_dead_occupant() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(111)),
+            &occupancy_caller(500),
+            false,
+            Some(&claim(222)),
+            true,
+        );
+        assert!(!decision.may_proceed);
+        assert!(decision.conflict);
+        assert!(decision.reason.contains("222"));
+    }
+
+    #[test]
+    fn occupancy_refuses_and_flags_disagreement_when_running_field_missing() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(111)),
+            &occupancy_caller(500),
+            true,
+            None,
+            false,
+        );
+        assert!(!decision.may_proceed);
+        assert!(decision.conflict);
+        assert!(decision.reason.contains("disagree"));
+    }
+
+    #[test]
+    fn occupancy_refuses_and_flags_disagreement_when_running_pid_differs() {
+        let decision = decide_workspace_occupant_conflict(
+            Some(&occupant(111)),
+            &occupancy_caller(500),
+            true,
+            Some(&claim(333)),
+            true,
+        );
+        assert!(!decision.may_proceed);
+        assert!(decision.conflict);
+        assert!(decision.reason.contains("disagree"));
     }
 }

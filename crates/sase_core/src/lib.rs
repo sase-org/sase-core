@@ -161,10 +161,12 @@ pub use agent_identity::{
 };
 pub use agent_launch::{
     allocate_and_claim_workspace_from_content, allocate_launch_timestamp_batch,
-    list_workspace_claims_from_content, plan_claim_workspace_from_content,
+    decide_workspace_occupant_conflict, list_workspace_claims_from_content,
+    plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content, prepare_agent_launch,
     safe_launch_name, AgentLaunchPreparationError, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, LaunchFanoutPlanWire, LaunchFanoutSlotWire,
+    OccupancyCallerWire, OccupancyConflictDecisionWire, OccupantRecordWire,
     TimestampBatchAllocationError, WorkspaceClaimOutcomeWire,
     WorkspaceClaimPlanWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
     AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
