@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0](https://github.com/sase-org/sase-core/compare/v0.27.20...v0.28.0) - 2026-08-18
+
+### Added
+
+- *(bead)* [**breaking**] require an explicit task type on new task creation
+
 ### Changed
 
 - *(bead)* new task issue creation now requires an explicit task type
