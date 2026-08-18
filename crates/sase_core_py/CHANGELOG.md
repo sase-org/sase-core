@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.20](https://github.com/sase-org/sase-core/compare/v0.27.19...v0.27.20) - 2026-08-18
+
+### Added
+
+- *(task_type)* add spec validation, digest, and body rendering
+
 ## [0.27.19](https://github.com/sase-org/sase-core/compare/v0.27.18...v0.27.19) - 2026-08-17
 
 ### Added
