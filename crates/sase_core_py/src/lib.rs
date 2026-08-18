@@ -12345,6 +12345,20 @@ MENTORS:
                 reserved_object.bind(py).downcast::<PyDict>().unwrap();
             assert!(py_validate_task_type_spec(reserved_spec).is_err());
 
+            let flag_object = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "task_type": "flag",
+                    "label": reserved["label"],
+                    "summary": reserved["summary"],
+                    "when_to_use": reserved["when_to_use"],
+                }),
+            )
+            .unwrap();
+            let flag_spec = flag_object.bind(py).downcast::<PyDict>().unwrap();
+            py_validate_task_type_spec(flag_spec).unwrap();
+
             let snapshot_value = json!({
                 "types": [{
                     "task_type": spec_value["task_type"],

@@ -18,9 +18,10 @@ pub const TASK_TYPE_FIELD_NAME_MAX_LEN: usize = 64;
 pub const TASK_TYPE_SUMMARY_MAX_CHARS: usize = 120;
 pub const TASK_TYPE_WHEN_TO_USE_MAX_CHARS: usize = 400;
 
-pub const RESERVED_TASK_TYPE_SLUGS: &[&str] = &[
-    "plan", "phase", "task", "flag", "untyped", "unknown", "all", "none",
-];
+/// Reserved slugs: the three bead issue types (`plan`, `phase`, `task`) plus
+/// the four filter sentinels (`untyped`, `unknown`, `all`, `none`).
+pub const RESERVED_TASK_TYPE_SLUGS: &[&str] =
+    &["plan", "phase", "task", "untyped", "unknown", "all", "none"];
 
 /// Scalar subset of the artifact-ref `PROPERTY_TYPES` vocabulary.
 pub const TASK_TYPE_FIELD_TYPES: &[&str] =
@@ -615,6 +616,21 @@ mod tests {
             .unwrap_err()
             .message
             .contains("schema_version"));
+    }
+
+    #[test]
+    fn reserved_slugs_are_the_three_issue_types_and_four_filter_sentinels() {
+        assert_eq!(
+            RESERVED_TASK_TYPE_SLUGS,
+            &["plan", "phase", "task", "untyped", "unknown", "all", "none"]
+        );
+    }
+
+    #[test]
+    fn accepts_flag_as_a_claimable_task_type_slug() {
+        let mut spec = valid_spec();
+        spec.task_type = "flag".to_string();
+        validate_task_type_spec(&spec).unwrap();
     }
 
     #[test]

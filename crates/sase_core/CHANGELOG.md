@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(task_type)* drop `flag` from reserved task-type slugs so a project may claim it
+
 ### Fixed
 
 - *(stats)* count monitor and post-handoff family shells in historical runner occupancy
