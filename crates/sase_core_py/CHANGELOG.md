@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/sase-org/sase-core/compare/v0.28.0...v0.29.0) - 2026-08-19
+
+### Added
+
+- *(bead)* [**breaking**] delete the flag issue type
+- *(agent_launch)* add pure workspace-occupant conflict decision
+- *(task_type)* drop flag from reserved task-type slugs
+
+### Fixed
+
+- *(agent_stats)* count family shells in historical runner occupancy
+
 ### Removed
 
 - *(bead)* [**breaking**] drop `BeadFlagWire` create/update bindings with the flag issue type
