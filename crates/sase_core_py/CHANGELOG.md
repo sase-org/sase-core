@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- *(bead)* [**breaking**] drop `BeadFlagWire` create/update bindings with the flag issue type
+
+### Added
+
+- bind `bead_needs_drop_flag_type_migration`, `bead_drop_flag_type_migration_sql`, and `bead_prune_removed_flag_event_streams`
+
 ### Fixed
 
 - *(stats)* count monitor and post-handoff family shells in historical runner occupancy

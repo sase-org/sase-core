@@ -8,7 +8,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     status      TEXT NOT NULL DEFAULT 'open'
                   CHECK(status IN ('open', 'claimed', 'ready', 'snoozed', 'in_progress', 'closed')),
     issue_type  TEXT NOT NULL DEFAULT 'phase'
-                  CHECK(issue_type IN ('plan', 'phase', 'task', 'flag')),
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
     tier        TEXT
                   CHECK(tier IN ('plan', 'epic')),
     parent_id   TEXT
@@ -29,7 +29,6 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     plus_one_evidence TEXT NOT NULL DEFAULT '[]',
     close_history TEXT NOT NULL DEFAULT '[]',
     snooze      TEXT,
-    flag        TEXT,
     model       TEXT NOT NULL DEFAULT '',
     size        TEXT
                   CHECK(
@@ -46,8 +45,7 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     CHECK(
         (issue_type = 'phase' AND parent_id IS NOT NULL) OR
         (issue_type = 'plan') OR
-        (issue_type = 'task' AND parent_id IS NULL) OR
-        (issue_type = 'flag' AND parent_id IS NULL)
+        (issue_type = 'task' AND parent_id IS NULL)
     ),
     CHECK(issue_type = 'plan' OR tier IS NULL),
     CHECK(is_ready_to_work IN (0, 1)),
@@ -55,7 +53,6 @@ pub const BEAD_SQLITE_SCHEMA: &str = r#"CREATE TABLE IF NOT EXISTS issues (
     CHECK(status != 'ready' OR issue_type = 'task'),
     CHECK(status != 'snoozed' OR issue_type = 'task'),
     CHECK((status = 'snoozed') = (snooze IS NOT NULL)),
-    CHECK((issue_type = 'flag') = (flag IS NOT NULL)),
     CHECK(
         issue_type = 'plan' OR
         (changespec_name = '' AND changespec_bug_id = '')
@@ -81,8 +78,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
 CREATE INDEX IF NOT EXISTS idx_issues_task_type ON issues(task_type);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
-    WHERE external_ref IS NOT NULL AND external_ref != ''
-      AND issue_type != 'flag';
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on ON dependencies(depends_on_id);
 "#;
 
@@ -405,10 +401,17 @@ PRAGMA foreign_keys=ON;"#
 /// The type is constrained by a CHECK, so admitting it needs a table rebuild
 /// rather than an `ALTER TABLE`; the `flag` payload column rides along in the
 /// same rebuild.
+///
+/// After the flag type was retired, a current schema also lacks `'flag'`.
+/// Distinguish that post-drop shape (which already has `task_type_fields`)
+/// from the historical pre-flag shape so this admission step does not fire
+/// on a freshly created store.
 pub fn needs_flag_type_migration(create_table_sql: Option<&str>) -> bool {
     match create_table_sql {
         None => false,
-        Some(sql) => !sql.contains("'flag'"),
+        Some(sql) => {
+            !sql.contains("'flag'") && !sql.contains("task_type_fields")
+        }
     }
 }
 
@@ -502,6 +505,130 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
     ON issues(external_ref)
     WHERE external_ref IS NOT NULL AND external_ref != ''
       AND issue_type != 'flag';
+PRAGMA foreign_keys=ON;"#
+}
+
+/// Whether a pre-existing `issues` table still admits the retired flag type.
+///
+/// Detection keys on the payload column and the type-equality CHECK, which
+/// the live schema no longer carries. Historical rebuilds that still mention
+/// `'flag'` in a unique-index predicate are not enough on their own.
+pub fn needs_drop_flag_type_migration(create_table_sql: Option<&str>) -> bool {
+    match create_table_sql {
+        None => false,
+        Some(sql) => {
+            sql.contains("flag        TEXT")
+                || sql.contains("(issue_type = 'flag') = (flag IS NOT NULL)")
+                || sql.contains("(issue_type = 'flag')=(flag IS NOT NULL)")
+        }
+    }
+}
+
+/// Rebuild `issues` without the flag type, its payload column, or the
+/// flag-specific parent and presence CHECKs.
+///
+/// Remaining `issue_type = 'flag'` rows are dropped (they cannot satisfy the
+/// new CHECK). The copied column list includes `task_type` and
+/// `task_type_fields`, so this must run *after* those columns exist.
+pub fn drop_flag_type_migration_sql() -> &'static str {
+    r#"PRAGMA foreign_keys=OFF;
+CREATE TABLE IF NOT EXISTS dependencies (
+    issue_id       TEXT NOT NULL,
+    depends_on_id  TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    created_by     TEXT,
+    PRIMARY KEY (issue_id, depends_on_id)
+);
+DELETE FROM dependencies WHERE issue_id IN (
+    SELECT id FROM issues WHERE issue_type = 'flag'
+) OR depends_on_id IN (
+    SELECT id FROM issues WHERE issue_type = 'flag'
+);
+DROP TABLE IF EXISTS _issues_new;
+CREATE TABLE _issues_new (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'open'
+                  CHECK(status IN ('open', 'claimed', 'ready', 'snoozed', 'in_progress', 'closed')),
+    issue_type  TEXT NOT NULL DEFAULT 'phase'
+                  CHECK(issue_type IN ('plan', 'phase', 'task')),
+    tier        TEXT
+                  CHECK(tier IN ('plan', 'epic')),
+    parent_id   TEXT
+                  REFERENCES issues(id) ON DELETE CASCADE,
+    owner       TEXT,
+    assignee    TEXT,
+    created_at  TEXT NOT NULL,
+    created_by  TEXT,
+    updated_at  TEXT NOT NULL,
+    closed_at   TEXT,
+    close_reason TEXT,
+    resolution  TEXT
+                  CHECK(resolution IN ('done', 'canceled', 'superseded')),
+    description TEXT,
+    notes       TEXT,
+    design      TEXT,
+    refs        TEXT NOT NULL DEFAULT '',
+    plus_one_evidence TEXT NOT NULL DEFAULT '[]',
+    close_history TEXT NOT NULL DEFAULT '[]',
+    snooze      TEXT,
+    model       TEXT NOT NULL DEFAULT '',
+    size        TEXT
+                  CHECK(
+                    size IS NULL OR
+                    (issue_type IN ('phase', 'task') AND
+                     size IN ('xsmall', 'small', 'medium', 'large', 'xlarge'))
+                  ),
+    task_type   TEXT,
+    task_type_fields TEXT NOT NULL DEFAULT '{}',
+    is_ready_to_work INTEGER NOT NULL DEFAULT 0,
+    changespec_name TEXT NOT NULL DEFAULT '',
+    changespec_bug_id TEXT NOT NULL DEFAULT '',
+    external_ref TEXT,
+    CHECK(
+        (issue_type = 'phase' AND parent_id IS NOT NULL) OR
+        (issue_type = 'plan') OR
+        (issue_type = 'task' AND parent_id IS NULL)
+    ),
+    CHECK(issue_type = 'plan' OR tier IS NULL),
+    CHECK(is_ready_to_work IN (0, 1)),
+    CHECK(issue_type = 'plan' OR is_ready_to_work = 0),
+    CHECK(status != 'ready' OR issue_type = 'task'),
+    CHECK(status != 'snoozed' OR issue_type = 'task'),
+    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),
+    CHECK(
+        issue_type = 'plan' OR
+        (changespec_name = '' AND changespec_bug_id = '')
+    ),
+    CHECK(changespec_name != '' OR changespec_bug_id = ''),
+    CHECK(task_type IS NULL OR issue_type = 'task')
+);
+INSERT INTO _issues_new (
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, plus_one_evidence, close_history,
+    snooze, model, size, task_type, task_type_fields, is_ready_to_work,
+    changespec_name, changespec_bug_id, external_ref
+)
+SELECT
+    id, title, status, issue_type, tier, parent_id, owner, assignee,
+    created_at, created_by, updated_at, closed_at, close_reason, resolution,
+    description, notes, design, refs, plus_one_evidence, close_history,
+    snooze, model, size, task_type, task_type_fields, is_ready_to_work,
+    changespec_name, changespec_bug_id, external_ref
+FROM issues
+WHERE issue_type != 'flag';
+DROP TABLE issues;
+ALTER TABLE _issues_new RENAME TO issues;
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_type ON issues(issue_type);
+CREATE INDEX IF NOT EXISTS idx_issues_tier ON issues(tier);
+CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
+CREATE INDEX IF NOT EXISTS idx_issues_task_type ON issues(task_type);
+DROP INDEX IF EXISTS idx_issues_external_ref;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_external_ref
+    ON issues(external_ref)
+    WHERE external_ref IS NOT NULL AND external_ref != '';
 PRAGMA foreign_keys=ON;"#
 }
 
@@ -716,9 +843,9 @@ mod tests {
         assert!(BEAD_SQLITE_SCHEMA.contains("'xlarge'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("issue_type = 'phase'"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'task'"));
-        assert!(BEAD_SQLITE_SCHEMA.contains("'flag'"));
-        assert!(BEAD_SQLITE_SCHEMA.contains("flag        TEXT"));
-        assert!(BEAD_SQLITE_SCHEMA
+        assert!(!BEAD_SQLITE_SCHEMA.contains("'flag'"));
+        assert!(!BEAD_SQLITE_SCHEMA.contains("flag        TEXT"));
+        assert!(!BEAD_SQLITE_SCHEMA
             .contains("(issue_type = 'flag') = (flag IS NOT NULL)"));
         assert!(BEAD_SQLITE_SCHEMA.contains("'ready'"));
         assert!(BEAD_SQLITE_SCHEMA
@@ -1357,27 +1484,62 @@ mod tests {
         assert!(!needs_snoozed_status_migration(Some(&migrated_sql)));
     }
 
-    #[test]
-    fn flag_type_migration_admits_flag_rows_and_keeps_snooze() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        let legacy_schema = BEAD_SQLITE_SCHEMA
-            .replace("    flag        TEXT,\n", "")
-            .replace(", 'flag'", "")
+    fn flag_era_schema() -> String {
+        BEAD_SQLITE_SCHEMA
             .replace(
-                " OR\n        (issue_type = 'flag' AND parent_id IS NULL)",
-                "",
+                "CHECK(issue_type IN ('plan', 'phase', 'task'))",
+                "CHECK(issue_type IN ('plan', 'phase', 'task', 'flag'))",
             )
             .replace(
-                "    CHECK((issue_type = 'flag') = (flag IS NOT NULL)),\n",
-                "",
-            );
-        conn.execute_batch(&legacy_schema).unwrap();
+                "    snooze      TEXT,\n    model",
+                "    snooze      TEXT,\n    flag        TEXT,\n    model",
+            )
+            .replace(
+                "        (issue_type = 'task' AND parent_id IS NULL)\n    )",
+                "        (issue_type = 'task' AND parent_id IS NULL) OR\n        (issue_type = 'flag' AND parent_id IS NULL)\n    )",
+            )
+            .replace(
+                "    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),\n    CHECK(",
+                "    CHECK((status = 'snoozed') = (snooze IS NOT NULL)),\n    CHECK((issue_type = 'flag') = (flag IS NOT NULL)),\n    CHECK(",
+            )
+    }
+
+    #[test]
+    fn flag_type_admission_only_fires_on_pre_flag_pre_task_type_schema() {
+        assert!(!needs_flag_type_migration(None));
+        assert!(!needs_flag_type_migration(Some(BEAD_SQLITE_SCHEMA)));
+        assert!(needs_flag_type_migration(Some(
+            "CREATE TABLE issues (id TEXT, snooze TEXT)"
+        )));
+        assert!(!needs_flag_type_migration(Some(
+            "CREATE TABLE issues (id TEXT, task_type_fields TEXT NOT NULL DEFAULT '{}')"
+        )));
+        assert!(!needs_drop_flag_type_migration(None));
+        assert!(!needs_drop_flag_type_migration(Some(BEAD_SQLITE_SCHEMA)));
+        assert!(needs_drop_flag_type_migration(Some(&flag_era_schema())));
+    }
+
+    #[test]
+    fn drop_flag_type_migration_removes_flag_rows_and_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(&flag_era_schema()).unwrap();
         insert_plan_and_phase(&conn, "phase-medium", "medium").unwrap();
         conn.execute(
             "UPDATE issues SET snooze='{\"until\":\"2026-08-09T09:00:00-04:00\"}',
                  status='snoozed', issue_type='task', parent_id=NULL, size='small'
              WHERE id='phase-medium'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues (
+                id, title, status, issue_type, created_at, updated_at, flag
+             ) VALUES (
+                'flag-demo', 'Demo flag', 'open', 'flag',
+                'now', 'now',
+                '{\"key\":\"demo_key\",\"remove_by_date\":\"2026-12-01\",\"remove_by_release\":\"0.19.0\"}'
+             )",
             [],
         )
         .unwrap();
@@ -1390,47 +1552,25 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(needs_flag_type_migration(Some(&create_table_sql)));
-        assert!(!needs_flag_type_migration(None));
+        assert!(needs_drop_flag_type_migration(Some(&create_table_sql)));
+        assert!(!needs_flag_type_migration(Some(&create_table_sql)));
 
-        conn.execute_batch(flag_type_migration_sql()).unwrap();
+        conn.execute_batch(drop_flag_type_migration_sql()).unwrap();
 
-        conn.execute(
-            "INSERT INTO issues (
-                id, title, status, issue_type, created_at, updated_at, flag
-             ) VALUES (
-                'flag-demo', 'Demo flag', 'open', 'flag',
-                'now', 'now',
-                '{\"key\":\"demo_key\",\"remove_by_date\":\"2026-12-01\",\"remove_by_release\":\"0.19.0\"}'
-             )",
-            [],
-        )
-        .unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM issues WHERE id='flag-demo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
         assert!(conn
             .execute(
                 "INSERT INTO issues (
                     id, title, status, issue_type, created_at, updated_at
                  ) VALUES (
                     'flag-bare', 'Bare', 'open', 'flag', 'now', 'now'
-                 )",
-                [],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE issues SET issue_type='flag', flag='{}'
-                 WHERE id='plan-1'",
-                [],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "INSERT INTO issues (
-                    id, title, status, issue_type, parent_id,
-                    created_at, updated_at, flag
-                 ) VALUES (
-                    'flag-child', 'Nested', 'open', 'flag', 'plan-1',
-                    'now', 'now', '{}'
                  )",
                 [],
             )
@@ -1453,7 +1593,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!needs_flag_type_migration(Some(&migrated_sql)));
+        assert!(!needs_drop_flag_type_migration(Some(&migrated_sql)));
+        assert!(!migrated_sql.contains("flag        TEXT"));
+        assert!(!migrated_sql.contains("'flag'"));
     }
 
     #[test]

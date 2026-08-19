@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use super::events::{
     compare_issues_canonically, reduce_event_streams, BeadEventRecordWire,
-    BeadEventStoreManifestWire, BeadEventStreamWire,
+    BeadEventStoreManifestWire, BeadEventStreamWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use super::wire::{
     deserialize_valid_issue, invalid_record_error,
@@ -137,6 +137,175 @@ pub fn event_streams_dir(beads_dir: &Path) -> PathBuf {
     beads_dir.join("events").join("streams")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedFlagStreamPruneOutcomeWire {
+    pub pruned_stream_ids: Vec<String>,
+    pub rewritten_manifest: bool,
+}
+
+/// Drop event streams of removed beads whose `issue_created` payload is the
+/// retired flag issue type, then rewrite `events/manifest.json`.
+///
+/// `sase bead rm` leaves a tombstoned stream on disk. After the flag issue
+/// type is deleted from the wire, those files cannot be deserialized, so this
+/// must run before any typed parse of the store.
+pub fn prune_removed_flag_event_streams(
+    beads_dir: &Path,
+) -> Result<RemovedFlagStreamPruneOutcomeWire, BeadError> {
+    let streams_dir = event_streams_dir(beads_dir);
+    if !streams_dir.is_dir() {
+        return Ok(RemovedFlagStreamPruneOutcomeWire {
+            pruned_stream_ids: Vec::new(),
+            rewritten_manifest: false,
+        });
+    }
+
+    let mut pruned_stream_ids = Vec::new();
+    let mut live_flag_ids = Vec::new();
+    for path in list_event_stream_paths(&streams_dir)? {
+        let stream_id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        match classify_flag_stream(&path)? {
+            FlagStreamKind::RemovedFlag => {
+                fs::remove_file(&path).map_err(|err| {
+                    BeadError::io(format!(
+                        "failed to prune removed flag stream {}: {err}",
+                        path.display()
+                    ))
+                })?;
+                pruned_stream_ids.push(stream_id);
+            }
+            FlagStreamKind::LiveFlag => live_flag_ids.push(stream_id),
+            FlagStreamKind::Other => {}
+        }
+    }
+
+    if !live_flag_ids.is_empty() {
+        live_flag_ids.sort();
+        return Err(BeadError::validation(format!(
+            "bead event store still has live flag issue-type streams: {}; migrate or remove them before loading",
+            live_flag_ids.join(", ")
+        )));
+    }
+
+    if pruned_stream_ids.is_empty() {
+        return Ok(RemovedFlagStreamPruneOutcomeWire {
+            pruned_stream_ids,
+            rewritten_manifest: false,
+        });
+    }
+
+    pruned_stream_ids.sort();
+    let remaining = list_event_stream_paths(&streams_dir)?.len();
+    rewrite_manifest_stream_count(beads_dir, remaining)?;
+    Ok(RemovedFlagStreamPruneOutcomeWire {
+        pruned_stream_ids,
+        rewritten_manifest: true,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlagStreamKind {
+    Other,
+    LiveFlag,
+    RemovedFlag,
+}
+
+fn classify_flag_stream(path: &Path) -> Result<FlagStreamKind, BeadError> {
+    let contents = fs::read_to_string(path).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead event stream {}: {err}",
+            path.display()
+        ))
+    })?;
+    let mut created_flag = false;
+    let mut removed = false;
+    for line in contents.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return Ok(FlagStreamKind::Other);
+        };
+        let operation = value
+            .get("operation")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        if operation == "issue_created" {
+            let issue_type = value
+                .pointer("/payload/issue/issue_type")
+                .and_then(|item| item.as_str());
+            if issue_type == Some("flag") {
+                created_flag = true;
+            }
+        }
+        if operation == "issue_removed" {
+            removed = true;
+        }
+    }
+    Ok(match (created_flag, removed) {
+        (true, true) => FlagStreamKind::RemovedFlag,
+        (true, false) => FlagStreamKind::LiveFlag,
+        _ => FlagStreamKind::Other,
+    })
+}
+
+fn list_event_stream_paths(
+    streams_dir: &Path,
+) -> Result<Vec<PathBuf>, BeadError> {
+    let mut stream_paths = Vec::new();
+    for entry in fs::read_dir(streams_dir).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead event streams directory {}: {err}",
+            streams_dir.display()
+        ))
+    })? {
+        let path = entry
+            .map_err(|err| {
+                BeadError::io(format!(
+                    "failed to read bead event stream entry: {err}"
+                ))
+            })?
+            .path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+            stream_paths.push(path);
+        }
+    }
+    stream_paths.sort();
+    Ok(stream_paths)
+}
+
+fn rewrite_manifest_stream_count(
+    beads_dir: &Path,
+    stream_count: usize,
+) -> Result<(), BeadError> {
+    let manifest_path = event_manifest_path(beads_dir);
+    let manifest = if manifest_path.exists() {
+        let text = fs::read_to_string(&manifest_path).map_err(|err| {
+            BeadError::io(format!(
+                "failed to read bead events manifest {}: {err}",
+                manifest_path.display()
+            ))
+        })?;
+        let mut manifest: BeadEventStoreManifestWire =
+            serde_json::from_str(&text)?;
+        manifest.stream_count = stream_count;
+        manifest
+    } else {
+        BeadEventStoreManifestWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            stream_count,
+            generated_from: "issues.jsonl".to_string(),
+            migration_tool: "sase-core bead events".to_string(),
+        }
+    };
+    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    write_file_atomic(&manifest_path, &manifest_json)
+}
+
 pub fn repair_event_store_manifest(
     beads_dir: &Path,
 ) -> Result<BeadEventManifestRepairOutcomeWire, BeadError> {
@@ -223,6 +392,7 @@ pub fn repair_event_store_manifest(
 pub fn read_event_store(
     beads_dir: &Path,
 ) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
+    prune_removed_flag_event_streams(beads_dir)?;
     let manifest_path = event_manifest_path(beads_dir);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
         BeadError::io(format!(
@@ -248,26 +418,7 @@ pub fn read_event_store(
 fn read_event_streams_without_manifest(
     beads_dir: &Path,
 ) -> Result<Vec<BeadEventStreamWire>, BeadError> {
-    let streams_dir = event_streams_dir(beads_dir);
-    let mut stream_paths = Vec::new();
-    for entry in fs::read_dir(&streams_dir).map_err(|err| {
-        BeadError::io(format!(
-            "failed to read bead event streams directory {}: {err}",
-            streams_dir.display()
-        ))
-    })? {
-        let path = entry
-            .map_err(|err| {
-                BeadError::io(format!(
-                    "failed to read bead event stream entry: {err}"
-                ))
-            })?
-            .path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            stream_paths.push(path);
-        }
-    }
-    stream_paths.sort();
+    let stream_paths = list_event_stream_paths(&event_streams_dir(beads_dir))?;
 
     let mut stream_ids = BTreeSet::new();
     stream_paths
@@ -355,7 +506,6 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
         IssueTypeWire::Task => 2,
-        IssueTypeWire::Flag => 3,
     };
     (kind_order, issue.id.as_str())
 }
@@ -526,7 +676,6 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
-            flag: None,
             model: String::new(),
             size: None,
             task_type: None,
@@ -555,6 +704,68 @@ mod tests {
                 payload: BeadEventPayloadWire::IssueCreated { issue },
             }],
         }
+    }
+
+    #[test]
+    fn prune_removes_tombstoned_flag_streams_and_rewrites_the_manifest() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let streams_dir = event_streams_dir(beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+        write_event_store(beads_dir, &[event_stream("sase-plan", "Plan")])
+            .unwrap();
+
+        let flag_path = streams_dir.join("sase-nw.jsonl");
+        fs::write(
+            &flag_path,
+            concat!(
+                r#"{"schema_version":1,"event_id":"sase-nw:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-nw","payload":{"kind":"issue_created","issue":{"id":"sase-nw","title":"Old flag","status":"open","issue_type":"flag","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}}}"#,
+                "\n",
+                r#"{"schema_version":1,"event_id":"sase-nw:2","timestamp":"2026-01-02T00:00:00Z","actor":"test","operation":"issue_removed","issue_id":"sase-nw","payload":{"kind":"issue_removed","cascade_removed_issue_ids":[]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let manifest_path = event_manifest_path(beads_dir);
+        let mut manifest: BeadEventStoreManifestWire =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap())
+                .unwrap();
+        manifest.stream_count = 2;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = prune_removed_flag_event_streams(beads_dir).unwrap();
+        assert_eq!(outcome.pruned_stream_ids, vec!["sase-nw".to_string()]);
+        assert!(outcome.rewritten_manifest);
+        assert!(!flag_path.exists());
+
+        let (loaded_manifest, streams) = read_event_store(beads_dir).unwrap();
+        assert_eq!(loaded_manifest.stream_count, 1);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].stream_id, "sase-plan");
+    }
+
+    #[test]
+    fn prune_rejects_live_flag_streams() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let streams_dir = event_streams_dir(beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+        fs::write(
+            streams_dir.join("sase-nw.jsonl"),
+            concat!(
+                r#"{"schema_version":1,"event_id":"sase-nw:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-nw","payload":{"kind":"issue_created","issue":{"id":"sase-nw","title":"Live flag","status":"open","issue_type":"flag","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let error = prune_removed_flag_event_streams(beads_dir).unwrap_err();
+        assert!(error.message.contains("sase-nw"));
+        assert!(error.message.contains("live flag"));
     }
 
     #[test]

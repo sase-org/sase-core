@@ -39,8 +39,9 @@ pub use history::{
 };
 pub use jsonl::{
     export_issues_to_jsonl, import_issues_from_jsonl, parse_issues_jsonl,
-    repair_event_store_manifest, BeadEventManifestRepairOutcomeWire,
-    BeadEventManifestRepairStatusWire, JsonlLoadOutcome,
+    prune_removed_flag_event_streams, repair_event_store_manifest,
+    BeadEventManifestRepairOutcomeWire, BeadEventManifestRepairStatusWire,
+    JsonlLoadOutcome, RemovedFlagStreamPruneOutcomeWire,
 };
 pub use mutation::{
     add_bead_references, add_dependency, add_task_plus_one, append_issue_note,
@@ -63,10 +64,11 @@ pub use read::{
     BeadProjectionDriftWire, BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
-    changespec_metadata_migration_sql, external_ref_migration_sql,
-    flag_type_migration_sql, is_ready_to_work_migration_sql,
-    issue_type_migration_sql, missing_changespec_metadata_columns,
-    model_migration_sql, needs_external_ref_migration,
+    changespec_metadata_migration_sql, drop_flag_type_migration_sql,
+    external_ref_migration_sql, flag_type_migration_sql,
+    is_ready_to_work_migration_sql, issue_type_migration_sql,
+    missing_changespec_metadata_columns, model_migration_sql,
+    needs_drop_flag_type_migration, needs_external_ref_migration,
     needs_flag_type_migration, needs_is_ready_to_work_migration,
     needs_issue_type_migration, needs_model_migration,
     needs_plus_one_evidence_migration, needs_refs_migration,
@@ -80,9 +82,8 @@ pub use schema::{
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use wire::{
-    parse_flag_key, parse_flag_remove_by_date, parse_flag_remove_by_release,
-    parse_snooze_timestamp, validate_model_value, BeadCloseRecordWire,
-    BeadError, BeadFlagWire, BeadReopenCauseWire, BeadResolutionWire,
+    flag_thresholds_due, parse_snooze_timestamp, validate_model_value,
+    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
     BeadSearchMatchWire, BeadSnoozeWire, BeadTierWire, DependencyWire,
     IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
     TaskPlusOneEvidenceWire,

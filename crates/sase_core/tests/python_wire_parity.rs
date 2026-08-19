@@ -41,9 +41,9 @@
 //! byte ordered comparison.
 
 use sase_core::{
-    AgentCleanupTargetWire, AgentMetaWire, BeadFlagWire, ChangeSpecWire,
-    CommentWire, CommitWire, DeltaWire, HookStatusLineWire, HookWire,
-    IssueTypeWire, MentorStatusLineWire, MentorWire, ProcStoreSnapshotWire,
+    AgentCleanupTargetWire, AgentMetaWire, ChangeSpecWire, CommentWire,
+    CommitWire, DeltaWire, HookStatusLineWire, HookWire, IssueTypeWire,
+    MentorStatusLineWire, MentorWire, ProcStoreSnapshotWire,
     ProcStoreStatsWire, ProcWire, SourceSpanWire, StatusWire, TimestampWire,
     CHANGESPEC_WIRE_SCHEMA_VERSION, PROC_WIRE_SCHEMA_VERSION,
 };
@@ -221,24 +221,6 @@ fn rust_patch() -> ChangeSpecWire {
 fn rust_json_equals_python_fixture() {
     let rust_value: Value = serde_json::to_value(rust_patch()).unwrap();
     let python_value: Value = serde_json::from_str(PYTHON_FIXTURE).unwrap();
-    assert_eq!(rust_value, python_value);
-}
-
-#[test]
-fn bead_flag_enum_and_record_match_python_wire_values() {
-    let rust_value = serde_json::json!({
-        "issue_type": IssueTypeWire::Flag,
-        "flag": BeadFlagWire {
-            key: "demo_key".to_string(),
-            remove_by_date: "2026-12-01".to_string(),
-            remove_by_release: "0.19.0".to_string(),
-        },
-    });
-    let python_value: Value = serde_json::from_str(
-        r#"{"issue_type":"flag","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}"#,
-    )
-    .unwrap();
-
     assert_eq!(rust_value, python_value);
 }
 

@@ -14,10 +14,9 @@ use crate::serde_option::deserialize_present_option;
 
 use super::wire::{
     parse_task_plus_one_observed_since, validate_unique_external_refs,
-    BeadCloseRecordWire, BeadError, BeadFlagWire, BeadReopenCauseWire,
-    BeadResolutionWire, BeadSnoozeWire, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
-    TaskPlusOneEvidenceWire,
+    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
+    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
+    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
 
 pub const BEAD_EVENT_SCHEMA_VERSION: u32 = 1;
@@ -371,8 +370,6 @@ pub struct BeadIssueUpdateEventFieldsWire {
     #[serde(default)]
     pub is_ready_to_work: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag: Option<BeadFlagWire>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_type_fields: Option<BTreeMap<String, String>>,
 }
 
@@ -394,7 +391,6 @@ impl BeadIssueUpdateEventFieldsWire {
             && self.external_ref.is_none()
             && self.tier.is_none()
             && self.is_ready_to_work.is_none()
-            && self.flag.is_none()
             && self.task_type_fields.is_none()
         {
             return Err(BeadError::validation(
@@ -550,9 +546,6 @@ pub fn reduce_event_streams(
 fn collapse_duplicate_external_refs(issues: Vec<IssueWire>) -> Vec<IssueWire> {
     let mut winner_index_by_ref: BTreeMap<String, usize> = BTreeMap::new();
     for (index, issue) in issues.iter().enumerate() {
-        if issue.issue_type == IssueTypeWire::Flag {
-            continue;
-        }
         let external_ref = issue.external_ref.trim();
         if external_ref.is_empty() {
             continue;
@@ -575,8 +568,7 @@ fn collapse_duplicate_external_refs(issues: Vec<IssueWire>) -> Vec<IssueWire> {
         .into_iter()
         .enumerate()
         .filter(|(index, issue)| {
-            issue.issue_type == IssueTypeWire::Flag
-                || issue.external_ref.trim().is_empty()
+            issue.external_ref.trim().is_empty()
                 || winning_indexes.contains(index)
         })
         .map(|(_, issue)| issue)
@@ -1467,9 +1459,6 @@ fn apply_update_event_fields(
     if let Some(value) = fields.is_ready_to_work {
         issue.is_ready_to_work = value;
     }
-    if let Some(value) = &fields.flag {
-        issue.flag = Some(value.clone());
-    }
     if let Some(value) = &fields.task_type_fields {
         issue.task_type_fields = value.clone();
     }
@@ -1597,7 +1586,6 @@ fn event_issue_key(issue: &IssueWire) -> (u8, String) {
         IssueTypeWire::Plan => 0,
         IssueTypeWire::Phase => 1,
         IssueTypeWire::Task => 2,
-        IssueTypeWire::Flag => 3,
     };
     (kind_order, issue.id.clone())
 }
@@ -1609,7 +1597,7 @@ fn root_issue_ids(issues: &[IssueWire]) -> BTreeMap<String, String> {
     for issue in issues {
         let root = if matches!(
             issue.issue_type,
-            IssueTypeWire::Plan | IssueTypeWire::Task | IssueTypeWire::Flag
+            IssueTypeWire::Plan | IssueTypeWire::Task
         ) {
             issue.id.clone()
         } else {
@@ -1744,7 +1732,6 @@ mod tests {
             refs,
             plus_one_evidence: Vec::new(),
             snooze: None,
-            flag: None,
             model: String::new(),
             size: None,
             task_type: None,
@@ -1794,20 +1781,6 @@ mod tests {
         issue.tier = None;
         issue.created_by = "creator-agent".to_string();
         issue.size = Some(PhaseSizeWire::Small);
-        issue
-    }
-
-    fn flag_issue() -> IssueWire {
-        let mut issue = issue_with_refs(Vec::new());
-        issue.id = "sase-flag".to_string();
-        issue.title = "Flag".to_string();
-        issue.issue_type = IssueTypeWire::Flag;
-        issue.tier = None;
-        issue.flag = Some(BeadFlagWire {
-            key: "demo_key".to_string(),
-            remove_by_date: "2026-12-01".to_string(),
-            remove_by_release: "0.19.0".to_string(),
-        });
         issue
     }
 
@@ -2020,30 +1993,6 @@ mod tests {
             assert_eq!(reduced[0].id, "sase-1");
             assert_eq!(reduced[0].external_ref, "bug:sase#42");
         }
-    }
-
-    #[test]
-    fn reduction_keeps_flag_rows_out_of_external_ref_collapse() {
-        let mut flag = flag_issue();
-        flag.external_ref = "bug:sase#42".to_string();
-        let mut task = task_issue();
-        task.id = "sase-task".to_string();
-        task.external_ref = "bug:sase#42".to_string();
-        let mut duplicate_task = task_issue();
-        duplicate_task.id = "sase-other".to_string();
-        duplicate_task.external_ref = "bug:sase#42".to_string();
-        duplicate_task.created_at = "2026-02-01T00:00:00Z".to_string();
-
-        let reduced = reduce_event_streams(&[
-            created_stream(&flag),
-            created_stream(&task),
-            created_stream(&duplicate_task),
-        ])
-        .unwrap();
-
-        let ids: BTreeSet<&str> =
-            reduced.iter().map(|issue| issue.id.as_str()).collect();
-        assert_eq!(ids, BTreeSet::from(["sase-task", "sase-flag"]));
     }
 
     #[test]

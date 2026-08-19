@@ -226,9 +226,7 @@ pub(crate) fn derive_active_intervals(
 /// follow-up rides the slot its family already holds. Terminal records stay
 /// eligible so historical analytics can still classify the row; occupancy
 /// uses [`is_runner_occupancy_record`] / [`running_agent_slot_count`].
-pub fn is_runner_eligible_record(
-    record: &AgentArtifactRecordWire,
-) -> bool {
+pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
     if !is_runner_user_agent_kind(record) {
         return false;
     }

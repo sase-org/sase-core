@@ -27,7 +27,6 @@ pub enum IssueTypeWire {
     #[default]
     Phase,
     Task,
-    Flag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -416,79 +415,26 @@ pub fn parse_snooze_timestamp(
     })
 }
 
-/// The removal thresholds a flag bead currently owns.
+/// Return whether a flag task bead's calendar and release thresholds are both
+/// reached.
 ///
-/// One embedded record, present exactly while `issue_type` is `flag` and
-/// absent otherwise, is deliberate: no flat field can drift out of sync with
-/// the type, and `sase bead history` replays the event stream when past
-/// `remove_by` values matter, so no separate history list is needed here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BeadFlagWire {
-    /// Registry key this bead owns. Non-empty `snake_case`.
-    pub key: String,
-    /// Calendar date the flag becomes eligible for removal, `YYYY-MM-DD`.
-    pub remove_by_date: String,
-    /// Release threshold the flag becomes eligible for removal, e.g. `0.19.0`.
-    pub remove_by_release: String,
-}
-
-impl BeadFlagWire {
-    pub fn validate(&self) -> Result<(), BeadError> {
-        parse_flag_key(&self.key)?;
-        parse_flag_remove_by_date(&self.remove_by_date)?;
-        parse_flag_remove_by_release(&self.remove_by_release)?;
-        Ok(())
-    }
-}
-
-/// Parse a flag registry key, requiring non-empty `snake_case`.
-pub fn parse_flag_key(value: &str) -> Result<&str, BeadError> {
-    let trimmed = value.trim();
-    if is_snake_case_key(trimmed) {
-        Ok(trimmed)
-    } else {
-        Err(BeadError::validation(format!(
-            "bead flag key must be non-empty snake_case: {value:?}"
-        )))
-    }
-}
-
-/// Parse a flag removal date, requiring a calendar `YYYY-MM-DD` ISO date.
-pub fn parse_flag_remove_by_date(value: &str) -> Result<NaiveDate, BeadError> {
-    let trimmed = value.trim();
-    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").map_err(|error| {
-        BeadError::validation(format!(
-            "bead flag remove_by_date must be an ISO date: {value:?} ({error})"
-        ))
-    })
-}
-
-/// Parse a flag removal release, requiring `X.Y.Z` with an optional suffix.
-pub fn parse_flag_remove_by_release(value: &str) -> Result<&str, BeadError> {
-    let trimmed = value.trim();
-    if is_release_string(trimmed) {
-        Ok(trimmed)
-    } else {
-        Err(BeadError::validation(format!(
-            "bead flag remove_by_release must be a release string: {value:?}"
-        )))
-    }
-}
-
-/// Return whether a flag's calendar and release thresholds are both reached.
-pub fn flag_removal_due(
-    flag: &BeadFlagWire,
+/// Thresholds now live on `task_type_fields` of a `task` bead whose
+/// `task_type` is `flag`. Unparseable values are not due.
+pub fn flag_thresholds_due(
+    remove_by_date: &str,
+    remove_by_release: &str,
     today: NaiveDate,
     release: &str,
 ) -> bool {
-    let Ok(remove_by_date) = parse_flag_remove_by_date(&flag.remove_by_date)
+    let Ok(remove_by_date) =
+        NaiveDate::parse_from_str(remove_by_date.trim(), "%Y-%m-%d")
     else {
         return false;
     };
     let Some(current_release) = release_tuple(release) else {
         return false;
     };
-    let Some(remove_by_release) = release_tuple(&flag.remove_by_release) else {
+    let Some(remove_by_release) = release_tuple(remove_by_release) else {
         return false;
     };
     today >= remove_by_date && current_release >= remove_by_release
@@ -582,39 +528,6 @@ fn is_snake_case_key(value: &str) -> bool {
     !prev_underscore
 }
 
-fn is_release_string(value: &str) -> bool {
-    let (core, suffix) = match value.find(['-', '+']) {
-        Some(index) => (&value[..index], Some(&value[index + 1..])),
-        None => (value, None),
-    };
-    let mut parts = core.split('.');
-    let Some(major) = parts.next() else {
-        return false;
-    };
-    let Some(minor) = parts.next() else {
-        return false;
-    };
-    let Some(patch) = parts.next() else {
-        return false;
-    };
-    if parts.next().is_some() {
-        return false;
-    }
-    if ![major, minor, patch].iter().all(|part| {
-        !part.is_empty()
-            && part.chars().all(|character| character.is_ascii_digit())
-    }) {
-        return false;
-    }
-    match suffix {
-        None => true,
-        Some("") => false,
-        Some(suffix) => suffix.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
-        }),
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueWire {
     pub id: String,
@@ -679,8 +592,6 @@ pub struct IssueWire {
     pub plus_one_evidence: Vec<TaskPlusOneEvidenceWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snooze: Option<BeadSnoozeWire>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag: Option<BeadFlagWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -733,6 +644,27 @@ impl IssueWire {
         self.plus_one_evidence.len()
     }
 
+    pub fn is_flag_task(&self) -> bool {
+        self.issue_type == IssueTypeWire::Task
+            && self.task_type.as_deref() == Some("flag")
+    }
+
+    pub fn flag_is_due(&self, today: NaiveDate, release: &str) -> bool {
+        if !self.is_flag_task() {
+            return false;
+        }
+        let Some(remove_by_date) = self.task_type_fields.get("remove_by_date")
+        else {
+            return false;
+        };
+        let Some(remove_by_release) =
+            self.task_type_fields.get("remove_by_release")
+        else {
+            return false;
+        };
+        flag_thresholds_due(remove_by_date, remove_by_release, today, release)
+    }
+
     pub fn validate(&self) -> Result<(), BeadError> {
         if self.issue_type == IssueTypeWire::Phase && self.parent_id.is_none() {
             return Err(BeadError::validation(
@@ -752,16 +684,6 @@ impl IssueWire {
         if self.issue_type == IssueTypeWire::Task && self.tier.is_some() {
             return Err(BeadError::validation(
                 "Task issues cannot carry plan tier metadata",
-            ));
-        }
-        if self.issue_type == IssueTypeWire::Flag && self.parent_id.is_some() {
-            return Err(BeadError::validation(
-                "Flag issues cannot have a parent_id",
-            ));
-        }
-        if self.issue_type == IssueTypeWire::Flag && self.tier.is_some() {
-            return Err(BeadError::validation(
-                "Flag issues cannot carry plan tier metadata",
             ));
         }
         if self.issue_type != IssueTypeWire::Task
@@ -834,22 +756,6 @@ impl IssueWire {
         if let Some(snooze) = &self.snooze {
             snooze.validate()?;
         }
-        match (&self.issue_type, &self.flag) {
-            (IssueTypeWire::Flag, None) => {
-                return Err(BeadError::validation(
-                    "flag issues must carry flag metadata",
-                ));
-            }
-            (issue_type, Some(_)) if *issue_type != IssueTypeWire::Flag => {
-                return Err(BeadError::validation(
-                    "Only flag issues can carry flag metadata",
-                ));
-            }
-            _ => {}
-        }
-        if let Some(flag) = &self.flag {
-            flag.validate()?;
-        }
         if !self.changespec_bug_id.is_empty() && self.changespec_name.is_empty()
         {
             return Err(BeadError::validation(
@@ -882,9 +788,6 @@ pub(crate) fn validate_unique_external_refs(
 ) -> Result<(), BeadError> {
     let mut owner_by_ref: BTreeSet<(&str, &str)> = BTreeSet::new();
     for issue in issues {
-        if issue.issue_type == IssueTypeWire::Flag {
-            continue;
-        }
         let external_ref = issue.external_ref.trim();
         if external_ref.is_empty() {
             continue;
@@ -938,7 +841,6 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
-            flag: None,
             model: String::new(),
             size: None,
             task_type: None,
@@ -1055,15 +957,11 @@ mod tests {
             (IssueTypeWire::Phase, Some("test-0"), None),
             (IssueTypeWire::Plan, None, Some(BeadTierWire::Epic)),
             (IssueTypeWire::Task, None, None),
-            (IssueTypeWire::Flag, None, None),
         ] {
             let mut issue = phase(parent_id);
             issue.issue_type = issue_type.clone();
             issue.parent_id = parent_id.map(str::to_string);
             issue.tier = tier;
-            if issue_type == IssueTypeWire::Flag {
-                issue.flag = Some(flag_record());
-            }
             issue.close_history = vec![close_record()];
             issue.validate().unwrap();
         }
@@ -1486,173 +1384,6 @@ mod tests {
         );
     }
 
-    fn flag_issue(flag: BeadFlagWire) -> IssueWire {
-        let mut issue = phase(None);
-        issue.issue_type = IssueTypeWire::Flag;
-        issue.flag = Some(flag);
-        issue
-    }
-
-    fn flag_record() -> BeadFlagWire {
-        BeadFlagWire {
-            key: "demo_key".to_string(),
-            remove_by_date: "2026-12-01".to_string(),
-            remove_by_release: "0.19.0".to_string(),
-        }
-    }
-
-    #[test]
-    fn flag_type_round_trips_with_its_record() {
-        let issue = flag_issue(flag_record());
-        issue.validate().unwrap();
-
-        let value = serde_json::to_value(&issue).unwrap();
-        assert_eq!(value["issue_type"], "flag");
-        assert_eq!(
-            value["flag"],
-            json!({
-                "key": "demo_key",
-                "remove_by_date": "2026-12-01",
-                "remove_by_release": "0.19.0",
-            })
-        );
-        let round_tripped: IssueWire = serde_json::from_value(value).unwrap();
-        assert_eq!(round_tripped, issue);
-    }
-
-    #[test]
-    fn flag_key_is_absent_when_the_bead_is_not_a_flag() {
-        let issue = phase(Some("test-0"));
-        let value = serde_json::to_value(&issue).unwrap();
-        assert!(value.get("flag").is_none());
-        let decoded: IssueWire = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.flag, None);
-    }
-
-    #[test]
-    fn flag_issues_must_carry_flag_metadata() {
-        let mut issue = flag_issue(flag_record());
-        issue.flag = None;
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "flag issues must carry flag metadata"
-        );
-    }
-
-    #[test]
-    fn flag_metadata_requires_flag_type() {
-        let mut issue = flag_issue(flag_record());
-        issue.issue_type = IssueTypeWire::Task;
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Only flag issues can carry flag metadata"
-        );
-    }
-
-    #[test]
-    fn flag_issues_cannot_have_parent_or_tier() {
-        let mut issue = flag_issue(flag_record());
-        issue.parent_id = Some("test-0".to_string());
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Flag issues cannot have a parent_id"
-        );
-
-        issue.parent_id = None;
-        issue.tier = Some(BeadTierWire::Epic);
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Flag issues cannot carry plan tier metadata"
-        );
-    }
-
-    #[test]
-    fn flag_record_validates_key_date_and_release() {
-        for key in ["", " ", "Demo", "demo-key", "_demo", "demo_", "1demo"] {
-            let issue = flag_issue(BeadFlagWire {
-                key: key.to_string(),
-                ..flag_record()
-            });
-            assert!(
-                issue
-                    .validate()
-                    .unwrap_err()
-                    .message
-                    .contains("key must be non-empty snake_case"),
-                "key {key:?} should be rejected"
-            );
-        }
-
-        for date in ["", "2026-12-01T00:00:00Z", "2026/12/01", "soon"] {
-            let issue = flag_issue(BeadFlagWire {
-                remove_by_date: date.to_string(),
-                ..flag_record()
-            });
-            assert!(
-                issue
-                    .validate()
-                    .unwrap_err()
-                    .message
-                    .contains("remove_by_date must be an ISO date"),
-                "date {date:?} should be rejected"
-            );
-        }
-
-        for release in ["", "v0.19.0", "0.19", "latest"] {
-            let issue = flag_issue(BeadFlagWire {
-                remove_by_release: release.to_string(),
-                ..flag_record()
-            });
-            assert!(
-                issue
-                    .validate()
-                    .unwrap_err()
-                    .message
-                    .contains("remove_by_release must be a release string"),
-                "release {release:?} should be rejected"
-            );
-        }
-
-        flag_issue(BeadFlagWire {
-            key: "plugins_enabled".to_string(),
-            remove_by_date: "2026-11-14".to_string(),
-            remove_by_release: "0.19.0-rc.1".to_string(),
-        })
-        .validate()
-        .unwrap();
-    }
-
-    #[test]
-    fn flag_issues_still_cannot_be_ready_or_snoozed_or_carry_plus_ones() {
-        let mut issue = flag_issue(flag_record());
-        issue.status = StatusWire::Ready;
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Only task issues can have ready status"
-        );
-
-        issue.status = StatusWire::Snoozed;
-        issue.snooze = Some(snooze_record());
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Only task issues can have snoozed status"
-        );
-
-        issue.status = StatusWire::Open;
-        issue.snooze = None;
-        issue.plus_one_evidence = vec![TaskPlusOneEvidenceWire {
-            timestamp: "2026-01-01T00:00:00Z".to_string(),
-            observed_since: None,
-            reporter: "agent-a".to_string(),
-            note: "reproduced".to_string(),
-            refs: Vec::new(),
-        }];
-        assert_eq!(
-            issue.validate().unwrap_err().message,
-            "Only task issues can carry +1 evidence"
-        );
-    }
-
     fn typed_task(
         task_type: Option<&str>,
         fields: BTreeMap<String, String>,
@@ -1709,16 +1440,14 @@ mod tests {
 
     #[test]
     fn task_type_is_rejected_on_non_task_issues() {
-        for (issue_type, parent_id, tier, flag) in [
-            (IssueTypeWire::Phase, Some("test-0"), None, None),
-            (IssueTypeWire::Plan, None, Some(BeadTierWire::Epic), None),
-            (IssueTypeWire::Flag, None, None, Some(flag_record())),
+        for (issue_type, parent_id, tier) in [
+            (IssueTypeWire::Phase, Some("test-0"), None),
+            (IssueTypeWire::Plan, None, Some(BeadTierWire::Epic)),
         ] {
             let mut issue = phase(parent_id);
             issue.issue_type = issue_type;
             issue.parent_id = parent_id.map(str::to_string);
             issue.tier = tier;
-            issue.flag = flag;
             issue.task_type = Some("flake".to_string());
             assert_eq!(
                 issue.validate().unwrap_err().message,

@@ -16,8 +16,7 @@ use super::jsonl::{
     import_issues_from_jsonl, read_event_store,
 };
 use super::wire::{
-    flag_removal_due, BeadError, BeadTierWire, IssueTypeWire, IssueWire,
-    StatusWire,
+    BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
@@ -883,11 +882,10 @@ fn stats_for_issues(issues: &[IssueWire]) -> BTreeMap<String, usize> {
         *stats
             .entry(issue_type_as_str(&issue.issue_type).to_string())
             .or_insert(0) += 1;
-        if issue
-            .flag
-            .as_ref()
-            .is_some_and(|flag| flag_removal_due(flag, today, release))
-        {
+        if issue.is_flag_task() {
+            *stats.entry("flag".to_string()).or_insert(0) += 1;
+        }
+        if issue.flag_is_due(today, release) {
             *stats.entry("due_flag".to_string()).or_insert(0) += 1;
         }
         plus_one_total += issue.plus_one_count();
@@ -939,7 +937,6 @@ fn parse_issue_type(value: &str) -> Result<IssueTypeWire, BeadError> {
         "plan" => Ok(IssueTypeWire::Plan),
         "phase" => Ok(IssueTypeWire::Phase),
         "task" => Ok(IssueTypeWire::Task),
-        "flag" => Ok(IssueTypeWire::Flag),
         _ => Err(BeadError::validation(format!(
             "invalid bead issue_type: {value}"
         ))),
@@ -982,7 +979,6 @@ fn issue_type_as_str(issue_type: &IssueTypeWire) -> &'static str {
         IssueTypeWire::Plan => "plan",
         IssueTypeWire::Phase => "phase",
         IssueTypeWire::Task => "task",
-        IssueTypeWire::Flag => "flag",
     }
 }
 
@@ -1017,7 +1013,6 @@ mod tests {
             refs: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
-            flag: None,
             model: String::new(),
             size: None,
             task_type: None,
