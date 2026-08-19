@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.2](https://github.com/sase-org/sase-core/compare/v0.29.1...v0.29.2) - 2026-08-19
+
+### Fixed
+
+- *(agent_cleanup)* dismiss clan family members and monitors directly
+
 ## [0.29.1](https://github.com/sase-org/sase-core/compare/v0.29.0...v0.29.1) - 2026-08-19
 
 ### Added
