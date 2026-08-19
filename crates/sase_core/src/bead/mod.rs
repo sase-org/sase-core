@@ -16,6 +16,7 @@ pub mod search;
 pub mod wire;
 pub mod work;
 
+pub use crate::artifact_link::BeadLinkWire;
 pub use cli::{
     execute_bead_cli, BeadCliMutationSummaryWire, BeadCliOutcomeWire,
     BeadCliStatusTransitionWire,

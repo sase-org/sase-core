@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(artifact_link)* add v2 link-row wire types, the closed relation registry, `ManagedTableBlock`, top-anchored Links tables, companion paths, the `links:` frontmatter inlet, and bead `LinkAdded`/`LinkRemoved` events
+
 ## [0.29.2](https://github.com/sase-org/sase-core/compare/v0.29.1...v0.29.2) - 2026-08-19
 
 ### Fixed

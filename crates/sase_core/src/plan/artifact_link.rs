@@ -248,11 +248,11 @@ impl SddArtifactDocumentWire {
     }
 }
 
-struct DocumentParts<'a> {
-    prefix: &'a str,
-    frontmatter: Option<&'a str>,
-    body: &'a str,
-    has_frontmatter: bool,
+pub(crate) struct DocumentParts<'a> {
+    pub(crate) prefix: &'a str,
+    pub(crate) frontmatter: Option<&'a str>,
+    pub(crate) body: &'a str,
+    pub(crate) has_frontmatter: bool,
 }
 
 #[derive(Debug)]
@@ -349,6 +349,19 @@ pub fn parse_sdd_artifact_link(document: &str) -> SddArtifactDocumentWire {
         canonical_layout: block.canonical_layout,
         reason: block.reason,
     }
+}
+
+/// Byte range `[start, end)` of a parsed leading plan-header block.
+///
+/// `end` is the first byte after the last header line, including that line's
+/// trailing newline when one is present. The blank separator after the block
+/// is not included. Returns `None` when the document has no header or the
+/// header does not parse.
+pub fn sdd_plan_header_block_span(document: &str) -> Option<(usize, usize)> {
+    let parts = split_document(document).ok()?;
+    let parsed = parse_block(parts.body, parts.has_frontmatter).ok()??;
+    let body_start = document.len().checked_sub(parts.body.len())?;
+    Some((body_start + parsed.start, body_start + parsed.end))
 }
 
 /// Parse one complete SDD Markdown document into its header-block state.
@@ -1214,7 +1227,9 @@ fn body_without_block(body: &str, block: &ParsedBlock) -> String {
     }
 }
 
-fn split_document(document: &str) -> Result<DocumentParts<'_>, String> {
+pub(crate) fn split_document(
+    document: &str,
+) -> Result<DocumentParts<'_>, String> {
     let mut lines = document.split_inclusive('\n');
     let Some(first) = lines.next() else {
         return Ok(DocumentParts {

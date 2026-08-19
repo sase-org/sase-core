@@ -23,6 +23,7 @@ pub mod agent_scan;
 pub mod agent_stats;
 pub mod artifact_consumption;
 pub mod artifact_file;
+pub mod artifact_link;
 pub mod artifact_object_store;
 pub mod artifact_ref;
 pub mod axe_chop;
@@ -270,6 +271,32 @@ pub use artifact_file::{
     ARTIFACT_FILE_INDEX_MIN_SCHEMA_VERSION,
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
+};
+pub use artifact_link::{
+    artifact_link_dedup_key, artifact_md_path, bead_lineage_root,
+    bead_page_relpath, builtin_artifact_relations,
+    canonicalize_artifact_link_ref, companion_md_path,
+    lookup_artifact_relation, parse_artifact_link_frontmatter_inlet,
+    parse_links_block, parse_managed_table_block,
+    relation_label_from_perspective, remove_links_block, render_links_block,
+    render_managed_table_block, reserved_artifact_relation_slugs,
+    strip_links_block, upsert_artifact_link_row, upsert_links_block,
+    upsert_managed_table_block, validate_artifact_link_description,
+    validate_artifact_link_row, ArtifactCompanionPathWire,
+    ArtifactLinkAggregateWire, ArtifactLinkDedupKeyWire, ArtifactLinkError,
+    ArtifactLinkFrontmatterInletKindWire, ArtifactLinkFrontmatterInletWire,
+    ArtifactLinkIndexWire, ArtifactLinkInletEntryWire, ArtifactLinkOriginWire,
+    ArtifactLinkRowWire, ArtifactLinkUpsertKindWire, ArtifactLinkUpsertWire,
+    ArtifactMdPathKindWire, ArtifactMdPathRequestWire, ArtifactMdPathWire,
+    ArtifactRelationWire, BeadLinkWire, ManagedTableAnchorWire,
+    ManagedTableBlock, ManagedTableColumnWire, ManagedTableDocumentWire,
+    ManagedTableRowWire, ManagedTableTableWire,
+    ARTIFACT_LINK_INLET_WIRE_SCHEMA_VERSION, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ARTIFACT_MD_PATH_WIRE_SCHEMA_VERSION,
+    ARTIFACT_RELATION_WIRE_SCHEMA_VERSION, LINKS_BLOCK_END_MARKER,
+    LINKS_BLOCK_HEADING, LINKS_BLOCK_START_MARKER,
+    LINKS_BLOCK_WIRE_SCHEMA_VERSION, MAX_RENDERED_MANAGED_TABLE_ROWS,
+    RESERVED_ARTIFACT_RELATION_SLUGS,
 };
 pub use artifact_object_store::{
     artifact_object_prompt_link, artifact_object_relpath,
@@ -626,12 +653,13 @@ pub use plan::{
     canonicalize_plan_reference, parse_plan_reference, parse_sdd_artifact_link,
     plan_frontmatter_schema, plan_validate, plan_validate_with_mode,
     read_plans, render_plan_reference, render_sdd_artifact_link,
-    resolve_plan_reference, search_plans, upsert_sdd_artifact_link,
-    ParsedPlanReference, PlanDiagnosticWire, PlanError,
-    PlanFrontmatterFieldSpecWire, PlanPhaseWire, PlanReferenceResolutionWire,
-    PlanSearchMatchWire, PlanValidationMode, PlanValidationResultWire,
-    PlanWire, SddArtifactDocumentWire, SddArtifactLinkKindWire,
-    SddArtifactLinkTypeWire, SddLegacyArtifactLinkWire, ValidatedPlanWire,
+    resolve_plan_reference, sdd_plan_header_block_span, search_plans,
+    upsert_sdd_artifact_link, ParsedPlanReference, PlanDiagnosticWire,
+    PlanError, PlanFrontmatterFieldSpecWire, PlanPhaseWire,
+    PlanReferenceResolutionWire, PlanSearchMatchWire, PlanValidationMode,
+    PlanValidationResultWire, PlanWire, SddArtifactDocumentWire,
+    SddArtifactLinkKindWire, SddArtifactLinkTypeWire,
+    SddLegacyArtifactLinkWire, ValidatedPlanWire,
     PLAN_READ_WIRE_SCHEMA_VERSION,
     PLAN_REFERENCE_RESOLUTION_WIRE_SCHEMA_VERSION, PLAN_SEARCH_FIELD_NAMES,
     PLAN_SEARCH_WIRE_SCHEMA_VERSION, PLAN_WIRE_SCHEMA_VERSION,

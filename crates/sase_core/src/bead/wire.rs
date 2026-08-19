@@ -589,6 +589,8 @@ pub struct IssueWire {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<crate::artifact_link::BeadLinkWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plus_one_evidence: Vec<TaskPlusOneEvidenceWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snooze: Option<BeadSnoozeWire>,
@@ -839,6 +841,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            links: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
             model: String::new(),

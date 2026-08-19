@@ -10,6 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::artifact_link::{
+    canonicalize_artifact_link_ref, lookup_artifact_relation,
+    validate_artifact_link_description, ArtifactLinkOriginWire, BeadLinkWire,
+};
 use crate::serde_option::deserialize_present_option;
 
 use super::wire::{
@@ -128,6 +132,8 @@ pub enum BeadEventOperationWire {
     DependencyRemoved,
     ReferenceAdded,
     ReferenceRemoved,
+    LinkAdded,
+    LinkRemoved,
     ReadyMarked,
     ReadyUnmarked,
     EpicWorkPreclaimed,
@@ -193,6 +199,16 @@ pub enum BeadEventPayloadWire {
     },
     ReferenceRemoved {
         reference: String,
+    },
+    LinkAdded {
+        target_ref: String,
+        relation: String,
+        description: String,
+        origin: crate::artifact_link::ArtifactLinkOriginWire,
+    },
+    LinkRemoved {
+        target_ref: String,
+        relation: String,
     },
     ReadyMarked,
     ReadyUnmarked,
@@ -310,6 +326,22 @@ impl BeadEventPayloadWire {
                 BeadEventPayloadWire::ReferenceRemoved { .. },
             ) => Ok(()),
             (
+                BeadEventOperationWire::LinkAdded,
+                BeadEventPayloadWire::LinkAdded {
+                    target_ref,
+                    relation,
+                    description,
+                    ..
+                },
+            ) => validate_link_added_payload(target_ref, relation, description),
+            (
+                BeadEventOperationWire::LinkRemoved,
+                BeadEventPayloadWire::LinkRemoved {
+                    target_ref,
+                    relation,
+                },
+            ) => validate_link_removed_payload(target_ref, relation),
+            (
                 BeadEventOperationWire::EpicWorkPreclaimed,
                 BeadEventPayloadWire::EpicWorkPreclaimed { agent_name },
             ) => {
@@ -329,6 +361,48 @@ impl BeadEventPayloadWire {
             ))),
         }
     }
+}
+
+fn validate_link_added_payload(
+    target_ref: &str,
+    relation: &str,
+    description: &str,
+) -> Result<(), BeadError> {
+    canonicalize_artifact_link_ref(target_ref).map_err(link_error)?;
+    lookup_artifact_relation(relation).map_err(link_error)?;
+    validate_artifact_link_description(description).map_err(link_error)?;
+    Ok(())
+}
+
+fn validate_link_removed_payload(
+    target_ref: &str,
+    relation: &str,
+) -> Result<(), BeadError> {
+    canonicalize_artifact_link_ref(target_ref).map_err(link_error)?;
+    lookup_artifact_relation(relation).map_err(link_error)?;
+    Ok(())
+}
+
+fn link_error(error: crate::artifact_link::ArtifactLinkError) -> BeadError {
+    BeadError::validation(error.to_string())
+}
+
+fn canonical_bead_source_ref(issue_id: &str) -> String {
+    format!("bead:{issue_id}")
+}
+
+fn remap_link_target_ref(
+    target_ref: &str,
+    old_id: &str,
+    new_id: &str,
+) -> String {
+    let Ok(canonical) = canonicalize_artifact_link_ref(target_ref) else {
+        return target_ref.to_string();
+    };
+    let Some(bead_id) = canonical.strip_prefix("bead:") else {
+        return canonical;
+    };
+    format!("bead:{}", remapped_id(bead_id, old_id, new_id))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -466,6 +540,12 @@ pub fn import_issues_to_event_streams(
                 .entry(stream_id.clone())
                 .or_default()
                 .push(PendingEvent::reference_added(issue, reference.clone()));
+        }
+        for link in &issue.links {
+            streams
+                .entry(stream_id.clone())
+                .or_default()
+                .push(PendingEvent::link_added(issue, link.clone()));
         }
     }
 
@@ -960,6 +1040,10 @@ fn remapped_event(
         | BeadEventPayloadWire::DependencyRemoved { dependency } => {
             remap_dependency(dependency, old_id, new_id);
         }
+        BeadEventPayloadWire::LinkAdded { target_ref, .. }
+        | BeadEventPayloadWire::LinkRemoved { target_ref, .. } => {
+            *target_ref = remap_link_target_ref(target_ref, old_id, new_id);
+        }
         _ => {}
     }
     event.event_id = mint_bead_event_id(
@@ -1188,6 +1272,8 @@ fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
         BeadEventOperationWire::DependencyRemoved => 3,
         BeadEventOperationWire::ReferenceAdded => 4,
         BeadEventOperationWire::ReferenceRemoved => 5,
+        BeadEventOperationWire::LinkAdded => 6,
+        BeadEventOperationWire::LinkRemoved => 7,
         _ => 1,
     }
 }
@@ -1208,6 +1294,7 @@ pub(super) fn apply_event(
             let mut issue = issue.clone();
             issue.dependencies.clear();
             issue.refs.clear();
+            issue.links.clear();
             issue.plus_one_evidence.clear();
             issue.close_history.clear();
             issues.insert(issue.id.clone(), issue);
@@ -1311,6 +1398,35 @@ pub(super) fn apply_event(
         BeadEventPayloadWire::ReferenceRemoved { reference } => {
             if let Some(issue) = issues.get_mut(&event.issue_id) {
                 issue.refs.retain(|existing| existing != reference);
+                issue.validate()?;
+            }
+        }
+        BeadEventPayloadWire::LinkAdded {
+            target_ref,
+            relation,
+            description,
+            origin,
+        } => {
+            apply_link_added(
+                issues,
+                &event.issue_id,
+                target_ref,
+                relation,
+                description,
+                *origin,
+            )?;
+        }
+        BeadEventPayloadWire::LinkRemoved {
+            target_ref,
+            relation,
+        } => {
+            if let Some(issue) = issues.get_mut(&event.issue_id) {
+                let canonical = canonicalize_artifact_link_ref(target_ref)
+                    .map_err(link_error)?;
+                issue.links.retain(|existing| {
+                    existing.target_ref != canonical
+                        || existing.relation != *relation
+                });
                 issue.validate()?;
             }
         }
@@ -1626,6 +1742,7 @@ impl PendingEvent {
         let mut issue = issue.clone();
         issue.dependencies.clear();
         issue.refs.clear();
+        issue.links.clear();
         issue.plus_one_evidence.clear();
         Self {
             timestamp: event_timestamp(&issue.created_at, &issue.updated_at),
@@ -1653,6 +1770,21 @@ impl PendingEvent {
             operation: BeadEventOperationWire::ReferenceAdded,
             issue_id: issue.id.clone(),
             payload: BeadEventPayloadWire::ReferenceAdded { reference },
+        }
+    }
+
+    fn link_added(issue: &IssueWire, link: BeadLinkWire) -> Self {
+        Self {
+            timestamp: event_timestamp(&issue.created_at, &issue.updated_at),
+            actor: issue.created_by.clone(),
+            operation: BeadEventOperationWire::LinkAdded,
+            issue_id: issue.id.clone(),
+            payload: BeadEventPayloadWire::LinkAdded {
+                target_ref: link.target_ref,
+                relation: link.relation,
+                description: link.description,
+                origin: link.origin,
+            },
         }
     }
 
@@ -1695,6 +1827,44 @@ impl PendingEvent {
     }
 }
 
+fn apply_link_added(
+    issues: &mut BTreeMap<String, IssueWire>,
+    issue_id: &str,
+    target_ref: &str,
+    relation: &str,
+    description: &str,
+    origin: ArtifactLinkOriginWire,
+) -> Result<(), BeadError> {
+    let canonical =
+        canonicalize_artifact_link_ref(target_ref).map_err(link_error)?;
+    lookup_artifact_relation(relation).map_err(link_error)?;
+    let description =
+        validate_artifact_link_description(description).map_err(link_error)?;
+    if canonical == canonical_bead_source_ref(issue_id) {
+        return Err(BeadError::validation(
+            "artifact link cannot target itself",
+        ));
+    }
+    let issue = existing_issue_mut(issues, issue_id)?;
+    if let Some(existing) = issue
+        .links
+        .iter_mut()
+        .find(|link| link.target_ref == canonical && link.relation == relation)
+    {
+        existing.description = description;
+        existing.origin = origin;
+    } else {
+        issue.links.push(BeadLinkWire {
+            target_ref: canonical,
+            relation: relation.to_string(),
+            description,
+            origin,
+        });
+    }
+    issue.validate()?;
+    Ok(())
+}
+
 fn event_timestamp(primary: &str, fallback: &str) -> String {
     if !primary.is_empty() {
         primary.to_string()
@@ -1730,6 +1900,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs,
+            links: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
             model: String::new(),
@@ -1961,6 +2132,109 @@ mod tests {
             reduce_event_streams(&streams).unwrap()[0].refs,
             vec!["bead:sase-bb.1"]
         );
+    }
+
+    fn link_event(
+        event_id: &str,
+        operation: BeadEventOperationWire,
+        target_ref: &str,
+        relation: &str,
+        description: &str,
+    ) -> BeadEventRecordWire {
+        let payload = match operation {
+            BeadEventOperationWire::LinkAdded => {
+                BeadEventPayloadWire::LinkAdded {
+                    target_ref: target_ref.to_string(),
+                    relation: relation.to_string(),
+                    description: description.to_string(),
+                    origin: ArtifactLinkOriginWire::Manual,
+                }
+            }
+            BeadEventOperationWire::LinkRemoved => {
+                BeadEventPayloadWire::LinkRemoved {
+                    target_ref: target_ref.to_string(),
+                    relation: relation.to_string(),
+                }
+            }
+            _ => panic!("link_event requires a link operation"),
+        };
+        BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: event_id.to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "owner@example.com".to_string(),
+            operation,
+            issue_id: "sase-1".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn links_import_round_trip_and_ignore_unknown_historical_payloads() {
+        let mut issue = issue_with_refs(Vec::new());
+        issue.links = vec![BeadLinkWire {
+            target_ref: "bead:sase-ct".to_string(),
+            relation: "related".to_string(),
+            description: "shares the ACE-TUI flake root cause".to_string(),
+            origin: ArtifactLinkOriginWire::Manual,
+        }];
+        let mut streams =
+            import_issues_to_event_streams(std::slice::from_ref(&issue))
+                .unwrap();
+        assert_eq!(
+            streams[0]
+                .events
+                .iter()
+                .map(|event| event.operation)
+                .collect::<Vec<_>>(),
+            vec![
+                BeadEventOperationWire::IssueCreated,
+                BeadEventOperationWire::LinkAdded,
+            ]
+        );
+        let BeadEventPayloadWire::IssueCreated { issue: created } =
+            &streams[0].events[0].payload
+        else {
+            panic!("first event should create the issue");
+        };
+        assert!(created.links.is_empty());
+        assert_eq!(
+            reduce_event_streams(&streams).unwrap(),
+            vec![issue.clone()]
+        );
+
+        streams[0].events.push(link_event(
+            "rewrite",
+            BeadEventOperationWire::LinkAdded,
+            "bead:sase-ct",
+            "related",
+            "updated why",
+        ));
+        let reduced = reduce_event_streams(&streams).unwrap();
+        assert_eq!(reduced[0].links.len(), 1);
+        assert_eq!(reduced[0].links[0].description, "updated why");
+
+        streams[0].events.push(link_event(
+            "remove",
+            BeadEventOperationWire::LinkRemoved,
+            "bead:sase-ct",
+            "related",
+            "",
+        ));
+        assert!(reduce_event_streams(&streams).unwrap()[0].links.is_empty());
+
+        let reserved = link_event(
+            "blocks",
+            BeadEventOperationWire::LinkAdded,
+            "bead:sase-ct",
+            "blocks",
+            "nope",
+        );
+        assert!(reserved
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("sase bead dep"));
     }
 
     fn created_stream(issue: &IssueWire) -> BeadEventStreamWire {

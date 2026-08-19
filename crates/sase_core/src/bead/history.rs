@@ -292,6 +292,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            links: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
             model: String::new(),

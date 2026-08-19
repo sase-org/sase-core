@@ -269,6 +269,7 @@ pub fn create_issue(
             notes: request.notes,
             design: request.design,
             refs: references.clone(),
+            links: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
             model: normalize_model(request.model)?,
@@ -289,6 +290,7 @@ pub fn create_issue(
         let mut event_issue = issue.clone();
         event_issue.dependencies.clear();
         event_issue.refs.clear();
+        event_issue.links.clear();
         store.append_issue_event(
             &issue.id,
             BeadEventOperationWire::IssueCreated,

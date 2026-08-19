@@ -1096,12 +1096,12 @@ fn resolve_agent(
 ///
 /// Bead page addressing is intentionally lexical and offline-derivable: no
 /// bead-store read is needed to address a page that may not be published yet.
-fn bead_lineage_root(id: &str) -> &str {
+pub(crate) fn bead_lineage_root(id: &str) -> &str {
     id.split_once('.').map_or(id, |(root, _)| root)
 }
 
 /// Return the bead-store-relative path of one generated bead page.
-fn bead_page_path(id: &str) -> PathBuf {
+pub(crate) fn bead_page_path(id: &str) -> PathBuf {
     let lineage = bead_lineage_root(id);
     let filename = if id == lineage {
         "README.md".to_string()

@@ -18,6 +18,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "notes",
     "design",
     "refs",
+    "links",
     "plus_one_evidence",
     "close_history",
     "owner",
@@ -271,6 +272,21 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("design", issue.design.as_str()),
         field("refs", issue.refs.join("\n")),
         field(
+            "links",
+            issue
+                .links
+                .iter()
+                .flat_map(|link| {
+                    [
+                        link.target_ref.as_str(),
+                        link.relation.as_str(),
+                        link.description.as_str(),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        field(
             "plus_one_evidence",
             issue
                 .plus_one_evidence
@@ -409,6 +425,19 @@ mod tests {
                 "refs",
                 phase_issue_with(|issue| {
                     issue.refs = vec!["research:202607/needle.md".to_string()];
+                }),
+                "needle",
+            ),
+            (
+                "links",
+                phase_issue_with(|issue| {
+                    issue.links = vec![crate::artifact_link::BeadLinkWire {
+                        target_ref: "research:202607/needle.md".to_string(),
+                        relation: "related".to_string(),
+                        description: "shares a root cause".to_string(),
+                        origin:
+                            crate::artifact_link::ArtifactLinkOriginWire::Manual,
+                    }];
                 }),
                 "needle",
             ),
@@ -1006,6 +1035,7 @@ mod tests {
             notes: String::new(),
             design: String::new(),
             refs: Vec::new(),
+            links: Vec::new(),
             plus_one_evidence: Vec::new(),
             snooze: None,
             model: String::new(),

@@ -314,6 +314,21 @@
 //! - `referenced_by_block_upsert(document: str, table: dict) -> str`
 //! - `referenced_by_block_remove(document: str) -> str`
 //! - `referenced_by_block_strip(document: str) -> str`
+//! - `artifact_link_row_schema_version() -> int`
+//! - `artifact_link_canonicalize(value: str) -> str`
+//! - `artifact_link_validate_row(row: dict) -> dict`
+//! - `artifact_link_upsert_row(rows: list[dict], row: dict) -> dict`
+//! - `artifact_relations_builtins() -> list[dict]`
+//! - `artifact_relation_lookup(slug: str) -> dict`
+//! - `artifact_relation_label(slug: str, this_is_source: bool) -> str`
+//! - `links_block_parse(document: str) -> dict`
+//! - `links_block_render(table: dict, host_document: str | None = None) -> str`
+//! - `links_block_upsert(document: str, table: dict) -> str`
+//! - `links_block_remove(document: str) -> str`
+//! - `links_block_strip(document: str) -> str`
+//! - `artifact_md_path(request: dict) -> dict`
+//! - `companion_md_path(asset_path: str) -> dict`
+//! - `artifact_link_frontmatter_inlet(document: str) -> dict`
 //!
 //! Dict shapes mirror the Python wire dataclasses in
 //! `sase_100/src/sase/core/query_wire.py` (rectangular, all fields always
@@ -489,6 +504,24 @@ use sase_core::artifact_file::{
     ArtifactFileVcsMaterializationRequestWire,
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
+};
+use sase_core::artifact_link::{
+    artifact_md_path as core_artifact_md_path,
+    builtin_artifact_relations as core_builtin_artifact_relations,
+    canonicalize_artifact_link_ref as core_canonicalize_artifact_link_ref,
+    companion_md_path as core_companion_md_path,
+    lookup_artifact_relation as core_lookup_artifact_relation,
+    parse_artifact_link_frontmatter_inlet as core_parse_artifact_link_frontmatter_inlet,
+    parse_links_block as core_parse_links_block,
+    relation_label_from_perspective as core_relation_label_from_perspective,
+    remove_links_block as core_remove_links_block,
+    render_links_block as core_render_links_block,
+    strip_links_block as core_strip_links_block,
+    upsert_artifact_link_row as core_upsert_artifact_link_row,
+    upsert_links_block as core_upsert_links_block,
+    validate_artifact_link_row as core_validate_artifact_link_row,
+    ArtifactLinkError, ArtifactLinkRowWire, ArtifactMdPathRequestWire,
+    ManagedTableTableWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use sase_core::artifact_object_store::{
     artifact_object_prompt_link as core_artifact_object_prompt_link,
@@ -4432,6 +4465,233 @@ fn py_referenced_by_block_remove(document: &str) -> String {
 #[pyo3(name = "referenced_by_block_strip")]
 fn py_referenced_by_block_strip(document: &str) -> String {
     core_strip_referenced_by_block(document)
+}
+
+fn artifact_link_error_to_pyerr(error: ArtifactLinkError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn managed_table_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ManagedTableTableWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "table is not a valid ManagedTableTableWire dict: {error}"
+        ))
+    })
+}
+
+/// Return the v2 artifact-link row schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_row_schema_version")]
+fn py_artifact_link_row_schema_version() -> u64 {
+    ARTIFACT_LINK_ROW_SCHEMA_VERSION
+}
+
+/// Canonicalize one artifact-link ref, stripping `@` and rewriting aliases.
+#[pyfunction]
+#[pyo3(name = "artifact_link_canonicalize")]
+fn py_artifact_link_canonicalize(value: &str) -> PyResult<String> {
+    core_canonicalize_artifact_link_ref(value)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Validate and canonicalize one link row.
+#[pyfunction]
+#[pyo3(name = "artifact_link_validate_row")]
+fn py_artifact_link_validate_row(
+    py: Python<'_>,
+    row: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let row: ArtifactLinkRowWire = serde_json::from_value(py_to_json_value(
+        row.as_any(),
+    )?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "row is not a valid ArtifactLinkRowWire dict: {error}"
+        ))
+    })?;
+    let validated = core_validate_artifact_link_row(&row)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(validated).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Insert or rewrite one row in a link-row collection.
+#[pyfunction]
+#[pyo3(name = "artifact_link_upsert_row")]
+fn py_artifact_link_upsert_row(
+    py: Python<'_>,
+    rows: &Bound<'_, PyList>,
+    row: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let mut parsed: Vec<ArtifactLinkRowWire> = Vec::with_capacity(rows.len());
+    for (index, item) in rows.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        parsed.push(serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "rows[{index}] is not a valid ArtifactLinkRowWire dict: {error}"
+            ))
+        })?);
+    }
+    let incoming: ArtifactLinkRowWire = serde_json::from_value(
+        py_to_json_value(row.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "row is not a valid ArtifactLinkRowWire dict: {error}"
+        ))
+    })?;
+    let outcome = core_upsert_artifact_link_row(&mut parsed, incoming)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::json!({
+        "kind": outcome.kind,
+        "row": outcome.row,
+        "rows": parsed,
+    });
+    json_value_to_py(py, &value)
+}
+
+/// Return the compiled-in v1 relation registry.
+#[pyfunction]
+#[pyo3(name = "artifact_relations_builtins")]
+fn py_artifact_relations_builtins(py: Python<'_>) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_builtin_artifact_relations())
+        .map_err(|error| {
+            PyValueError::new_err(format!("internal serialize error: {error}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Look up one writable relation slug.
+#[pyfunction]
+#[pyo3(name = "artifact_relation_lookup")]
+fn py_artifact_relation_lookup(
+    py: Python<'_>,
+    slug: &str,
+) -> PyResult<PyObject> {
+    let relation = core_lookup_artifact_relation(slug)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(relation).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Relation label from this document's perspective.
+#[pyfunction]
+#[pyo3(name = "artifact_relation_label")]
+fn py_artifact_relation_label(
+    slug: &str,
+    this_is_source: bool,
+) -> PyResult<String> {
+    core_relation_label_from_perspective(slug, this_is_source)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Parse the managed `## Links` block out of a document.
+#[pyfunction]
+#[pyo3(name = "links_block_parse")]
+fn py_links_block_parse(py: Python<'_>, document: &str) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_parse_links_block(document))
+        .map_err(|error| {
+            PyValueError::new_err(format!("internal serialize error: {error}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Render one `## Links` block.
+#[pyfunction]
+#[pyo3(name = "links_block_render", signature = (table, host_document=None))]
+fn py_links_block_render(
+    table: &Bound<'_, PyDict>,
+    host_document: Option<&str>,
+) -> PyResult<String> {
+    let table = managed_table_from_pydict(table)?;
+    core_render_links_block(&table, host_document)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Insert, replace, or remove the top-anchored `## Links` block.
+#[pyfunction]
+#[pyo3(name = "links_block_upsert")]
+fn py_links_block_upsert(
+    document: &str,
+    table: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let table = managed_table_from_pydict(table)?;
+    core_upsert_links_block(document, &table)
+        .map_err(artifact_ref_error_to_pyerr)
+}
+
+/// Remove the managed `## Links` block, if present.
+#[pyfunction]
+#[pyo3(name = "links_block_remove")]
+fn py_links_block_remove(document: &str) -> String {
+    core_remove_links_block(document)
+}
+
+/// Strip the managed `## Links` block for content hashing.
+#[pyfunction]
+#[pyo3(name = "links_block_strip")]
+fn py_links_block_strip(document: &str) -> String {
+    core_strip_links_block(document)
+}
+
+/// Resolve the artifact markdown file for one ref.
+#[pyfunction]
+#[pyo3(name = "artifact_md_path")]
+fn py_artifact_md_path(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ArtifactMdPathRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactMdPathRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_artifact_md_path(&request)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Companion markdown path for a published binary, with collision refusal.
+#[pyfunction]
+#[pyo3(name = "companion_md_path")]
+fn py_companion_md_path(
+    py: Python<'_>,
+    asset_path: &str,
+) -> PyResult<PyObject> {
+    let result = core_companion_md_path(asset_path)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(result).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Classify a document's `links:` frontmatter inlet.
+#[pyfunction]
+#[pyo3(name = "artifact_link_frontmatter_inlet")]
+fn py_artifact_link_frontmatter_inlet(
+    py: Python<'_>,
+    document: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(
+        core_parse_artifact_link_frontmatter_inlet(document),
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Build one content-addressed prompt-artifact pool filename.
@@ -9263,6 +9523,21 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_referenced_by_block_upsert, m)?)?;
     m.add_function(wrap_pyfunction!(py_referenced_by_block_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_referenced_by_block_strip, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_row_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_canonicalize, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_validate_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_upsert_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_relations_builtins, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_relation_lookup, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_relation_label, m)?)?;
+    m.add_function(wrap_pyfunction!(py_links_block_parse, m)?)?;
+    m.add_function(wrap_pyfunction!(py_links_block_render, m)?)?;
+    m.add_function(wrap_pyfunction!(py_links_block_upsert, m)?)?;
+    m.add_function(wrap_pyfunction!(py_links_block_remove, m)?)?;
+    m.add_function(wrap_pyfunction!(py_links_block_strip, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_md_path, m)?)?;
+    m.add_function(wrap_pyfunction!(py_companion_md_path, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_frontmatter_inlet, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_artifact_pool_filename, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_artifact_manifest_parse, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -12433,6 +12708,76 @@ MENTORS:
             );
             assert_eq!(py_referenced_by_block_remove(&upserted), "Body\n");
             assert_eq!(py_referenced_by_block_strip(&upserted), "Body");
+
+            for name in [
+                "artifact_link_row_schema_version",
+                "artifact_link_canonicalize",
+                "artifact_link_validate_row",
+                "artifact_link_upsert_row",
+                "artifact_relations_builtins",
+                "artifact_relation_lookup",
+                "artifact_relation_label",
+                "links_block_parse",
+                "links_block_render",
+                "links_block_upsert",
+                "links_block_remove",
+                "links_block_strip",
+                "artifact_md_path",
+                "companion_md_path",
+                "artifact_link_frontmatter_inlet",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(py_artifact_link_row_schema_version(), 2);
+            assert_eq!(
+                py_artifact_link_canonicalize("plans:202608/report.md")
+                    .unwrap(),
+                "plan:202608/report.md"
+            );
+            let relations = py_artifact_relations_builtins(py).unwrap();
+            let relations = py_to_json_value(relations.bind(py)).unwrap();
+            assert!(relations
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["slug"] == json!("related")));
+            assert_eq!(
+                py_artifact_relation_label("implements", false).unwrap(),
+                "implemented-by"
+            );
+            let links_table_value = json!({
+                "schema_version": 1,
+                "columns": [
+                    {"key": "relation", "label": "Relation", "numeric": false},
+                    {"key": "artifact", "label": "Artifact", "numeric": false},
+                    {"key": "why", "label": "Why", "numeric": false}
+                ],
+                "rows": [{
+                    "values": {
+                        "relation": "related",
+                        "artifact": "bead:sase-ct",
+                        "why": "why"
+                    },
+                    "link_targets": {}
+                }],
+                "omitted": 0
+            });
+            let links_table_object =
+                json_value_to_py(py, &links_table_value).unwrap();
+            let links_table =
+                links_table_object.bind(py).downcast::<PyDict>().unwrap();
+            let links_upserted =
+                py_links_block_upsert("# Doc\n", links_table).unwrap();
+            assert!(links_upserted.contains("<!-- sase:links:start -->"));
+            assert!(links_upserted.contains("## Links"));
+            assert_eq!(py_links_block_strip(&links_upserted), "# Doc");
+            let inlet = py_artifact_link_frontmatter_inlet(
+                py,
+                "---\nlinks:\n  - Label: path.md\n---\n# Body\n",
+            )
+            .unwrap();
+            let inlet = py_to_json_value(inlet.bind(py)).unwrap();
+            assert_eq!(inlet["kind"], json!("unrecognized"));
         });
     }
 

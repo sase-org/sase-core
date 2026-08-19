@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bind artifact-link row, relation, Links-block, companion-path, and frontmatter-inlet helpers
+
 ## [0.29.1](https://github.com/sase-org/sase-core/compare/v0.29.0...v0.29.1) - 2026-08-19
 
 ### Added
