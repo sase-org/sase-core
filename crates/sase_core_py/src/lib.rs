@@ -157,10 +157,10 @@
 //! - `runner_limit_override_clear(sase_home: str) -> bool`
 //! - `provider_disable_wire_schema_version() -> int`
 //! - `provider_disable_get(sase_home: str, now: float | None = None) -> dict`
-//! - `provider_disable_set_relative(sase_home: str, provider: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
-//! - `provider_disable_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
-//! - `provider_disable_try_set_relative(sase_home: str, provider: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
-//! - `provider_disable_try_set_until(sase_home: str, provider: str, expires_at: float, source: str, now: float | None = None) -> dict`
+//! - `provider_disable_set_relative(sase_home: str, provider: str, source: str, mode: str = "hard", duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `provider_disable_set_until(sase_home: str, provider: str, expires_at: float, source: str, mode: str = "hard", now: float | None = None) -> dict`
+//! - `provider_disable_try_set_relative(sase_home: str, provider: str, source: str, mode: str = "hard", duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `provider_disable_try_set_until(sase_home: str, provider: str, expires_at: float, source: str, mode: str = "hard", now: float | None = None) -> dict`
 //! - `provider_disable_clear(sase_home: str, provider: str) -> bool`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `size_model_route(size: str) -> dict`
@@ -785,7 +785,7 @@ use sase_core::provider_disable::{
     set_provider_disable_until as core_set_provider_disable_until,
     try_set_provider_disable_relative as core_try_set_provider_disable_relative,
     try_set_provider_disable_until as core_try_set_provider_disable_until,
-    ProviderDisableError as ProviderDisableDomainError,
+    ProviderDisableError as ProviderDisableDomainError, ProviderDisableMode,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -7894,6 +7894,10 @@ fn provider_disable_wire_to_py<'py, T: serde::Serialize>(
     json_value_to_py(py, &json)
 }
 
+fn parse_provider_disable_mode(mode: &str) -> PyResult<ProviderDisableMode> {
+    ProviderDisableMode::parse(mode).map_err(provider_disable_error_to_pyerr)
+}
+
 #[pyfunction]
 #[pyo3(name = "provider_disable_wire_schema_version")]
 fn py_provider_disable_wire_schema_version() -> u32 {
@@ -7922,6 +7926,7 @@ fn py_provider_disable_get<'py>(
         sase_home,
         provider,
         source,
+        mode = "hard",
         duration_seconds = None,
         now = None
     )
@@ -7931,6 +7936,7 @@ fn py_provider_disable_set_relative<'py>(
     sase_home: &str,
     provider: &str,
     source: &str,
+    mode: &str,
     duration_seconds: Option<f64>,
     now: Option<f64>,
 ) -> PyResult<PyObject> {
@@ -7940,6 +7946,7 @@ fn py_provider_disable_set_relative<'py>(
         duration_seconds,
         source,
         effort_override_now(now)?,
+        parse_provider_disable_mode(mode)?,
     )
     .map_err(provider_disable_error_to_pyerr)?;
     provider_disable_wire_to_py(py, &record)
@@ -7948,7 +7955,7 @@ fn py_provider_disable_set_relative<'py>(
 #[pyfunction]
 #[pyo3(
     name = "provider_disable_set_until",
-    signature = (sase_home, provider, expires_at, source, now = None)
+    signature = (sase_home, provider, expires_at, source, mode = "hard", now = None)
 )]
 fn py_provider_disable_set_until<'py>(
     py: Python<'py>,
@@ -7956,6 +7963,7 @@ fn py_provider_disable_set_until<'py>(
     provider: &str,
     expires_at: f64,
     source: &str,
+    mode: &str,
     now: Option<f64>,
 ) -> PyResult<PyObject> {
     let record = core_set_provider_disable_until(
@@ -7964,6 +7972,7 @@ fn py_provider_disable_set_until<'py>(
         expires_at,
         source,
         effort_override_now(now)?,
+        parse_provider_disable_mode(mode)?,
     )
     .map_err(provider_disable_error_to_pyerr)?;
     provider_disable_wire_to_py(py, &record)
@@ -7976,6 +7985,7 @@ fn py_provider_disable_set_until<'py>(
         sase_home,
         provider,
         source,
+        mode = "hard",
         duration_seconds = None,
         now = None
     )
@@ -7985,6 +7995,7 @@ fn py_provider_disable_try_set_relative<'py>(
     sase_home: &str,
     provider: &str,
     source: &str,
+    mode: &str,
     duration_seconds: Option<f64>,
     now: Option<f64>,
 ) -> PyResult<PyObject> {
@@ -7994,6 +8005,7 @@ fn py_provider_disable_try_set_relative<'py>(
         duration_seconds,
         source,
         effort_override_now(now)?,
+        parse_provider_disable_mode(mode)?,
     )
     .map_err(provider_disable_error_to_pyerr)?;
     provider_disable_wire_to_py(py, &outcome)
@@ -8002,7 +8014,7 @@ fn py_provider_disable_try_set_relative<'py>(
 #[pyfunction]
 #[pyo3(
     name = "provider_disable_try_set_until",
-    signature = (sase_home, provider, expires_at, source, now = None)
+    signature = (sase_home, provider, expires_at, source, mode = "hard", now = None)
 )]
 fn py_provider_disable_try_set_until<'py>(
     py: Python<'py>,
@@ -8010,6 +8022,7 @@ fn py_provider_disable_try_set_until<'py>(
     provider: &str,
     expires_at: f64,
     source: &str,
+    mode: &str,
     now: Option<f64>,
 ) -> PyResult<PyObject> {
     let outcome = core_try_set_provider_disable_until(
@@ -8018,6 +8031,7 @@ fn py_provider_disable_try_set_until<'py>(
         expires_at,
         source,
         effort_override_now(now)?,
+        parse_provider_disable_mode(mode)?,
     )
     .map_err(provider_disable_error_to_pyerr)?;
     provider_disable_wire_to_py(py, &outcome)
@@ -10997,6 +11011,7 @@ mod tests {
                 &home,
                 "claude",
                 "binding-test",
+                "hard",
                 Some(900.0),
                 Some(now),
             )
@@ -11005,11 +11020,12 @@ mod tests {
             assert_eq!(
                 first_value,
                 json!({
-                    "version": 1,
+                    "version": 2,
                     "provider": "claude",
                     "created_at": now,
                     "expires_at": now + 900.0,
                     "source": "binding-test",
+                    "mode": "hard",
                 })
             );
 
@@ -11018,27 +11034,31 @@ mod tests {
                 &home,
                 "codex",
                 "binding-test",
+                "soft",
                 None,
                 Some(now),
             )
             .unwrap();
             let codex_value = py_to_json_value(codex.bind(py)).unwrap();
+            assert_eq!(codex_value["mode"], json!("soft"));
             let replacement = py_provider_disable_set_until(
                 py,
                 &home,
                 "claude",
                 now + 60.0,
                 "binding-test",
+                "soft",
                 Some(now),
             )
             .unwrap();
             let replacement_value =
                 py_to_json_value(replacement.bind(py)).unwrap();
+            assert_eq!(replacement_value["mode"], json!("soft"));
 
             let snapshot =
                 py_provider_disable_get(py, &home, Some(now)).unwrap();
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
-            assert_eq!(snapshot_value["version"], json!(1));
+            assert_eq!(snapshot_value["version"], json!(2));
             assert_eq!(
                 snapshot_value["disables"],
                 json!([replacement_value, codex_value])
@@ -11061,6 +11081,7 @@ mod tests {
                 &home,
                 "claude",
                 "usage_limit",
+                "soft",
                 Some(900.0),
                 Some(now),
             )
@@ -11069,14 +11090,15 @@ mod tests {
             assert_eq!(
                 first_value,
                 json!({
-                    "version": 1,
+                    "version": 2,
                     "inserted": true,
                     "record": {
-                        "version": 1,
+                        "version": 2,
                         "provider": "claude",
                         "created_at": now,
                         "expires_at": now + 900.0,
                         "source": "usage_limit",
+                        "mode": "soft",
                     },
                 })
             );
@@ -11087,6 +11109,7 @@ mod tests {
                 "claude",
                 now + 3_600.0,
                 "ace",
+                "hard",
                 Some(now),
             )
             .unwrap();
@@ -11107,6 +11130,7 @@ mod tests {
                 &home,
                 "",
                 "test",
+                "hard",
                 None,
                 Some(1.0),
             )
@@ -11119,6 +11143,7 @@ mod tests {
                 "claude",
                 1.0,
                 "test",
+                "hard",
                 Some(1.0),
             )
             .unwrap_err();
@@ -11129,6 +11154,7 @@ mod tests {
                 &home,
                 "",
                 "test",
+                "hard",
                 None,
                 Some(1.0),
             )
@@ -11141,10 +11167,75 @@ mod tests {
                 "claude",
                 1.0,
                 "test",
+                "hard",
                 Some(1.0),
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+
+            for (call_name, error) in [
+                (
+                    "set_relative",
+                    py_provider_disable_set_relative(
+                        py,
+                        &home,
+                        "claude",
+                        "test",
+                        "medium",
+                        Some(1.0),
+                        Some(1.0),
+                    )
+                    .unwrap_err(),
+                ),
+                (
+                    "set_until",
+                    py_provider_disable_set_until(
+                        py,
+                        &home,
+                        "claude",
+                        2.0,
+                        "test",
+                        "MEDIUM",
+                        Some(1.0),
+                    )
+                    .unwrap_err(),
+                ),
+                (
+                    "try_set_relative",
+                    py_provider_disable_try_set_relative(
+                        py,
+                        &home,
+                        "claude",
+                        "test",
+                        "soft ",
+                        Some(1.0),
+                        Some(1.0),
+                    )
+                    .unwrap_err(),
+                ),
+                (
+                    "try_set_until",
+                    py_provider_disable_try_set_until(
+                        py,
+                        &home,
+                        "claude",
+                        2.0,
+                        "test",
+                        "",
+                        Some(1.0),
+                    )
+                    .unwrap_err(),
+                ),
+            ] {
+                assert!(
+                    error.is_instance_of::<PyValueError>(py),
+                    "{call_name} should reject an unknown mode"
+                );
+            }
+            let snapshot =
+                py_provider_disable_get(py, &home, Some(1.0)).unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["disables"], json!([]));
         });
     }
 

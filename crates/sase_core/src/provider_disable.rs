@@ -17,11 +17,46 @@ use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-pub const PROVIDER_DISABLE_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PROVIDER_DISABLE_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const PROVIDER_DISABLE_STATE_FILENAME: &str = "llm_provider_disables.json";
+const PROVIDER_DISABLE_WIRE_SCHEMA_V1: u32 = 1;
 const PROVIDER_DISABLE_LOCK_FILENAME: &str = "llm_provider_disables.lock";
 const LOCK_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
+
+/// How a disable participates in routing.
+///
+/// `hard` is today's fail-closed disable. `soft` spares the provider in
+/// load-balanced pools while another member can cover; it never diverts a
+/// `||` fallback and never blocks an explicit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderDisableMode {
+    Hard,
+    Soft,
+}
+
+impl ProviderDisableMode {
+    /// Stable lowercase name stored on the wire.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hard => "hard",
+            Self::Soft => "soft",
+        }
+    }
+
+    /// Parse the two exact wire strings. Anything else is a validation error.
+    pub fn parse(value: &str) -> Result<Self, ProviderDisableError> {
+        match value {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            _ => Err(ProviderDisableError::Validation(format!(
+                "mode must be hard or soft, got {value:?}"
+            ))),
+        }
+    }
+}
 
 /// Stable record returned to frontends and stored on disk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +67,19 @@ pub struct ProviderDisableWire {
     pub created_at: f64,
     pub expires_at: Option<f64>,
     pub source: String,
+    pub mode: ProviderDisableMode,
+}
+
+/// Schema-1 on-disk record. Migrated in place to [`ProviderDisableWire`]
+/// with `mode: Hard`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderDisableWireV1 {
+    version: u32,
+    provider: String,
+    created_at: f64,
+    expires_at: Option<f64>,
+    source: String,
 }
 
 /// Ordered active provider-disable snapshot returned to frontends.
@@ -108,12 +156,13 @@ pub fn set_provider_disable_relative(
     duration_seconds: Option<f64>,
     source: &str,
     now: f64,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWire, ProviderDisableError> {
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
     validate_now(now)?;
     let expires_at = validate_relative_expires_at(duration_seconds, now)?;
-    write_provider_record(sase_home, &provider, &source, now, expires_at)
+    write_provider_record(sase_home, &provider, &source, now, expires_at, mode)
 }
 
 /// Set or replace a provider disable until an exact future Unix timestamp.
@@ -123,12 +172,20 @@ pub fn set_provider_disable_until(
     expires_at: f64,
     source: &str,
     now: f64,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWire, ProviderDisableError> {
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
     validate_now(now)?;
     let expires_at = validate_until_expires_at(expires_at, now)?;
-    write_provider_record(sase_home, &provider, &source, now, Some(expires_at))
+    write_provider_record(
+        sase_home,
+        &provider,
+        &source,
+        now,
+        Some(expires_at),
+        mode,
+    )
 }
 
 /// Write a relative-duration disable only when no active record exists.
@@ -138,13 +195,14 @@ pub fn try_set_provider_disable_relative(
     duration_seconds: Option<f64>,
     source: &str,
     now: f64,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
     validate_now(now)?;
     let expires_at = validate_relative_expires_at(duration_seconds, now)?;
     write_provider_record_if_absent(
-        sase_home, &provider, &source, now, expires_at,
+        sase_home, &provider, &source, now, expires_at, mode,
     )
 }
 
@@ -155,6 +213,7 @@ pub fn try_set_provider_disable_until(
     expires_at: f64,
     source: &str,
     now: f64,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
     let provider = validate_provider(provider)?;
     let source = validate_source(source)?;
@@ -166,6 +225,7 @@ pub fn try_set_provider_disable_until(
         &source,
         now,
         Some(expires_at),
+        mode,
     )
 }
 
@@ -197,8 +257,9 @@ fn write_provider_record(
     source: &str,
     now: f64,
     expires_at: Option<f64>,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWire, ProviderDisableError> {
-    let record = candidate_record(provider, source, now, expires_at);
+    let record = candidate_record(provider, source, now, expires_at, mode);
     with_lock(sase_home, || {
         let mut records = read_records_locked(sase_home, Some(now))?;
         records.insert(provider.to_string(), record.clone());
@@ -213,8 +274,9 @@ fn write_provider_record_if_absent(
     source: &str,
     now: f64,
     expires_at: Option<f64>,
+    mode: ProviderDisableMode,
 ) -> Result<ProviderDisableWriteOutcomeWire, ProviderDisableError> {
-    let candidate = candidate_record(provider, source, now, expires_at);
+    let candidate = candidate_record(provider, source, now, expires_at, mode);
     with_lock(sase_home, || {
         let mut records = read_records_locked(sase_home, Some(now))?;
         if let Some(existing) = records.get(provider) {
@@ -231,6 +293,7 @@ fn candidate_record(
     source: &str,
     now: f64,
     expires_at: Option<f64>,
+    mode: ProviderDisableMode,
 ) -> ProviderDisableWire {
     ProviderDisableWire {
         version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
@@ -238,6 +301,7 @@ fn candidate_record(
         created_at: now,
         expires_at,
         source: source.to_string(),
+        mode,
     }
 }
 
@@ -272,19 +336,32 @@ fn read_records_locked(
             return Ok(BTreeMap::new());
         }
     };
-    if raw.version != PROVIDER_DISABLE_WIRE_SCHEMA_VERSION {
+    if raw.version != PROVIDER_DISABLE_WIRE_SCHEMA_VERSION
+        && raw.version != PROVIDER_DISABLE_WIRE_SCHEMA_V1
+    {
         remove_invalid_state(&path)?;
         return Ok(BTreeMap::new());
     }
 
-    let mut changed = false;
+    let migrating_v1 = raw.version == PROVIDER_DISABLE_WIRE_SCHEMA_V1;
+    let mut changed = migrating_v1;
     let mut records = BTreeMap::new();
     for (provider, value) in raw.disables {
-        let record: ProviderDisableWire = match serde_json::from_value(value) {
-            Ok(record) => record,
-            Err(_) => {
-                changed = true;
-                continue;
+        let record = if migrating_v1 {
+            match migrate_v1_record(value) {
+                Some(record) => record,
+                None => {
+                    changed = true;
+                    continue;
+                }
+            }
+        } else {
+            match serde_json::from_value::<ProviderDisableWire>(value) {
+                Ok(record) => record,
+                Err(_) => {
+                    changed = true;
+                    continue;
+                }
             }
         };
         if !is_valid_record_for_key(&provider, &record) {
@@ -406,6 +483,21 @@ fn validate_until_expires_at(
     Ok(expires_at)
 }
 
+fn migrate_v1_record(value: Value) -> Option<ProviderDisableWire> {
+    let record: ProviderDisableWireV1 = serde_json::from_value(value).ok()?;
+    if record.version != PROVIDER_DISABLE_WIRE_SCHEMA_V1 {
+        return None;
+    }
+    Some(ProviderDisableWire {
+        version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+        provider: record.provider,
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        source: record.source,
+        mode: ProviderDisableMode::Hard,
+    })
+}
+
 fn is_valid_record_for_key(key: &str, record: &ProviderDisableWire) -> bool {
     record.version == PROVIDER_DISABLE_WIRE_SCHEMA_VERSION
         && record.provider == key
@@ -487,6 +579,23 @@ mod tests {
     use tempfile::tempdir;
 
     const NOW: f64 = 1_800_000_000.0;
+    const HARD: ProviderDisableMode = ProviderDisableMode::Hard;
+    const SOFT: ProviderDisableMode = ProviderDisableMode::Soft;
+
+    #[test]
+    fn mode_parse_accepts_exact_wire_strings() {
+        assert_eq!(ProviderDisableMode::parse("hard").unwrap(), HARD);
+        assert_eq!(ProviderDisableMode::parse("soft").unwrap(), SOFT);
+        assert_eq!(HARD.as_str(), "hard");
+        assert_eq!(SOFT.as_str(), "soft");
+        for value in ["", "Hard", "SOFT", "hard ", " medium", "unknown"] {
+            assert!(matches!(
+                ProviderDisableMode::parse(value),
+                Err(ProviderDisableError::Validation(message))
+                    if message.contains("hard or soft")
+            ));
+        }
+    }
 
     #[test]
     fn concurrent_entries_are_returned_in_provider_order() {
@@ -505,6 +614,7 @@ mod tests {
                     Some(900.0),
                     "test",
                     NOW,
+                    HARD,
                 )
                 .unwrap();
             }));
@@ -534,6 +644,7 @@ mod tests {
             Some(60.0),
             "test",
             NOW,
+            HARD,
         )
         .unwrap();
         let codex = set_provider_disable_relative(
@@ -542,6 +653,7 @@ mod tests {
             None,
             "test",
             NOW,
+            SOFT,
         )
         .unwrap();
         let replacement = set_provider_disable_until(
@@ -550,10 +662,14 @@ mod tests {
             NOW + 300.0,
             "ace",
             NOW,
+            SOFT,
         )
         .unwrap();
 
         assert_ne!(replacement, claude);
+        assert_eq!(claude.mode, HARD);
+        assert_eq!(codex.mode, SOFT);
+        assert_eq!(replacement.mode, SOFT);
         let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
         assert_eq!(snapshot.disables, vec![replacement, codex]);
     }
@@ -567,6 +683,7 @@ mod tests {
             Some(60.0),
             "test",
             NOW,
+            HARD,
         )
         .unwrap();
         let codex = set_provider_disable_relative(
@@ -575,6 +692,7 @@ mod tests {
             None,
             "test",
             NOW,
+            SOFT,
         )
         .unwrap();
 
@@ -595,6 +713,7 @@ mod tests {
             NOW + 10.0,
             "ace",
             NOW,
+            HARD,
         )
         .unwrap();
         assert_eq!(
@@ -615,8 +734,10 @@ mod tests {
             None,
             "ace",
             NOW,
+            SOFT,
         )
         .unwrap();
+        assert_eq!(permanent.mode, SOFT);
         assert_eq!(
             get_provider_disables(temp.path(), NOW + 1_000_000.0)
                 .unwrap()
@@ -634,7 +755,8 @@ mod tests {
                 provider,
                 Some(1.0),
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -644,7 +766,8 @@ mod tests {
                 "claude",
                 Some(duration),
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -654,7 +777,8 @@ mod tests {
                 "claude",
                 expiry,
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -666,7 +790,8 @@ mod tests {
             "claude",
             Some(1.0),
             " ",
-            NOW
+            NOW,
+            HARD
         )
         .is_err());
     }
@@ -684,12 +809,23 @@ mod tests {
             })
             .to_string(),
             json!({
+                "version": 3,
+                "disables": {},
+            })
+            .to_string(),
+            json!({
                 "version": 1,
                 "disables": [],
             })
             .to_string(),
             json!({
                 "version": 1,
+                "disables": {},
+                "extra": true,
+            })
+            .to_string(),
+            json!({
+                "version": 2,
                 "disables": {},
                 "extra": true,
             })
@@ -710,31 +846,34 @@ mod tests {
         let path = provider_disable_state_path(temp.path());
         fs::create_dir_all(temp.path()).unwrap();
         let valid = json!({
-            "version": 1,
+            "version": 2,
             "provider": "codex",
             "created_at": NOW - 10.0,
             "expires_at": null,
             "source": "test",
+            "mode": "soft",
         });
         fs::write(
             &path,
             serde_json::to_string(&json!({
-                "version": 1,
+                "version": 2,
                 "disables": {
                     "claude": {
-                        "version": 1,
+                        "version": 2,
                         "provider": "",
                         "created_at": NOW,
                         "expires_at": null,
-                        "source": "test"
+                        "source": "test",
+                        "mode": "hard"
                     },
                     "codex": valid,
                     "grok": {
-                        "version": 1,
+                        "version": 2,
                         "provider": "grok",
                         "created_at": NOW - 10.0,
                         "expires_at": NOW - 1.0,
-                        "source": "test"
+                        "source": "test",
+                        "mode": "hard"
                     }
                 }
             }))
@@ -745,8 +884,10 @@ mod tests {
         let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
         assert_eq!(snapshot.disables.len(), 1);
         assert_eq!(snapshot.disables[0].provider, "codex");
+        assert_eq!(snapshot.disables[0].mode, SOFT);
         let rewritten: ProviderDisableStateWire =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten.version, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION);
         assert_eq!(rewritten.disables.len(), 1);
         assert!(rewritten.disables.contains_key("codex"));
     }
@@ -760,6 +901,7 @@ mod tests {
             Some(60.0),
             "test",
             NOW,
+            HARD,
         )
         .unwrap();
         let path = provider_disable_state_path(temp.path());
@@ -769,6 +911,222 @@ mod tests {
 
         assert_eq!(snapshot.disables.len(), 1);
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    fn write_v1_state(path: &Path, disables: serde_json::Value) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "disables": disables,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v1_file_migrates_in_place_to_hard_v2() {
+        let temp = tempdir().unwrap();
+        let path = provider_disable_state_path(temp.path());
+        write_v1_state(
+            &path,
+            json!({
+                "claude": {
+                    "version": 1,
+                    "provider": "claude",
+                    "created_at": NOW - 10.0,
+                    "expires_at": NOW + 60.0,
+                    "source": "usage_limit",
+                },
+                "codex": {
+                    "version": 1,
+                    "provider": "codex",
+                    "created_at": NOW - 5.0,
+                    "expires_at": null,
+                    "source": "ace",
+                }
+            }),
+        );
+
+        let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
+        assert_eq!(snapshot.version, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION);
+        assert_eq!(snapshot.disables.len(), 2);
+        assert_eq!(snapshot.disables[0].provider, "claude");
+        assert_eq!(snapshot.disables[0].created_at, NOW - 10.0);
+        assert_eq!(snapshot.disables[0].expires_at, Some(NOW + 60.0));
+        assert_eq!(snapshot.disables[0].source, "usage_limit");
+        assert_eq!(snapshot.disables[0].mode, HARD);
+        assert_eq!(snapshot.disables[1].provider, "codex");
+        assert_eq!(snapshot.disables[1].created_at, NOW - 5.0);
+        assert_eq!(snapshot.disables[1].expires_at, None);
+        assert_eq!(snapshot.disables[1].source, "ace");
+        assert_eq!(snapshot.disables[1].mode, HARD);
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], json!(2));
+        assert_eq!(rewritten["disables"]["claude"]["version"], json!(2));
+        assert_eq!(rewritten["disables"]["claude"]["mode"], json!("hard"));
+        assert_eq!(
+            rewritten["disables"]["claude"]["created_at"],
+            json!(NOW - 10.0)
+        );
+        assert_eq!(
+            rewritten["disables"]["claude"]["expires_at"],
+            json!(NOW + 60.0)
+        );
+        assert_eq!(
+            rewritten["disables"]["claude"]["source"],
+            json!("usage_limit")
+        );
+        assert_eq!(rewritten["disables"]["codex"]["mode"], json!("hard"));
+        assert_eq!(rewritten["disables"]["codex"]["expires_at"], json!(null));
+        assert_eq!(rewritten["disables"]["codex"]["source"], json!("ace"));
+    }
+
+    #[test]
+    fn v1_expired_record_is_pruned_during_migration() {
+        let temp = tempdir().unwrap();
+        let path = provider_disable_state_path(temp.path());
+        write_v1_state(
+            &path,
+            json!({
+                "claude": {
+                    "version": 1,
+                    "provider": "claude",
+                    "created_at": NOW - 10.0,
+                    "expires_at": NOW - 1.0,
+                    "source": "usage_limit",
+                },
+                "codex": {
+                    "version": 1,
+                    "provider": "codex",
+                    "created_at": NOW - 10.0,
+                    "expires_at": NOW + 60.0,
+                    "source": "ace",
+                }
+            }),
+        );
+
+        let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
+        assert_eq!(snapshot.disables.len(), 1);
+        assert_eq!(snapshot.disables[0].provider, "codex");
+        assert_eq!(snapshot.disables[0].mode, HARD);
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], json!(2));
+        assert!(rewritten["disables"].get("claude").is_none());
+        assert_eq!(rewritten["disables"]["codex"]["mode"], json!("hard"));
+    }
+
+    #[test]
+    fn unknown_v2_mode_is_pruned_without_deleting_valid_siblings() {
+        let temp = tempdir().unwrap();
+        let path = provider_disable_state_path(temp.path());
+        fs::create_dir_all(temp.path()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "version": 2,
+                "disables": {
+                    "claude": {
+                        "version": 2,
+                        "provider": "claude",
+                        "created_at": NOW,
+                        "expires_at": null,
+                        "source": "ace",
+                        "mode": "medium"
+                    },
+                    "codex": {
+                        "version": 2,
+                        "provider": "codex",
+                        "created_at": NOW,
+                        "expires_at": null,
+                        "source": "ace",
+                        "mode": "soft"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
+        assert_eq!(snapshot.disables.len(), 1);
+        assert_eq!(snapshot.disables[0].provider, "codex");
+        assert_eq!(snapshot.disables[0].mode, SOFT);
+        assert!(path.exists());
+        let rewritten: ProviderDisableStateWire =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rewritten.disables.len(), 1);
+        assert!(rewritten.disables.contains_key("codex"));
+    }
+
+    #[test]
+    fn v2_round_trip_get_set_try_set_and_clear_for_each_mode() {
+        let temp = tempdir().unwrap();
+        for mode in [HARD, SOFT] {
+            let relative = set_provider_disable_relative(
+                temp.path(),
+                "claude",
+                Some(60.0),
+                "ace",
+                NOW,
+                mode,
+            )
+            .unwrap();
+            assert_eq!(relative.mode, mode);
+            assert_eq!(relative.version, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION);
+            let snapshot = get_provider_disables(temp.path(), NOW).unwrap();
+            assert_eq!(snapshot.disables, vec![relative.clone()]);
+
+            let until = set_provider_disable_until(
+                temp.path(),
+                "codex",
+                NOW + 30.0,
+                "usage_limit",
+                NOW,
+                mode,
+            )
+            .unwrap();
+            assert_eq!(until.mode, mode);
+
+            let lost = try_set_provider_disable_relative(
+                temp.path(),
+                "claude",
+                Some(9_000.0),
+                "other",
+                NOW,
+                if mode == HARD { SOFT } else { HARD },
+            )
+            .unwrap();
+            assert!(!lost.inserted);
+            assert_eq!(lost.record, relative);
+
+            let inserted = try_set_provider_disable_until(
+                temp.path(),
+                "grok",
+                NOW + 90.0,
+                "ace",
+                NOW,
+                mode,
+            )
+            .unwrap();
+            assert!(inserted.inserted);
+            assert_eq!(inserted.record.mode, mode);
+
+            assert!(clear_provider_disable(temp.path(), "claude").unwrap());
+            assert!(clear_provider_disable(temp.path(), "codex").unwrap());
+            assert!(clear_provider_disable(temp.path(), "grok").unwrap());
+            assert!(get_provider_disables(temp.path(), NOW)
+                .unwrap()
+                .disables
+                .is_empty());
+        }
     }
 
     #[test]
@@ -795,6 +1153,7 @@ mod tests {
             Some(1_200.0),
             "sibling",
             NOW,
+            SOFT,
         )
         .unwrap();
         let home = Arc::new(temp.path().to_path_buf());
@@ -811,6 +1170,7 @@ mod tests {
                     Some(60.0 + f64::from(index)),
                     &format!("contender-{index}"),
                     NOW + f64::from(index),
+                    HARD,
                 )
                 .unwrap()
             }));
@@ -854,6 +1214,7 @@ mod tests {
             NOW + 30.0,
             "usage_limit",
             NOW,
+            SOFT,
         )
         .unwrap();
         let lost = try_set_provider_disable_until(
@@ -862,6 +1223,7 @@ mod tests {
             NOW + 3_600.0,
             "ace",
             NOW + 1.0,
+            HARD,
         )
         .unwrap();
 
@@ -882,6 +1244,7 @@ mod tests {
             NOW + 10.0,
             "usage_limit",
             NOW,
+            HARD,
         )
         .unwrap();
         let replacement = try_set_provider_disable_relative(
@@ -890,12 +1253,14 @@ mod tests {
             Some(60.0),
             "usage_limit",
             NOW + 10.0,
+            SOFT,
         )
         .unwrap();
 
         assert!(replacement.inserted);
         assert_eq!(replacement.record.created_at, NOW + 10.0);
         assert_eq!(replacement.record.expires_at, Some(NOW + 70.0));
+        assert_eq!(replacement.record.mode, SOFT);
         assert_eq!(
             get_provider_disables(temp.path(), NOW + 10.0)
                 .unwrap()
@@ -913,7 +1278,8 @@ mod tests {
                 provider,
                 Some(1.0),
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -923,7 +1289,8 @@ mod tests {
                 "claude",
                 Some(duration),
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -933,7 +1300,8 @@ mod tests {
                 "claude",
                 expiry,
                 "ace",
-                NOW
+                NOW,
+                HARD
             )
             .is_err());
         }
@@ -942,7 +1310,8 @@ mod tests {
             "claude",
             Some(1.0),
             " ",
-            NOW
+            NOW,
+            HARD
         )
         .is_err());
 
@@ -957,6 +1326,7 @@ mod tests {
             Some(1.0),
             "ace",
             NOW,
+            HARD,
         );
         assert!(matches!(result, Err(ProviderDisableError::LockTimeout)));
         assert!(started.elapsed() < Duration::from_secs(2));
