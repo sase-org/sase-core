@@ -45,17 +45,28 @@ fn is_dismissable_status(status: &str) -> bool {
     DISMISSABLE_STATUSES.contains(&status)
 }
 
-fn is_workflow_child(target: &AgentCleanupTargetWire) -> bool {
+/// True for any child row: workflow steps, sequential family members, and
+/// monitor proc shells. The wire's `is_workflow_child` flag is a historical
+/// alias for this broader predicate.
+fn is_child_row(target: &AgentCleanupTargetWire) -> bool {
     target.is_workflow_child
         || target.parent_workflow.is_some()
         || target.parent_timestamp.is_some()
+}
+
+/// Mirrors `AgentChildLinkage::WORKFLOW_STEP`: only a workflow step child is
+/// covered by its parent's cascade. Family members and monitor proc shells
+/// carry a `parent_timestamp` but are independent agent rows with their own
+/// PID, artifacts, and dismissal record.
+fn is_workflow_step_child(target: &AgentCleanupTargetWire) -> bool {
+    target.parent_workflow.is_some()
 }
 
 fn effective_tribe(
     target: &AgentCleanupTargetWire,
     parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> Option<String> {
-    if is_workflow_child(target) {
+    if is_child_row(target) {
         if let Some(parent_ts) = &target.parent_timestamp {
             if let Some(tribe) = parent_tribes.get(parent_ts) {
                 return tribe.clone();
@@ -111,7 +122,7 @@ fn parent_matches_child(
     parent: &AgentCleanupTargetWire,
     child: &AgentCleanupTargetWire,
 ) -> bool {
-    if is_workflow_child(parent) {
+    if is_child_row(parent) {
         return false;
     }
     if parent.raw_suffix.as_deref() != child.parent_timestamp.as_deref() {
@@ -153,7 +164,7 @@ fn is_direct_child_target(
     selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
     parent_tribes: &BTreeMap<String, Option<String>>,
 ) -> bool {
-    is_workflow_child(target)
+    is_workflow_step_child(target)
         && scope_allows_direct_child_targets(&request.scope)
         && selected_ids.contains(&target.identity)
         && !parent_selected_for_child(
@@ -215,7 +226,7 @@ fn parallel_family_members<'a>(
     root: &AgentCleanupTargetWire,
     members_by_parent: &'a BTreeMap<String, Vec<&'a AgentCleanupTargetWire>>,
 ) -> &'a [&'a AgentCleanupTargetWire] {
-    if !root.agent_family_parallel || is_workflow_child(root) {
+    if !root.agent_family_parallel || is_child_row(root) {
         return &[];
     }
     let Some(raw_suffix) = &root.raw_suffix else {
@@ -243,7 +254,7 @@ fn workflow_children_by_parent(
         Vec<&AgentCleanupTargetWire>,
     > = BTreeMap::new();
     for target in targets {
-        if !is_workflow_child(target) {
+        if !is_child_row(target) {
             continue;
         }
         let Some(parent_ts) = &target.parent_timestamp else {
@@ -262,7 +273,7 @@ fn parent_tribes_by_suffix(
 ) -> BTreeMap<String, Option<String>> {
     let mut tribes = BTreeMap::new();
     for target in targets {
-        if is_workflow_child(target) {
+        if is_child_row(target) {
             continue;
         }
         if let Some(raw_suffix) = &target.raw_suffix {
@@ -395,7 +406,7 @@ fn add_workspace_release(
         return;
     }
     if kind == KILL_KIND_WORKFLOW {
-        if is_workflow_child(target) {
+        if is_child_row(target) {
             return;
         }
         let workflow_name = target.workflow.clone();
@@ -427,7 +438,7 @@ fn add_held_workspace_release(
     seen: &mut BTreeSet<AgentCleanupIdentityWire>,
     target: &AgentCleanupTargetWire,
 ) {
-    if is_workflow_child(target) || !seen.insert(target.identity.clone()) {
+    if is_child_row(target) || !seen.insert(target.identity.clone()) {
         return;
     }
     let Some(artifacts_timestamp) = target.raw_suffix.clone() else {
@@ -455,7 +466,7 @@ fn related_workflow_targets<'a>(
     >,
 ) -> Vec<&'a AgentCleanupTargetWire> {
     let mut related = vec![target];
-    if target.agent_type == "workflow" && !is_workflow_child(target) {
+    if target.agent_type == "workflow" && !is_child_row(target) {
         if let Some(raw_suffix) = &target.raw_suffix {
             let key = (raw_suffix.clone(), target.workflow.clone());
             if let Some(children) = children_by_parent.get(&key) {
@@ -612,7 +623,7 @@ pub fn plan_agent_cleanup(
             &selected_ids,
             &parent_tribes,
         );
-        if is_workflow_child(target) && !direct_child_target {
+        if is_workflow_step_child(target) && !direct_child_target {
             add_skip(
                 &mut skipped_items,
                 target,
@@ -1339,26 +1350,51 @@ mod tests {
         assert!(plan.cascaded_workflow_children.is_empty());
     }
 
-    #[test]
-    fn broad_scopes_keep_child_rows_cascade_only() {
-        let mut child =
-            target("run", "child", Some("child"), "RUNNING", Some(11));
-        child.parent_timestamp = Some("root".to_string());
-        child.tribe = Some("ops".to_string());
-
+    fn broad_scope_kill_requests() -> Vec<AgentCleanupRequestWire> {
         let mut focused =
             req(CLEANUP_SCOPE_FOCUSED_PANEL, CLEANUP_MODE_KILL_AND_DISMISS);
         focused.focused_panel_tribe = Some("ops".to_string());
         let mut tribe_request =
             req(CLEANUP_SCOPE_TRIBE, CLEANUP_MODE_KILL_AND_DISMISS);
         tribe_request.tribe = Some("ops".to_string());
-        let requests = vec![
+        vec![
             req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
             focused,
             tribe_request,
-        ];
+        ]
+    }
 
-        for request in requests {
+    #[test]
+    fn broad_scopes_act_on_family_member_child_rows_directly() {
+        let mut child =
+            target("run", "child", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        child.tribe = Some("ops".to_string());
+
+        for request in broad_scope_kill_requests() {
+            let plan =
+                plan_agent_cleanup(std::slice::from_ref(&child), &request)
+                    .unwrap();
+
+            assert_eq!(plan.kill_items.len(), 1);
+            assert_eq!(plan.kill_items[0].identity.cl_name, "child");
+            assert!(plan.dismiss_items.is_empty());
+            assert!(plan.cascaded_workflow_children.is_empty());
+            assert!(!plan.skipped_items.iter().any(|item| {
+                item.reason == SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY
+            }));
+        }
+    }
+
+    #[test]
+    fn broad_scopes_keep_workflow_step_children_cascade_only() {
+        let mut child =
+            target("run", "child", Some("child"), "RUNNING", Some(11));
+        child.parent_timestamp = Some("root".to_string());
+        child.parent_workflow = Some("build".to_string());
+        child.tribe = Some("ops".to_string());
+
+        for request in broad_scope_kill_requests() {
             let plan =
                 plan_agent_cleanup(std::slice::from_ref(&child), &request)
                     .unwrap();
@@ -1371,6 +1407,98 @@ mod tests {
                 SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY
             );
         }
+    }
+
+    fn clan_sequential_family_chain() -> (
+        AgentCleanupTargetWire,
+        AgentCleanupTargetWire,
+        AgentCleanupTargetWire,
+    ) {
+        let mut plan_root =
+            target("run", "sase-ps.plan", Some("20260818102050"), "DONE", None);
+        plan_root.agent_clan = Some("sase-ps".to_string());
+        plan_root.agent_clan_generation = Some("20260818102050".to_string());
+        plan_root.agent_family_parallel = false;
+
+        let mut family_root = target(
+            "run",
+            "sase-ps.plan--1",
+            Some("20260818114621"),
+            "DONE",
+            None,
+        );
+        family_root.parent_timestamp = Some("20260818102050".to_string());
+        family_root.agent_clan = Some("sase-ps".to_string());
+        family_root.agent_clan_generation = Some("20260818102050".to_string());
+        family_root.agent_family_parallel = false;
+
+        let mut monitor = target(
+            "run",
+            "sase-ps.plan--mon",
+            Some("20260818114457"),
+            "DONE",
+            None,
+        );
+        monitor.parent_timestamp = Some("20260818114621".to_string());
+        monitor.agent_clan = Some("sase-ps".to_string());
+        monitor.agent_clan_generation = Some("20260818102050".to_string());
+        monitor.agent_family_parallel = false;
+
+        (plan_root, family_root, monitor)
+    }
+
+    fn assert_clan_sequential_family_dismissed(plan: &AgentCleanupPlanWire) {
+        assert_eq!(
+            plan.dismiss_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-ps.plan", "sase-ps.plan--1", "sase-ps.plan--mon"]
+        );
+        assert_eq!(
+            plan.side_effects
+                .dismissed_index_additions
+                .iter()
+                .map(|identity| identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-ps.plan", "sase-ps.plan--1", "sase-ps.plan--mon"]
+        );
+        assert!(!plan.skipped_items.iter().any(|item| {
+            item.reason == SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY
+        }));
+    }
+
+    #[test]
+    fn clan_scope_dismisses_sequential_family_and_monitor_rows() {
+        let (plan_root, family_root, monitor) = clan_sequential_family_chain();
+        let mut request =
+            req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.clan_name = Some("sase-ps".to_string());
+        request.clan_generation = Some("20260818102050".to_string());
+
+        let plan =
+            plan_agent_cleanup(&[plan_root, family_root, monitor], &request)
+                .unwrap();
+        assert_clan_sequential_family_dismissed(&plan);
+    }
+
+    #[test]
+    fn explicit_identities_dismiss_sequential_family_and_monitor_rows() {
+        let (plan_root, family_root, monitor) = clan_sequential_family_chain();
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![
+            plan_root.identity.clone(),
+            family_root.identity.clone(),
+            monitor.identity.clone(),
+        ];
+
+        let plan =
+            plan_agent_cleanup(&[plan_root, family_root, monitor], &request)
+                .unwrap();
+        assert_clan_sequential_family_dismissed(&plan);
     }
 
     #[test]
