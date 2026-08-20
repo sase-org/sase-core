@@ -244,6 +244,8 @@
 //! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
+//! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", now: str | None = None) -> dict`
+//! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, now: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None, observed_since: str | None = None) -> dict`
 //! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
@@ -523,8 +525,9 @@ use sase_core::artifact_link::{
     upsert_artifact_link_row as core_upsert_artifact_link_row,
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
-    ArtifactLinkError, ArtifactLinkRowWire, ArtifactMdPathRequestWire,
-    ManagedTableTableWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ArtifactLinkError, ArtifactLinkOriginWire, ArtifactLinkRowWire,
+    ArtifactMdPathRequestWire, ManagedTableTableWire,
+    ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use sase_core::artifact_object_store::{
     artifact_object_prompt_link as core_artifact_object_prompt_link,
@@ -600,6 +603,7 @@ use sase_core::axe_status::{
 #[cfg(test)]
 use sase_core::bead::PhaseSizeWire;
 use sase_core::bead::{
+    add_bead_link as core_bead_add_link,
     add_dependency as core_bead_add_dependency,
     add_task_plus_one as core_bead_add_task_plus_one,
     append_issue_note as core_bead_append_issue_note,
@@ -644,6 +648,7 @@ use sase_core::bead::{
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
     release_agent_claim as core_bead_release_agent_claim,
+    remove_bead_link as core_bead_remove_link,
     remove_dependencies as core_bead_remove_dependencies,
     remove_issue as core_bead_remove_issue,
     remove_issues as core_bead_remove_issues,
@@ -5791,6 +5796,64 @@ fn py_bead_remove_many<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_add_link")]
+#[pyo3(signature = (beads_dir, issue_id, target_ref, relation, description, origin="manual", now=None))]
+fn py_bead_add_link<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    target_ref: &str,
+    relation: &str,
+    description: &str,
+    origin: &str,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let origin =
+        ArtifactLinkOriginWire::from_name(origin).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown artifact link origin `{origin}`"
+            ))
+        })?;
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_add_link(
+                &beads_dir,
+                issue_id,
+                target_ref,
+                relation,
+                description,
+                origin,
+                now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_remove_link")]
+#[pyo3(signature = (beads_dir, issue_id, target_ref, relation=None, now=None))]
+fn py_bead_remove_link<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    target_ref: &str,
+    relation: Option<&str>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_remove_link(
+                &beads_dir, issue_id, target_ref, relation, now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_dep_add")]
 #[pyo3(signature = (beads_dir, issue_id, depends_on_id, now=None))]
 fn py_bead_dep_add<'py>(
@@ -9641,6 +9704,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_repair_event_store_manifest, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_many, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_add_link, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_remove_link, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_mark_ready_to_work, m)?)?;

@@ -45,15 +45,15 @@ pub use jsonl::{
     JsonlLoadOutcome, RemovedFlagStreamPruneOutcomeWire,
 };
 pub use mutation::{
-    add_bead_references, add_dependency, add_task_plus_one, append_issue_note,
-    cancel_task_snooze, claim_for_agent_launch, claim_for_agent_wait,
-    close_issues, close_issues_with_note, create_issue, export_jsonl,
-    init_store, mark_ready_to_work, open_issue, preclaim_epic_work_plan,
-    release_agent_claim, remove_bead_references, remove_dependencies,
-    remove_issue, remove_issues, snooze_task, sync_is_clean,
-    unmark_ready_to_work, update_issue, update_issues, BeadCreateRequestWire,
-    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
-    BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
+    add_bead_link, add_bead_references, add_dependency, add_task_plus_one,
+    append_issue_note, cancel_task_snooze, claim_for_agent_launch,
+    claim_for_agent_wait, close_issues, close_issues_with_note, create_issue,
+    export_jsonl, init_store, mark_ready_to_work, open_issue,
+    preclaim_epic_work_plan, release_agent_claim, remove_bead_link,
+    remove_bead_references, remove_dependencies, remove_issue, remove_issues,
+    snooze_task, sync_is_clean, unmark_ready_to_work, update_issue,
+    update_issues, BeadCreateRequestWire, BeadMutationOutcomeWire,
+    BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
     blocked_issues, doctor, doctor_report, doctor_report_with_contexts,

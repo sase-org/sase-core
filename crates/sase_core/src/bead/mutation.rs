@@ -9,6 +9,10 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_link::{
+    canonicalize_artifact_link_ref, lookup_artifact_relation,
+    validate_artifact_link_description, ArtifactLinkOriginWire, BeadLinkWire,
+};
 use crate::artifact_ref::normalize_artifact_ref_list;
 use crate::store_lock::{
     acquire_store_lock, timeout_from_env, LockMode, StoreLockError,
@@ -2030,6 +2034,294 @@ pub fn remove_bead_references(
     })
 }
 
+pub fn add_bead_link(
+    beads_dir: &Path,
+    issue_id: &str,
+    target_ref: &str,
+    relation: &str,
+    description: &str,
+    origin: ArtifactLinkOriginWire,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    with_bead_mutation_lock(beads_dir, "add_link", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let source_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
+        let target_ref =
+            canonicalize_bead_link_target(&store.issues, target_ref)?;
+        lookup_artifact_relation(relation).map_err(link_mutation_error)?;
+        let description = validate_artifact_link_description(description)
+            .map_err(link_mutation_error)?;
+        let source_ref = canonical_bead_source_ref(&source_id);
+        if source_ref == target_ref {
+            return Err(BeadError::validation(
+                "artifact link cannot target itself",
+            ));
+        }
+        let holder_id = undirected_holder_issue_id(
+            &store.issues,
+            &source_id,
+            &source_ref,
+            &target_ref,
+            relation,
+        )?;
+        let holder_index = store.issue_index(&holder_id)?;
+        let existing =
+            store.issues[holder_index].links.iter().position(|link| {
+                link_matches(link, relation, &target_ref, &source_ref)
+            });
+        if let Some(index) = existing {
+            let current = &store.issues[holder_index].links[index];
+            if current.description == description && current.origin == origin {
+                let mut result =
+                    outcome("link_add", false, vec![source_id.clone()]);
+                result.issue =
+                    Some(store.issues[store.issue_index(&source_id)?].clone());
+                return Ok(result);
+            }
+            store.issues[holder_index].links[index].description =
+                description.clone();
+            store.issues[holder_index].links[index].origin = origin;
+        } else {
+            let stored_target = if holder_id == source_id {
+                target_ref.clone()
+            } else {
+                source_ref.clone()
+            };
+            store.issues[holder_index].links.push(BeadLinkWire {
+                target_ref: stored_target,
+                relation: relation.to_string(),
+                description: description.clone(),
+                origin,
+            });
+        }
+        let added_at = now.unwrap_or_else(now_utc);
+        let actor = store.config.owner.clone();
+        let event_target = if holder_id == source_id {
+            target_ref.clone()
+        } else {
+            source_ref.clone()
+        };
+        store.issues[holder_index].updated_at = added_at.clone();
+        store.append_issue_event(
+            &holder_id,
+            BeadEventOperationWire::LinkAdded,
+            BeadEventPayloadWire::LinkAdded {
+                target_ref: event_target,
+                relation: relation.to_string(),
+                description,
+                origin,
+            },
+            &added_at,
+            &actor,
+        )?;
+        store.save()?;
+        let mut result = outcome("link_add", true, vec![source_id.clone()]);
+        if holder_id != source_id {
+            result.issue_ids.push(holder_id);
+        }
+        result.issue =
+            Some(store.issues[store.issue_index(&source_id)?].clone());
+        Ok(result)
+    })
+}
+
+pub fn remove_bead_link(
+    beads_dir: &Path,
+    issue_id: &str,
+    target_ref: &str,
+    relation: Option<&str>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    if let Some(relation) = relation {
+        lookup_artifact_relation(relation).map_err(link_mutation_error)?;
+    }
+    with_bead_mutation_lock(beads_dir, "remove_link", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let source_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
+        let target_ref =
+            canonicalize_bead_link_target(&store.issues, target_ref)?;
+        let source_ref = canonical_bead_source_ref(&source_id);
+        let removed_at = now.unwrap_or_else(now_utc);
+        let actor = store.config.owner.clone();
+        let mut removed: Vec<(String, String, String)> = Vec::new();
+        collect_removable_bead_links(
+            &store.issues,
+            &source_id,
+            &source_ref,
+            &target_ref,
+            relation,
+            &mut removed,
+        )?;
+        if removed.is_empty() {
+            let mut result = outcome("link_rm", false, vec![source_id.clone()]);
+            result.issue =
+                Some(store.issues[store.issue_index(&source_id)?].clone());
+            return Ok(result);
+        }
+        let mut touched: Vec<String> = Vec::new();
+        for (holder_id, stored_target, stored_relation) in &removed {
+            let index = store.issue_index(holder_id)?;
+            store.issues[index].links.retain(|link| {
+                !(link.target_ref == *stored_target
+                    && link.relation == *stored_relation)
+            });
+            store.issues[index].updated_at = removed_at.clone();
+            store.append_issue_event(
+                holder_id,
+                BeadEventOperationWire::LinkRemoved,
+                BeadEventPayloadWire::LinkRemoved {
+                    target_ref: stored_target.clone(),
+                    relation: stored_relation.clone(),
+                },
+                &removed_at,
+                &actor,
+            )?;
+            if !touched.contains(holder_id) {
+                touched.push(holder_id.clone());
+            }
+        }
+        store.save()?;
+        let mut issue_ids = vec![source_id.clone()];
+        for holder_id in touched {
+            if holder_id != source_id {
+                issue_ids.push(holder_id);
+            }
+        }
+        let mut result = outcome("link_rm", true, issue_ids);
+        result.issue =
+            Some(store.issues[store.issue_index(&source_id)?].clone());
+        Ok(result)
+    })
+}
+
+fn canonical_bead_source_ref(issue_id: &str) -> String {
+    format!("bead:{issue_id}")
+}
+
+fn canonicalize_bead_link_target(
+    issues: &[IssueWire],
+    target_ref: &str,
+) -> Result<String, BeadError> {
+    let canonical = canonicalize_artifact_link_ref(target_ref)
+        .map_err(link_mutation_error)?;
+    let Some(bead_id) = canonical.strip_prefix("bead:") else {
+        return Ok(canonical);
+    };
+    match resolve_issue_id_in_issues(issues, bead_id) {
+        Ok(resolved) => Ok(format!("bead:{resolved}")),
+        Err(_) => Ok(canonical),
+    }
+}
+
+fn undirected_holder_issue_id(
+    issues: &[IssueWire],
+    source_id: &str,
+    source_ref: &str,
+    target_ref: &str,
+    relation: &str,
+) -> Result<String, BeadError> {
+    let directed = lookup_artifact_relation(relation)
+        .map_err(link_mutation_error)?
+        .directed;
+    if directed {
+        return Ok(source_id.to_string());
+    }
+    if let Some(target_id) = target_ref.strip_prefix("bead:") {
+        if let Ok(resolved) = resolve_issue_id_in_issues(issues, target_id) {
+            if let Some(issue) =
+                issues.iter().find(|issue| issue.id == resolved)
+            {
+                if issue.links.iter().any(|link| {
+                    link.relation == relation && link.target_ref == source_ref
+                }) {
+                    return Ok(resolved);
+                }
+            }
+        }
+    }
+    Ok(source_id.to_string())
+}
+
+fn link_matches(
+    link: &BeadLinkWire,
+    relation: &str,
+    target_ref: &str,
+    source_ref: &str,
+) -> bool {
+    if link.relation != relation {
+        return false;
+    }
+    link.target_ref == target_ref || link.target_ref == source_ref
+}
+
+fn collect_removable_bead_links(
+    issues: &[IssueWire],
+    source_id: &str,
+    source_ref: &str,
+    target_ref: &str,
+    relation: Option<&str>,
+    removed: &mut Vec<(String, String, String)>,
+) -> Result<(), BeadError> {
+    let source = issues
+        .iter()
+        .find(|issue| issue.id == source_id)
+        .ok_or_else(|| not_found(source_id))?;
+    for link in &source.links {
+        if link.target_ref == *target_ref
+            && relation
+                .map(|wanted| link.relation == wanted)
+                .unwrap_or(true)
+        {
+            removed.push((
+                source_id.to_string(),
+                link.target_ref.clone(),
+                link.relation.clone(),
+            ));
+        }
+    }
+    let Some(target_id) = target_ref.strip_prefix("bead:") else {
+        return Ok(());
+    };
+    let Ok(resolved) = resolve_issue_id_in_issues(issues, target_id) else {
+        return Ok(());
+    };
+    let Some(peer) = issues.iter().find(|issue| issue.id == resolved) else {
+        return Ok(());
+    };
+    for link in &peer.links {
+        if link.target_ref == *source_ref
+            && relation
+                .map(|wanted| {
+                    wanted == link.relation
+                        && lookup_artifact_relation(&link.relation)
+                            .map(|item| !item.directed)
+                            .unwrap_or(false)
+                })
+                .unwrap_or_else(|| {
+                    lookup_artifact_relation(&link.relation)
+                        .map(|item| !item.directed)
+                        .unwrap_or(false)
+                })
+        {
+            removed.push((
+                resolved.clone(),
+                link.target_ref.clone(),
+                link.relation.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn link_mutation_error(
+    error: crate::artifact_link::ArtifactLinkError,
+) -> BeadError {
+    BeadError {
+        kind: error.kind,
+        message: error.message,
+    }
+}
+
 pub fn mark_ready_to_work(
     beads_dir: &Path,
     epic_id: &str,
@@ -3906,6 +4198,124 @@ mod tests {
         )
         .unwrap();
         assert!(!absent.changed);
+    }
+
+    #[test]
+    fn link_mutations_round_trip_and_keep_related_undirected() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let left = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Left".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let right = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Right".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let added = add_bead_link(
+            &beads_dir,
+            &left.id,
+            &format!("bead:{}", right.id),
+            "related",
+            "shares the ACE-TUI flake root cause",
+            ArtifactLinkOriginWire::Manual,
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(added.changed);
+        assert_eq!(added.issue.as_ref().unwrap().links.len(), 1);
+        assert_eq!(
+            added.issue.as_ref().unwrap().links[0].target_ref,
+            format!("bead:{}", right.id)
+        );
+
+        let reverse = add_bead_link(
+            &beads_dir,
+            &right.id,
+            &format!("bead:{}", left.id),
+            "related",
+            "shares the ACE-TUI flake root cause",
+            ArtifactLinkOriginWire::Manual,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!reverse.changed);
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let left_issue =
+            issues.iter().find(|issue| issue.id == left.id).unwrap();
+        let right_issue =
+            issues.iter().find(|issue| issue.id == right.id).unwrap();
+        assert_eq!(left_issue.links.len(), 1);
+        assert!(right_issue.links.is_empty());
+
+        let rewritten = add_bead_link(
+            &beads_dir,
+            &right.id,
+            &format!("bead:{}", left.id),
+            "related",
+            "updated rationale",
+            ArtifactLinkOriginWire::Manual,
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(rewritten.changed);
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let left_issue =
+            issues.iter().find(|issue| issue.id == left.id).unwrap();
+        assert_eq!(left_issue.links[0].description, "updated rationale");
+
+        let reserved = add_bead_link(
+            &beads_dir,
+            &left.id,
+            &format!("bead:{}", right.id),
+            "blocks",
+            "scheduling",
+            ArtifactLinkOriginWire::Manual,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(reserved.kind, "reserved");
+        assert!(reserved.message.contains("sase bead dep"));
+
+        let removed = remove_bead_link(
+            &beads_dir,
+            &right.id,
+            &format!("bead:{}", left.id),
+            Some("related"),
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(removed.changed);
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let left_issue =
+            issues.iter().find(|issue| issue.id == left.id).unwrap();
+        assert!(left_issue.links.is_empty());
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let ops: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| {
+                stream.events.iter().map(|event| event.operation)
+            })
+            .collect();
+        assert!(ops.contains(&BeadEventOperationWire::LinkAdded));
+        assert!(ops.contains(&BeadEventOperationWire::LinkRemoved));
     }
 
     #[test]

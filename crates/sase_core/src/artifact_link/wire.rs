@@ -78,6 +78,17 @@ impl ArtifactLinkOriginWire {
     pub fn increments_uses(self) -> bool {
         matches!(self, Self::PromptRef | Self::Read)
     }
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "manual" => Some(Self::Manual),
+            "migrated" => Some(Self::Migrated),
+            "prompt_ref" => Some(Self::PromptRef),
+            "read" => Some(Self::Read),
+            "derived" => Some(Self::Derived),
+            _ => None,
+        }
+    }
 }
 
 /// One directed (or undirected-stored) link graph row.
