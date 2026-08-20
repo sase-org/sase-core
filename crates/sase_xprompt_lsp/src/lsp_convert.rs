@@ -343,6 +343,7 @@ pub fn agent_completion_response(
 fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
     match kind {
         "keyword" => CompletionItemKind::KEYWORD,
+        "bead" => CompletionItemKind::REFERENCE,
         "tribe" => CompletionItemKind::ENUM_MEMBER,
         "clan" => CompletionItemKind::MODULE,
         "family" => CompletionItemKind::CLASS,
@@ -353,6 +354,7 @@ fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
 fn agent_completion_sort_group(kind: &str) -> u8 {
     match kind {
         "keyword" => 0,
+        "bead" => 0,
         "tribe" => 1,
         "clan" => 2,
         "family" => 3,
@@ -362,7 +364,8 @@ fn agent_completion_sort_group(kind: &str) -> u8 {
 
 fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
     let normalized = match kind {
-        "keyword" | "tribe" | "clan" | "family" => kind,
+        "keyword" | "bead" | "tribe" | "clan" | "family" => kind,
+        "" => "value",
         _ => "agent",
     };
     match detail.filter(|detail| !detail.is_empty()) {

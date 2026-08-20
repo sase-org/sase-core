@@ -287,6 +287,11 @@ pub const AGENT_CATALOG_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCatalogRequest {
     pub schema_version: u32,
+    /// Optional project hint so the helper can prefer that store for bead
+    /// rows. Older helpers ignore unknown fields; newer helpers still return
+    /// agents when this is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Fresh agent catalog returned by the Python editor helper bridge.
@@ -298,6 +303,10 @@ pub struct AgentCatalogResponse {
     pub message: String,
     #[serde(default)]
     pub entries: Vec<AgentCompletionEntry>,
+    /// Bounded open-bead rows for `%wait(bead=)` / `%id(..., bead=)`.
+    /// Omitted by mixed-version helpers; empty when the store is unavailable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beads: Vec<BeadCompletionEntry>,
 }
 
 pub const VCS_REPO_CATALOG_SCHEMA_VERSION: u32 = 1;

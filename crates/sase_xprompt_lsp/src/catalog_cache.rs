@@ -50,6 +50,12 @@ struct CachedVcsRepoCatalog {
     refreshed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CachedAgentCatalog {
+    response: Arc<AgentCatalogResponse>,
+    refreshed_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct CatalogCache {
     bridge: DynHelperHostBridge,
@@ -58,6 +64,7 @@ pub struct CatalogCache {
     catalogs: RwLock<HashMap<String, CachedCatalog>>,
     snippet_catalogs: RwLock<HashMap<String, CachedSnippetCatalog>>,
     vcs_repo_catalogs: RwLock<HashMap<(String, String), CachedVcsRepoCatalog>>,
+    agent_catalogs: RwLock<HashMap<String, CachedAgentCatalog>>,
     warned_failure_classes: RwLock<BTreeSet<String>>,
 }
 
@@ -87,6 +94,7 @@ impl CatalogCache {
             catalogs: RwLock::new(HashMap::new()),
             snippet_catalogs: RwLock::new(HashMap::new()),
             vcs_repo_catalogs: RwLock::new(HashMap::new()),
+            agent_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -103,6 +111,7 @@ impl CatalogCache {
             catalogs: RwLock::new(HashMap::new()),
             snippet_catalogs: RwLock::new(HashMap::new()),
             vcs_repo_catalogs: RwLock::new(HashMap::new()),
+            agent_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -238,27 +247,89 @@ impl CatalogCache {
         }
     }
 
+    pub fn cached_agent_catalog(
+        &self,
+        project: Option<&str>,
+    ) -> Option<Arc<AgentCatalogResponse>> {
+        let catalogs = self.agent_catalogs.read().ok()?;
+        catalogs
+            .get(&agent_catalog_key(project))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn agent_catalog_stale_or_missing(
+        &self,
+        project: Option<&str>,
+    ) -> bool {
+        let Ok(catalogs) = self.agent_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&agent_catalog_key(project))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
     pub async fn agent_catalog_for_completion(
         &self,
-    ) -> Result<AgentCatalogResponse, CatalogFailure> {
-        let request = AgentCatalogRequest { schema_version: 1 };
+        project: Option<String>,
+    ) -> Result<Arc<AgentCatalogResponse>, CatalogFailure> {
+        if !self.agent_catalog_stale_or_missing(project.as_deref()) {
+            if let Some(response) =
+                self.cached_agent_catalog(project.as_deref())
+            {
+                return Ok(response);
+            }
+        }
+        match self.refresh_agent_catalog(project.clone()).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.cached_agent_catalog(project.as_deref()).ok_or(error)
+            }
+        }
+    }
+
+    async fn refresh_agent_catalog(
+        &self,
+        project: Option<String>,
+    ) -> Result<Arc<AgentCatalogResponse>, CatalogFailure> {
+        let request = AgentCatalogRequest {
+            schema_version: 1,
+            project: project.clone(),
+        };
         let bridge = self.bridge.clone();
         let task =
             tokio::task::spawn_blocking(move || bridge.agent_catalog(&request));
-        match time::timeout(COMPLETION_REFRESH_TIMEOUT, task).await {
-            Ok(Ok(Ok(response))) => Ok(response),
+        let response = match time::timeout(COMPLETION_REFRESH_TIMEOUT, task)
+            .await
+        {
+            Ok(Ok(Ok(response))) => Arc::new(response),
             Ok(Ok(Err(error))) => {
-                Err(failure_from_bridge_error(error, "agent catalog"))
+                return Err(failure_from_bridge_error(error, "agent catalog"));
             }
-            Ok(Err(error)) => Err(CatalogFailure {
-                class: "helper_join".to_string(),
-                message: format!("agent catalog helper failed: {error}"),
-            }),
-            Err(_) => Err(CatalogFailure {
-                class: "helper_timeout".to_string(),
-                message: "agent catalog helper timed out".to_string(),
-            }),
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!("agent catalog helper failed: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "agent catalog helper timed out".to_string(),
+                });
+            }
+        };
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.insert(
+                agent_catalog_key(project.as_deref()),
+                CachedAgentCatalog {
+                    response: response.clone(),
+                    refreshed_at: Instant::now(),
+                },
+            );
         }
+        Ok(response)
     }
 
     pub fn should_warn(&self, class: &str) -> bool {
@@ -266,6 +337,12 @@ impl CatalogCache {
             return false;
         };
         warned.insert(class.to_string())
+    }
+
+    pub fn invalidate_agent_catalogs(&self) {
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.clear();
+        }
     }
 
     pub fn invalidate_all(&self) {
@@ -276,6 +353,9 @@ impl CatalogCache {
             catalogs.clear();
         }
         if let Ok(mut catalogs) = self.vcs_repo_catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
             catalogs.clear();
         }
     }
@@ -677,6 +757,10 @@ fn failure_from_bridge_error(
     }
 }
 
+fn agent_catalog_key(project: Option<&str>) -> String {
+    project.unwrap_or_default().to_string()
+}
+
 fn plugin_metadata_env_present() -> bool {
     env::var_os(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV).is_some()
         || env::var_os(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV).is_some()
@@ -686,6 +770,7 @@ fn plugin_metadata_env_present() -> bool {
 mod tests {
     use super::*;
     use sase_core::{
+        AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
         EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
         EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
         HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
@@ -799,6 +884,38 @@ mod tests {
         ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
             std::thread::sleep(Duration::from_millis(200));
             Ok(vcs_repo_response("slow"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AgentCatalogFixtureBridge {
+        response: AgentCatalogResponse,
+    }
+
+    impl HelperHostBridge for AgentCatalogFixtureBridge {
+        fn agent_catalog(
+            &self,
+            _request: &AgentCatalogRequest,
+        ) -> Result<AgentCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    fn agent_catalog_response(name: &str) -> AgentCatalogResponse {
+        AgentCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![AgentCompletionEntry {
+                name: name.to_string(),
+                status: "RUNNING".to_string(),
+                project: "sase".to_string(),
+                kind: "agent".to_string(),
+                member_count: 1,
+                detail: String::new(),
+                documentation: String::new(),
+            }],
+            beads: Vec::new(),
         }
     }
 
@@ -986,6 +1103,32 @@ mod tests {
 
         assert_eq!(first.entries[0].name, "cached");
         assert_eq!(second.entries[0].name, "cached");
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(AgentCatalogFixtureBridge {
+            response: agent_catalog_response("planner"),
+        }));
+
+        let response = cache
+            .agent_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].name, "planner");
+        assert!(!cache.agent_catalog_stale_or_missing(Some("sase")));
+        assert_eq!(
+            cache.cached_agent_catalog(Some("sase")).unwrap().entries[0].name,
+            "planner"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_cache_reports_helper_failure_without_cached_rows() {
+        let cache = CatalogCache::new(Arc::new(UnavailableBridge));
+        let error = cache.agent_catalog_for_completion(None).await.unwrap_err();
+        assert_eq!(error.class, "helper_unavailable");
     }
 
     #[tokio::test]

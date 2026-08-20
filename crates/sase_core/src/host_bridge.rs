@@ -934,6 +934,7 @@ mod tests {
                 status: "ok".to_string(),
                 message: String::new(),
                 entries: Vec::new(),
+                beads: Vec::new(),
             },
             changespec_tags_response: MobileChangeSpecTagListResponseWire {
                 schema_version: 1,

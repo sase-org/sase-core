@@ -29,7 +29,7 @@ use super::directive::{
     build_bead_completion_candidates, build_directive_keyword_candidates,
     build_directive_static_value_candidates,
     detect_directive_context_at_position, directive_allows_keywords,
-    directive_argument_candidates, directive_metadata,
+    directive_metadata,
 };
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
@@ -41,10 +41,10 @@ use super::wire::{
     AgentCompletionEntry, ArtifactRefCompletionMode,
     ArtifactRefCompletionTrigger, CompletionCandidate, CompletionContext,
     CompletionContextKind, CompletionList, DirectiveClauseKind,
-    DirectiveCompletionInventories, DirectiveSyntaxForm, DirectiveValueRole,
-    EditorPosition, EditorRange, EditorTextEdit, TokenInfo, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger,
-    XpromptAssistEntry, XpromptInputHint,
+    DirectiveCompletionInventories, DirectiveModelEntry, DirectiveSyntaxForm,
+    DirectiveValueRole, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoEntry,
+    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
 };
 
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
@@ -1513,6 +1513,7 @@ pub fn build_directive_clause_candidates(
                         token,
                         inventories,
                         context.selected_keywords(),
+                        &context.selected_values,
                         replacement,
                     ));
                 }
@@ -1554,8 +1555,12 @@ pub fn build_directive_clause_candidates(
         );
     }
     if name == "model" {
-        let mut candidates =
-            model_value_candidates(token, inventories, replacement);
+        let mut candidates = model_value_candidates(
+            token,
+            inventories,
+            context.active_keyword(),
+            replacement,
+        );
         if context.syntax_form() == Some(DirectiveSyntaxForm::Parenthesized)
             && context.clause_kind() == Some(DirectiveClauseKind::Positional)
         {
@@ -1563,6 +1568,7 @@ pub fn build_directive_clause_candidates(
                 token,
                 inventories,
                 context.selected_keywords(),
+                &context.selected_values,
                 replacement,
             ));
         }
@@ -1571,14 +1577,19 @@ pub fn build_directive_clause_candidates(
             candidates,
         };
     }
-    context
-        .directive_name
-        .as_deref()
-        .map(directive_argument_candidates)
-        .unwrap_or_else(|| CompletionList {
+    let Some(metadata) = directive_metadata(name) else {
+        return CompletionList {
             candidates: Vec::new(),
             shared_extension: String::new(),
-        })
+        };
+    };
+    // Keyword names are offered only in `DirectiveArgumentKeyword` (and the
+    // wait positional mix above). Clan/id positional slots stay free-form.
+    build_directive_static_value_candidates(
+        metadata.positional_suggestions,
+        token,
+        replacement,
+    )
 }
 
 fn build_directive_value_candidates(
@@ -1623,7 +1634,12 @@ fn build_directive_value_candidates(
             &context.selected_values,
         ),
         Some(DirectiveValueRole::Model) => CompletionList {
-            candidates: model_value_candidates(token, inventories, replacement),
+            candidates: model_value_candidates(
+                token,
+                inventories,
+                context.active_keyword(),
+                replacement,
+            ),
             shared_extension: String::new(),
         },
         _ => {
@@ -1655,13 +1671,21 @@ fn build_directive_value_candidates(
 fn model_value_candidates(
     token: &str,
     inventories: &DirectiveCompletionInventories,
+    active_keyword: Option<&str>,
     replacement: Option<EditorRange>,
 ) -> Vec<CompletionCandidate> {
     let partial = token.to_lowercase();
+    let self_ref = active_keyword.map(str::to_lowercase);
     inventories
         .models
         .iter()
         .filter(|entry| {
+            if self_ref
+                .as_ref()
+                .is_some_and(|name| model_entry_is_self_ref(entry, name))
+            {
+                return false;
+            }
             entry.value.to_lowercase().starts_with(&partial)
                 || entry.display.to_lowercase().starts_with(&partial)
         })
@@ -1693,20 +1717,35 @@ fn model_value_candidates(
         .collect()
 }
 
+fn model_entry_is_self_ref(entry: &DirectiveModelEntry, keyword: &str) -> bool {
+    let keyword = keyword.trim_start_matches('@');
+    let value = entry.value.trim_start_matches('@').to_lowercase();
+    if value == keyword {
+        return true;
+    }
+    entry
+        .display
+        .trim_start_matches('@')
+        .eq_ignore_ascii_case(keyword)
+}
+
 fn model_alias_key_candidates(
     token: &str,
     inventories: &DirectiveCompletionInventories,
     selected_keywords: &[String],
+    selected_values: &[String],
     replacement: Option<EditorRange>,
 ) -> Vec<CompletionCandidate> {
     let partial = token.to_lowercase();
     let selected = selected_keywords
         .iter()
+        .chain(selected_values.iter())
         .map(|value| {
             value
                 .split_once('=')
                 .map(|(name, _)| name.trim())
                 .unwrap_or(value.as_str())
+                .trim_start_matches('@')
                 .to_lowercase()
         })
         .collect::<Vec<_>>();

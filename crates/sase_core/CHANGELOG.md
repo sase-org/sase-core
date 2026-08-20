@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(sase_core_rs)* bind `directive_contract`, `directive_completion_context`,
   and `directive_completion_candidates`
 - *(prompt_stash)* optional bundle-local cursor metadata on stash rows
+- *(editor)* extend the editor helper agent-catalog wire with optional bounded
+  bead rows and drive xprompt LSP directive completion from the shared contract
 
 ## [0.29.5](https://github.com/sase-org/sase-core/compare/v0.29.4...v0.29.5) - 2026-08-20
 

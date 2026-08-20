@@ -1793,4 +1793,104 @@ mod tests {
         assert_eq!(unclosed.active_keyword(), Some("summary"));
         assert_eq!(unclosed.token.as_ref().unwrap().text, "\"hello");
     }
+
+    #[test]
+    fn clause_candidates_cover_roles_conflicts_and_self_references() {
+        use super::super::completion::build_directive_clause_candidates;
+        use super::super::wire::{
+            AgentCompletionEntry, DirectiveCompletionInventories,
+            DirectiveModelAliasKey, DirectiveModelEntry,
+        };
+
+        let inventories = DirectiveCompletionInventories {
+            models: vec![DirectiveModelEntry {
+                value: "opus".to_string(),
+                display: "opus".to_string(),
+                detail: String::new(),
+                documentation: "Claude".to_string(),
+            }],
+            model_alias_keys: vec![
+                DirectiveModelAliasKey {
+                    name: "coder".to_string(),
+                    documentation: "Coder follow-up".to_string(),
+                },
+                DirectiveModelAliasKey {
+                    name: "medium".to_string(),
+                    documentation: "Medium alias".to_string(),
+                },
+            ],
+            agents: vec![
+                AgentCompletionEntry {
+                    name: "planner".to_string(),
+                    status: "RUNNING".to_string(),
+                    project: "sase".to_string(),
+                    kind: "agent".to_string(),
+                    member_count: 1,
+                    detail: String::new(),
+                    documentation: String::new(),
+                },
+                AgentCompletionEntry {
+                    name: "builders".to_string(),
+                    status: "RUNNING".to_string(),
+                    project: String::new(),
+                    kind: "clan".to_string(),
+                    member_count: 3,
+                    detail: "clan · 3 members".to_string(),
+                    documentation: String::new(),
+                },
+            ],
+            beads: vec![BeadCompletionEntry {
+                id: "sase-a".to_string(),
+                title: "Active bug".to_string(),
+                status: "in_progress".to_string(),
+                type_label: "task".to_string(),
+                created_at: "2026-08-01T00:00:00Z".to_string(),
+                updated_at: "2026-08-20T12:00:00Z".to_string(),
+                task_type: "bug".to_string(),
+                project: "sase".to_string(),
+            }],
+            excluded_bead_ids: Vec::new(),
+        };
+
+        let insertions = |text: &str, character: u32| -> Vec<String> {
+            let list = build_directive_clause_candidates(
+                &classify(text, character),
+                &inventories,
+            );
+            list.candidates
+                .into_iter()
+                .map(|candidate| candidate.insertion)
+                .collect()
+        };
+
+        let at_end = |text: &str| insertions(text, text.len() as u32);
+        assert_eq!(
+            at_end("%wait("),
+            [
+                "bead=",
+                "priority=",
+                "runners=",
+                "time=",
+                "builders",
+                "planner"
+            ]
+        );
+        assert_eq!(at_end("%wait:"), ["builders", "planner"]);
+        assert!(at_end("%wait:t").iter().all(|value| !value.ends_with('=')));
+        assert_eq!(at_end("%wait(bead="), ["sase-a"]);
+        assert_eq!(at_end("%wait(time="), ["5m", "1430"]);
+        assert_eq!(at_end("%id(worker, clan="), ["builders"]);
+        assert_eq!(at_end("%id(worker, clan=builders, "), ["bead="]);
+        assert!(at_end("%clan(re").is_empty());
+        assert_eq!(
+            at_end("%clan(research, su"),
+            ["summary=", "summary_script="]
+        );
+        assert_eq!(at_end("%clan(research, summary=hi, "), ["tribe="]);
+        assert_eq!(at_end("%repeat:"), ["2", "3"]);
+        assert_eq!(at_end("%xprompts_enabled:"), ["false", "true"]);
+        assert_eq!(at_end("%model(opus, "), ["coder=", "medium="]);
+        assert_eq!(at_end("%model(medium, c"), ["coder="]);
+        assert_eq!(at_end("%model(opus, coder="), ["opus"]);
+    }
 }

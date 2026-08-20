@@ -51,6 +51,16 @@ impl HelperHostBridge for FixtureBridge {
                     documentation: String::new(),
                 },
             ],
+            beads: vec![sase_core::BeadCompletionEntry {
+                id: "sase-a".to_string(),
+                title: "Active bug".to_string(),
+                status: "in_progress".to_string(),
+                type_label: "task".to_string(),
+                created_at: "2026-08-01T00:00:00Z".to_string(),
+                updated_at: "2026-08-20T12:00:00Z".to_string(),
+                task_type: "bug".to_string(),
+                project: "sase".to_string(),
+            }],
         })
     }
 
@@ -1175,6 +1185,198 @@ async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
             .expect("expected snippet label");
         assert_eq!(item["textEdit"]["newText"], json!(new_text));
     }
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(5)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_directive_value_roles() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_directive_values.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "%wait(bead=\n%wait:t\n%wait(café, be"
+                }
+            }
+        }),
+    )
+    .await;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 11}
+            }
+        }),
+    )
+    .await;
+    let mut bead_labels = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            bead_labels = message["result"]
+                .as_array()
+                .expect("bead completion array")
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert_eq!(bead_labels, vec!["sase-a"]);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 7}
+            }
+        }),
+    )
+    .await;
+    let mut colon_labels = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            colon_labels = message["result"]
+                .as_array()
+                .expect("colon wait completion array")
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert!(
+        colon_labels.iter().all(|label| !label.ends_with('=')),
+        "{colon_labels:?}"
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 14}
+            }
+        }),
+    )
+    .await;
+    let mut unicode_item = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            unicode_item = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "bead=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let unicode_item = unicode_item.expect("bead= after unicode clause");
+    assert_eq!(
+        unicode_item["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 14}
+            },
+            "newText": "bead="
+        })
+    );
 
     write_message(
         &mut client_writer,

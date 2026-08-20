@@ -38,20 +38,20 @@ use sase_core::{
     editor_build_vcs_project_completion_candidates,
     editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
-    editor_build_wait_completion_candidates_for_form,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
-    editor_directive_argument_candidates, editor_directive_metadata,
-    editor_extract_token_at_position, editor_hover_at_position,
-    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
-    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    editor_directive_metadata, editor_extract_token_at_position,
+    editor_hover_at_position, ArtifactRefContextWire, AtReferenceContextWire,
+    AtReferenceInventoryWire, AtReferenceKindRowWire,
+    AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
-    DirectiveCompletionInventories, DirectiveSyntaxForm, DocumentSnapshot,
-    EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
+    DirectiveClauseKind, DirectiveCompletionInventories,
+    DirectiveModelAliasKey, DirectiveSyntaxForm, DirectiveValueRole,
+    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
     GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
     VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
     XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
@@ -387,11 +387,14 @@ impl XpromptLspServer {
                 &vcs_catalog,
             ));
         }
-        if context.kind == CompletionContextKind::XpromptArgumentAgent
-            || (context.kind == CompletionContextKind::DirectiveArgument
-                && context.directive_name.as_deref() == Some("wait"))
-        {
-            return Some(self.agent_completion(&context).await);
+        if context.kind == CompletionContextKind::XpromptArgumentAgent {
+            return Some(self.agent_completion(&context, &config).await);
+        }
+        if is_directive_argument_context(&context) {
+            return Some(
+                self.directive_completion(&context, &config, &document)
+                    .await,
+            );
         }
         let list = self.completion_list_for_context(
             &context,
@@ -444,14 +447,6 @@ impl XpromptLspServer {
                 context.replacement_range,
                 append_text_arg_space,
             )));
-        }
-        if context.kind == CompletionContextKind::DirectiveArgument
-            && context.directive_name.as_deref() == Some("model")
-        {
-            return Some(model_completion_response(
-                list,
-                context.replacement_range,
-            ));
         }
         let mut response = completion_response(list, context.replacement_range);
         if config.snippet_support
@@ -600,15 +595,19 @@ impl XpromptLspServer {
     async fn agent_completion(
         &self,
         context: &sase_core::CompletionContext,
+        config: &ServerConfig,
     ) -> CompletionResponse {
-        let response =
-            match self.catalog_cache.agent_catalog_for_completion().await {
-                Ok(response) => response,
-                Err(error) => {
-                    self.warn_once(&error).await;
-                    return empty_completion_response();
-                }
-            };
+        let response = match self
+            .catalog_cache
+            .agent_catalog_for_completion(config.project.clone())
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.warn_once(&error).await;
+                return empty_completion_response();
+            }
+        };
         if response.status != "ok" {
             if !response.message.is_empty() {
                 warn!(
@@ -623,25 +622,134 @@ impl XpromptLspServer {
             .as_ref()
             .map(|token| token.text.as_str())
             .unwrap_or_default();
-        let list = if context.directive_name.as_deref() == Some("wait") {
-            editor_build_wait_completion_candidates_for_form(
-                token,
-                None,
-                &response.entries,
-                &context.selected_values,
-                context
-                    .syntax_form()
-                    .unwrap_or(DirectiveSyntaxForm::Parenthesized),
-            )
-        } else {
-            editor_build_agent_completion_candidates(
-                token,
-                None,
-                &response.entries,
-                &context.selected_values,
-            )
-        };
+        let list = editor_build_agent_completion_candidates(
+            token,
+            None,
+            &response.entries,
+            &context.selected_values,
+        );
         agent_completion_response(list, context.replacement_range)
+    }
+
+    async fn directive_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        config: &ServerConfig,
+        document: &DocumentSnapshot,
+    ) -> CompletionResponse {
+        if context.value_role() == Some(DirectiveValueRole::PathOrExecutable) {
+            let token = context
+                .token
+                .as_ref()
+                .map(|token| token.text.as_str())
+                .unwrap_or_default();
+            let list = editor_build_file_completion_candidates_with_base(
+                token,
+                config.root_dir.as_deref(),
+            );
+            return completion_response(
+                apply_replacement(list, context.replacement_range),
+                context.replacement_range,
+            );
+        }
+
+        let inventories =
+            self.directive_inventories(context, config, document).await;
+        if is_rich_model_value_context(context) {
+            return self.model_directive_completion(
+                context,
+                &inventories,
+                config,
+            );
+        }
+        let list =
+            editor_build_directive_clause_candidates(context, &inventories);
+        agent_completion_response(list, context.replacement_range)
+    }
+
+    async fn directive_inventories(
+        &self,
+        context: &sase_core::CompletionContext,
+        config: &ServerConfig,
+        _document: &DocumentSnapshot,
+    ) -> DirectiveCompletionInventories {
+        let mut inventories = DirectiveCompletionInventories::default();
+        if needs_model_alias_keys(context) {
+            inventories.model_alias_keys =
+                model_alias_keys_from_catalog(config.model_catalog.as_deref());
+        }
+        if !needs_host_catalog(context) {
+            return inventories;
+        }
+        match self
+            .catalog_cache
+            .agent_catalog_for_completion(config.project.clone())
+            .await
+        {
+            Ok(response) if response.status == "ok" => {
+                if needs_agent_entries(context) {
+                    inventories.agents = response.entries.clone();
+                }
+                if needs_bead_entries(context) {
+                    inventories.beads = response.beads.clone();
+                }
+            }
+            Ok(response) => {
+                if !response.message.is_empty() {
+                    warn!(
+                        "agent catalog returned no entries: {}",
+                        response.message
+                    );
+                }
+            }
+            Err(error) => {
+                self.warn_once(&error).await;
+            }
+        }
+        inventories
+    }
+
+    fn model_directive_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        inventories: &DirectiveCompletionInventories,
+        config: &ServerConfig,
+    ) -> CompletionResponse {
+        let token = context
+            .token
+            .as_ref()
+            .map(|token| token.text.as_str())
+            .unwrap_or_default();
+        let mut list =
+            model_completion_list(token, config.model_catalog.as_deref());
+        if let Some(keyword) = context.active_keyword() {
+            list.candidates.retain(|candidate| {
+                !model_insertion_is_self_ref(&candidate.insertion, keyword)
+            });
+        }
+        let mut items =
+            match model_completion_response(list, context.replacement_range) {
+                CompletionResponse::Array(items) => items,
+                other => return other,
+            };
+        if context.kind == CompletionContextKind::DirectiveArgument
+            && context.syntax_form() == Some(DirectiveSyntaxForm::Parenthesized)
+            && context.clause_kind() == Some(DirectiveClauseKind::Positional)
+        {
+            let mut alias_context = context.clone();
+            alias_context.kind =
+                CompletionContextKind::DirectiveArgumentKeyword;
+            let aliases = editor_build_directive_clause_candidates(
+                &alias_context,
+                inventories,
+            );
+            if let CompletionResponse::Array(alias_items) =
+                agent_completion_response(aliases, context.replacement_range)
+            {
+                items.extend(alias_items);
+            }
+        }
+        CompletionResponse::Array(items)
     }
 
     async fn vcs_repo_catalog_for_completion(
@@ -1173,32 +1281,12 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates(token)
             }
-            CompletionContextKind::DirectiveArgument => context
-                .directive_name
-                .as_deref()
-                .map(|name| {
-                    if name == "model" {
-                        model_completion_list(
-                            token,
-                            config.model_catalog.as_deref(),
-                        )
-                    } else if matches!(name, "clan" | "id") {
-                        empty_completion_list()
-                    } else {
-                        editor_directive_argument_candidates(name)
-                    }
-                })
-                .unwrap_or_else(empty_completion_list),
-            CompletionContextKind::DirectiveArgumentKeyword => context
-                .directive_name
-                .as_deref()
-                .map(editor_directive_argument_candidates)
-                .unwrap_or_else(empty_completion_list),
-            CompletionContextKind::DirectiveArgumentValue => {
-                editor_build_directive_clause_candidates(
-                    context,
-                    &DirectiveCompletionInventories::default(),
-                )
+            CompletionContextKind::DirectiveArgument
+            | CompletionContextKind::DirectiveArgumentKeyword
+            | CompletionContextKind::DirectiveArgumentValue => {
+                // Handled out-of-band in `directive_completion`, which loads
+                // host inventories only for the active value role.
+                empty_completion_list()
             }
             CompletionContextKind::XpromptArgumentName => context
                 .active_xprompt
@@ -1244,6 +1332,7 @@ impl XpromptLspServer {
     async fn refresh_catalog_explicit(&self) {
         self.invalidate_artifact_ref_cache();
         self.invalidate_glossary_cache();
+        self.catalog_cache.invalidate_agent_catalogs();
         let config = self.current_config();
         let xprompt_result = self
             .catalog_cache
@@ -1662,6 +1751,95 @@ fn snippet_support(capabilities: &ClientCapabilities) -> bool {
         .unwrap_or(false)
 }
 
+fn is_directive_argument_context(
+    context: &sase_core::CompletionContext,
+) -> bool {
+    matches!(
+        context.kind,
+        CompletionContextKind::DirectiveArgument
+            | CompletionContextKind::DirectiveArgumentKeyword
+            | CompletionContextKind::DirectiveArgumentValue
+    )
+}
+
+fn needs_host_catalog(context: &sase_core::CompletionContext) -> bool {
+    needs_agent_entries(context) || needs_bead_entries(context)
+}
+
+fn needs_agent_entries(context: &sase_core::CompletionContext) -> bool {
+    if context.directive_name.as_deref() == Some("wait")
+        && context.kind == CompletionContextKind::DirectiveArgument
+    {
+        return true;
+    }
+    matches!(
+        context.value_role(),
+        Some(
+            DirectiveValueRole::Agent
+                | DirectiveValueRole::Clan
+                | DirectiveValueRole::Family
+                | DirectiveValueRole::Tribe
+        )
+    )
+}
+
+fn needs_bead_entries(context: &sase_core::CompletionContext) -> bool {
+    context.value_role() == Some(DirectiveValueRole::Bead)
+}
+
+fn needs_model_alias_keys(context: &sase_core::CompletionContext) -> bool {
+    context.directive_name.as_deref() == Some("model")
+        && context.syntax_form() == Some(DirectiveSyntaxForm::Parenthesized)
+        && context.kind != CompletionContextKind::DirectiveArgumentValue
+}
+
+fn is_rich_model_value_context(context: &sase_core::CompletionContext) -> bool {
+    context.directive_name.as_deref() == Some("model")
+        && (context.kind == CompletionContextKind::DirectiveArgument
+            && context.clause_kind() == Some(DirectiveClauseKind::Positional)
+            || context.value_role() == Some(DirectiveValueRole::Model))
+}
+
+fn model_insertion_is_self_ref(insertion: &str, keyword: &str) -> bool {
+    let keyword = keyword.trim_start_matches('@');
+    insertion
+        .trim_start_matches('@')
+        .eq_ignore_ascii_case(keyword)
+}
+
+fn model_alias_keys_from_catalog(
+    path: Option<&Path>,
+) -> Vec<DirectiveModelAliasKey> {
+    let mut keys = Vec::new();
+    let mut seen = BTreeSet::new();
+    for entry in load_model_catalog(path) {
+        if !is_model_alias_kind(&entry.kind) {
+            continue;
+        }
+        let names = if entry.aliases.is_empty() {
+            vec![entry.value.trim_start_matches('@').to_string()]
+        } else {
+            entry.aliases.clone()
+        };
+        for name in names {
+            let name = name.trim_start_matches('@').to_string();
+            if name.is_empty() || !seen.insert(name.to_lowercase()) {
+                continue;
+            }
+            keys.push(DirectiveModelAliasKey {
+                name,
+                documentation: if entry.description.is_empty() {
+                    "model alias override".to_string()
+                } else {
+                    entry.description.clone()
+                },
+            });
+        }
+    }
+    keys.sort_by(|left, right| left.name.cmp(&right.name));
+    keys
+}
+
 fn xprompt_snippet_items(
     list: CompletionList,
     entries: &[XpromptAssistEntry],
@@ -1772,6 +1950,22 @@ fn directive_snippet_items(
                 items.push(snippet_completion_item(
                     "%clan(..., tribe=...)".to_string(),
                     "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation,
+                    replacement_range,
+                ));
+            } else if directive.name == "wait" {
+                items.push(snippet_completion_item(
+                    "%wait(..., bead=...)".to_string(),
+                    "%wait(${1:agent}, bead=${2:bead-id})$0".to_string(),
+                    Some("directive snippet".to_string()),
+                    documentation,
+                    replacement_range,
+                ));
+            } else if directive.name == "model" {
+                items.push(snippet_completion_item(
+                    "%model(..., alias=...)".to_string(),
+                    "%model(${1:model}, ${2:alias}=${3:model})$0".to_string(),
                     Some("directive snippet".to_string()),
                     documentation,
                     replacement_range,
@@ -2959,17 +3153,71 @@ mod tests {
         TextDocumentPositionParams, Uri,
     };
     use sase_core::{
+        AgentCatalogRequest, AgentCatalogResponse,
         EditorPosition as CorePosition, EditorRange as CoreRange,
-        EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
-        EditorSnippetEntryWire, MobileHelperProjectContextWire,
+        EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+        EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
+        HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
         MobileHelperProjectScopeWire, MobileHelperResultWire,
         MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
-        MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
-        MobileXpromptInputWire, StaticHelperHostBridge,
+        MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
+        MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
+        StaticHelperHostBridge, UnavailableHelperHostBridge,
     };
     use tower_lsp_server::UriExt;
 
     use super::*;
+
+    async fn labels_at(server: &XpromptLspServer, text: &str) -> Vec<String> {
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array for {text}");
+        };
+        items.iter().map(|item| item.label.clone()).collect()
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingAgentBridge {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+        inner: StaticHelperHostBridge,
+    }
+
+    impl HelperHostBridge for CountingAgentBridge {
+        fn agent_catalog(
+            &self,
+            request: &AgentCatalogRequest,
+        ) -> std::result::Result<AgentCatalogResponse, HostBridgeError>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.agent_catalog(request)
+        }
+
+        fn xprompt_catalog(
+            &self,
+            request: &MobileXpromptCatalogRequestWire,
+        ) -> std::result::Result<
+            MobileXpromptCatalogResponseWire,
+            HostBridgeError,
+        > {
+            self.inner.xprompt_catalog(request)
+        }
+
+        fn snippet_catalog(
+            &self,
+            request: &EditorSnippetCatalogRequestWire,
+        ) -> std::result::Result<
+            EditorSnippetCatalogResponseWire,
+            HostBridgeError,
+        > {
+            self.inner.snippet_catalog(request)
+        }
+    }
 
     fn bridge_with_catalog(
         definition_path: Option<String>,
@@ -3552,8 +3800,13 @@ mod tests {
             let CompletionResponse::Array(items) = response else {
                 panic!("expected completion array");
             };
-            assert_text_completion_item(
-                &items, keyword, start, cursor, keyword,
+            assert_completion_edit(
+                &items,
+                keyword,
+                start,
+                cursor,
+                keyword,
+                CompletionItemKind::KEYWORD,
             );
             let item = items
                 .iter()
@@ -3613,7 +3866,14 @@ mod tests {
             labels,
             vec!["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         );
-        assert_text_completion_item(&items, "high", 8, 8, "high");
+        assert_completion_edit(
+            &items,
+            "high",
+            8,
+            8,
+            "high",
+            CompletionItemKind::VALUE,
+        );
 
         let response = server
             .completion_for_text(
@@ -3630,8 +3890,15 @@ mod tests {
         };
         let labels: Vec<&str> =
             items.iter().map(|item| item.label.as_str()).collect();
-        assert_eq!(labels, vec!["plan", "tale", "epic"]);
-        assert_text_completion_item(&items, "tale", 6, 7, "tale");
+        assert_eq!(labels, vec!["tale"]);
+        assert_completion_edit(
+            &items,
+            "tale",
+            6,
+            7,
+            "tale",
+            CompletionItemKind::VALUE,
+        );
     }
 
     #[tokio::test]
@@ -3719,6 +3986,299 @@ mod tests {
         };
         assert_eq!(edit.range.start, Position::new(0, 6));
         assert_eq!(edit.new_text, "@ops");
+    }
+
+    #[tokio::test]
+    async fn wait_bead_value_completion_uses_helper_rows() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.agent_catalog_response =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "message": "",
+                "entries": [
+                    {"name": "planner", "status": "RUNNING", "project": "sase"}
+                ],
+                "beads": [
+                    {
+                        "id": "sase-a",
+                        "title": "Active bug",
+                        "status": "in_progress",
+                        "type_label": "task",
+                        "updated_at": "2026-08-20T12:00:00Z",
+                        "task_type": "bug",
+                        "project": "sase"
+                    }
+                ]
+            }))
+            .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+        let text = "%wait(bead=";
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-a"]
+        );
+        assert_eq!(items[0].kind, Some(CompletionItemKind::REFERENCE));
+        assert!(items[0]
+            .documentation
+            .as_ref()
+            .is_some_and(|doc| match doc {
+                Documentation::MarkupContent(content) => {
+                    content.value.contains("Active bug")
+                }
+                _ => false,
+            }));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected bead text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 11));
+        assert_eq!(edit.new_text, "sase-a");
+    }
+
+    #[tokio::test]
+    async fn wait_keywords_survive_helper_failure_and_mixed_version_payloads() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(UnavailableHelperHostBridge),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text("%wait(".to_string(), Position::new(0, 6))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bead=", "priority=", "runners=", "time="]
+        );
+
+        let mut mixed = bridge_with_catalog_entries(Vec::new());
+        mixed.agent_catalog_response =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "entries": [{"name": "planner", "status": "RUNNING"}]
+            }))
+            .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(mixed))
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text(
+                "%wait(bead=".to_string(),
+                Position::new(0, 11),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[tokio::test]
+    async fn identity_and_static_value_roles_use_the_shared_contract() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.agent_catalog_response = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "status": "ok",
+            "entries": [
+                {"name": "planner", "kind": "agent"},
+                {"name": "builders", "kind": "clan", "member_count": 3, "detail": "clan · 3 members"},
+                {"name": "review", "kind": "family", "member_count": 2},
+                {"name": "@ops", "kind": "tribe", "member_count": 4}
+            ],
+            "beads": [{"id": "sase-a", "title": "Active bug", "status": "in_progress"}]
+        }))
+        .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+
+        let clan = labels_at(server, "%id(worker, clan=").await;
+        assert_eq!(clan, vec!["builders"]);
+        let family = labels_at(server, "%i(worker, family=").await;
+        assert_eq!(family, vec!["review"]);
+        let tribe = labels_at(server, "%clan(research, tribe=").await;
+        assert_eq!(tribe, vec!["@ops"]);
+        let bead = labels_at(server, "%id(worker, bead=").await;
+        assert_eq!(bead, vec!["sase-a"]);
+        assert_eq!(labels_at(server, "%wait(time=").await, vec!["5m", "1430"]);
+        assert_eq!(labels_at(server, "%wait(runners=").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%wait(priority=").await, vec!["10", "1"]);
+        assert_eq!(labels_at(server, "%repeat:").await, vec!["2", "3"]);
+        assert_eq!(
+            labels_at(server, "%xprompts_enabled:").await,
+            vec!["false", "true"]
+        );
+        assert_eq!(labels_at(server, "%e:xh").await, vec!["xhigh"]);
+        assert!(labels_at(server, "%w:t")
+            .await
+            .iter()
+            .all(|value| !value.ends_with('=')));
+    }
+
+    #[tokio::test]
+    async fn wait_unicode_mid_clause_uses_utf16_replacement_range() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.agent_catalog_response =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "entries": []
+            }))
+            .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+        let text = "%wait(café, be";
+        let response = server
+            .completion_for_text(text.to_string(), Position::new(0, 14))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_completion_edit(
+            &items,
+            "bead=",
+            12,
+            14,
+            "bead=",
+            CompletionItemKind::KEYWORD,
+        );
+    }
+
+    #[tokio::test]
+    async fn host_catalog_is_not_fetched_for_static_value_roles() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut inner = bridge_with_catalog_entries(Vec::new());
+        inner.agent_catalog_response =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "entries": [{"name": "planner"}],
+                "beads": [{"id": "sase-a"}]
+            }))
+            .unwrap();
+        let bridge = CountingAgentBridge {
+            calls: calls.clone(),
+            inner,
+        };
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+        let _ = labels_at(server, "%wait(time=").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let _ = labels_at(server, "%wait(bead=").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let _ = labels_at(server, "%id(worker, clan=").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn model_paren_completion_offers_alias_keys_and_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            config.model_catalog = Some(catalog_path);
+        }
+
+        let first = labels_at(server, "%model(scout").await;
+        assert!(first.iter().any(|label| *label == "scout="), "{first:?}");
+
+        let keys = labels_at(server, "%m(opus, ").await;
+        assert!(keys.contains(&"scout=".to_string()), "{keys:?}");
+        assert!(keys.contains(&"default=".to_string()), "{keys:?}");
+        assert!(!keys.iter().any(|label| label == "opus"), "{keys:?}");
+
+        let values = labels_at(server, "%model(opus, scout=").await;
+        assert!(values.contains(&"opus".to_string()), "{values:?}");
+        assert!(!values.iter().any(|label| label == "@scout"), "{values:?}");
+
+        let earlier = "%model(op, scout=sonnet)";
+        let response = server
+            .completion_for_text(earlier.to_string(), Position::new(0, 9))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_completion_edit(
+            &items,
+            "opus",
+            7,
+            9,
+            "opus",
+            CompletionItemKind::VALUE,
+        );
+    }
+
+    #[tokio::test]
+    async fn directive_matrix_completes_every_advertised_name_and_alias() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+        for (token, expected) in [
+            ("%m", "%model"),
+            ("%e", "%effort"),
+            ("%i", "%id"),
+            ("%c", "%clan"),
+            ("%w", "%wait"),
+            ("%a", "%auto"),
+            ("%h", "%hide"),
+            ("%r", "%repeat"),
+            ("%xprompts_enabled", "%xprompts_enabled"),
+        ] {
+            let labels = labels_at(server, token).await;
+            assert!(
+                labels.contains(&expected.to_string()),
+                "{token}: {labels:?}"
+            );
+        }
+        let alt = labels_at(server, "%alt").await;
+        assert!(alt.contains(&"%alt".to_string()), "{alt:?}");
     }
 
     #[tokio::test]
@@ -4091,6 +4651,31 @@ mod tests {
                 || item.label.starts_with("%tribe")
                 || item.label.starts_with("%t:")));
         }
+
+        let wait_items = server
+            .completion_for_text("%wait".to_string(), Position::new(0, 5))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(wait_items) = wait_items else {
+            panic!("expected completion array");
+        };
+        assert_snippet_item(
+            &wait_items,
+            "%wait(..., bead=...)",
+            "%wait(${1:agent}, bead=${2:bead-id})$0",
+        );
+        let model_items = server
+            .completion_for_text("%model".to_string(), Position::new(0, 6))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(model_items) = model_items else {
+            panic!("expected completion array");
+        };
+        assert_snippet_item(
+            &model_items,
+            "%model(..., alias=...)",
+            "%model(${1:model}, ${2:alias}=${3:model})$0",
+        );
     }
 
     #[test]
@@ -4105,6 +4690,14 @@ mod tests {
                 character: 4,
             },
         };
+        let wait_items = directive_snippet_items(Some("%wait"), range);
+        assert!(wait_items
+            .iter()
+            .any(|item| item.label == "%wait(..., bead=...)"));
+        let model_items = directive_snippet_items(Some("%model"), range);
+        assert!(model_items
+            .iter()
+            .any(|item| item.label == "%model(..., alias=...)"));
         let items = directive_snippet_items(Some("%alt"), range);
         let alt = items
             .iter()
@@ -4623,18 +5216,19 @@ mod tests {
         assert_eq!(edit.new_text.as_str(), new_text);
     }
 
-    fn assert_text_completion_item(
+    fn assert_completion_edit(
         items: &[CompletionItem],
         label: &str,
         start_character: u32,
         end_character: u32,
         new_text: &str,
+        kind: CompletionItemKind,
     ) {
         let item = items
             .iter()
             .find(|item| item.label == label)
             .unwrap_or_else(|| panic!("missing completion item {label}"));
-        assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
+        assert_eq!(item.kind, Some(kind));
         assert_eq!(item.filter_text.as_deref(), Some(label));
         let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
         else {
