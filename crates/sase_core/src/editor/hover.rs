@@ -40,6 +40,7 @@ pub fn hover_at_position(
             context.kind,
             CompletionContextKind::DirectiveArgument
                 | CompletionContextKind::DirectiveArgumentKeyword
+                | CompletionContextKind::DirectiveArgumentValue
         ) {
             let name = context.directive_name.as_deref()?;
             let metadata = directive_metadata(name)?;

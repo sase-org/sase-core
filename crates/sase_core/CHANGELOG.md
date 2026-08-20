@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(editor)* expand the xprompt directive completion contract with syntax forms,
+  keyword conflicts, value-provider roles, a grammar-aware classifier, and
+  shared static/dynamic candidate builders (including `%wait bead=` and bead
+  ranking)
+- *(sase_core_rs)* bind `directive_contract`, `directive_completion_context`,
+  and `directive_completion_candidates`
+
 ## [0.29.5](https://github.com/sase-org/sase-core/compare/v0.29.4...v0.29.5) - 2026-08-20
 
 ### Added

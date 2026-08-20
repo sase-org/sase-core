@@ -28,6 +28,9 @@ without a local Rust toolchain.
 - `axe_status_wire_schema_version()` — portable AXE status contract version.
 - `classify_axe_status(request)` — pure AXE lifecycle and worker-health
   classification from already-collected host observations.
+- `directive_contract()`, `directive_completion_context(text, line, character)`,
+  `directive_completion_candidates(context, inventories=None)` — shared xprompt
+  directive completion contract, cursor classifier, and JSON-shaped candidates.
 
 `classify_axe_status` performs no filesystem, process, or clock access. Python
 supplies lock/PID liveness, marker ages, runner occupancy, lumberjack reports,

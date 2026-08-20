@@ -244,6 +244,9 @@
 //! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
+//! - `directive_contract() -> list[dict]`
+//! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
+//! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
 //! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", now: str | None = None) -> dict`
 //! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, now: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict`
@@ -7490,6 +7493,86 @@ fn py_placeholder_input_names(texts: Vec<String>) -> Vec<String> {
     sase_core::editor_placeholder_input_names(texts)
 }
 
+// --- Directive completion contract ---------------------------------------
+//
+// These bindings expose the shared xprompt directive contract, grammar-aware
+// cursor classifier, and JSON-shaped candidate builder consumed by ACE.
+
+/// Return the canonical directive completion contract as a list of dicts.
+#[pyfunction]
+#[pyo3(name = "directive_contract")]
+fn py_directive_contract(py: Python<'_>) -> PyResult<PyObject> {
+    let contract = sase_core::editor_directive_contract();
+    let value = serde_json::to_value(&contract).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Classify directive completion context at a UTF-16 cursor, or `None`.
+#[pyfunction]
+#[pyo3(name = "directive_completion_context")]
+fn py_directive_completion_context(
+    py: Python<'_>,
+    text: &str,
+    line: u32,
+    character: u32,
+) -> PyResult<PyObject> {
+    let document = sase_core::DocumentSnapshot::new(text);
+    let context = sase_core::editor_detect_directive_context_at_position(
+        &document,
+        sase_core::EditorPosition { line, character },
+    );
+    let value = serde_json::to_value(&context).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Build JSON-shaped directive completion candidates for a classified context.
+///
+/// `inventories` supplies host-owned model, agent, and bead rows. Static
+/// keyword and example values come from the shared contract even when the
+/// inventory is empty.
+#[pyfunction]
+#[pyo3(name = "directive_completion_candidates")]
+#[pyo3(signature = (context, inventories = None))]
+fn py_directive_completion_candidates(
+    py: Python<'_>,
+    context: Bound<'_, PyDict>,
+    inventories: Option<Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let context = serde_json::from_value::<sase_core::CompletionContext>(
+        py_to_json_value(context.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "context is not a valid CompletionContext dict: {error}"
+        ))
+    })?;
+    let inventories = inventories
+        .map(|inventories| {
+            serde_json::from_value::<sase_core::DirectiveCompletionInventories>(
+                py_to_json_value(inventories.as_any())?,
+            )
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "inventories is not a valid DirectiveCompletionInventories dict: {error}"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let list = sase_core::editor_build_directive_clause_candidates(
+        &context,
+        &inventories,
+    );
+    let value = serde_json::to_value(&list).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Chop overrun classification ------------------------------------------
 
 fn chop_overrun_error_to_pyerr(error: ChopOverrunError) -> PyErr {
@@ -9767,6 +9850,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_substitute_raw_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_input_names, m)?)?;
+    m.add_function(wrap_pyfunction!(py_directive_contract, m)?)?;
+    m.add_function(wrap_pyfunction!(py_directive_completion_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_directive_completion_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
@@ -15824,6 +15910,137 @@ MENTORS:
             assert_eq!(result["coverage_start_ts"], json!(120.0));
 
             let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let contract = py_directive_contract(py).unwrap();
+            let contract = py_to_json_value(contract.bind(py)).unwrap();
+            let names: Vec<&str> = contract
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "model",
+                    "effort",
+                    "id",
+                    "clan",
+                    "wait",
+                    "auto",
+                    "hide",
+                    "repeat",
+                    "alt",
+                    "xprompts_enabled",
+                ]
+            );
+            let wait = contract
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == "wait")
+                .unwrap();
+            assert_eq!(
+                wait["keywords"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|keyword| keyword["name"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["bead", "priority", "runners", "time"]
+            );
+
+            let context =
+                py_directive_completion_context(py, "%wait(bead=", 0, 11)
+                    .unwrap();
+            let context_value = py_to_json_value(context.bind(py)).unwrap();
+            assert_eq!(
+                context_value["kind"],
+                json!("directive_argument_value")
+            );
+            assert_eq!(context_value["directive_name"], json!("wait"));
+            assert_eq!(
+                context_value["directive"]["active_keyword"],
+                json!("bead")
+            );
+            assert_eq!(context_value["directive"]["value_role"], json!("bead"));
+
+            let context_dict = context.bind(py).downcast::<PyDict>().unwrap();
+            let inventories = json_value_to_py(
+                py,
+                &json!({
+                    "beads": [{
+                        "id": "sase-a",
+                        "title": "Active bug",
+                        "status": "in_progress",
+                        "updated_at": "2026-08-20T12:00:00Z"
+                    }],
+                    "agents": [{"name": "worker", "kind": "agent"}]
+                }),
+            )
+            .unwrap();
+            let inventories_dict =
+                inventories.bind(py).downcast::<PyDict>().unwrap();
+            let candidates = py_directive_completion_candidates(
+                py,
+                context_dict.clone(),
+                Some(inventories_dict.clone()),
+            )
+            .unwrap();
+            let candidates = py_to_json_value(candidates.bind(py)).unwrap();
+            assert_eq!(
+                candidates["candidates"][0]["insertion"],
+                json!("sase-a")
+            );
+
+            let wait_context =
+                py_directive_completion_context(py, "%wait(", 0, 6).unwrap();
+            let wait_dict = wait_context.bind(py).downcast::<PyDict>().unwrap();
+            let wait_candidates = py_directive_completion_candidates(
+                py,
+                wait_dict.clone(),
+                Some(inventories_dict.clone()),
+            )
+            .unwrap();
+            let wait_candidates =
+                py_to_json_value(wait_candidates.bind(py)).unwrap();
+            let insertions: Vec<&str> = wait_candidates["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|candidate| candidate["insertion"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                insertions,
+                ["bead=", "priority=", "runners=", "time=", "worker"]
+            );
+
+            let colon =
+                py_directive_completion_context(py, "%wait:t", 0, 7).unwrap();
+            let colon_value = py_to_json_value(colon.bind(py)).unwrap();
+            assert_eq!(colon_value["directive"]["syntax_form"], json!("colon"));
+            let colon_dict = colon.bind(py).downcast::<PyDict>().unwrap();
+            let colon_candidates = py_directive_completion_candidates(
+                py,
+                colon_dict.clone(),
+                Some(inventories_dict.clone()),
+            )
+            .unwrap();
+            let colon_candidates =
+                py_to_json_value(colon_candidates.bind(py)).unwrap();
+            assert!(colon_candidates["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| {
+                    !candidate["insertion"].as_str().unwrap().ends_with('=')
+                }));
         });
     }
 }

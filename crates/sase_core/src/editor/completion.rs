@@ -25,7 +25,12 @@ use super::at_reference::{
     AtReferenceInventoryWire, AtReferenceKindRowWire,
     AtReferencePayloadRowWire, AtReferenceStage,
 };
-use super::directive::canonical_directive_name;
+use super::directive::{
+    build_bead_completion_candidates, build_directive_keyword_candidates,
+    build_directive_static_value_candidates,
+    detect_directive_context_at_position, directive_allows_keywords,
+    directive_argument_candidates, directive_metadata,
+};
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
     extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
@@ -35,10 +40,11 @@ use super::token::{
 use super::wire::{
     AgentCompletionEntry, ArtifactRefCompletionMode,
     ArtifactRefCompletionTrigger, CompletionCandidate, CompletionContext,
-    CompletionContextKind, CompletionList, EditorPosition, EditorRange,
-    EditorTextEdit, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint,
+    CompletionContextKind, CompletionList, DirectiveClauseKind,
+    DirectiveCompletionInventories, DirectiveSyntaxForm, DirectiveValueRole,
+    EditorPosition, EditorRange, EditorTextEdit, TokenInfo, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger,
+    XpromptAssistEntry, XpromptInputHint,
 };
 
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
@@ -153,6 +159,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
             active_input: None,
             directive_name: None,
             selected_values: Vec::new(),
+            directive: None,
             vcs_repo: None,
             vcs_ref: None,
             artifact_ref: None,
@@ -208,6 +215,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
                 active_input: None,
                 directive_name: None,
                 selected_values: Vec::new(),
+                directive: None,
                 vcs_repo: None,
                 vcs_ref: None,
                 artifact_ref: None,
@@ -281,6 +289,7 @@ fn artifact_ref_completion_context(
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),
+        directive: None,
         vcs_repo: None,
         vcs_ref: None,
         artifact_ref: Some(ArtifactRefCompletionTrigger {
@@ -1394,39 +1403,44 @@ pub fn build_wait_completion_candidates(
     entries: &[AgentCompletionEntry],
     selected_values: &[String],
 ) -> CompletionList {
-    let partial = token.to_lowercase();
-    let selected = selected_values
-        .iter()
-        .map(|value| value.to_lowercase())
-        .collect::<Vec<_>>();
+    build_wait_completion_candidates_for_form(
+        token,
+        replacement_range,
+        entries,
+        selected_values,
+        DirectiveSyntaxForm::Parenthesized,
+    )
+}
+
+pub fn build_wait_completion_candidates_for_form(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+    syntax_form: DirectiveSyntaxForm,
+) -> CompletionList {
     let mut candidates = Vec::new();
-    if !token.contains('=') {
-        for (keyword, detail) in [
-            ("time=", "wait duration"),
-            ("runners=", "runner capacity"),
-            ("priority=", "runner queue priority (lower runs first)"),
-        ] {
-            if !keyword.starts_with(&partial)
-                || selected.iter().any(|value| value.starts_with(keyword))
-            {
-                continue;
-            }
-            candidates.push(CompletionCandidate {
-                display: keyword.to_string(),
-                insertion: keyword.to_string(),
-                detail: Some(detail.to_string()),
-                documentation: None,
-                is_dir: false,
-                name: keyword.to_string(),
-                replacement: replacement_range.map(|range| EditorTextEdit {
-                    range,
-                    new_text: keyword.to_string(),
-                }),
-                additional_edits: Vec::new(),
-                kind: "keyword".to_string(),
-                project: String::new(),
-                status: String::new(),
-            });
+    let wait = directive_metadata("wait");
+    if !token.contains('=')
+        && wait.is_some_and(|metadata| {
+            directive_allows_keywords(metadata, syntax_form)
+        })
+    {
+        let selected_keywords: Vec<String> = selected_values
+            .iter()
+            .filter(|value| value.contains('='))
+            .cloned()
+            .collect();
+        if let Some(metadata) = wait {
+            candidates.extend(
+                build_directive_keyword_candidates(
+                    metadata,
+                    token,
+                    &selected_keywords,
+                    replacement_range,
+                )
+                .candidates,
+            );
         }
     }
     candidates.extend(
@@ -1442,6 +1456,290 @@ pub fn build_wait_completion_candidates(
         shared_extension: shared_extension(&candidates, token),
         candidates,
     }
+}
+
+pub fn build_identity_target_candidates(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    required_kind: &str,
+    selected_values: &[String],
+) -> CompletionList {
+    let filtered: Vec<AgentCompletionEntry> = entries
+        .iter()
+        .filter(|entry| agent_entry_kind(entry) == required_kind)
+        .cloned()
+        .collect();
+    build_agent_completion_candidates(
+        token,
+        replacement_range,
+        &filtered,
+        selected_values,
+    )
+}
+
+pub fn build_directive_clause_candidates(
+    context: &CompletionContext,
+    inventories: &DirectiveCompletionInventories,
+) -> CompletionList {
+    let token = context
+        .token
+        .as_ref()
+        .map(|token| token.text.as_str())
+        .unwrap_or_default();
+    let replacement = Some(context.replacement_range);
+    match context.kind {
+        CompletionContextKind::DirectiveName => {
+            return super::directive::build_directive_completion_candidates(
+                token,
+            );
+        }
+        CompletionContextKind::DirectiveArgumentKeyword => {
+            if let Some(metadata) = context
+                .directive_name
+                .as_deref()
+                .and_then(directive_metadata)
+            {
+                let mut list = build_directive_keyword_candidates(
+                    metadata,
+                    token,
+                    context.selected_keywords(),
+                    replacement,
+                );
+                if metadata.dynamic_keyword_role
+                    == Some(DirectiveValueRole::ModelAliasKey)
+                {
+                    list.candidates.extend(model_alias_key_candidates(
+                        token,
+                        inventories,
+                        context.selected_keywords(),
+                        replacement,
+                    ));
+                }
+                return list;
+            }
+        }
+        CompletionContextKind::DirectiveArgumentValue => {
+            return build_directive_value_candidates(
+                context,
+                inventories,
+                token,
+                replacement,
+            );
+        }
+        CompletionContextKind::DirectiveArgument => {}
+        _ => {
+            return CompletionList {
+                candidates: Vec::new(),
+                shared_extension: String::new(),
+            };
+        }
+    }
+
+    let Some(name) = context.directive_name.as_deref() else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+    if name == "wait" {
+        return build_wait_completion_candidates_for_form(
+            token,
+            replacement,
+            &inventories.agents,
+            &context.selected_values,
+            context
+                .syntax_form()
+                .unwrap_or(DirectiveSyntaxForm::Parenthesized),
+        );
+    }
+    if name == "model" {
+        let mut candidates =
+            model_value_candidates(token, inventories, replacement);
+        if context.syntax_form() == Some(DirectiveSyntaxForm::Parenthesized)
+            && context.clause_kind() == Some(DirectiveClauseKind::Positional)
+        {
+            candidates.extend(model_alias_key_candidates(
+                token,
+                inventories,
+                context.selected_keywords(),
+                replacement,
+            ));
+        }
+        return CompletionList {
+            shared_extension: shared_extension(&candidates, token),
+            candidates,
+        };
+    }
+    context
+        .directive_name
+        .as_deref()
+        .map(directive_argument_candidates)
+        .unwrap_or_else(|| CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        })
+}
+
+fn build_directive_value_candidates(
+    context: &CompletionContext,
+    inventories: &DirectiveCompletionInventories,
+    token: &str,
+    replacement: Option<EditorRange>,
+) -> CompletionList {
+    match context.value_role() {
+        Some(DirectiveValueRole::Bead) => build_bead_completion_candidates(
+            &inventories.beads,
+            token,
+            &context.selected_values,
+            &inventories.excluded_bead_ids,
+            replacement,
+        ),
+        Some(DirectiveValueRole::Agent) => build_agent_completion_candidates(
+            token,
+            replacement,
+            &inventories.agents,
+            &context.selected_values,
+        ),
+        Some(DirectiveValueRole::Clan) => build_identity_target_candidates(
+            token,
+            replacement,
+            &inventories.agents,
+            "clan",
+            &context.selected_values,
+        ),
+        Some(DirectiveValueRole::Family) => build_identity_target_candidates(
+            token,
+            replacement,
+            &inventories.agents,
+            "family",
+            &context.selected_values,
+        ),
+        Some(DirectiveValueRole::Tribe) => build_identity_target_candidates(
+            token,
+            replacement,
+            &inventories.agents,
+            "tribe",
+            &context.selected_values,
+        ),
+        Some(DirectiveValueRole::Model) => CompletionList {
+            candidates: model_value_candidates(token, inventories, replacement),
+            shared_extension: String::new(),
+        },
+        _ => {
+            let Some(metadata) = context
+                .directive_name
+                .as_deref()
+                .and_then(directive_metadata)
+            else {
+                return CompletionList {
+                    candidates: Vec::new(),
+                    shared_extension: String::new(),
+                };
+            };
+            let values = context
+                .active_keyword()
+                .and_then(|name| {
+                    metadata
+                        .keywords
+                        .iter()
+                        .find(|keyword| keyword.name == name)
+                        .map(|keyword| keyword.suggested_values)
+                })
+                .unwrap_or(metadata.positional_suggestions);
+            build_directive_static_value_candidates(values, token, replacement)
+        }
+    }
+}
+
+fn model_value_candidates(
+    token: &str,
+    inventories: &DirectiveCompletionInventories,
+    replacement: Option<EditorRange>,
+) -> Vec<CompletionCandidate> {
+    let partial = token.to_lowercase();
+    inventories
+        .models
+        .iter()
+        .filter(|entry| {
+            entry.value.to_lowercase().starts_with(&partial)
+                || entry.display.to_lowercase().starts_with(&partial)
+        })
+        .map(|entry| {
+            let display = if entry.display.is_empty() {
+                entry.value.clone()
+            } else {
+                entry.display.clone()
+            };
+            CompletionCandidate {
+                display,
+                insertion: entry.value.clone(),
+                detail: (!entry.detail.is_empty())
+                    .then(|| entry.detail.clone()),
+                documentation: (!entry.documentation.is_empty())
+                    .then(|| entry.documentation.clone()),
+                is_dir: false,
+                name: entry.value.clone(),
+                replacement: replacement.map(|range| EditorTextEdit {
+                    range,
+                    new_text: entry.value.clone(),
+                }),
+                additional_edits: Vec::new(),
+                kind: "model".to_string(),
+                project: String::new(),
+                status: String::new(),
+            }
+        })
+        .collect()
+}
+
+fn model_alias_key_candidates(
+    token: &str,
+    inventories: &DirectiveCompletionInventories,
+    selected_keywords: &[String],
+    replacement: Option<EditorRange>,
+) -> Vec<CompletionCandidate> {
+    let partial = token.to_lowercase();
+    let selected = selected_keywords
+        .iter()
+        .map(|value| {
+            value
+                .split_once('=')
+                .map(|(name, _)| name.trim())
+                .unwrap_or(value.as_str())
+                .to_lowercase()
+        })
+        .collect::<Vec<_>>();
+    inventories
+        .model_alias_keys
+        .iter()
+        .filter(|entry| {
+            let name = entry.name.to_lowercase();
+            !selected.iter().any(|value| value == &name)
+                && (name.starts_with(&partial)
+                    || format!("{}=", name).starts_with(&partial))
+        })
+        .map(|entry| {
+            let insertion = format!("{}=", entry.name);
+            CompletionCandidate {
+                display: insertion.clone(),
+                insertion: insertion.clone(),
+                detail: None,
+                documentation: (!entry.documentation.is_empty())
+                    .then(|| entry.documentation.clone()),
+                is_dir: false,
+                name: insertion.clone(),
+                replacement: replacement.map(|range| EditorTextEdit {
+                    range,
+                    new_text: insertion,
+                }),
+                additional_edits: Vec::new(),
+                kind: "keyword".to_string(),
+                project: String::new(),
+                status: String::new(),
+            }
+        })
+        .collect()
 }
 
 fn agent_entry_kind(entry: &AgentCompletionEntry) -> &str {
@@ -1725,6 +2023,7 @@ pub fn detect_vcs_repo_context_at_position(
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),
+        directive: None,
         vcs_repo: Some(trigger),
         vcs_ref: None,
         artifact_ref: None,
@@ -2041,6 +2340,7 @@ pub fn detect_vcs_ref_context_at_position(
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),
+        directive: None,
         vcs_repo: None,
         vcs_ref: Some(trigger),
         artifact_ref: None,
@@ -2186,6 +2486,7 @@ fn detect_vcs_project_context_at_position(
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),
+        directive: None,
         vcs_repo: None,
         vcs_ref: None,
         artifact_ref: None,
@@ -2641,6 +2942,7 @@ fn arg_context(
             .then_some(target.active_input.name),
         directive_name: None,
         selected_values: target.selected_values,
+        directive: None,
         vcs_repo: None,
         vcs_ref: None,
         artifact_ref: None,
@@ -2693,196 +2995,6 @@ fn selected_positional_values(
     values
 }
 
-fn detect_directive_context_at_position(
-    document: &DocumentSnapshot,
-    position: EditorPosition,
-) -> Option<CompletionContext> {
-    let cursor = document.position_to_byte_offset(position)?;
-    let line = document.line_text(position.line)?;
-    let line_start = document.position_to_byte_offset(EditorPosition {
-        line: position.line,
-        character: 0,
-    })?;
-    let cursor_in_line = cursor.checked_sub(line_start)?;
-    let before = line.get(..cursor_in_line)?;
-
-    if let Some((start, token)) = directive_name_token(before) {
-        let byte_start = line_start + start;
-        let range = document.byte_range_to_range(byte_start, cursor)?;
-        return Some(CompletionContext {
-            kind: CompletionContextKind::DirectiveName,
-            token: Some(TokenInfo {
-                text: token.to_string(),
-                range,
-                byte_start,
-                byte_end: cursor,
-            }),
-            active_xprompt: None,
-            active_input: None,
-            directive_name: None,
-            selected_values: Vec::new(),
-            vcs_repo: None,
-            vcs_ref: None,
-            artifact_ref: None,
-            replacement_range: range,
-        });
-    }
-
-    if let Some(target) = directive_arg_token(line, cursor_in_line) {
-        // A non-leading `@<effort>` suffix on a `%model` value completes from
-        // the effort vocabulary, mirroring the Python `%model:<model>@<effort>`
-        // split. A leading `@` is the model-alias marker and stays in model
-        // completion context. The replacement range covers only the token after
-        // a suffix `@`.
-        let (directive_name, arg_start) = match target.directive_name {
-            "model" => match before[target.arg_start..].rfind('@') {
-                Some(rel_at) if rel_at > 0 => {
-                    ("effort", target.arg_start + rel_at + 1)
-                }
-                None => (target.directive_name, target.arg_start),
-                _ => (target.directive_name, target.arg_start),
-            },
-            _ => (target.directive_name, target.arg_start),
-        };
-        let byte_start = line_start + arg_start;
-        let byte_end = line_start + target.arg_end;
-        let range = document.byte_range_to_range(byte_start, byte_end)?;
-        let token_range = document.byte_range_to_range(byte_start, cursor)?;
-        return Some(CompletionContext {
-            kind: target.kind,
-            token: Some(TokenInfo {
-                text: before[arg_start..].to_string(),
-                range: token_range,
-                byte_start,
-                byte_end: cursor,
-            }),
-            active_xprompt: None,
-            active_input: None,
-            directive_name: Some(directive_name.to_string()),
-            selected_values: target.selected_values,
-            vcs_repo: None,
-            vcs_ref: None,
-            artifact_ref: None,
-            replacement_range: range,
-        });
-    }
-    None
-}
-
-fn directive_name_token(before: &str) -> Option<(usize, &str)> {
-    let start = before.rfind('%')?;
-    let token = &before[start..];
-    if token == "%("
-        || token[1..]
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        return Some((start, token));
-    }
-    None
-}
-
-struct DirectiveArgCompletionTarget {
-    directive_name: &'static str,
-    arg_start: usize,
-    arg_end: usize,
-    kind: CompletionContextKind,
-    selected_values: Vec<String>,
-}
-
-fn directive_arg_token(
-    line: &str,
-    cursor: usize,
-) -> Option<DirectiveArgCompletionTarget> {
-    let before = line.get(..cursor)?;
-    let percent = before.rfind('%')?;
-    let directive = &before[percent + 1..];
-    let split = directive.find([':', '('])?;
-    let name = &directive[..split];
-    // Return the canonical directive name so aliases (e.g. `%e` -> `effort`,
-    // `%m` -> `model`) classify under the same argument context as their full
-    // spelling, matching the Python `extract_directive_arg_token_around_cursor`.
-    let canonical = canonical_directive_name(name)?;
-    let sep_idx = percent + 1 + split;
-    if directive.as_bytes().get(split) == Some(&b'(') && directive.contains(')')
-    {
-        return None;
-    }
-
-    let mut target = DirectiveArgCompletionTarget {
-        directive_name: canonical,
-        arg_start: sep_idx + 1,
-        arg_end: cursor,
-        kind: CompletionContextKind::DirectiveArgument,
-        selected_values: Vec::new(),
-    };
-    if canonical == "wait" {
-        let body_start = sep_idx + 1;
-        let body_end = if directive.as_bytes().get(split) == Some(&b'(') {
-            line[body_start..]
-                .find(')')
-                .map(|offset| body_start + offset)
-                .unwrap_or(line.len())
-        } else {
-            line.len()
-        };
-        if cursor > body_end {
-            return None;
-        }
-        let body = line.get(body_start..body_end)?;
-        let cursor_in_body = cursor.checked_sub(body_start)?;
-        let clause_index = body[..cursor_in_body].matches(',').count();
-        let clause_start = body[..cursor_in_body]
-            .rfind(',')
-            .map(|offset| offset + 1)
-            .unwrap_or(0);
-        let clause_end = body[cursor_in_body..]
-            .find(',')
-            .map(|offset| cursor_in_body + offset)
-            .unwrap_or(body.len());
-        let clause = &body[clause_start..clause_end];
-        let leading = clause.len() - clause.trim_start().len();
-        let trailing = clause.len() - clause.trim_end().len();
-        target.arg_start = body_start + clause_start + leading;
-        target.arg_end = body_start + clause_end - trailing;
-        target.selected_values = body
-            .split(',')
-            .enumerate()
-            .filter(|(index, _value)| *index != clause_index)
-            .map(|(_index, value)| value)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect();
-        return Some(target);
-    }
-    if !matches!(canonical, "clan" | "id")
-        || directive.as_bytes().get(split) != Some(&b'(')
-    {
-        return Some(target);
-    }
-
-    // `%clan` accepts its metadata keywords and `%id` accepts its
-    // membership/tag keywords after a positional argument. Keep the canonical
-    // directive name for hover while narrowing keyword completion and
-    // replacement to the active clause.
-    let body = &directive[split + 1..];
-    let Some(comma) = body.rfind(',') else {
-        return Some(target);
-    };
-    let clause = &body[comma + 1..];
-    let trimmed = clause.trim_start();
-    target.arg_start = sep_idx + 1 + comma + 1 + (clause.len() - trimmed.len());
-    if let Some(equals) = trimmed.find('=') {
-        let value = &trimmed[equals + 1..];
-        target.arg_start +=
-            equals + 1 + (value.len() - value.trim_start().len());
-    } else {
-        target.kind = CompletionContextKind::DirectiveArgumentKeyword;
-    }
-    Some(target)
-}
-
 fn context_for_token(
     kind: CompletionContextKind,
     token: TokenInfo,
@@ -2895,6 +3007,7 @@ fn context_for_token(
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),
+        directive: None,
         vcs_repo: None,
         vcs_ref: None,
         artifact_ref: None,
@@ -4615,7 +4728,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 value_context.kind,
-                CompletionContextKind::DirectiveArgument
+                CompletionContextKind::DirectiveArgumentValue
             );
             assert_eq!(
                 value_context.directive_name.as_deref(),
@@ -4638,6 +4751,7 @@ mod tests {
                 context.kind,
                 CompletionContextKind::DirectiveArgument
                     | CompletionContextKind::DirectiveArgumentKeyword
+                    | CompletionContextKind::DirectiveArgumentValue
             )));
         }
     }
@@ -5051,9 +5165,10 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "time=",
-                "runners=",
+                "bead=",
                 "priority=",
+                "runners=",
+                "time=",
                 "@ops",
                 "builders",
                 "review",
@@ -5070,7 +5185,23 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["runners=", "priority=", "@ops", "review", "worker"]
+            vec!["bead=", "priority=", "runners=", "@ops", "review", "worker"]
+        );
+
+        let colon = build_wait_completion_candidates_for_form(
+            "t",
+            None,
+            &entries,
+            &[],
+            DirectiveSyntaxForm::Colon,
+        );
+        assert_eq!(
+            colon
+                .candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
         );
     }
 

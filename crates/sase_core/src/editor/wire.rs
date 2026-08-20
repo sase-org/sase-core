@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content_layout::MemoryTierWire;
 
-pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EditorPosition {
@@ -48,6 +48,7 @@ pub enum CompletionContextKind {
     DirectiveName,
     DirectiveArgument,
     DirectiveArgumentKeyword,
+    DirectiveArgumentValue,
     SnippetTrigger,
     VcsProject,
     VcsRepo,
@@ -90,6 +91,10 @@ pub struct CompletionContext {
     pub directive_name: Option<String>,
     #[serde(default)]
     pub selected_values: Vec<String>,
+    /// Grammar-aware directive clause details. Absent for non-directive
+    /// contexts and for directive-name completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directive: Option<DirectiveClauseContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vcs_repo: Option<VcsRepoTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -370,13 +375,269 @@ pub struct XpromptAssistEntry {
     pub memory_type: Option<MemoryTierWire>,
 }
 
+/// Allowed surface syntax for one directive. Classifiers must not advertise
+/// keywords in a form the runtime treats as positional-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectiveSyntaxForm {
+    Bare,
+    Colon,
+    Parenthesized,
+    Plus,
+    BraceShorthand,
+}
+
+/// Dynamic or static value provider role for a positional argument or
+/// keyword value. Suggestions are assistance, never an accidental allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectiveValueRole {
+    Model,
+    ModelAliasKey,
+    Agent,
+    Clan,
+    Family,
+    Tribe,
+    Bead,
+    PathOrExecutable,
+    Bool,
+    NonNegativeInt,
+    PositiveInt,
+    WaitTime,
+    FreeText,
+    GateOwned,
+}
+
+/// Which part of a directive argument clause the cursor is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectiveClauseKind {
+    Positional,
+    KeywordName,
+    KeywordValue,
+}
+
+/// One documented example value for a positional argument or keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DirectiveSuggestedValue {
+    pub value: &'static str,
+    pub documentation: &'static str,
+}
+
+/// Owned suggested-value row for the serializable directive contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveSuggestedValueWire {
+    pub value: String,
+    pub documentation: String,
+}
+
+/// Static keyword specification for one directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DirectiveKeywordSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub value_role: DirectiveValueRole,
+    pub repeatable: bool,
+    pub conflicts_with: &'static [&'static str],
+    pub suggested_values: &'static [DirectiveSuggestedValue],
+}
+
+/// Owned keyword row for the serializable directive contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveKeywordContract {
+    pub name: String,
+    pub description: String,
+    pub value_role: DirectiveValueRole,
+    pub repeatable: bool,
+    pub conflicts_with: Vec<String>,
+    pub suggested_values: Vec<DirectiveSuggestedValueWire>,
+}
+
+/// Canonical editor/domain metadata for one xprompt directive.
+///
+/// Extra fields beyond the historical name/alias/description triple are the
+/// shared completion contract consumed by ACE and the xprompt LSP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DirectiveMetadata {
     pub name: &'static str,
     pub alias: Option<&'static str>,
     pub description: &'static str,
+    pub argument_hint: &'static str,
     pub takes_argument: bool,
     pub allows_multiple: bool,
+    pub syntax_forms: &'static [DirectiveSyntaxForm],
+    pub positional_role: Option<DirectiveValueRole>,
+    pub positional_suggestions: &'static [DirectiveSuggestedValue],
+    pub keywords: &'static [DirectiveKeywordSpec],
+    pub dynamic_keyword_role: Option<DirectiveValueRole>,
+}
+
+/// JSON-shaped owned copy of [`DirectiveMetadata`] for Python/ACE bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveContractEntry {
+    pub name: String,
+    pub alias: Option<String>,
+    pub description: String,
+    pub argument_hint: String,
+    pub takes_argument: bool,
+    pub allows_multiple: bool,
+    pub syntax_forms: Vec<DirectiveSyntaxForm>,
+    pub positional_role: Option<DirectiveValueRole>,
+    pub positional_suggestions: Vec<DirectiveSuggestedValueWire>,
+    pub keywords: Vec<DirectiveKeywordContract>,
+    pub dynamic_keyword_role: Option<DirectiveValueRole>,
+}
+
+impl From<&DirectiveMetadata> for DirectiveContractEntry {
+    fn from(metadata: &DirectiveMetadata) -> Self {
+        Self {
+            name: metadata.name.to_string(),
+            alias: metadata.alias.map(str::to_string),
+            description: metadata.description.to_string(),
+            argument_hint: metadata.argument_hint.to_string(),
+            takes_argument: metadata.takes_argument,
+            allows_multiple: metadata.allows_multiple,
+            syntax_forms: metadata.syntax_forms.to_vec(),
+            positional_role: metadata.positional_role,
+            positional_suggestions: metadata
+                .positional_suggestions
+                .iter()
+                .map(|value| DirectiveSuggestedValueWire {
+                    value: value.value.to_string(),
+                    documentation: value.documentation.to_string(),
+                })
+                .collect(),
+            keywords: metadata
+                .keywords
+                .iter()
+                .map(|keyword| DirectiveKeywordContract {
+                    name: keyword.name.to_string(),
+                    description: keyword.description.to_string(),
+                    value_role: keyword.value_role,
+                    repeatable: keyword.repeatable,
+                    conflicts_with: keyword
+                        .conflicts_with
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect(),
+                    suggested_values: keyword
+                        .suggested_values
+                        .iter()
+                        .map(|value| DirectiveSuggestedValueWire {
+                            value: value.value.to_string(),
+                            documentation: value.documentation.to_string(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            dynamic_keyword_role: metadata.dynamic_keyword_role,
+        }
+    }
+}
+
+/// Grammar classification for the active directive clause at the cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveClauseContext {
+    pub syntax_form: DirectiveSyntaxForm,
+    pub clause_kind: DirectiveClauseKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_keyword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_role: Option<DirectiveValueRole>,
+    #[serde(default)]
+    pub selected_keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clause_range: Option<EditorRange>,
+}
+
+/// One open-bead inventory row supplied by the host for directive completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadCompletionEntry {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub type_label: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub task_type: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+/// One model-catalog row supplied by the host for `%model` completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveModelEntry {
+    pub value: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub documentation: String,
+}
+
+/// One configured model-alias key for `%model(...)` override completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveModelAliasKey {
+    pub name: String,
+    #[serde(default)]
+    pub documentation: String,
+}
+
+/// Host-supplied dynamic inventories for directive value completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveCompletionInventories {
+    #[serde(default)]
+    pub models: Vec<DirectiveModelEntry>,
+    #[serde(default)]
+    pub model_alias_keys: Vec<DirectiveModelAliasKey>,
+    #[serde(default)]
+    pub agents: Vec<AgentCompletionEntry>,
+    #[serde(default)]
+    pub beads: Vec<BeadCompletionEntry>,
+    /// Bead IDs that must never be offered (for example the launching
+    /// agent's own bead).
+    #[serde(default)]
+    pub excluded_bead_ids: Vec<String>,
+}
+
+impl CompletionContext {
+    pub fn syntax_form(&self) -> Option<DirectiveSyntaxForm> {
+        self.directive
+            .as_ref()
+            .map(|directive| directive.syntax_form)
+    }
+
+    pub fn clause_kind(&self) -> Option<DirectiveClauseKind> {
+        self.directive
+            .as_ref()
+            .map(|directive| directive.clause_kind)
+    }
+
+    pub fn active_keyword(&self) -> Option<&str> {
+        self.directive
+            .as_ref()
+            .and_then(|directive| directive.active_keyword.as_deref())
+    }
+
+    pub fn value_role(&self) -> Option<DirectiveValueRole> {
+        self.directive
+            .as_ref()
+            .and_then(|directive| directive.value_role)
+    }
+
+    pub fn selected_keywords(&self) -> &[String] {
+        self.directive
+            .as_ref()
+            .map(|directive| directive.selected_keywords.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

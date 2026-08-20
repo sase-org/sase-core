@@ -29,6 +29,7 @@ use sase_core::{
     editor_build_agent_completion_candidates,
     editor_build_artifact_ref_payload_inventory,
     editor_build_at_reference_menu_with_options,
+    editor_build_directive_clause_candidates,
     editor_build_directive_completion_candidates,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
@@ -37,7 +38,7 @@ use sase_core::{
     editor_build_vcs_project_completion_candidates,
     editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
-    editor_build_wait_completion_candidates,
+    editor_build_wait_completion_candidates_for_form,
     editor_build_xprompt_arg_name_candidates,
     editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_artifacts_and_workflows,
@@ -49,7 +50,8 @@ use sase_core::{
     AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
-    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
+    DirectiveCompletionInventories, DirectiveSyntaxForm, DocumentSnapshot,
+    EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
     GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
     VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
     XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
@@ -622,11 +624,14 @@ impl XpromptLspServer {
             .map(|token| token.text.as_str())
             .unwrap_or_default();
         let list = if context.directive_name.as_deref() == Some("wait") {
-            editor_build_wait_completion_candidates(
+            editor_build_wait_completion_candidates_for_form(
                 token,
                 None,
                 &response.entries,
                 &context.selected_values,
+                context
+                    .syntax_form()
+                    .unwrap_or(DirectiveSyntaxForm::Parenthesized),
             )
         } else {
             editor_build_agent_completion_candidates(
@@ -1189,6 +1194,12 @@ impl XpromptLspServer {
                 .as_deref()
                 .map(editor_directive_argument_candidates)
                 .unwrap_or_else(empty_completion_list),
+            CompletionContextKind::DirectiveArgumentValue => {
+                editor_build_directive_clause_candidates(
+                    context,
+                    &DirectiveCompletionInventories::default(),
+                )
+            }
             CompletionContextKind::XpromptArgumentName => context
                 .active_xprompt
                 .as_deref()
@@ -3662,29 +3673,30 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "time=",
-                "runners=",
+                "bead=",
                 "priority=",
+                "runners=",
+                "time=",
                 "@ops",
                 "builders",
                 "review"
             ]
         );
         assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-        assert_eq!(items[3].kind, Some(CompletionItemKind::ENUM_MEMBER));
-        assert_eq!(items[4].kind, Some(CompletionItemKind::MODULE));
-        assert_eq!(items[5].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[3].sort_text.as_deref(), Some("1:0003"));
+        assert_eq!(items[4].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[5].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[6].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[4].sort_text.as_deref(), Some("1:0004"));
         assert_eq!(
-            items[4]
+            items[5]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("clan · 3 members")
         );
-        assert!(items[4].documentation.is_none());
+        assert!(items[5].documentation.is_none());
         let Some(Documentation::MarkupContent(review_doc)) =
-            items[5].documentation.as_ref()
+            items[6].documentation.as_ref()
         else {
             panic!("expected markdown documentation for review family entry");
         };
