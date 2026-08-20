@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.4](https://github.com/sase-org/sase-core/compare/v0.29.3...v0.29.4) - 2026-08-20
+
+### Added
+
+- *(snippet_catalog)* add trigger validation, call graph, and diagnostics
+
 ### Added
 
 - *(snippet_catalog)* add trigger validation, call graph, and missing/cycle diagnostics to `compose_snippet_catalog`
