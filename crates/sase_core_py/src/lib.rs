@@ -13144,6 +13144,27 @@ MENTORS:
             assert_eq!(digest.len(), 64);
             assert_eq!(py_task_type_spec_wire_schema_version(), 1);
 
+            let mut with_refusal = spec_value.clone();
+            with_refusal["create_refusal"] =
+                json!("Agents never create this type.");
+            let with_refusal_object =
+                json_value_to_py(py, &with_refusal).unwrap();
+            let with_refusal_spec =
+                with_refusal_object.bind(py).downcast::<PyDict>().unwrap();
+            py_validate_task_type_spec(with_refusal_spec).unwrap();
+            let refusal_digest =
+                py_task_type_spec_digest(with_refusal_spec).unwrap();
+            assert_ne!(digest, refusal_digest);
+
+            let mut omitted = spec_value.clone();
+            if let Some(object) = omitted.as_object_mut() {
+                object.remove("create_refusal");
+            }
+            let omitted_object = json_value_to_py(py, &omitted).unwrap();
+            let omitted_spec =
+                omitted_object.bind(py).downcast::<PyDict>().unwrap();
+            assert_eq!(py_task_type_spec_digest(omitted_spec).unwrap(), digest);
+
             let values = BTreeMap::from([
                 ("node_id".to_string(), "tests/foo.py::test_bar".to_string()),
                 ("evidence".to_string(), "failed then passed".to_string()),

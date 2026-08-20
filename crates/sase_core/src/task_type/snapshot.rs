@@ -39,6 +39,8 @@ pub struct TaskTypeSnapshotEntryWire {
     pub summary: String,
     pub when_to_use: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_refusal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glyph: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent_color: Option<String>,
@@ -66,6 +68,7 @@ impl TaskTypeSnapshotEntryWire {
             label: spec.label.clone(),
             summary: spec.summary.clone(),
             when_to_use: spec.when_to_use.clone(),
+            create_refusal: spec.create_refusal.clone(),
             glyph: spec.glyph.clone(),
             accent_color: spec.accent_color.clone(),
             agent_creatable: spec.agent_creatable,
@@ -86,6 +89,7 @@ impl TaskTypeSnapshotEntryWire {
             label: self.label.clone(),
             summary: self.summary.clone(),
             when_to_use: self.when_to_use.clone(),
+            create_refusal: self.create_refusal.clone(),
             glyph: self.glyph.clone(),
             accent_color: self.accent_color.clone(),
             agent_creatable: self.agent_creatable,
@@ -255,5 +259,32 @@ mod tests {
     #[test]
     fn parse_rejects_invalid_json() {
         assert!(parse_task_type_snapshot("{").is_err());
+    }
+
+    #[test]
+    fn round_trips_optional_create_refusal_and_omits_it_when_absent() {
+        let mut spec = valid_spec();
+        spec.create_refusal =
+            Some("Agents never create this type.".to_string());
+        let encoded =
+            serialize_task_type_snapshot(&snapshot_with(&spec)).unwrap();
+        assert!(encoded.contains("\"create_refusal\""));
+        assert!(encoded.contains("Agents never create this type."));
+        let parsed = parse_task_type_snapshot(&encoded).unwrap();
+        assert_eq!(
+            parsed.types[0].create_refusal.as_deref(),
+            Some("Agents never create this type.")
+        );
+        assert_eq!(
+            parsed.types[0].to_spec().create_refusal,
+            spec.create_refusal
+        );
+
+        let omitted =
+            serialize_task_type_snapshot(&snapshot_with(&valid_spec()))
+                .unwrap();
+        assert!(!omitted.contains("create_refusal"));
+        let parsed_omitted = parse_task_type_snapshot(&omitted).unwrap();
+        assert_eq!(parsed_omitted.types[0].create_refusal, None);
     }
 }

@@ -17,6 +17,7 @@ pub const TASK_TYPE_SLUG_MAX_LEN: usize = 32;
 pub const TASK_TYPE_FIELD_NAME_MAX_LEN: usize = 64;
 pub const TASK_TYPE_SUMMARY_MAX_CHARS: usize = 120;
 pub const TASK_TYPE_WHEN_TO_USE_MAX_CHARS: usize = 400;
+pub const TASK_TYPE_CREATE_REFUSAL_MAX_CHARS: usize = 400;
 
 /// Reserved slugs: the three bead issue types (`plan`, `phase`, `task`) plus
 /// the four filter sentinels (`untyped`, `unknown`, `all`, `none`).
@@ -38,6 +39,8 @@ pub struct TaskTypeSpecWire {
     pub label: String,
     pub summary: String,
     pub when_to_use: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_refusal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glyph: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +120,9 @@ pub fn validate_task_type_spec(
     validate_required_text(&spec.label, "label")?;
     validate_summary(&spec.summary)?;
     validate_when_to_use(&spec.when_to_use)?;
+    if let Some(create_refusal) = &spec.create_refusal {
+        validate_create_refusal(create_refusal)?;
+    }
     if let Some(glyph) = &spec.glyph {
         validate_glyph(glyph)?;
     }
@@ -482,6 +488,17 @@ fn validate_when_to_use(when_to_use: &str) -> Result<(), TaskTypeError> {
     Ok(())
 }
 
+fn validate_create_refusal(create_refusal: &str) -> Result<(), TaskTypeError> {
+    validate_required_text(create_refusal, "create_refusal")?;
+    let chars = create_refusal.chars().count();
+    if chars > TASK_TYPE_CREATE_REFUSAL_MAX_CHARS {
+        return Err(TaskTypeError::validation(format!(
+            "create_refusal must be at most {TASK_TYPE_CREATE_REFUSAL_MAX_CHARS} characters, got {chars}"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_glyph(glyph: &str) -> Result<(), TaskTypeError> {
     if glyph.is_empty() {
         return Err(TaskTypeError::validation("glyph must not be empty"));
@@ -532,6 +549,7 @@ pub(super) fn valid_spec() -> TaskTypeSpecWire {
         summary: "A test that fails and then passes on an unchanged tree."
             .to_string(),
         when_to_use: "File one when a test failed, a rerun on the same tree passed, and you did not cause the failure.".to_string(),
+        create_refusal: None,
         glyph: Some("≈".to_string()),
         accent_color: Some("#00D7D7".to_string()),
         agent_creatable: true,
@@ -599,13 +617,64 @@ mod tests {
         let explicit = valid_spec();
         let mut omitted = serde_json::to_value(&explicit).unwrap();
         omitted.as_object_mut().unwrap().remove("agent_creatable");
+        omitted.as_object_mut().unwrap().remove("create_refusal");
         let decoded: TaskTypeSpecWire =
             serde_json::from_value(omitted).unwrap();
         assert!(decoded.agent_creatable);
+        assert_eq!(decoded.create_refusal, None);
         assert_eq!(
             task_type_spec_digest(&explicit).unwrap(),
             task_type_spec_digest(&decoded).unwrap()
         );
+    }
+
+    #[test]
+    fn omitted_create_refusal_does_not_change_digest() {
+        let without = valid_spec();
+        let encoded = serde_json::to_value(&without).unwrap();
+        assert!(!encoded.as_object().unwrap().contains_key("create_refusal"));
+        let decoded: TaskTypeSpecWire =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.create_refusal, None);
+        assert_eq!(
+            task_type_spec_digest(&without).unwrap(),
+            task_type_spec_digest(&decoded).unwrap()
+        );
+    }
+
+    #[test]
+    fn create_refusal_changes_digest_and_rejects_empty_or_overlong() {
+        let mut with_refusal = valid_spec();
+        with_refusal.create_refusal =
+            Some("Agents never create this type.".to_string());
+        assert_ne!(
+            task_type_spec_digest(&valid_spec()).unwrap(),
+            task_type_spec_digest(&with_refusal).unwrap()
+        );
+        validate_task_type_spec(&with_refusal).unwrap();
+
+        let mut empty = valid_spec();
+        empty.create_refusal = Some(String::new());
+        assert!(validate_task_type_spec(&empty)
+            .unwrap_err()
+            .message
+            .contains("create_refusal"));
+
+        let mut padded = valid_spec();
+        padded.create_refusal =
+            Some(" Agents never create this type. ".to_string());
+        assert!(validate_task_type_spec(&padded)
+            .unwrap_err()
+            .message
+            .contains("create_refusal"));
+
+        let mut overlong = valid_spec();
+        overlong.create_refusal =
+            Some("y".repeat(TASK_TYPE_CREATE_REFUSAL_MAX_CHARS + 1));
+        assert!(validate_task_type_spec(&overlong)
+            .unwrap_err()
+            .message
+            .contains("at most 400"));
     }
 
     #[test]
