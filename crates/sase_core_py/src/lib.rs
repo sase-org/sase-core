@@ -5798,6 +5798,7 @@ fn py_bead_remove_many<'py>(
 #[pyfunction]
 #[pyo3(name = "bead_add_link")]
 #[pyo3(signature = (beads_dir, issue_id, target_ref, relation, description, origin="manual", now=None))]
+#[allow(clippy::too_many_arguments)]
 fn py_bead_add_link<'py>(
     py: Python<'py>,
     beads_dir: &str,
