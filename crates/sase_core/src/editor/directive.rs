@@ -74,6 +74,13 @@ const REPEAT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     },
 ];
 
+const FINAL_SUGGESTIONS: &[DirectiveSuggestedValue] =
+    &[DirectiveSuggestedValue {
+        value: "none",
+        documentation:
+            "Clear the configured finalizer selection for this launch",
+    }];
+
 const WAIT_TIME_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "5m",
@@ -264,6 +271,19 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         syntax_forms: COLON,
         positional_role: Some(DirectiveValueRole::FreeText),
         positional_suggestions: EFFORT_SUGGESTIONS,
+        keywords: &[],
+        dynamic_keyword_role: None,
+    },
+    DirectiveMetadata {
+        name: "final",
+        alias: None,
+        description: "Select configured finalizer instances for this launch",
+        argument_hint: ":instance|!instance|none or (instance, ...)",
+        takes_argument: true,
+        allows_multiple: true,
+        syntax_forms: COLON_PAREN,
+        positional_role: Some(DirectiveValueRole::FinalizerInstance),
+        positional_suggestions: FINAL_SUGGESTIONS,
         keywords: &[],
         dynamic_keyword_role: None,
     },
@@ -1229,6 +1249,7 @@ mod tests {
             [
                 "model",
                 "effort",
+                "final",
                 "id",
                 "clan",
                 "wait",
@@ -1317,6 +1338,31 @@ mod tests {
             Some(DirectiveValueRole::ModelAliasKey)
         );
         assert_eq!(model.positional_role, Some(DirectiveValueRole::Model));
+
+        let final_directive = contract
+            .iter()
+            .find(|entry| entry.name == "final")
+            .expect("final contract");
+        assert!(final_directive.allows_multiple);
+        assert_eq!(
+            final_directive.syntax_forms,
+            vec![
+                DirectiveSyntaxForm::Colon,
+                DirectiveSyntaxForm::Parenthesized
+            ]
+        );
+        assert_eq!(
+            final_directive.positional_role,
+            Some(DirectiveValueRole::FinalizerInstance)
+        );
+        assert_eq!(
+            final_directive
+                .positional_suggestions
+                .iter()
+                .map(|value| value.value.as_str())
+                .collect::<Vec<_>>(),
+            ["none"]
+        );
     }
 
     #[test]
@@ -1422,7 +1468,10 @@ mod tests {
 
     #[test]
     fn removed_identity_directives_do_not_resolve_or_complete() {
-        for name in ["family", "f", "group", "g", "tribe", "t"] {
+        assert_eq!(canonical_directive_name("f"), None);
+        assert!(directive_metadata("f").is_none());
+
+        for name in ["family", "group", "g", "tribe", "t"] {
             assert_eq!(canonical_directive_name(name), None, "{name}");
             assert!(directive_metadata(name).is_none(), "{name}");
             assert!(
@@ -1849,6 +1898,7 @@ mod tests {
                 task_type: "bug".to_string(),
                 project: "sase".to_string(),
             }],
+            finalizers: Vec::new(),
             excluded_bead_ids: Vec::new(),
         };
 

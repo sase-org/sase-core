@@ -413,6 +413,7 @@ pub enum DirectiveValueRole {
     NonNegativeInt,
     PositiveInt,
     WaitTime,
+    FinalizerInstance,
     FreeText,
     GateOwned,
 }
@@ -599,6 +600,18 @@ pub struct DirectiveModelAliasKey {
     pub documentation: String,
 }
 
+/// One configured finalizer instance supplied by the host for `%final`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveFinalizerEntry {
+    pub value: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub documentation: String,
+}
+
 /// Host-supplied dynamic inventories for directive value completion.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectiveCompletionInventories {
@@ -610,6 +623,8 @@ pub struct DirectiveCompletionInventories {
     pub agents: Vec<AgentCompletionEntry>,
     #[serde(default)]
     pub beads: Vec<BeadCompletionEntry>,
+    #[serde(default)]
+    pub finalizers: Vec<DirectiveFinalizerEntry>,
     /// Bead IDs that must never be offered (for example the launching
     /// agent's own bead).
     #[serde(default)]

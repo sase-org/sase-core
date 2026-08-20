@@ -3708,9 +3708,8 @@ mod tests {
         });
         let server = service.inner();
 
-        for token in [
-            "%name", "%n", "%family", "%f", "%group", "%g", "%tribe", "%t",
-        ] {
+        for token in ["%name", "%n", "%family", "%group", "%g", "%tribe", "%t"]
+        {
             let response = server
                 .completion_for_text(
                     token.to_string(),

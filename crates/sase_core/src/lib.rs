@@ -39,6 +39,7 @@ pub mod editor;
 pub mod effort;
 pub mod effort_override;
 pub mod external_pr;
+pub mod finalizer;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -538,10 +539,11 @@ pub use editor::{
     BeadCompletionEntry, CompletionCandidate, CompletionContext,
     CompletionContextKind, CompletionList, DefinitionTarget,
     DiagnosticSeverity, DirectiveClauseContext, DirectiveClauseKind,
-    DirectiveCompletionInventories, DirectiveContractEntry, DirectiveMetadata,
-    DirectiveModelAliasKey, DirectiveModelEntry, DirectiveSyntaxForm,
-    DirectiveValueRole, DocumentSnapshot, EditorDiagnostic, EditorPosition,
-    EditorRange, EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
+    DirectiveCompletionInventories, DirectiveContractEntry,
+    DirectiveFinalizerEntry, DirectiveMetadata, DirectiveModelAliasKey,
+    DirectiveModelEntry, DirectiveSyntaxForm, DirectiveValueRole,
+    DocumentSnapshot, EditorDiagnostic, EditorPosition, EditorRange,
+    EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
     FrontmatterInputType, FuzzyMatch, HoverPayload, PlaceholderCandidate,
     PlaceholderCandidateSource, PlaceholderCompletion, PlaceholderContext,
     PlaceholderSpan, RawPlaceholderField, TokenInfo, VcsNamespaceEntry,
@@ -568,6 +570,27 @@ pub use external_pr::{
     CanonicalPullRequestUrl, ExternalPrImportPlanWire,
     ExternalPrImportRequestWire, LocalPatchWire, RemotePullRequestWire,
     EXTERNAL_PR_WIRE_SCHEMA_VERSION,
+};
+pub use finalizer::{
+    aggregate_finalizer_outcomes, canonical_json_bytes, canonical_json_sha256,
+    finalizer_context_digest, finalizer_digest_json_value,
+    finalizer_digest_serializable, finalizer_instance_spec_digest,
+    finalizer_plan_digest, finalizer_provider_spec_digest,
+    resolve_finalizer_plan, validate_finalizer_context,
+    validate_finalizer_instance_results, validate_finalizer_instance_spec,
+    validate_finalizer_provider_spec, validate_finalizer_submission,
+    FinalizerAggregateResultWire, FinalizerAggregateStatusWire,
+    FinalizerAttemptWire, FinalizerContextWire,
+    FinalizerDiagnosticSeverityWire, FinalizerDiagnosticWire, FinalizerError,
+    FinalizerInstancePolicyWire, FinalizerInstanceResultWire,
+    FinalizerInstanceSpecWire, FinalizerInstanceStatusWire,
+    FinalizerObligationWire, FinalizerOutcomeEvidenceWire,
+    FinalizerPayloadRequirementWire, FinalizerPlanEntryWire,
+    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderCapabilityWire,
+    FinalizerProviderSpecWire, FinalizerRefusalPolicyWire,
+    FinalizerSelectorOpWire, FinalizerSubmissionEnvelopeWire,
+    FinalizerSubmissionPayloadWire, FinalizerSubmissionValidationWire,
+    FinalizerTriggerKindWire, FINALIZER_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

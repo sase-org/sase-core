@@ -1577,6 +1577,9 @@ pub fn build_directive_clause_candidates(
             candidates,
         };
     }
+    if context.value_role() == Some(DirectiveValueRole::FinalizerInstance) {
+        return finalizer_value_candidates(token, inventories, replacement);
+    }
     let Some(metadata) = directive_metadata(name) else {
         return CompletionList {
             candidates: Vec::new(),
@@ -1642,6 +1645,9 @@ fn build_directive_value_candidates(
             ),
             shared_extension: String::new(),
         },
+        Some(DirectiveValueRole::FinalizerInstance) => {
+            finalizer_value_candidates(token, inventories, replacement)
+        }
         _ => {
             let Some(metadata) = context
                 .directive_name
@@ -1665,6 +1671,77 @@ fn build_directive_value_candidates(
                 .unwrap_or(metadata.positional_suggestions);
             build_directive_static_value_candidates(values, token, replacement)
         }
+    }
+}
+
+fn finalizer_value_candidates(
+    token: &str,
+    inventories: &DirectiveCompletionInventories,
+    replacement: Option<EditorRange>,
+) -> CompletionList {
+    let removing = token.starts_with('!');
+    let query = token.strip_prefix('!').unwrap_or(token).to_lowercase();
+    let mut candidates = Vec::new();
+    if !removing && "none".starts_with(&query) {
+        candidates.push(finalizer_candidate(
+            "none",
+            "none",
+            "clear selection",
+            "Clear the configured finalizer selection for this launch",
+            replacement,
+        ));
+    }
+    for entry in &inventories.finalizers {
+        if !entry.value.to_lowercase().starts_with(&query) {
+            continue;
+        }
+        let insertion = if removing {
+            format!("!{}", entry.value)
+        } else {
+            entry.value.clone()
+        };
+        candidates.push(finalizer_candidate(
+            &entry.display,
+            &insertion,
+            &entry.detail,
+            &entry.documentation,
+            replacement,
+        ));
+    }
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
+    }
+}
+
+fn finalizer_candidate(
+    display: &str,
+    insertion: &str,
+    detail: &str,
+    documentation: &str,
+    replacement: Option<EditorRange>,
+) -> CompletionCandidate {
+    let display = if display.is_empty() {
+        insertion.to_string()
+    } else {
+        display.to_string()
+    };
+    CompletionCandidate {
+        display,
+        insertion: insertion.to_string(),
+        detail: Some(detail.to_string()).filter(|value| !value.is_empty()),
+        documentation: Some(documentation.to_string())
+            .filter(|value| !value.is_empty()),
+        is_dir: false,
+        name: insertion.to_string(),
+        replacement: replacement.map(|range| EditorTextEdit {
+            range,
+            new_text: insertion.to_string(),
+        }),
+        additional_edits: Vec::new(),
+        kind: "finalizer".to_string(),
+        project: String::new(),
+        status: String::new(),
     }
 }
 
@@ -4665,6 +4742,8 @@ mod tests {
             // The `%e` alias classifies under the canonical `effort` context.
             ("%e:", 3, "effort", "", EFFORT_LEVELS_ORDERED.to_vec()),
             ("%e:xh", 5, "effort", "xh", EFFORT_LEVELS_ORDERED.to_vec()),
+            ("%final:", 7, "final", "", vec!["none"]),
+            ("%final:n", 8, "final", "n", vec!["none"]),
             ("%auto:", 6, "auto", "", vec!["plan", "tale", "epic"]),
             ("%auto:t", 7, "auto", "t", vec!["plan", "tale", "epic"]),
         ];
@@ -4682,6 +4761,47 @@ mod tests {
             let values: Vec<&str> =
                 candidates.iter().map(|c| c.insertion.as_str()).collect();
             assert_eq!(values, expected_values, "{text}");
+        }
+    }
+
+    #[test]
+    fn final_directive_completes_add_and_remove_instance_selectors() {
+        let inventories = DirectiveCompletionInventories {
+            finalizers: vec![
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "commit".to_string(),
+                    display: "commit".to_string(),
+                    detail: "builtin@commit".to_string(),
+                    documentation: "Commit attributable repository changes"
+                        .to_string(),
+                },
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "lint".to_string(),
+                    display: "lint".to_string(),
+                    detail: "builtin@command".to_string(),
+                    documentation: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        for (text, cursor, expected) in [
+            ("%final:c", 8, vec!["commit"]),
+            ("%final:!c", 9, vec!["!commit"]),
+            ("%final:none %final:l", 20, vec!["lint"]),
+        ] {
+            let document = DocumentSnapshot::new(text);
+            let context =
+                classify_completion_context(&document, pos(cursor), &entries())
+                    .unwrap();
+            assert_eq!(context.directive_name.as_deref(), Some("final"));
+            let list =
+                build_directive_clause_candidates(&context, &inventories);
+            let insertions = list
+                .candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(insertions, expected, "{text}");
         }
     }
 

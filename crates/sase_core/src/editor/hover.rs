@@ -358,6 +358,12 @@ mod tests {
                 "**%clan**",
                 "Declare a new parallel agent clan",
             ),
+            (
+                "%final:commit",
+                8,
+                "**%final**",
+                "Select configured finalizer instances for this launch",
+            ),
         ] {
             let hover = hover_at_position(
                 &DocumentSnapshot::new(text),

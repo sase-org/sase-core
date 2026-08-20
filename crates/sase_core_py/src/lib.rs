@@ -300,6 +300,18 @@
 //! - `artifact_ref_provider_spec_validate(spec: dict) -> None`
 //! - `artifact_ref_provider_spec_digest(spec: dict) -> str`
 //! - `artifact_ref_provider_spec_wire_schema_version() -> int`
+//! - `finalizer_wire_schema_version() -> int`
+//! - `validate_finalizer_provider_spec(spec: dict) -> None`
+//! - `finalizer_provider_spec_digest(spec: dict) -> str`
+//! - `validate_finalizer_instance_spec(spec: dict) -> None`
+//! - `finalizer_instance_spec_digest(spec: dict) -> str`
+//! - `resolve_finalizer_plan(request: dict) -> dict`
+//! - `finalizer_plan_digest(plan: dict) -> str`
+//! - `finalizer_context_digest(context: dict) -> str`
+//! - `validate_finalizer_context(plan: dict, context: dict) -> str`
+//! - `validate_finalizer_submission(plan: dict, context: dict, submission: dict) -> dict`
+//! - `finalizer_json_digest(value: Any) -> str`
+//! - `aggregate_finalizer_outcomes(results: list[dict]) -> dict`
 //! - `validate_task_type_spec(spec: dict) -> None`
 //! - `task_type_spec_digest(spec: dict) -> str`
 //! - `validate_task_type_field_values(spec: dict, values: dict[str, str]) -> list[dict]`
@@ -720,6 +732,23 @@ use sase_core::external_pr::{
     canonical_pull_request_url as core_canonical_pull_request_url,
     plan_external_pr_import as core_plan_external_pr_import,
     ExternalPrImportRequestWire,
+};
+use sase_core::finalizer::{
+    aggregate_finalizer_outcomes as core_aggregate_finalizer_outcomes,
+    finalizer_context_digest as core_finalizer_context_digest,
+    finalizer_digest_json_value as core_finalizer_digest_json_value,
+    finalizer_instance_spec_digest as core_finalizer_instance_spec_digest,
+    finalizer_plan_digest as core_finalizer_plan_digest,
+    finalizer_provider_spec_digest as core_finalizer_provider_spec_digest,
+    resolve_finalizer_plan as core_resolve_finalizer_plan,
+    validate_finalizer_context as core_validate_finalizer_context,
+    validate_finalizer_instance_spec as core_validate_finalizer_instance_spec,
+    validate_finalizer_provider_spec as core_validate_finalizer_provider_spec,
+    validate_finalizer_submission as core_validate_finalizer_submission,
+    FinalizerContextWire, FinalizerError, FinalizerInstanceResultWire,
+    FinalizerInstanceSpecWire, FinalizerPlanInputWire, FinalizerPlanWire,
+    FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
+    FINALIZER_WIRE_SCHEMA_VERSION,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -4210,6 +4239,194 @@ fn py_artifact_ref_provider_spec_digest(
 #[pyo3(name = "artifact_ref_provider_spec_wire_schema_version")]
 fn py_artifact_ref_provider_spec_wire_schema_version() -> u64 {
     ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION
+}
+
+fn finalizer_error_to_pyerr(error: FinalizerError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn finalizer_wire_from_pydict<T>(
+    dict: &Bound<'_, PyDict>,
+    what: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "{what} is not a valid finalizer wire dict: {error}"
+        ))
+    })
+}
+
+fn finalizer_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, FinalizerError>,
+    operation: &str,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result.map_err(finalizer_error_to_pyerr)?)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "internal finalizer {operation} serialize error: {error}"
+            ))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the finalizer protocol wire schema version.
+#[pyfunction]
+#[pyo3(name = "finalizer_wire_schema_version")]
+fn py_finalizer_wire_schema_version() -> u64 {
+    FINALIZER_WIRE_SCHEMA_VERSION
+}
+
+/// Validate one provider capability/spec wire.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_provider_spec")]
+fn py_validate_finalizer_provider_spec(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let spec: FinalizerProviderSpecWire =
+        finalizer_wire_from_pydict(spec, "provider spec")?;
+    core_validate_finalizer_provider_spec(&spec)
+        .map_err(finalizer_error_to_pyerr)
+}
+
+/// Compute the canonical sha256 digest for one provider spec.
+#[pyfunction]
+#[pyo3(name = "finalizer_provider_spec_digest")]
+fn py_finalizer_provider_spec_digest(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let spec: FinalizerProviderSpecWire =
+        finalizer_wire_from_pydict(spec, "provider spec")?;
+    core_finalizer_provider_spec_digest(&spec).map_err(finalizer_error_to_pyerr)
+}
+
+/// Validate one configured finalizer instance.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_instance_spec")]
+fn py_validate_finalizer_instance_spec(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let spec: FinalizerInstanceSpecWire =
+        finalizer_wire_from_pydict(spec, "instance spec")?;
+    core_validate_finalizer_instance_spec(&spec)
+        .map_err(finalizer_error_to_pyerr)
+}
+
+/// Compute the canonical sha256 digest for one instance spec.
+#[pyfunction]
+#[pyo3(name = "finalizer_instance_spec_digest")]
+fn py_finalizer_instance_spec_digest(
+    spec: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let spec: FinalizerInstanceSpecWire =
+        finalizer_wire_from_pydict(spec, "instance spec")?;
+    core_finalizer_instance_spec_digest(&spec).map_err(finalizer_error_to_pyerr)
+}
+
+/// Resolve defaults, required instances, selectors, and dependencies.
+#[pyfunction]
+#[pyo3(name = "resolve_finalizer_plan")]
+fn py_resolve_finalizer_plan<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FinalizerPlanInputWire =
+        finalizer_wire_from_pydict(request, "plan input")?;
+    finalizer_result_to_py(
+        py,
+        core_resolve_finalizer_plan(&request),
+        "plan resolution",
+    )
+}
+
+/// Compute the canonical digest for a resolved plan.
+#[pyfunction]
+#[pyo3(name = "finalizer_plan_digest")]
+fn py_finalizer_plan_digest(plan: &Bound<'_, PyDict>) -> PyResult<String> {
+    let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
+    core_finalizer_plan_digest(&plan).map_err(finalizer_error_to_pyerr)
+}
+
+/// Compute the canonical digest for a context, excluding context_digest.
+#[pyfunction]
+#[pyo3(name = "finalizer_context_digest")]
+fn py_finalizer_context_digest(
+    context: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let context: FinalizerContextWire =
+        finalizer_wire_from_pydict(context, "context")?;
+    core_finalizer_context_digest(&context).map_err(finalizer_error_to_pyerr)
+}
+
+/// Validate a context against a resolved plan and return its digest.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_context")]
+fn py_validate_finalizer_context(
+    plan: &Bound<'_, PyDict>,
+    context: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
+    let context: FinalizerContextWire =
+        finalizer_wire_from_pydict(context, "context")?;
+    core_validate_finalizer_context(&plan, &context)
+        .map_err(finalizer_error_to_pyerr)
+}
+
+/// Validate a submission against a resolved plan/context and return a summary.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_submission")]
+fn py_validate_finalizer_submission<'py>(
+    py: Python<'py>,
+    plan: &Bound<'_, PyDict>,
+    context: &Bound<'_, PyDict>,
+    submission: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
+    let context: FinalizerContextWire =
+        finalizer_wire_from_pydict(context, "context")?;
+    let submission: FinalizerSubmissionEnvelopeWire =
+        finalizer_wire_from_pydict(submission, "submission")?;
+    finalizer_result_to_py(
+        py,
+        core_validate_finalizer_submission(&plan, &context, &submission),
+        "submission validation",
+    )
+}
+
+/// Compute a canonical sha256 digest for an arbitrary JSON-shaped value.
+#[pyfunction]
+#[pyo3(name = "finalizer_json_digest")]
+fn py_finalizer_json_digest(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let value = py_to_json_value(value)?;
+    core_finalizer_digest_json_value(&value).map_err(finalizer_error_to_pyerr)
+}
+
+/// Aggregate per-instance finalizer results into a terminal run status.
+#[pyfunction]
+#[pyo3(name = "aggregate_finalizer_outcomes")]
+fn py_aggregate_finalizer_outcomes<'py>(
+    py: Python<'py>,
+    results: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let results = serde_json::from_value::<Vec<FinalizerInstanceResultWire>>(
+        py_to_json_value(results.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "results are not valid finalizer instance-result dicts: {error}"
+        ))
+    })?;
+    finalizer_result_to_py(
+        py,
+        core_aggregate_finalizer_outcomes(results),
+        "outcome aggregation",
+    )
 }
 
 fn task_type_spec_from_pydict(
@@ -9683,6 +9900,18 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_ref_provider_spec_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_provider_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_provider_spec_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_instance_spec, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_instance_spec_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_finalizer_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_plan_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_context_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_submission, m)?)?;
+    m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_spec, m)?)?;
     m.add_function(wrap_pyfunction!(py_task_type_spec_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_field_values, m)?)?;
@@ -13206,6 +13435,153 @@ MENTORS:
     }
 
     #[test]
+    fn finalizer_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "finalizer_wire_schema_version",
+                "validate_finalizer_provider_spec",
+                "finalizer_provider_spec_digest",
+                "validate_finalizer_instance_spec",
+                "finalizer_instance_spec_digest",
+                "resolve_finalizer_plan",
+                "finalizer_plan_digest",
+                "finalizer_context_digest",
+                "validate_finalizer_context",
+                "validate_finalizer_submission",
+                "finalizer_json_digest",
+                "aggregate_finalizer_outcomes",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let provider_value = json!({
+                "schema_version": 1,
+                "provider_ref": "builtin@commit",
+                "capabilities": ["validate", "execute", "verify"],
+                "provenance_id": "builtin"
+            });
+            let provider_obj = json_value_to_py(py, &provider_value).unwrap();
+            let provider = provider_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_validate_finalizer_provider_spec(provider).unwrap();
+            assert_eq!(
+                py_finalizer_provider_spec_digest(provider).unwrap().len(),
+                64
+            );
+            assert_eq!(py_finalizer_wire_schema_version(), 1);
+
+            let request_value = json!({
+                "schema_version": 1,
+                "instances": [
+                    {
+                        "schema_version": 1,
+                        "instance_id": "commit",
+                        "provider_ref": "builtin@commit",
+                        "after": ["lint"],
+                        "policy": {"max_attempts": 2, "refusal": "fail"}
+                    },
+                    {
+                        "schema_version": 1,
+                        "instance_id": "lint",
+                        "provider_ref": "builtin@command",
+                        "after": [],
+                        "policy": {"max_attempts": 1, "refusal": "fail"}
+                    }
+                ],
+                "defaults": ["commit"],
+                "required": [],
+                "selectors": [{"op": "add", "instance_id": "lint"}]
+            });
+            let request_obj = json_value_to_py(py, &request_value).unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let plan_obj = py_resolve_finalizer_plan(py, request).unwrap();
+            let plan_json = py_to_json_value(plan_obj.bind(py)).unwrap();
+            assert_eq!(plan_json["entries"][0]["instance_id"], json!("lint"));
+            assert_eq!(plan_json["entries"][1]["instance_id"], json!("commit"));
+            let plan = plan_obj.bind(py).downcast::<PyDict>().unwrap();
+            assert_eq!(
+                py_finalizer_plan_digest(plan).unwrap(),
+                plan_json["plan_digest"].as_str().unwrap()
+            );
+
+            let mut context_value = json!({
+                "schema_version": 1,
+                "run_id": "run-1",
+                "agent_id": "agent-1",
+                "turn_nonce": "nonce-1",
+                "plan_digest": plan_json["plan_digest"],
+                "requirements": [
+                    {
+                        "instance_id": "lint",
+                        "trigger": "always",
+                        "submission_required": false
+                    },
+                    {
+                        "instance_id": "commit",
+                        "trigger": "dirty_repository",
+                        "submission_required": true
+                    }
+                ],
+                "obligations": []
+            });
+            let context_obj = json_value_to_py(py, &context_value).unwrap();
+            let context = context_obj.bind(py).downcast::<PyDict>().unwrap();
+            let context_digest = py_finalizer_context_digest(context).unwrap();
+            context_value["context_digest"] = json!(context_digest);
+            let context_obj = json_value_to_py(py, &context_value).unwrap();
+            let context = context_obj.bind(py).downcast::<PyDict>().unwrap();
+            assert_eq!(
+                py_validate_finalizer_context(plan, context).unwrap(),
+                context_value["context_digest"].as_str().unwrap()
+            );
+
+            let submission_value = json!({
+                "schema_version": 1,
+                "run_id": "run-1",
+                "agent_id": "agent-1",
+                "turn_nonce": "nonce-1",
+                "plan_digest": plan_json["plan_digest"],
+                "context_digest": context_value["context_digest"],
+                "payloads": [{
+                    "instance_id": "commit",
+                    "payload": {"repositories": []}
+                }]
+            });
+            let submission_obj =
+                json_value_to_py(py, &submission_value).unwrap();
+            let submission =
+                submission_obj.bind(py).downcast::<PyDict>().unwrap();
+            let validation =
+                py_validate_finalizer_submission(py, plan, context, submission)
+                    .unwrap();
+            let validation = py_to_json_value(validation.bind(py)).unwrap();
+            assert_eq!(validation["accepted_instances"], json!(["commit"]));
+            assert_eq!(
+                validation["submission_digest"].as_str().unwrap().len(),
+                64
+            );
+
+            let aggregate_input = json_value_to_py(
+                py,
+                &json!([
+                    {"instance_id": "lint", "status": "success"},
+                    {"instance_id": "commit", "status": "success"}
+                ]),
+            )
+            .unwrap();
+            let aggregate = py_aggregate_finalizer_outcomes(
+                py,
+                aggregate_input.bind(py).downcast::<PyList>().unwrap(),
+            )
+            .unwrap();
+            let aggregate = py_to_json_value(aggregate.bind(py)).unwrap();
+            assert_eq!(aggregate["status"], json!("success"));
+        });
+    }
+
+    #[test]
     fn task_type_spec_bindings_round_trip_validation_digest_and_snapshot() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -16162,6 +16538,7 @@ MENTORS:
                 [
                     "model",
                     "effort",
+                    "final",
                     "id",
                     "clan",
                     "wait",
