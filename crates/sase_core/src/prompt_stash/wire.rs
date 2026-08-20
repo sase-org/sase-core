@@ -2,11 +2,30 @@ use serde::{Deserialize, Serialize};
 
 pub const PROMPT_STASH_WIRE_SCHEMA_VERSION: u32 = 1;
 
-/// One stashed prompt draft (a single prompt-bar pane).
+/// Zero-based editor position for the pane that was active when a stash row
+/// was captured.
 ///
-/// A stash is a flat pile of these entries persisted as JSONL. Each entry is
-/// individually restorable; "stash all visible prompts" simply appends one
-/// entry per non-empty pane, preserving `pane_index` order.
+/// `pane_index` is bundle-local: it names the active pane among the row's
+/// persisted, non-empty segments, not the original prompt-stack index and not
+/// [`PromptStashEntryWire::pane_index`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptStashCursorWire {
+    #[serde(default)]
+    pub pane_index: u32,
+    #[serde(default)]
+    pub row: u32,
+    #[serde(default)]
+    pub column: u32,
+}
+
+/// One stashed prompt draft.
+///
+/// A stash is a JSONL pile of these entries. Each entry is a canonical
+/// single-row bundle: one pane stored as `text`, or several panes joined with
+/// `\n---\n`. `pane_index` is ordering metadata (the original stack index of
+/// the first captured pane). Optional `cursor` is independent of that field
+/// and restores the active pane plus a zero-based `(row, column)` in the
+/// stored segment text.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptStashEntryWire {
     pub id: String,
@@ -22,6 +41,8 @@ pub struct PromptStashEntryWire {
     pub pane_index: u32,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<PromptStashCursorWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

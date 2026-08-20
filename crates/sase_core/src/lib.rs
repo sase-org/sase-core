@@ -703,9 +703,10 @@ pub use project_spec::{
 pub use prompt_literals::inline_code_ranges;
 pub use prompt_stash::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
-    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,
-    PromptStashPopOutcomeWire, PromptStashSnapshotWire, PromptStashStoreError,
-    PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
+    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashCursorWire,
+    PromptStashEntryWire, PromptStashPopOutcomeWire, PromptStashSnapshotWire,
+    PromptStashStoreError, PromptStashStoreStatsWire,
+    PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 pub use provider_disable::{
     clear_provider_disable, get_provider_disables, provider_disable_state_path,

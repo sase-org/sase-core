@@ -6,6 +6,7 @@ pub use store::{
     rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashStoreError,
 };
 pub use wire::{
-    PromptStashEntryWire, PromptStashPopOutcomeWire, PromptStashSnapshotWire,
-    PromptStashStoreStatsWire, PROMPT_STASH_WIRE_SCHEMA_VERSION,
+    PromptStashCursorWire, PromptStashEntryWire, PromptStashPopOutcomeWire,
+    PromptStashSnapshotWire, PromptStashStoreStatsWire,
+    PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };

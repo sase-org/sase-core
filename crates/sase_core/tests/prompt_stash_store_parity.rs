@@ -4,7 +4,8 @@ use std::thread;
 
 use sase_core::prompt_stash::{
     append_prompt_stash, pop_prompt_stash, read_prompt_stash_snapshot,
-    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashEntryWire,
+    rewrite_prompt_stash, set_prompt_stash_pinned, PromptStashCursorWire,
+    PromptStashEntryWire,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -23,6 +24,15 @@ fn entry(id: &str) -> PromptStashEntryWire {
         source: "current".to_string(),
         pane_index: 0,
         pinned: false,
+        cursor: None,
+    }
+}
+
+fn cursor(pane_index: u32, row: u32, column: u32) -> PromptStashCursorWire {
+    PromptStashCursorWire {
+        pane_index,
+        row,
+        column,
     }
 }
 
@@ -88,6 +98,7 @@ fn prompt_stash_skips_blank_and_malformed_rows() {
     assert_eq!(loaded.project, None);
     assert_eq!(loaded.pane_index, 0);
     assert!(!loaded.pinned);
+    assert_eq!(loaded.cursor, None);
     assert_eq!(snapshot.stats.blank_lines, 1);
     assert_eq!(snapshot.stats.invalid_json_lines, 1);
     assert_eq!(snapshot.stats.invalid_record_lines, 2);
@@ -278,4 +289,77 @@ fn prompt_stash_append_plus_pop_concurrency_preserves_valid_rows() {
     let snapshot = read_prompt_stash_snapshot(&path).unwrap();
     assert!(snapshot.entries.iter().any(|e| e.id == "seed"));
     assert!(snapshot.entries.iter().any(|e| e.id == "append-79"));
+}
+
+#[test]
+fn prompt_stash_cursor_survives_append_read_pop_pin_rewrite() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+
+    let mut first = entry("cursor");
+    first.text = "alpha\n---\nbeta".to_string();
+    first.cursor = Some(cursor(1, 2, 3));
+    let snapshot = append_prompt_stash(&path, &first).unwrap();
+    assert_eq!(snapshot.entries[0].cursor, Some(cursor(1, 2, 3)));
+
+    let loaded = read_prompt_stash_snapshot(&path).unwrap();
+    assert_eq!(loaded.entries[0].cursor, Some(cursor(1, 2, 3)));
+
+    append_prompt_stash(&path, &entry("other")).unwrap();
+    let pinned =
+        set_prompt_stash_pinned(&path, &["cursor".to_string()], true).unwrap();
+    let pinned_row = pinned
+        .entries
+        .iter()
+        .find(|entry| entry.id == "cursor")
+        .unwrap();
+    assert!(pinned_row.pinned);
+    assert_eq!(pinned_row.cursor, Some(cursor(1, 2, 3)));
+
+    let mut rewritten = first.clone();
+    rewritten.cursor = Some(cursor(0, 4, 5));
+    rewritten.pinned = true;
+    let rewritten_snapshot = rewrite_prompt_stash(&path, &[rewritten]).unwrap();
+    let rewritten_row = rewritten_snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.id == "cursor")
+        .unwrap();
+    assert_eq!(rewritten_row.cursor, Some(cursor(0, 4, 5)));
+
+    let outcome = pop_prompt_stash(&path, &["cursor".to_string()]).unwrap();
+    assert_eq!(outcome.removed.len(), 1);
+    assert_eq!(outcome.removed[0].cursor, Some(cursor(0, 4, 5)));
+}
+
+#[test]
+fn prompt_stash_legacy_row_defaults_cursor_to_none() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        r#"{"id":"legacy","created_at":"2026-06-16T01:02:03+00:00","text":"hi"}"#,
+    )
+    .unwrap();
+
+    let snapshot = read_prompt_stash_snapshot(&path).unwrap();
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].id, "legacy");
+    assert_eq!(snapshot.entries[0].cursor, None);
+}
+
+#[test]
+fn prompt_stash_cursor_serializes_under_nested_key() {
+    let mut e = entry("shape");
+    e.cursor = Some(cursor(1, 2, 3));
+    let value = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        value.get("cursor"),
+        Some(&json!({
+            "pane_index": 1,
+            "row": 2,
+            "column": 3
+        }))
+    );
 }
