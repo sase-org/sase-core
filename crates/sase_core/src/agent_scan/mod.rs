@@ -21,9 +21,10 @@ pub mod wire;
 pub use index::{
     agent_artifact_index_status, delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout,
-    query_agent_alias_history, query_agent_artifact_index,
-    query_agent_output_variable_history, query_related_agent_artifact_dirs,
-    read_agent_artifact_index_meta, rebuild_agent_artifact_index,
+    prune_hidden_terminal_agent_artifact_index_rows, query_agent_alias_history,
+    query_agent_artifact_index, query_agent_output_variable_history,
+    query_related_agent_artifact_dirs, read_agent_artifact_index_meta,
+    rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, write_agent_artifact_index_meta,
@@ -32,7 +33,7 @@ pub use index::{
     AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
     AgentArtifactIndexStatusWire, AgentArtifactIndexUpdateWire,
     AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
-    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
 };
 pub use layout::{
     canonical_agent_artifact_path, collect_workflow_artifact_candidates,

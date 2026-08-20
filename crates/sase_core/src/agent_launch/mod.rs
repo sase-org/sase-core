@@ -1948,21 +1948,7 @@ pub fn plan_transfer_workspace_claim_from_content(
                     && claim.pid == from_pid
                     && cl_matches
                 {
-                    let replacement = WorkspaceClaimLine {
-                        workspace_num: claim.workspace_num,
-                        pid: request.pid,
-                        workflow: request.workflow_name.clone(),
-                        cl_name: claim.cl_name,
-                        artifacts_timestamp: if request
-                            .artifacts_timestamp
-                            .is_empty()
-                        {
-                            claim.artifacts_timestamp
-                        } else {
-                            Some(request.artifacts_timestamp.clone())
-                        },
-                        pinned: claim.pinned,
-                    };
+                    let replacement = claim.transfer_to(request);
                     *line = replacement.to_line();
                     return claim_plan(
                         lines.join("\n"),
@@ -2177,6 +2163,23 @@ struct WorkspaceClaimLine {
     cl_name: Option<String>,
     artifacts_timestamp: Option<String>,
     pinned: bool,
+    suffix_parts: Vec<WorkspaceClaimSuffixPart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceClaimSuffixPart {
+    Timestamp(String),
+    Pinned,
+    Unknown(String),
+}
+
+impl WorkspaceClaimSuffixPart {
+    fn raw_value(&self) -> &str {
+        match self {
+            Self::Timestamp(value) | Self::Unknown(value) => value,
+            Self::Pinned => "PINNED",
+        }
+    }
 }
 
 impl WorkspaceClaimLine {
@@ -2199,13 +2202,24 @@ impl WorkspaceClaimLine {
 
         let mut artifacts_timestamp = None;
         let mut pinned = false;
+        let mut suffix_parts = Vec::new();
         for part in parts.iter().skip(4) {
             if *part == "PINNED" {
                 pinned = true;
+                suffix_parts.push(WorkspaceClaimSuffixPart::Pinned);
             } else if is_timestamp_part(part) {
-                artifacts_timestamp = Some((*part).to_string());
+                let value = (*part).to_string();
+                if artifacts_timestamp.is_none() {
+                    artifacts_timestamp = Some(value.clone());
+                    suffix_parts
+                        .push(WorkspaceClaimSuffixPart::Timestamp(value));
+                } else {
+                    suffix_parts.push(WorkspaceClaimSuffixPart::Unknown(value));
+                }
             } else {
-                return None;
+                suffix_parts.push(WorkspaceClaimSuffixPart::Unknown(
+                    (*part).to_string(),
+                ));
             }
         }
 
@@ -2220,10 +2234,23 @@ impl WorkspaceClaimLine {
             },
             artifacts_timestamp,
             pinned,
+            suffix_parts,
         })
     }
 
     fn from_request(request: &WorkspaceClaimRequestWire) -> Self {
+        let mut suffix_parts = Vec::new();
+        let artifacts_timestamp = if request.artifacts_timestamp.is_empty() {
+            None
+        } else {
+            suffix_parts.push(WorkspaceClaimSuffixPart::Timestamp(
+                request.artifacts_timestamp.clone(),
+            ));
+            Some(request.artifacts_timestamp.clone())
+        };
+        if request.pinned {
+            suffix_parts.push(WorkspaceClaimSuffixPart::Pinned);
+        }
         Self {
             workspace_num: request.workspace_num,
             pid: request.pid,
@@ -2233,13 +2260,38 @@ impl WorkspaceClaimLine {
             } else {
                 Some(request.cl_name.clone())
             },
-            artifacts_timestamp: if request.artifacts_timestamp.is_empty() {
-                None
-            } else {
-                Some(request.artifacts_timestamp.clone())
-            },
+            artifacts_timestamp,
             pinned: request.pinned,
+            suffix_parts,
         }
+    }
+
+    fn transfer_to(&self, request: &WorkspaceClaimRequestWire) -> Self {
+        let mut replacement = self.clone();
+        replacement.pid = request.pid;
+        replacement.workflow = request.workflow_name.clone();
+        if !request.artifacts_timestamp.is_empty() {
+            replacement
+                .set_artifacts_timestamp(request.artifacts_timestamp.clone());
+        }
+        replacement
+    }
+
+    fn set_artifacts_timestamp(&mut self, value: String) {
+        self.artifacts_timestamp = Some(value.clone());
+        for part in &mut self.suffix_parts {
+            if matches!(part, WorkspaceClaimSuffixPart::Timestamp(_)) {
+                *part = WorkspaceClaimSuffixPart::Timestamp(value);
+                return;
+            }
+        }
+        let insert_idx = self
+            .suffix_parts
+            .iter()
+            .position(|part| matches!(part, WorkspaceClaimSuffixPart::Pinned))
+            .unwrap_or(self.suffix_parts.len());
+        self.suffix_parts
+            .insert(insert_idx, WorkspaceClaimSuffixPart::Timestamp(value));
     }
 
     fn into_wire(self) -> WorkspaceClaimWire {
@@ -2255,26 +2307,30 @@ impl WorkspaceClaimLine {
 
     fn to_line(&self) -> String {
         let cl_part = self.cl_name.as_deref().unwrap_or("");
-        let ts_part = self
-            .artifacts_timestamp
-            .as_ref()
-            .map(|ts| format!(" | {ts}"))
-            .unwrap_or_default();
-        let pin_part = if self.pinned { " | PINNED" } else { "" };
+        let suffix = self
+            .suffix_parts
+            .iter()
+            .map(WorkspaceClaimSuffixPart::raw_value)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let suffix_part = if suffix.is_empty() {
+            String::new()
+        } else {
+            format!(" | {suffix}")
+        };
         format!(
-            "  #{} | {} | {} | {}{}{}",
-            self.workspace_num,
-            self.pid,
-            self.workflow,
-            cl_part,
-            ts_part,
-            pin_part
+            "  #{} | {} | {} | {}{}",
+            self.workspace_num, self.pid, self.workflow, cl_part, suffix_part
         )
     }
 }
 
 fn is_timestamp_part(value: &str) -> bool {
     (value.len() == 14 && value.as_bytes().iter().all(u8::is_ascii_digit))
+        || (value.len() == 15
+            && value.as_bytes()[0..8].iter().all(u8::is_ascii_digit)
+            && value.as_bytes()[8] == b'_'
+            && value.as_bytes()[9..15].iter().all(u8::is_ascii_digit))
         || (value.len() == 13
             && value.as_bytes()[0..6].iter().all(u8::is_ascii_digit)
             && value.as_bytes()[6] == b'_'
@@ -2589,6 +2645,35 @@ mod tests {
     }
 
     #[test]
+    fn workspace_claims_keep_suffix_corrupt_rows_occupied() {
+        let content = "RUNNING:\n  #10 | 111 | run | demo | 20260820_121314 | LEGACY=bad | PINNED\n\n\nNAME: demo\n";
+
+        let claims = list_workspace_claims_from_content(content);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].workspace_num, 10);
+        assert_eq!(
+            claims[0].artifacts_timestamp.as_deref(),
+            Some("20260820_121314")
+        );
+        assert!(claims[0].pinned);
+
+        let duplicate =
+            plan_claim_workspace_from_content(content, &request(10));
+        assert!(!duplicate.outcome.success);
+        assert!(!duplicate.changed);
+
+        let allocated = allocate_and_claim_workspace_from_content(
+            content,
+            10,
+            11,
+            &request(0),
+        );
+        assert!(allocated.outcome.success);
+        assert_eq!(allocated.outcome.workspace_num, 11);
+        assert!(allocated.content.contains("#11 | 222 | run | demo"));
+    }
+
+    #[test]
     fn claim_workspace_rejects_duplicate_nonzero_but_allows_zero() {
         let content = "RUNNING:\n  #2 | 111 | run | demo\n\n\nNAME: demo\n";
 
@@ -2633,6 +2718,22 @@ mod tests {
         assert!(plan
             .content
             .contains("#101 | 222 | run-retry | demo | 20260501120000"));
+    }
+
+    #[test]
+    fn transfer_workspace_claim_preserves_unknown_suffix_fields() {
+        let content = "RUNNING:\n  #101 | 111 | run | demo | 20260820_121314 | LEGACY=bad | PINNED | extra\n\n\nNAME: demo\n";
+        let mut req = request(101);
+        req.workflow_name = "run-retry".to_string();
+        req.artifacts_timestamp = "20260820121516".to_string();
+        req.transfer_from_pid = Some(111);
+
+        let plan = plan_transfer_workspace_claim_from_content(content, &req);
+
+        assert!(plan.outcome.success);
+        assert!(plan.content.contains(
+            "#101 | 222 | run-retry | demo | 20260820121516 | LEGACY=bad | PINNED | extra"
+        ));
     }
 
     #[test]

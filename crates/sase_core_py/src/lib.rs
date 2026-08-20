@@ -464,6 +464,7 @@ use sase_core::agent_scan::{
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     parse_output_variable_selector as core_parse_output_variable_selector,
+    prune_hidden_terminal_agent_artifact_index_rows as core_prune_hidden_terminal_agent_artifact_index_rows,
     query_agent_alias_history as core_query_agent_alias_history,
     query_agent_artifact_index as core_query_agent_artifact_index,
     query_agent_output_variable_history as core_query_agent_output_variable_history,
@@ -2164,6 +2165,31 @@ fn py_terminalize_stale_active_agent_artifact_index_rows<'py>(
                 opts,
                 stale_after_seconds,
                 max_rows,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Prune old hidden terminal rows from the persistent artifact index.
+#[pyfunction]
+#[pyo3(
+    name = "prune_hidden_terminal_agent_artifact_index_rows",
+    signature = (index_path, hot_rows = None)
+)]
+fn py_prune_hidden_terminal_agent_artifact_index_rows<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    hot_rows: Option<u32>,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let update = py
+        .allow_threads(|| {
+            core_prune_hidden_terminal_agent_artifact_index_rows(
+                &index, hot_rows,
             )
         })
         .map_err(PyRuntimeError::new_err)?;
@@ -9450,6 +9476,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        py_prune_hidden_terminal_agent_artifact_index_rows,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         py_replace_agent_artifact_index_dismissed_agents,
         m
     )?)?;
@@ -10266,6 +10296,87 @@ mod tests {
             assert!(preclaimed["changed"].as_bool().unwrap());
             assert_eq!(preclaimed["issue_ids"], json!([phase.id, epic.id]));
             assert_eq!(preclaimed["rollback_preclaims"][1]["bead_id"], epic.id);
+        });
+    }
+
+    #[test]
+    fn bead_update_binding_preserves_resolution_presence_semantics() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Closable".to_string(),
+                issue_type: IssueTypeWire::Task,
+                size: Some(PhaseSizeWire::Small),
+                task_type: Some("bug".to_string()),
+                task_type_fields: [
+                    ("location".to_string(), "tests".to_string()),
+                    ("repro".to_string(), "run pytest".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        core_bead_close_issues_with_note(
+            &beads_dir,
+            std::slice::from_ref(&issue.id),
+            Some("verified".to_string()),
+            Some(BeadResolutionWire::Done),
+            false,
+            None,
+            None,
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let path = beads_dir.to_str().unwrap();
+            let omitted = json_value_to_py(
+                py,
+                &json!({
+                    "title": "Retitled",
+                    "now": "2026-01-01T00:02:00Z"
+                }),
+            )
+            .unwrap();
+            let omitted = omitted.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_bead_update(py, path, &issue.id, omitted).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["issue"]["resolution"], json!("done"));
+
+            let clear = json_value_to_py(
+                py,
+                &json!({
+                    "resolution": null,
+                    "now": "2026-01-01T00:03:00Z"
+                }),
+            )
+            .unwrap();
+            let clear = clear.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_bead_update(py, path, &issue.id, clear).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert!(result["issue"].get("resolution").is_none());
+
+            let set = json_value_to_py(
+                py,
+                &json!({
+                    "resolution": "superseded",
+                    "now": "2026-01-01T00:04:00Z"
+                }),
+            )
+            .unwrap();
+            let set = set.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_bead_update(py, path, &issue.id, set).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["issue"]["resolution"], json!("superseded"));
         });
     }
 
@@ -14607,6 +14718,106 @@ MENTORS:
                     "added-before",
                     "added-between",
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn bead_merge_event_streams_binding_exposes_typed_relocations() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let issue = |id: &str, title: &str, created_at: &str| {
+                json!({
+                    "id": id,
+                    "title": title,
+                    "status": "open",
+                    "issue_type": "plan",
+                    "tier": "epic",
+                    "parent_id": null,
+                    "owner": "owner@example.com",
+                    "assignee": "",
+                    "created_at": created_at,
+                    "created_by": "owner@example.com",
+                    "updated_at": created_at,
+                    "closed_at": null,
+                    "close_reason": null,
+                    "resolution": null,
+                    "close_history": [],
+                    "description": "",
+                    "notes": "",
+                    "design": "",
+                    "refs": [],
+                    "links": [],
+                    "plus_one_evidence": [],
+                    "snooze": null,
+                    "model": "",
+                    "size": null,
+                    "task_type": null,
+                    "task_type_fields": {},
+                    "is_ready_to_work": false,
+                    "changespec_name": "",
+                    "changespec_bug_id": "",
+                    "external_ref": "",
+                    "dependencies": [],
+                })
+            };
+            let created_event =
+                |event_id: &str, title: &str, created_at: &str| {
+                    json!({
+                        "schema_version": 1,
+                        "event_id": event_id,
+                        "timestamp": created_at,
+                        "actor": "owner@example.com",
+                        "operation": "issue_created",
+                        "issue_id": "sase-ey",
+                        "payload": {
+                            "kind": "issue_created",
+                            "issue": issue("sase-ey", title, created_at),
+                        },
+                    })
+                };
+            let stream = |events: Vec<JsonValue>| {
+                json!({
+                    "stream_id": "sase-ey",
+                    "root_issue_id": "sase-ey",
+                    "events": events,
+                })
+            };
+            let base_value = stream(vec![]);
+            let ours_value = stream(vec![created_event(
+                "sase-ey:000001:issue_created:sase-ey:ours",
+                "Ours",
+                "2026-08-03T11:00:00Z",
+            )]);
+            let theirs_value = stream(vec![created_event(
+                "sase-ey:000001:issue_created:sase-ey:theirs",
+                "Theirs",
+                "2026-08-03T11:00:01Z",
+            )]);
+            let base_obj = json_value_to_py(py, &base_value).unwrap();
+            let ours_obj = json_value_to_py(py, &ours_value).unwrap();
+            let theirs_obj = json_value_to_py(py, &theirs_value).unwrap();
+            let base = base_obj.bind(py).downcast::<PyDict>().unwrap();
+            let ours = ours_obj.bind(py).downcast::<PyDict>().unwrap();
+            let theirs = theirs_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result = py_bead_merge_event_streams_with_relocation(
+                py,
+                base,
+                ours,
+                theirs,
+                Some("sase-ez".to_string()),
+            )
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["relocations"], json!([["sase-ey", "sase-ez"]]));
+            assert_eq!(
+                result["relocation_records"],
+                json!([{
+                    "old_id": "sase-ey",
+                    "new_id": "sase-ez",
+                    "kind": "top_level_duplicate",
+                }])
             );
         });
     }

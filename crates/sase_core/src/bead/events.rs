@@ -707,6 +707,24 @@ pub struct BeadEventStreamMergeWire {
     /// Every `(old_id, new_id)` pair this merge had to renumber.
     #[serde(default)]
     pub relocations: Vec<(String, String)>,
+    /// Typed relocation records for callers that need to resolve created ids.
+    #[serde(default)]
+    pub relocation_records: Vec<BeadIdRelocationWire>,
+}
+
+/// One bead id remapped during conflict repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadIdRelocationWire {
+    pub old_id: String,
+    pub new_id: String,
+    pub kind: BeadIdRelocationKindWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadIdRelocationKindWire {
+    TopLevelDuplicate,
+    ChildDuplicate,
 }
 
 /// Which merge input contributed an event, used to attribute id collisions.
@@ -798,7 +816,7 @@ pub fn merge_bead_event_streams_with_relocation(
         provenance.push(tag);
     }
 
-    let (relocated, relocations) = split_duplicate_creations(
+    let (relocated, relocation_records) = split_duplicate_creations(
         &mut merged,
         provenance,
         relocation_issue_id,
@@ -807,16 +825,21 @@ pub fn merge_bead_event_streams_with_relocation(
     if let Some(stream) = &relocated {
         stream.validate()?;
     }
+    let relocations = relocation_records
+        .iter()
+        .map(|record| (record.old_id.clone(), record.new_id.clone()))
+        .collect();
     Ok(BeadEventStreamMergeWire {
         merged,
         relocated,
         relocations,
+        relocation_records,
     })
 }
 
-/// A relocated stream, if any, plus every `(old_id, new_id)` pair renumbered.
+/// A relocated stream, if any, plus every id relocation applied.
 type DuplicateCreationSplit =
-    (Option<BeadEventStreamWire>, Vec<(String, String)>);
+    (Option<BeadEventStreamWire>, Vec<BeadIdRelocationWire>);
 
 /// Renumber every bead whose `issue_created` event was minted twice.
 ///
@@ -831,7 +854,7 @@ fn split_duplicate_creations(
     let mut tagged: Vec<(BeadEventRecordWire, BranchTag)> =
         merged.events.drain(..).zip(provenance).collect();
     let mut relocated: Option<BeadEventStreamWire> = None;
-    let mut relocations: Vec<(String, String)> = Vec::new();
+    let mut relocations: Vec<BeadIdRelocationWire> = Vec::new();
 
     while let Some((issue_id, loser_tag)) = losing_creation(&tagged)? {
         if issue_id == merged.stream_id {
@@ -847,7 +870,11 @@ fn split_duplicate_creations(
             }
             let moved = extract_subtree(&mut tagged, &issue_id, loser_tag);
             relocated = Some(relocated_stream(new_id, &issue_id, moved)?);
-            relocations.push((issue_id, new_id.to_string()));
+            relocations.push(BeadIdRelocationWire {
+                old_id: issue_id,
+                new_id: new_id.to_string(),
+                kind: BeadIdRelocationKindWire::TopLevelDuplicate,
+            });
         } else {
             let new_id = next_sibling_issue_id(&tagged, &issue_id)?;
             remap_subtree(
@@ -857,7 +884,11 @@ fn split_duplicate_creations(
                 &new_id,
                 &merged.stream_id,
             )?;
-            relocations.push((issue_id, new_id));
+            relocations.push(BeadIdRelocationWire {
+                old_id: issue_id,
+                new_id,
+                kind: BeadIdRelocationKindWire::ChildDuplicate,
+            });
         }
     }
 
@@ -2361,6 +2392,19 @@ mod tests {
             outcome.relocations,
             vec![("sase-ey".to_string(), "sase-ez".to_string())]
         );
+        assert_eq!(
+            outcome.relocation_records,
+            vec![BeadIdRelocationWire {
+                old_id: "sase-ey".to_string(),
+                new_id: "sase-ez".to_string(),
+                kind: BeadIdRelocationKindWire::TopLevelDuplicate,
+            }]
+        );
+        let serialized = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(
+            serialized["relocation_records"][0]["kind"],
+            serde_json::json!("top_level_duplicate")
+        );
         let relocated = outcome.relocated.clone().unwrap();
         assert_eq!(relocated.stream_id, "sase-ez");
         // Both beads survive: the older creation keeps the contested id.
@@ -2473,6 +2517,14 @@ mod tests {
         assert_eq!(
             outcome.relocations,
             vec![("sase-ey.1".to_string(), "sase-ey.2".to_string())]
+        );
+        assert_eq!(
+            outcome.relocation_records,
+            vec![BeadIdRelocationWire {
+                old_id: "sase-ey.1".to_string(),
+                new_id: "sase-ey.2".to_string(),
+                kind: BeadIdRelocationKindWire::ChildDuplicate,
+            }]
         );
         let issues = reduce_event_streams(&[outcome.merged]).unwrap();
         assert_eq!(

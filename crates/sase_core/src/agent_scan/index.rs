@@ -41,6 +41,12 @@ use super::wire::{
 
 pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 22;
 
+/// Newest hidden terminal rows kept hot in the materialized SQLite view.
+///
+/// The artifact tree remains authoritative for older hidden terminal payloads;
+/// rebuilding the index from source artifacts restores evicted history.
+pub const DEFAULT_HIDDEN_TERMINAL_HOT_ROWS: u32 = 4096;
+
 /// Schema version for indexed model-alias history queries.
 pub const AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -226,6 +232,10 @@ pub struct AgentArtifactIndexUpdateWire {
     pub rows_indexed: u64,
     pub rows_deleted: u64,
     pub rows_skipped: u64,
+    #[serde(default)]
+    pub hidden_terminal_rows_retained: u64,
+    #[serde(default)]
+    pub hidden_terminal_rows_pruned: u64,
 }
 
 /// Lightweight status for the persistent artifact index.
@@ -238,6 +248,12 @@ pub struct AgentArtifactIndexStatusWire {
     pub agent_artifact_aliases_rows: u64,
     pub agent_output_variables_rows: u64,
     pub agent_artifact_model_aliases_rows: u64,
+    #[serde(default)]
+    pub hidden_terminal_retention_limit: u64,
+    #[serde(default)]
+    pub hidden_terminal_rows_retained: u64,
+    #[serde(default)]
+    pub hidden_terminal_rows_prunable: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -258,6 +274,10 @@ pub fn rebuild_agent_artifact_index(
         rows_indexed += 1;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    let retention = enforce_hidden_terminal_retention(
+        &mut conn,
+        DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
+    )?;
 
     Ok(AgentArtifactIndexUpdateWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
@@ -266,6 +286,8 @@ pub fn rebuild_agent_artifact_index(
         rows_indexed,
         rows_deleted: 0,
         rows_skipped: 0,
+        hidden_terminal_rows_retained: retention.retained_rows,
+        hidden_terminal_rows_pruned: retention.pruned_rows(),
     })
 }
 
@@ -287,6 +309,8 @@ pub fn upsert_agent_artifact_index_row(
             rows_indexed: 0,
             rows_deleted: 0,
             rows_skipped: 1,
+            hidden_terminal_rows_retained: 0,
+            hidden_terminal_rows_pruned: 0,
         });
     };
 
@@ -301,6 +325,8 @@ pub fn upsert_agent_artifact_index_row(
         rows_indexed: 1,
         rows_deleted: 0,
         rows_skipped: 0,
+        hidden_terminal_rows_retained: 0,
+        hidden_terminal_rows_pruned: 0,
     })
 }
 
@@ -351,6 +377,8 @@ pub fn delete_agent_artifact_index_row_with_busy_timeout(
         rows_indexed: 0,
         rows_deleted: deleted,
         rows_skipped: 0,
+        hidden_terminal_rows_retained: 0,
+        hidden_terminal_rows_pruned: 0,
     })
 }
 
@@ -380,6 +408,10 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
             TerminalizationOutcome::Skipped => rows_skipped += 1,
         }
     }
+    let retention = enforce_hidden_terminal_retention(
+        &mut conn,
+        DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
+    )?;
 
     Ok(AgentArtifactIndexUpdateWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
@@ -388,7 +420,262 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
         rows_indexed,
         rows_deleted: 0,
         rows_skipped,
+        hidden_terminal_rows_retained: retention.retained_rows,
+        hidden_terminal_rows_pruned: retention.pruned_rows(),
     })
+}
+
+/// Prune old hidden terminal rows from the hot SQLite materialized view.
+///
+/// This never mutates artifact directories. Evicted payloads remain recoverable
+/// by rebuilding the index from the canonical artifact tree.
+pub fn prune_hidden_terminal_agent_artifact_index_rows(
+    index_path: &Path,
+    hot_rows: Option<u32>,
+) -> Result<AgentArtifactIndexUpdateWire, String> {
+    let mut conn = open_index(index_path)?;
+    let retention = enforce_hidden_terminal_retention(
+        &mut conn,
+        hot_rows.unwrap_or(DEFAULT_HIDDEN_TERMINAL_HOT_ROWS),
+    )?;
+    Ok(AgentArtifactIndexUpdateWire {
+        schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+        index_path: index_path.to_string_lossy().into_owned(),
+        projects_root: String::new(),
+        rows_indexed: 0,
+        rows_deleted: retention.pruned_rows(),
+        rows_skipped: 0,
+        hidden_terminal_rows_retained: retention.retained_rows,
+        hidden_terminal_rows_pruned: retention.pruned_rows(),
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct HiddenTerminalRetentionPlan {
+    retained_rows: u64,
+    prunable_rows: u64,
+    pruned_dirs: Vec<String>,
+}
+
+impl HiddenTerminalRetentionPlan {
+    fn pruned_rows(&self) -> u64 {
+        self.pruned_dirs.len() as u64
+    }
+}
+
+fn enforce_hidden_terminal_retention(
+    conn: &mut Connection,
+    hot_rows: u32,
+) -> Result<HiddenTerminalRetentionPlan, String> {
+    let plan = plan_hidden_terminal_retention(conn, hot_rows)?;
+    if plan.pruned_dirs.is_empty() {
+        return Ok(plan);
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    delete_agent_artifact_projection_rows(&tx, &plan.pruned_dirs)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(HiddenTerminalRetentionPlan {
+        retained_rows: plan.retained_rows,
+        prunable_rows: 0,
+        pruned_dirs: plan.pruned_dirs,
+    })
+}
+
+fn plan_hidden_terminal_retention(
+    conn: &Connection,
+    hot_rows: u32,
+) -> Result<HiddenTerminalRetentionPlan, String> {
+    let rows = select_hidden_terminal_rows(conn)?;
+    let referenced = select_lineage_reference_keys(conn)?;
+    let mut plan = HiddenTerminalRetentionPlan::default();
+    let hot_rows = hot_rows as usize;
+
+    for (index, row) in rows.into_iter().enumerate() {
+        if index < hot_rows || row.is_context_anchor(&referenced) {
+            plan.retained_rows += 1;
+        } else {
+            plan.prunable_rows += 1;
+            plan.pruned_dirs.push(row.artifact_dir);
+        }
+    }
+    Ok(plan)
+}
+
+#[derive(Debug, Clone)]
+struct HiddenTerminalRow {
+    artifact_dir: String,
+    project_name: String,
+    workflow_dir_name: String,
+    timestamp: String,
+    parent_timestamp: Option<String>,
+    retry_of_timestamp: Option<String>,
+    retried_as_timestamp: Option<String>,
+    retry_chain_root_timestamp: Option<String>,
+    clan_tribe: Option<String>,
+    clan_summary: Option<String>,
+}
+
+impl HiddenTerminalRow {
+    fn is_context_anchor(
+        &self,
+        referenced: &BTreeSet<LineageReferenceKey>,
+    ) -> bool {
+        self.has_lineage_pointer()
+            || self.has_clan_context()
+            || referenced.contains(&LineageReferenceKey {
+                project_name: self.project_name.clone(),
+                workflow_dir_name: self.workflow_dir_name.clone(),
+                timestamp: self.timestamp.clone(),
+            })
+    }
+
+    fn has_lineage_pointer(&self) -> bool {
+        [
+            self.parent_timestamp.as_deref(),
+            self.retry_of_timestamp.as_deref(),
+            self.retried_as_timestamp.as_deref(),
+            self.retry_chain_root_timestamp.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+    }
+
+    fn has_clan_context(&self) -> bool {
+        [self.clan_tribe.as_deref(), self.clan_summary.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LineageReferenceKey {
+    project_name: String,
+    workflow_dir_name: String,
+    timestamp: String,
+}
+
+fn select_hidden_terminal_rows(
+    conn: &Connection,
+) -> Result<Vec<HiddenTerminalRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT artifact_dir, project_name, workflow_dir_name, timestamp, \
+                    parent_timestamp, retry_of_timestamp, \
+                    retried_as_timestamp, retry_chain_root_timestamp, \
+                    clan_tribe, clan_summary \
+             FROM agent_artifacts \
+             WHERE hidden = 1 \
+               AND has_done_marker = 1 \
+               AND (workflow_status IS NULL \
+                    OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')) \
+             ORDER BY timestamp DESC, artifact_dir DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push(HiddenTerminalRow {
+            artifact_dir: row.get(0).map_err(|e| e.to_string())?,
+            project_name: row.get(1).map_err(|e| e.to_string())?,
+            workflow_dir_name: row.get(2).map_err(|e| e.to_string())?,
+            timestamp: row.get(3).map_err(|e| e.to_string())?,
+            parent_timestamp: row.get(4).map_err(|e| e.to_string())?,
+            retry_of_timestamp: row.get(5).map_err(|e| e.to_string())?,
+            retried_as_timestamp: row.get(6).map_err(|e| e.to_string())?,
+            retry_chain_root_timestamp: row
+                .get(7)
+                .map_err(|e| e.to_string())?,
+            clan_tribe: row.get(8).map_err(|e| e.to_string())?,
+            clan_summary: row.get(9).map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(result)
+}
+
+fn select_lineage_reference_keys(
+    conn: &Connection,
+) -> Result<BTreeSet<LineageReferenceKey>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_name, workflow_dir_name, parent_timestamp, \
+                    retry_of_timestamp, retried_as_timestamp, \
+                    retry_chain_root_timestamp \
+             FROM agent_artifacts",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut result = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let project_name: String = row.get(0).map_err(|e| e.to_string())?;
+        let workflow_dir_name: String =
+            row.get(1).map_err(|e| e.to_string())?;
+        for column in 2..=5 {
+            let timestamp: Option<String> =
+                row.get(column).map_err(|e| e.to_string())?;
+            let Some(timestamp) = timestamp else {
+                continue;
+            };
+            if timestamp.trim().is_empty() {
+                continue;
+            }
+            result.insert(LineageReferenceKey {
+                project_name: project_name.clone(),
+                workflow_dir_name: workflow_dir_name.clone(),
+                timestamp,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn delete_agent_artifact_projection_rows(
+    conn: &Connection,
+    artifact_dirs: &[String],
+) -> Result<(), String> {
+    const DELETE_BATCH_SIZE: usize = 500;
+    for chunk in artifact_dirs.chunks(DELETE_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        conn.execute(
+            &format!(
+                "DELETE FROM agent_output_variables \
+                 WHERE artifact_dir IN ({placeholders})"
+            ),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            &format!(
+                "DELETE FROM agent_artifact_model_aliases \
+                 WHERE artifact_dir IN ({placeholders})"
+            ),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let mut alias_values: Vec<&str> =
+            chunk.iter().map(String::as_str).collect();
+        alias_values.extend(chunk.iter().map(String::as_str));
+        conn.execute(
+            &format!(
+                "DELETE FROM agent_artifact_aliases \
+                 WHERE artifact_dir IN ({placeholders}) \
+                    OR alias_path IN ({placeholders})"
+            ),
+            params_from_iter(alias_values),
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            &format!(
+                "DELETE FROM agent_artifacts \
+                 WHERE artifact_dir IN ({placeholders})"
+            ),
+            params_from_iter(chunk.iter()),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn repair_abandoned_agent_artifact_index_rows(
@@ -510,6 +797,8 @@ pub fn replace_agent_artifact_index_dismissed_agents(
         rows_indexed: dismissed.len() as u64,
         rows_deleted: deleted,
         rows_skipped: 0,
+        hidden_terminal_rows_retained: 0,
+        hidden_terminal_rows_pruned: 0,
     })
 }
 
@@ -546,6 +835,10 @@ pub fn agent_artifact_index_status(
     index_path: &Path,
 ) -> Result<AgentArtifactIndexStatusWire, String> {
     let conn = open_index(index_path)?;
+    let retention = plan_hidden_terminal_retention(
+        &conn,
+        DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
+    )?;
     Ok(AgentArtifactIndexStatusWire {
         schema_version: read_index_schema_version(&conn)?,
         index_path: index_path.to_string_lossy().into_owned(),
@@ -563,6 +856,10 @@ pub fn agent_artifact_index_status(
             &conn,
             "agent_artifact_model_aliases",
         )?,
+        hidden_terminal_retention_limit: DEFAULT_HIDDEN_TERMINAL_HOT_ROWS
+            as u64,
+        hidden_terminal_rows_retained: retention.retained_rows,
+        hidden_terminal_rows_prunable: retention.prunable_rows,
     })
 }
 
@@ -3943,6 +4240,13 @@ mod tests {
         fs::write(path, body).unwrap();
     }
 
+    fn count_sql(index: &Path, sql: &str) -> i64 {
+        Connection::open(index)
+            .unwrap()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+
     fn alias_query(aliases: &[&str]) -> AgentAliasHistoryQueryWire {
         AgentAliasHistoryQueryWire {
             aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
@@ -4792,6 +5096,236 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn hidden_terminal_retention_bounds_rebuild_and_preserves_anchors() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for index in 0..4_700 {
+            let dir = artifact(&projects, &format!("20260817{index:06}"));
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": format!("hidden-{index}"), "hidden": true}),
+            );
+            write_json(
+                &dir.join("done.json"),
+                json!({"outcome": "completed", "hidden": true}),
+            );
+        }
+
+        let pruned_dir = artifact(&projects, "20260817000000");
+        write_json(
+            &pruned_dir.join("agent_meta.json"),
+            json!({
+                "name": "old-projected",
+                "hidden": true,
+                "output_variables": {"status": "old"},
+                "model_alias": "large",
+                "model_alias_trail": ["large"]
+            }),
+        );
+        write_json(
+            &pruned_dir.join("done.json"),
+            json!({"outcome": "completed", "hidden": true}),
+        );
+
+        let visible = artifact(&projects, "20200101000000");
+        write_json(
+            &visible.join("done.json"),
+            json!({"outcome": "completed", "hidden": false}),
+        );
+        let active_hidden = artifact(&projects, "20200101000001");
+        write_json(
+            &active_hidden.join("agent_meta.json"),
+            json!({"name": "active-hidden", "hidden": true}),
+        );
+        let parent = artifact(&projects, "20200101000002");
+        write_json(
+            &parent.join("agent_meta.json"),
+            json!({"name": "hidden-parent", "hidden": true}),
+        );
+        write_json(
+            &parent.join("done.json"),
+            json!({"outcome": "completed", "hidden": true}),
+        );
+        let visible_child = artifact(&projects, "20260918000000");
+        write_json(
+            &visible_child.join("agent_meta.json"),
+            json!({
+                "name": "visible-child",
+                "parent_timestamp": "20200101000002"
+            }),
+        );
+        write_json(
+            &visible_child.join("done.json"),
+            json!({"outcome": "completed", "hidden": false}),
+        );
+        let hidden_lineage = artifact(&projects, "20200101000003");
+        write_json(
+            &hidden_lineage.join("agent_meta.json"),
+            json!({
+                "name": "hidden-lineage",
+                "hidden": true,
+                "parent_timestamp": "20200101000000"
+            }),
+        );
+        write_json(
+            &hidden_lineage.join("done.json"),
+            json!({"outcome": "completed", "hidden": true}),
+        );
+        let clan_source = artifact(&projects, "20200101000004");
+        write_json(
+            &clan_source.join("agent_meta.json"),
+            json!({
+                "name": "clan-source",
+                "hidden": true,
+                "agent_clan": "ship",
+                "agent_clan_generation": "gen-1",
+                "clan_tribe": "release"
+            }),
+        );
+        write_json(
+            &clan_source.join("done.json"),
+            json!({"outcome": "completed", "hidden": true}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        let update = rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert!(update.hidden_terminal_rows_pruned >= 600);
+        assert!(update.hidden_terminal_rows_retained >= 4_096);
+        let status = agent_artifact_index_status(&index).unwrap();
+        assert_eq!(status.hidden_terminal_rows_prunable, 0);
+        assert_eq!(
+            count_sql(
+                &index,
+                "SELECT COUNT(*) FROM agent_artifacts \
+                 WHERE artifact_dir LIKE '%20260817000000'"
+            ),
+            0
+        );
+        for timestamp in [
+            "20200101000000",
+            "20200101000001",
+            "20200101000002",
+            "20200101000003",
+            "20200101000004",
+        ] {
+            assert_eq!(
+                count_sql(
+                    &index,
+                    &format!(
+                        "SELECT COUNT(*) FROM agent_artifacts \
+                         WHERE timestamp = '{timestamp}'"
+                    ),
+                ),
+                1,
+                "{timestamp}"
+            );
+        }
+        assert_eq!(
+            count_sql(
+                &index,
+                "SELECT COUNT(*) FROM agent_output_variables \
+                 WHERE artifact_dir LIKE '%20260817000000'"
+            ),
+            0
+        );
+        assert_eq!(
+            count_sql(
+                &index,
+                "SELECT COUNT(*) FROM agent_artifact_model_aliases \
+                 WHERE artifact_dir LIKE '%20260817000000'"
+            ),
+            0
+        );
+
+        let related =
+            query_related_agent_artifact_dirs(&index, &visible_child, &[])
+                .unwrap();
+        assert!(related
+            .iter()
+            .any(|path| path == parent.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn hidden_terminal_retention_prunes_dependents_and_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260818000000");
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({
+                "name": "hidden",
+                "hidden": true,
+                "output_variables": {"status": "old"},
+                "model_alias": "large",
+                "model_alias_trail": ["large"]
+            }),
+        );
+        write_json(
+            &dir.join("done.json"),
+            json!({"outcome": "completed", "hidden": true}),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        upsert_agent_artifact_index_row(
+            &index,
+            &projects,
+            &dir,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute(
+                "INSERT INTO agent_artifact_aliases(alias_path, artifact_dir) \
+                 VALUES (?1, ?2)",
+                params![
+                    "/legacy/artifacts/20260818000000",
+                    dir.to_string_lossy().as_ref(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let pruned =
+            prune_hidden_terminal_agent_artifact_index_rows(&index, Some(0))
+                .unwrap();
+        assert_eq!(pruned.hidden_terminal_rows_pruned, 1);
+        assert_eq!(pruned.hidden_terminal_rows_retained, 0);
+        assert_eq!(
+            agent_artifact_index_status(&index)
+                .unwrap()
+                .agent_artifacts_rows,
+            0
+        );
+        assert_eq!(
+            count_sql(&index, "SELECT COUNT(*) FROM agent_artifact_aliases"),
+            0
+        );
+        assert_eq!(
+            count_sql(&index, "SELECT COUNT(*) FROM agent_output_variables"),
+            0
+        );
+        assert_eq!(
+            count_sql(
+                &index,
+                "SELECT COUNT(*) FROM agent_artifact_model_aliases"
+            ),
+            0
+        );
+
+        let second =
+            prune_hidden_terminal_agent_artifact_index_rows(&index, Some(0))
+                .unwrap();
+        assert_eq!(second.hidden_terminal_rows_pruned, 0);
+        assert_eq!(second.hidden_terminal_rows_retained, 0);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::artifact_link::{
     validate_artifact_link_description, ArtifactLinkOriginWire, BeadLinkWire,
 };
 use crate::artifact_ref::normalize_artifact_ref_list;
+use crate::serde_option::deserialize_present_option;
 use crate::store_lock::{
     acquire_store_lock, timeout_from_env, LockMode, StoreLockError,
 };
@@ -110,7 +111,11 @@ pub struct BeadUpdateFieldsWire {
     pub closed_at: Option<Option<String>>,
     #[serde(default)]
     pub close_reason: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub resolution: Option<Option<BeadResolutionWire>>,
     #[serde(default)]
     pub changespec_name: Option<String>,
@@ -5329,6 +5334,72 @@ mod tests {
         assert!(!result.changed);
         assert_eq!(result.already_closed_ids, vec![issue_id]);
         assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn update_fields_resolution_preserves_omitted_clear_and_set() {
+        let omitted: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({"title": "rename"}))
+                .unwrap();
+        assert_eq!(omitted.resolution, None);
+        let omitted_json = serde_json::to_value(&omitted).unwrap();
+        assert!(omitted_json.get("resolution").is_none());
+
+        let cleared: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({"resolution": null}))
+                .unwrap();
+        assert_eq!(cleared.resolution, Some(None));
+        let cleared_json = serde_json::to_value(&cleared).unwrap();
+        assert_eq!(cleared_json["resolution"], serde_json::Value::Null);
+
+        let set: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({"resolution": "done"}))
+                .unwrap();
+        assert_eq!(set.resolution, Some(Some(BeadResolutionWire::Done)));
+        let set_json = serde_json::to_value(&set).unwrap();
+        assert_eq!(set_json["resolution"], serde_json::json!("done"));
+    }
+
+    #[test]
+    fn update_issue_resolution_omitted_null_and_set_mutate_deliberately() {
+        let (_temp, beads_dir, issue_id) =
+            closed_issue_fixture(BeadResolutionWire::Done, Some("verified"));
+
+        let omitted: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({
+                "title": "Retitled closed issue",
+                "now": "2026-01-03T00:00:00Z"
+            }))
+            .unwrap();
+        let after_omitted = update_issue(&beads_dir, &issue_id, omitted)
+            .unwrap()
+            .issue
+            .unwrap();
+        assert_eq!(after_omitted.resolution, Some(BeadResolutionWire::Done));
+
+        let clear: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({
+                "resolution": null,
+                "now": "2026-01-03T00:00:01Z"
+            }))
+            .unwrap();
+        let after_clear = update_issue(&beads_dir, &issue_id, clear)
+            .unwrap()
+            .issue
+            .unwrap();
+        assert_eq!(after_clear.resolution, None);
+
+        let set: BeadUpdateFieldsWire =
+            serde_json::from_value(serde_json::json!({
+                "resolution": "superseded",
+                "now": "2026-01-03T00:00:02Z"
+            }))
+            .unwrap();
+        let after_set = update_issue(&beads_dir, &issue_id, set)
+            .unwrap()
+            .issue
+            .unwrap();
+        assert_eq!(after_set.resolution, Some(BeadResolutionWire::Superseded));
     }
 
     #[test]

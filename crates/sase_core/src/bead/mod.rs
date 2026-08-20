@@ -30,6 +30,7 @@ pub use events::{
     merge_bead_event_streams_with_relocation, reduce_event_streams,
     BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
     BeadEventStoreManifestWire, BeadEventStreamMergeWire, BeadEventStreamWire,
+    BeadIdRelocationKindWire, BeadIdRelocationWire,
     BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
     BEAD_EVENT_SCHEMA_VERSION,
 };
