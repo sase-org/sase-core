@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.5](https://github.com/sase-org/sase-core/compare/v0.29.4...v0.29.5) - 2026-08-20
+
+### Added
+
+- *(bead)* add bead_add_link and bead_remove_link mutations
+
+### Fixed
+
+- *(bead)* allow clippy::too_many_arguments on bead_add_link
+
 ## [0.29.4](https://github.com/sase-org/sase-core/compare/v0.29.3...v0.29.4) - 2026-08-20
 
 ### Added
