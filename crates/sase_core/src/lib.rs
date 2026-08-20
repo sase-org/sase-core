@@ -62,6 +62,7 @@ pub mod referenced_by;
 pub mod runner_limit_override;
 pub mod sections;
 mod serde_option;
+pub mod snippet_catalog;
 pub mod snippet_session;
 pub mod status;
 mod store_lock;
@@ -728,6 +729,12 @@ pub use runner_limit_override::{
     RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
     RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
 };
+pub use snippet_catalog::{
+    compose_snippet_catalog, is_valid_snippet_trigger,
+    validate_snippet_trigger, ComposedSnippetCatalog, SnippetCall,
+    SnippetCallStatus, SnippetDiagnostic, SnippetSourceSpan,
+    SnippetTriggerValidation,
+};
 /// Legacy Rust alias retained for compatibility with older status callers.
 pub use status::has_suffix as has_changespec_suffix;
 pub use status::{
@@ -792,7 +799,6 @@ pub use workspace_lease::{
     UNIFIED_MAX_WORKSPACE,
 };
 pub use xprompt_catalog::{
-    compose_snippet_catalog, load_editor_snippet_catalog,
-    load_editor_xprompt_catalog, ComposedSnippetCatalog,
+    load_editor_snippet_catalog, load_editor_xprompt_catalog,
     XpromptCatalogLoadError, XpromptCatalogLoadOptions,
 };

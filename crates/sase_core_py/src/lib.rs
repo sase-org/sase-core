@@ -276,7 +276,10 @@
 //!   runtime, project, and Patch work rollups)
 //! - `agent_stats_query_activity(index_path: str, sase_home: str, request: dict)`
 //!   `-> dict` (project-filterable skills and memories plus global documents)
-//! - `compose_snippet_catalog(templates: dict[str, str]) -> dict`
+//! - `compose_snippet_catalog(templates: dict[str, str]) -> dict` (composed
+//!   templates, alias provenance, explicit-trigger validation, call graph,
+//!   and missing/cycle diagnostics)
+//! - `validate_snippet_trigger(trigger: str) -> dict`
 //! - `apply_snippet_session_event(state: dict, event: dict) -> dict` (the
 //!   nested snippet session engine's single entry point: `event["kind"]`
 //!   is one of `plan`, `expand`, `advance`, `retreat`, `apply_edit`, or
@@ -674,7 +677,6 @@ use sase_core::commit_subject::{
     parse_commit_subject as core_parse_commit_subject,
     COMMIT_SUBJECT_WIRE_SCHEMA_VERSION,
 };
-use sase_core::compose_snippet_catalog as core_compose_snippet_catalog;
 use sase_core::config::{
     compose_axe_config as core_compose_axe_config,
     config_field_model as core_config_field_model,
@@ -886,6 +888,10 @@ use sase_core::vcs_log::{
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
+use sase_core::{
+    compose_snippet_catalog as core_compose_snippet_catalog,
+    validate_snippet_trigger as core_validate_snippet_trigger,
+};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[pyclass(name = "QueryCorpusHandle", module = "sase_core_rs")]
@@ -1417,15 +1423,28 @@ fn py_rewrite_agent_relationship_batch(
 
 #[pyfunction]
 #[pyo3(name = "compose_snippet_catalog")]
-fn py_compose_snippet_catalog<'py>(
-    py: Python<'py>,
+fn py_compose_snippet_catalog(
+    py: Python<'_>,
     templates: BTreeMap<String, String>,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<PyObject> {
     let composed = core_compose_snippet_catalog(&templates);
-    let result = PyDict::new_bound(py);
-    result.set_item("templates", composed.templates)?;
-    result.set_item("alias_provenance", composed.alias_provenance)?;
-    Ok(result)
+    let value = serde_json::to_value(composed).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_snippet_trigger")]
+fn py_validate_snippet_trigger(
+    py: Python<'_>,
+    trigger: &str,
+) -> PyResult<PyObject> {
+    let validation = core_validate_snippet_trigger(trigger);
+    let value = serde_json::to_value(validation).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// The nested snippet session engine's single entry point: apply one wire
@@ -9236,6 +9255,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_snippet_session_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
@@ -10780,20 +10800,161 @@ mod tests {
             let value = py_to_json_value(&result).unwrap();
 
             assert_eq!(
-                value,
+                value["templates"],
                 json!({
-                    "templates": {
-                        "Foo": "Foo helper $1 $2$0",
-                        "Helper": "Helper $1$0",
-                        "foo": "foo helper $1 $2$0",
-                        "helper": "helper $1$0"
+                    "Foo": "Foo helper $1 $2$0",
+                    "Helper": "Helper $1$0",
+                    "foo": "foo helper $1 $2$0",
+                    "helper": "helper $1$0"
+                })
+            );
+            assert_eq!(
+                value["alias_provenance"],
+                json!({
+                    "Foo": "foo",
+                    "Helper": "helper"
+                })
+            );
+            assert_eq!(
+                value["triggers"],
+                json!({
+                    "foo": {
+                        "trigger": "foo",
+                        "valid": true,
+                        "reason": null
                     },
-                    "alias_provenance": {
-                        "Foo": "foo",
-                        "Helper": "helper"
+                    "helper": {
+                        "trigger": "helper",
+                        "valid": true,
+                        "reason": null
                     }
                 })
             );
+            assert_eq!(
+                value["calls"],
+                json!({
+                    "foo": [{
+                        "authored_target": "helper",
+                        "canonical_target": "helper",
+                        "positional_args": [],
+                        "span": {"start": 4, "end": 13},
+                        "status": "resolved"
+                    }],
+                    "helper": []
+                })
+            );
+            assert_eq!(
+                value["outbound"],
+                json!({
+                    "foo": ["helper"],
+                    "helper": []
+                })
+            );
+            assert_eq!(
+                value["inbound"],
+                json!({
+                    "foo": [],
+                    "helper": ["foo"]
+                })
+            );
+            assert_eq!(value["diagnostics"], json!([]));
+        });
+    }
+
+    #[test]
+    fn validate_snippet_trigger_binding_returns_plain_dict_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_validate_snippet_trigger, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+
+            let valid = module
+                .getattr("validate_snippet_trigger")
+                .unwrap()
+                .call1(("fix_it2",))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&valid).unwrap(),
+                json!({
+                    "trigger": "fix_it2",
+                    "valid": true,
+                    "reason": null
+                })
+            );
+
+            let invalid = module
+                .getattr("validate_snippet_trigger")
+                .unwrap()
+                .call1(("bad-name!",))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&invalid).unwrap(),
+                json!({
+                    "trigger": "bad-name!",
+                    "valid": false,
+                    "reason": "invalid_characters"
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn compose_snippet_catalog_binding_exposes_missing_and_cycle_graph() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_compose_snippet_catalog, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            let templates = PyDict::new_bound(py);
+            templates.set_item("selfish", "#[selfish]$0").unwrap();
+            templates.set_item("outer", "#[missing]$0").unwrap();
+            templates.set_item("via_alias", "#[Selfish]$0").unwrap();
+
+            let result = module
+                .getattr("compose_snippet_catalog")
+                .unwrap()
+                .call1((templates,))
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
+
+            assert_eq!(value["calls"]["selfish"][0]["status"], json!("cycle"));
+            assert_eq!(
+                value["calls"]["selfish"][0]["canonical_target"],
+                json!("selfish")
+            );
+            assert_eq!(value["calls"]["outer"][0]["status"], json!("missing"));
+            assert_eq!(
+                value["calls"]["via_alias"][0]["authored_target"],
+                json!("Selfish")
+            );
+            assert_eq!(
+                value["calls"]["via_alias"][0]["canonical_target"],
+                json!("selfish")
+            );
+            assert_eq!(
+                value["calls"]["via_alias"][0]["status"],
+                json!("resolved")
+            );
+            assert_eq!(
+                value["inbound"]["selfish"],
+                json!(["selfish", "via_alias"])
+            );
+            let codes: Vec<&str> = value["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["code"].as_str().unwrap())
+                .collect();
+            assert_eq!(codes, vec!["missing_target", "direct_cycle"]);
         });
     }
 
