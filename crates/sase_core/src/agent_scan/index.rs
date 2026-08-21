@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::agent_clan_tribe::ClanTribeMemberWire;
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_launch::list_workspace_claims_from_content;
-use crate::agent_runtime::parse_runtime_timestamp;
+use crate::agent_runtime::{
+    is_real_monitor_member_record, parse_runtime_timestamp,
+};
 
 use super::context::{
     clan_key_from_meta, represented_clan_keys, resolve_clan_context,
@@ -202,8 +204,9 @@ pub struct AgentArtifactIndexQueryWire {
     pub include_hidden: bool,
     #[serde(default)]
     pub freshness: AgentArtifactIndexFreshnessWire,
-    /// Restrict results to monitor family members
-    /// (`agent_meta.agent_family_role == "monitor"`).
+    /// Restrict results to real monitor family members
+    /// (`agent_meta.agent_family_role == "monitor"` and non-empty
+    /// `agent_meta.monitor_id`).
     #[serde(default)]
     pub only_monitors: bool,
 }
@@ -3464,11 +3467,7 @@ fn record_matches_selection(
 }
 
 fn record_is_monitor(record: &AgentArtifactRecordWire) -> bool {
-    record
-        .agent_meta
-        .as_ref()
-        .and_then(|meta| meta.agent_family_role.as_deref())
-        == Some("monitor")
+    is_real_monitor_member_record(record)
 }
 
 fn record_is_active(record: &AgentArtifactRecordWire) -> bool {

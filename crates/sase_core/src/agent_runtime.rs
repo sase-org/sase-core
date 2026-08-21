@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_scan::{AgentArtifactRecordWire, ACE_RUN_WORKFLOW_DIR};
 
+const MONITOR_FAMILY_ROLE: &str = "monitor";
+
 /// Runtime-relevant projection of one agent artifact record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClanRuntimeMemberWire {
@@ -255,6 +257,26 @@ pub(crate) fn is_runner_occupancy_record(
     is_runner_user_agent_kind(record)
 }
 
+/// Return whether *record* is the durable monitor member for its family.
+///
+/// `monitor_id` is inherited by the starter and later monitor-associated
+/// follow-ups, so it cannot classify a row on its own. A real monitor member
+/// must carry both the explicit monitor role and a durable monitor id.
+pub(crate) fn is_real_monitor_member_record(
+    record: &AgentArtifactRecordWire,
+) -> bool {
+    let Some(meta) = record.agent_meta.as_ref() else {
+        return false;
+    };
+    meta.agent_family_role
+        .as_deref()
+        .is_some_and(|role| role.trim() == MONITOR_FAMILY_ROLE)
+        && meta
+            .monitor_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+}
+
 fn is_runner_user_agent_kind(record: &AgentArtifactRecordWire) -> bool {
     if record.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
         return false;
@@ -288,9 +310,10 @@ pub(crate) fn runner_slot_family_key(
 /// Return whether *record* is occupying a runner slot in a live snapshot.
 ///
 /// Mirrors Python `is_runner_slot_occupying_record`, including the
-/// monitor-aware started rule: a monitor member (`monitor_id` set) only
-/// needs a recorded `pid`, because the supervisor pid is written before
-/// the starter's runner group is killed.
+/// monitor-aware started rule: a real monitor member only needs a recorded
+/// `pid`, because the supervisor pid is written before the starter's runner
+/// group is killed. Ordinary agents that merely inherited `monitor_id` still
+/// need `run_started_at`.
 pub fn is_runner_slot_occupying_record(
     record: &AgentArtifactRecordWire,
     is_live: impl Fn(&AgentArtifactRecordWire) -> bool,
@@ -304,10 +327,7 @@ pub fn is_runner_slot_occupying_record(
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
-    let monitor = meta
-        .monitor_id
-        .as_deref()
-        .is_some_and(|value| !value.is_empty());
+    let monitor = is_real_monitor_member_record(record);
     let started = if monitor {
         meta.pid.is_some()
     } else {
@@ -426,43 +446,21 @@ fn merge_serial_family_intervals(
     merge_intervals(&mut filled)
 }
 
-/// Occupancy interval start for one record, as an epoch-seconds string.
+/// Occupancy interval start for one recorded historical row.
 ///
-/// Agent shells use `run_started_at`. Monitor members use the earlier of
-/// `run_started_at` and the artifact-directory timestamp so occupancy
-/// begins when the supervisor pid is recorded, not when the launch
-/// barrier later writes `run_started_at`.
+/// Historical rows use the explicit, offset-aware `run_started_at`. A live
+/// transient monitor with a supervisor pid but no `run_started_at` can count
+/// in a live snapshot, but it must not manufacture a historical interval from
+/// an ambiguous artifact-directory timestamp.
 pub(crate) fn occupancy_member_start(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
-    let meta = record.agent_meta.as_ref()?;
-    let started = meta
+    record
+        .agent_meta
+        .as_ref()?
         .run_started_at
         .clone()
-        .filter(|value| !value.is_empty());
-    let monitor = meta
-        .monitor_id
-        .as_deref()
-        .is_some_and(|value| !value.is_empty());
-    if !monitor {
-        return started;
-    }
-    let created = parse_compact_artifact_timestamp(&record.timestamp)
-        .or_else(|| parse_runtime_timestamp(&record.timestamp));
-    let Some(created) = created else {
-        return started;
-    };
-    let started_ts = started.as_deref().and_then(parse_runtime_timestamp);
-    if started_ts.map_or(true, |value| created < value) {
-        Some(created.to_string())
-    } else {
-        started
-    }
-}
-
-pub(crate) fn parse_compact_artifact_timestamp(value: &str) -> Option<f64> {
-    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
-    Some(datetime_seconds(parsed.and_utc()))
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn member_terminal(
@@ -1041,6 +1039,7 @@ mod tests {
                 "/monitor",
                 serde_json::json!({
                     "agent_family": "fam",
+                    "agent_family_role": "monitor",
                     "monitor_id": "mon-1",
                     "run_started_at": serde_json::Value::Null
                 }),
@@ -1062,6 +1061,7 @@ mod tests {
                 "/monitor",
                 serde_json::json!({
                     "agent_family": "fam",
+                    "agent_family_role": "monitor",
                     "monitor_id": "mon-1"
                 }),
             ),
@@ -1163,11 +1163,38 @@ mod tests {
         let records = [occupancy_record(
             "/monitor",
             serde_json::json!({
+                "agent_family_role": "monitor",
                 "monitor_id": "mon-1",
                 "run_started_at": serde_json::Value::Null
             }),
         )];
         assert_eq!(running_agent_slot_count(&records, always_live), 1);
+    }
+
+    #[test]
+    fn inherited_monitor_id_without_monitor_role_uses_ordinary_started_rule() {
+        let records = [
+            occupancy_record(
+                "/starter",
+                serde_json::json!({
+                    "agent_family_role": "root",
+                    "monitor_id": "mon-1",
+                    "run_started_at": serde_json::Value::Null
+                }),
+            ),
+            occupancy_record(
+                "/followup",
+                serde_json::json!({
+                    "agent_family_role": "code",
+                    "monitor_id": "mon-1",
+                    "run_started_at": serde_json::Value::Null
+                }),
+            ),
+        ];
+
+        assert!(!is_real_monitor_member_record(&records[0]));
+        assert!(!is_real_monitor_member_record(&records[1]));
+        assert_eq!(running_agent_slot_count(&records, always_live), 0);
     }
 
     #[test]
@@ -1252,22 +1279,20 @@ mod tests {
     }
 
     #[test]
-    fn occupancy_member_start_uses_earlier_monitor_artifact_timestamp() {
+    fn occupancy_member_start_ignores_artifact_timestamp_even_for_monitor() {
         let record = occupancy_record(
             "/20260712120000",
             serde_json::json!({
+                "agent_family_role": "monitor",
                 "monitor_id": "mon-1",
                 "run_started_at": "2026-07-12T12:00:10+00:00"
             }),
         );
         let start = occupancy_member_start(&record).unwrap();
         let parsed = parse_runtime_timestamp(&start).unwrap();
-        let created =
-            parse_compact_artifact_timestamp("20260712120000").unwrap();
-        assert_eq!(parsed, created);
-        assert!(
-            created
-                < parse_runtime_timestamp("2026-07-12T12:00:10+00:00").unwrap()
+        assert_eq!(
+            parsed,
+            parse_runtime_timestamp("2026-07-12T12:00:10+00:00").unwrap()
         );
     }
 }

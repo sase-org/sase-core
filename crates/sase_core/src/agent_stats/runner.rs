@@ -8,10 +8,11 @@ use crate::agent_launch::{
     list_workspace_claims_from_content, WorkspaceClaimWire,
 };
 use crate::agent_runtime::{
-    derive_active_intervals, is_runner_occupancy_record,
-    merge_family_occupancy_intervals, occupancy_member_start,
-    runner_slot_family_key, ActiveInterval, ActiveIntervalError,
-    ClanRuntimeMemberWire, RunnerOccupancyContribution, WaitPolicy,
+    derive_active_intervals, is_real_monitor_member_record,
+    is_runner_occupancy_record, merge_family_occupancy_intervals,
+    occupancy_member_start, runner_slot_family_key, ActiveInterval,
+    ActiveIntervalError, ClanRuntimeMemberWire, RunnerOccupancyContribution,
+    WaitPolicy,
 };
 use crate::agent_scan::{AgentArtifactRecordWire, RunningMarkerWire};
 
@@ -254,14 +255,40 @@ impl RunnerStatsBuilder {
         }) {
             self.diagnostics.lanes_counted += 1;
         }
+        self.push_contribution(record, derived.intervals);
+    }
+
+    pub(super) fn add_handoff_carry_record(
+        &mut self,
+        record: &AgentArtifactRecordWire,
+        requested_end: f64,
+        resolved_question_answers: &[f64],
+    ) {
+        if !is_runner_occupancy_record(record) {
+            return;
+        }
+        let member = occupancy_runtime_member(record);
+        if let Ok(derived) = derive_active_intervals(
+            &member,
+            requested_end,
+            WaitPolicy::SlotYield,
+            resolved_question_answers,
+        ) {
+            self.push_contribution(record, derived.intervals);
+        }
+    }
+
+    fn push_contribution(
+        &mut self,
+        record: &AgentArtifactRecordWire,
+        intervals: Vec<ActiveInterval>,
+    ) {
         let meta = record.agent_meta.as_ref();
         self.contributions.push(RunnerOccupancyContribution {
             family_key: runner_slot_family_key(record),
             parallel: meta.is_some_and(|value| value.agent_family_parallel),
-            monitor: meta.is_some_and(|value| {
-                value.monitor_id.as_deref().is_some_and(|id| !id.is_empty())
-            }),
-            intervals: derived.intervals,
+            monitor: is_real_monitor_member_record(record),
+            intervals,
         });
     }
 
@@ -673,6 +700,12 @@ mod tests {
         {
             meta.parent_timestamp = Some(parent.to_string());
         }
+        if let Some(role) = extra_meta
+            .get("agent_family_role")
+            .and_then(|value| value.as_str())
+        {
+            meta.agent_family_role = Some(role.to_string());
+        }
         if let Some(monitor_id) = extra_meta
             .get("monitor_id")
             .and_then(|value| value.as_str())
@@ -754,6 +787,7 @@ mod tests {
                 "30",
                 json!({
                     "agent_family": "fam",
+                    "agent_family_role": "monitor",
                     "monitor_id": "mon-1",
                     "stopped_at": "80"
                 }),
@@ -769,5 +803,53 @@ mod tests {
         assert_eq!(result.peak_runners, 1);
         assert_eq!(result.distribution[0].seconds, 20.0);
         assert_eq!(result.distribution[1].seconds, 80.0);
+    }
+
+    #[test]
+    fn inherited_monitor_id_does_not_fill_family_gap() {
+        let mut builder = RunnerStatsBuilder::default();
+        let live = |_: &AgentArtifactRecordWire| false;
+        builder.add_record(
+            &family_record(
+                "root",
+                "0",
+                json!({
+                    "agent_family": "fam",
+                    "stopped_at": "20"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+        builder.add_record(
+            &family_record(
+                "ordinary",
+                "30",
+                json!({
+                    "agent_family": "fam",
+                    "agent_family_role": "code",
+                    "monitor_id": "mon-1",
+                    "stopped_at": "80"
+                }),
+            ),
+            0.0,
+            100.0,
+            &[],
+            &live,
+        );
+
+        let result = builder.finish(0.0, 100.0, 100, false).unwrap();
+        assert_eq!(result.runner_seconds, 70.0);
+        assert_eq!(result.peak_runners, 1);
+        assert_eq!(
+            result
+                .distribution
+                .iter()
+                .map(|row| (row.runners, row.seconds))
+                .collect::<Vec<_>>(),
+            vec![(0, 30.0), (1, 70.0)]
+        );
     }
 }

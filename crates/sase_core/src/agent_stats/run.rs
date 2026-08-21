@@ -274,7 +274,13 @@ fn query_run_stats_with_liveness(
         });
         let runner_candidate =
             runner_overlap_candidate(&row, requested_start, requested_end);
-        if !launch_in_window && !runner_candidate {
+        let runner_handoff_carry = !runner_candidate
+            && runner_handoff_carry_candidate(
+                &row,
+                requested_start,
+                requested_end,
+            );
+        if !launch_in_window && !runner_candidate && !runner_handoff_carry {
             continue;
         }
         let Ok(record) =
@@ -294,17 +300,23 @@ fn query_run_stats_with_liveness(
             }
             continue;
         }
+        let resolved_answers = question_answer_times
+            .get(record.artifact_dir.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if runner_candidate {
-            let resolved_answers = question_answer_times
-                .get(record.artifact_dir.as_str())
-                .map(Vec::as_slice)
-                .unwrap_or_default();
             runner_stats.add_record(
                 &record,
                 requested_start,
                 requested_end,
                 resolved_answers,
                 liveness,
+            );
+        } else if runner_handoff_carry {
+            runner_stats.add_handoff_carry_record(
+                &record,
+                requested_end,
+                resolved_answers,
             );
         }
         if !launch_in_window {
@@ -504,16 +516,8 @@ fn runner_overlap_candidate(
     if row.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
         return false;
     }
-    let Some(started) = row
-        .started_at
-        .as_deref()
-        .and_then(parse_timestamp)
-        .or_else(|| parse_artifact_timestamp(&row.timestamp))
+    let Some(started) = row.started_at.as_deref().and_then(parse_timestamp)
     else {
-        // Prefer run_started_at so never-started agent shells stay out of
-        // occupancy. Fall back to the artifact stamp so a monitor that
-        // already recorded a pid — but not yet run_started_at — still
-        // reaches JSON decode and the monitor-aware occupancy start.
         return false;
     };
     if row
@@ -527,6 +531,26 @@ fn runner_overlap_candidate(
         return false;
     }
     true
+}
+
+fn runner_handoff_carry_candidate(
+    row: &IndexRunRow,
+    requested_start: f64,
+    requested_end: f64,
+) -> bool {
+    if row.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
+        return false;
+    }
+    let Some(started) = row.started_at.as_deref().and_then(parse_timestamp)
+    else {
+        return false;
+    };
+    if started >= requested_end {
+        return false;
+    }
+    row.finished_at
+        .filter(|value| value.is_finite())
+        .is_some_and(|finished| finished <= requested_start)
 }
 
 fn record_is_user_hidden(record: &AgentArtifactRecordWire) -> bool {
@@ -3064,6 +3088,7 @@ mod tests {
             json!({
                 "name": "monitor",
                 "agent_family": "fam",
+                "agent_family_role": "monitor",
                 "monitor_id": "mon-1",
                 "run_started_at": runner_time(30)
             }),
@@ -3123,6 +3148,158 @@ mod tests {
         );
         assert_eq!(runners.lanes_counted, 4);
         assert_runner_conservation(runners);
+    }
+
+    #[test]
+    fn runner_monitor_handoff_is_query_window_invariant() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let terminal_at = |offset: i64| {
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + offset) as f64
+            }))
+        };
+
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "starter",
+                "agent_family": "fam",
+                "run_started_at": runner_time(0)
+            }),
+            terminal_at(20),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(10),
+            json!({
+                "name": "monitor",
+                "agent_family": "fam",
+                "agent_family_role": "monitor",
+                "monitor_id": "mon-1",
+                "run_started_at": runner_time(30)
+            }),
+            terminal_at(80),
+            false,
+        );
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(80),
+            json!({
+                "name": "followup",
+                "agent_family": "fam",
+                "parent_timestamp": runner_artifact_timestamp(0),
+                "run_started_at": runner_time(80)
+            }),
+            terminal_at(100),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let broad =
+            query_run_stats(&index, runner_request(0, 100, 25)).unwrap();
+        let nested =
+            query_run_stats(&index, runner_request(25, 75, 25)).unwrap();
+        let broad_runners = broad.runners.as_ref().unwrap();
+        let nested_runners = nested.runners.as_ref().unwrap();
+
+        assert_eq!(broad_runners.peak_runners, 1);
+        assert_eq!(broad_runners.runner_seconds, 100.0);
+        assert_eq!(nested_runners.peak_runners, 1);
+        assert_eq!(nested_runners.runner_seconds, 50.0);
+        assert_eq!(broad_runners.trend[1].peak_runners, 1);
+        assert_eq!(broad_runners.trend[2].peak_runners, 1);
+        assert_runner_conservation(broad_runners);
+        assert_runner_conservation(nested_runners);
+    }
+
+    #[test]
+    fn runner_inherited_monitor_id_and_artifact_stamp_do_not_move_start_back() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let terminal_at = |offset: i64| {
+            Some(json!({
+                "outcome": "completed",
+                "finished_at": (RUNNER_BASE + offset) as f64
+            }))
+        };
+
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(0),
+            json!({
+                "name": "baseline",
+                "run_started_at": runner_time(0)
+            }),
+            terminal_at(60),
+            false,
+        );
+        for (offset, start, role) in
+            [(5, 70, "root"), (10, 80, "code"), (15, 90, "feedback")]
+        {
+            add_run(
+                &projects,
+                &runner_artifact_timestamp(offset),
+                json!({
+                    "name": format!("ordinary-{offset}"),
+                    "agent_family_role": role,
+                    "monitor_id": "mon-1",
+                    "run_started_at": runner_time(start)
+                }),
+                terminal_at(100),
+                false,
+            );
+        }
+        add_run(
+            &projects,
+            &runner_artifact_timestamp(3_600),
+            json!({
+                "name": "true-monitor-later",
+                "agent_family_role": "monitor",
+                "monitor_id": "mon-2",
+                "run_started_at": runner_time(5 * 3_600)
+            }),
+            terminal_at(6 * 3_600),
+            false,
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let early = query_run_stats(&index, runner_request(0, 60, 60)).unwrap();
+        let broad =
+            query_run_stats(&index, runner_request(0, 120, 60)).unwrap();
+        let late_monitor_span =
+            query_run_stats(&index, runner_request(0, 6 * 3_600, 3_600))
+                .unwrap();
+        let early_runners = early.runners.as_ref().unwrap();
+        let broad_runners = broad.runners.as_ref().unwrap();
+        let late_monitor_runners = late_monitor_span.runners.as_ref().unwrap();
+
+        assert_eq!(early_runners.peak_runners, 1);
+        assert_eq!(early_runners.runner_seconds, 60.0);
+        assert_eq!(broad_runners.trend[0].peak_runners, 1);
+        assert_eq!(broad_runners.peak_runners, 3);
+        assert_eq!(late_monitor_runners.trend[1].peak_runners, 0);
+        assert_eq!(late_monitor_runners.trend[5].peak_runners, 1);
+        assert_runner_conservation(early_runners);
+        assert_runner_conservation(broad_runners);
+        assert_runner_conservation(late_monitor_runners);
     }
 
     #[test]
