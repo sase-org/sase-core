@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.10](https://github.com/sase-org/sase-core/compare/v0.29.9...v0.29.10) - 2026-08-21
+
+### Added
+
+- *(finalizer)* validate unique increasing attempt ledgers
+- *(editor)* expose final directive completion
+
+### Fixed
+
+- *(finalizer)* hide final directive name completion
+
 ## [0.29.9](https://github.com/sase-org/sase-core/compare/v0.29.8...v0.29.9) - 2026-08-21
 
 ### Added
