@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.6](https://github.com/sase-org/sase-core/compare/v0.29.5...v0.29.6) - 2026-08-21
+
+### Added
+
+- *(core)* add versioned feature-flag preference store
+- *(completion)* share model filtering with bindings and LSP
+- *(finalizer)* add shared finalizer protocol
+- *(task_type)* add optional create_refusal on catalog wire
+- *(editor)* add canonical xprompt directive completion contract
+
+### Fixed
+
+- repair core storage identity contracts
+
 ### Added
 
 - bind `feature_flag_state_get` and `feature_flag_state_set` for the machine-local
