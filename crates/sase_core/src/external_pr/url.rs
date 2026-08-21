@@ -44,7 +44,7 @@ pub fn canonical_pull_request_url(
 
     let (authority, path) = without_scheme
         .split_once('/')
-        .map_or((without_scheme, ""), |pair| pair);
+        .unwrap_or((without_scheme, ""));
     if authority.is_empty() || path.is_empty() {
         return None;
     }
