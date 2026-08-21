@@ -54,14 +54,7 @@ pub fn validate_finalizer_instance_results(
                 result.instance_id
             )));
         }
-        for attempt in &result.attempts {
-            if attempt.attempt == 0 {
-                return Err(FinalizerError::validation(format!(
-                    "instance '{}' attempt numbers are 1-based",
-                    result.instance_id
-                )));
-            }
-        }
+        validate_attempt_ledger(result)?;
         validate_diagnostics(&result.diagnostics)?;
         for evidence in &result.evidence {
             validate_required_text(&evidence.kind, "evidence.kind")?;
@@ -132,7 +125,70 @@ fn aggregate_diagnostics(
         message: format!("aggregate finalizer status is {status:?}"),
         severity: FinalizerDiagnosticSeverityWire::Error,
         instance_id,
+        attempt: None,
     }])
+}
+
+fn validate_attempt_ledger(
+    result: &FinalizerInstanceResultWire,
+) -> Result<(), FinalizerError> {
+    let mut previous_attempt = 0_u32;
+    for attempt in &result.attempts {
+        if attempt.attempt == 0 {
+            return Err(FinalizerError::validation(format!(
+                "instance '{}' attempt numbers are 1-based",
+                result.instance_id
+            )));
+        }
+        if attempt.attempt <= previous_attempt {
+            return Err(FinalizerError::validation(format!(
+                "instance '{}' attempt numbers must be unique and increasing",
+                result.instance_id
+            )));
+        }
+        previous_attempt = attempt.attempt;
+    }
+    match result.status {
+        FinalizerInstanceStatusWire::Skipped => {
+            if !result.attempts.is_empty() {
+                return Err(FinalizerError::validation(format!(
+                    "instance '{}' skipped status cannot record attempts",
+                    result.instance_id
+                )));
+            }
+        }
+        FinalizerInstanceStatusWire::Failed
+        | FinalizerInstanceStatusWire::Refused => {
+            if result.attempts.is_empty() {
+                return Err(FinalizerError::validation(format!(
+                    "instance '{}' {} status requires a terminal attempt",
+                    result.instance_id,
+                    instance_status_name(result.status)
+                )));
+            }
+        }
+        FinalizerInstanceStatusWire::Success
+        | FinalizerInstanceStatusWire::Pending => {}
+    }
+    if let Some(last) = result.attempts.last() {
+        if last.status != result.status {
+            return Err(FinalizerError::validation(format!(
+                "instance '{}' terminal status does not match last attempt",
+                result.instance_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn instance_status_name(status: FinalizerInstanceStatusWire) -> &'static str {
+    match status {
+        FinalizerInstanceStatusWire::Pending => "pending",
+        FinalizerInstanceStatusWire::Skipped => "skipped",
+        FinalizerInstanceStatusWire::Success => "success",
+        FinalizerInstanceStatusWire::Refused => "refused",
+        FinalizerInstanceStatusWire::Failed => "failed",
+    }
 }
 
 fn validate_diagnostics(
@@ -144,6 +200,11 @@ fn validate_diagnostics(
         if let Some(instance_id) = &diagnostic.instance_id {
             validate_instance_id(instance_id)?;
         }
+        if diagnostic.attempt == Some(0) {
+            return Err(FinalizerError::validation(
+                "diagnostic attempt numbers are 1-based".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -152,16 +213,28 @@ fn validate_diagnostics(
 mod tests {
     use serde_json::json;
 
+    use super::super::wire::FinalizerAttemptWire;
     use super::*;
 
     fn result(
         instance_id: &str,
         status: FinalizerInstanceStatusWire,
     ) -> FinalizerInstanceResultWire {
+        let attempts = match status {
+            FinalizerInstanceStatusWire::Failed
+            | FinalizerInstanceStatusWire::Refused => {
+                vec![FinalizerAttemptWire {
+                    attempt: 1,
+                    status,
+                    diagnostic_code: None,
+                }]
+            }
+            _ => Vec::new(),
+        };
         FinalizerInstanceResultWire {
             instance_id: instance_id.to_string(),
             status,
-            attempts: Vec::new(),
+            attempts,
             refusal_reason: (status == FinalizerInstanceStatusWire::Refused)
                 .then(|| "No attributable commit should be made".to_string()),
             evidence: Vec::new(),
@@ -214,5 +287,67 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("refusal_reason"));
+    }
+
+    #[test]
+    fn all_skipped_aggregates_success_and_all_failed_aggregates_failed() {
+        let skipped = aggregate_finalizer_outcomes(vec![
+            result("lint", FinalizerInstanceStatusWire::Skipped),
+            result("audit", FinalizerInstanceStatusWire::Skipped),
+        ])
+        .unwrap();
+        assert_eq!(skipped.status, FinalizerAggregateStatusWire::Success);
+        assert!(skipped.diagnostics.is_empty());
+
+        let failed = aggregate_finalizer_outcomes(vec![
+            result("lint", FinalizerInstanceStatusWire::Failed),
+            result("audit", FinalizerInstanceStatusWire::Failed),
+        ])
+        .unwrap();
+        assert_eq!(failed.status, FinalizerAggregateStatusWire::Failed);
+        assert_eq!(failed.diagnostics[0].instance_id.as_deref(), Some("lint"));
+    }
+
+    #[test]
+    fn attempt_numbers_must_be_unique_increasing_and_terminal() {
+        let mut duplicate = result("lint", FinalizerInstanceStatusWire::Failed);
+        duplicate.attempts = vec![
+            FinalizerAttemptWire {
+                attempt: 1,
+                status: FinalizerInstanceStatusWire::Failed,
+                diagnostic_code: None,
+            },
+            FinalizerAttemptWire {
+                attempt: 1,
+                status: FinalizerInstanceStatusWire::Failed,
+                diagnostic_code: None,
+            },
+        ];
+        assert!(validate_finalizer_instance_results(&[duplicate])
+            .unwrap_err()
+            .to_string()
+            .contains("unique and increasing"));
+
+        let mut mismatched =
+            result("lint", FinalizerInstanceStatusWire::Failed);
+        mismatched.attempts[0].status = FinalizerInstanceStatusWire::Success;
+        assert!(validate_finalizer_instance_results(&[mismatched])
+            .unwrap_err()
+            .to_string()
+            .contains("terminal status"));
+
+        let mut skipped_with_attempts =
+            result("lint", FinalizerInstanceStatusWire::Skipped);
+        skipped_with_attempts.attempts = vec![FinalizerAttemptWire {
+            attempt: 1,
+            status: FinalizerInstanceStatusWire::Skipped,
+            diagnostic_code: None,
+        }];
+        assert!(
+            validate_finalizer_instance_results(&[skipped_with_attempts])
+                .unwrap_err()
+                .to_string()
+                .contains("skipped status cannot record attempts")
+        );
     }
 }

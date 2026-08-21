@@ -234,6 +234,8 @@ pub struct FinalizerDiagnosticWire {
     pub severity: FinalizerDiagnosticSeverityWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
