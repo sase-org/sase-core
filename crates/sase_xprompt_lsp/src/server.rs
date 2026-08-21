@@ -4323,6 +4323,8 @@ mod tests {
             ("%a", "%auto"),
             ("%h", "%hide"),
             ("%r", "%repeat"),
+            ("%f", "%final"),
+            ("%final", "%final"),
             ("%xprompts_enabled", "%xprompts_enabled"),
         ] {
             let labels = labels_at(server, token).await;
@@ -4684,10 +4686,29 @@ mod tests {
             let CompletionResponse::Array(items) = response else {
                 panic!("expected completion array");
             };
-            assert!(
-                items.iter().all(|item| !item.label.contains("final")),
-                "hidden %final advertised by name completion: {items:?}"
+            assert_canonical_final_name(&items, token.len() as u32);
+            assert_snippet_item(&items, "%final:...", "%final:${1:instance}$0");
+            assert_snippet_item(
+                &items,
+                "%final(...)",
+                "%final(${1:instance}, ${2:instance})$0",
             );
+            for item in items.iter().filter(|item| {
+                item.label == "%final"
+                    || item.label.starts_with("%final:")
+                    || item.label.starts_with("%final(")
+            }) {
+                let Some(CompletionTextEdit::Edit(edit)) =
+                    item.text_edit.as_ref()
+                else {
+                    panic!("expected %final clause-local text edit");
+                };
+                assert_eq!(edit.range.start, Position::new(0, 0));
+                assert_eq!(
+                    edit.range.end,
+                    Position::new(0, token.len() as u32)
+                );
+            }
         }
 
         for token in ["%id", "%i"] {
@@ -4799,10 +4820,24 @@ mod tests {
                 ),
             ]
         );
-        assert!(directive_snippet_items(Some("%final"), range).is_empty());
-        assert!(directive_snippet_items(Some("%f"), range)
-            .iter()
-            .all(|item| !item.label.contains("final")));
+        for token in [Some("%final"), Some("%f")] {
+            let items = directive_snippet_items(token, range);
+            assert_snippet_item(&items, "%final:...", "%final:${1:instance}$0");
+            assert_snippet_item(
+                &items,
+                "%final(...)",
+                "%final(${1:instance}, ${2:instance})$0",
+            );
+            for item in &items {
+                let Some(CompletionTextEdit::Edit(edit)) =
+                    item.text_edit.as_ref()
+                else {
+                    panic!("expected %final snippet text edit");
+                };
+                assert_eq!(edit.range.start, Position::new(0, 0));
+                assert_eq!(edit.range.end, Position::new(0, 4));
+            }
+        }
 
         // No directive snippet should still emit the legacy `%(...)` spelling.
         for item in &items {
@@ -5289,6 +5324,24 @@ mod tests {
             panic!("expected completion array");
         };
         items
+    }
+
+    fn assert_canonical_final_name(items: &[CompletionItem], end: u32) {
+        let item = items
+            .iter()
+            .find(|item| {
+                item.label == "%final"
+                    && item.kind != Some(CompletionItemKind::SNIPPET)
+            })
+            .unwrap_or_else(|| panic!("missing canonical %final name row"));
+        assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit for %final");
+        };
+        assert_eq!(edit.new_text.as_str(), "%final");
+        assert_eq!(edit.range.start, Position::new(0, 0));
+        assert_eq!(edit.range.end, Position::new(0, end));
     }
 
     fn assert_snippet_item(
