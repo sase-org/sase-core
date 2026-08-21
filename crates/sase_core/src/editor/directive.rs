@@ -401,6 +401,8 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
 ];
 
+const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &["final"];
+
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
     if raw == "(" || raw == "{" {
         return Some("alt");
@@ -442,6 +444,9 @@ pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
     let partial = token.strip_prefix('%').unwrap_or(token).to_lowercase();
     let mut candidates = Vec::new();
     for directive in DIRECTIVES {
+        if HIDDEN_COMPLETION_DIRECTIVES.contains(&directive.name) {
+            continue;
+        }
         if directive.name.starts_with(&partial)
             || directive
                 .alias
@@ -1525,6 +1530,18 @@ mod tests {
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
         assert_eq!(values, ["plan", "tale", "epic"]);
+    }
+
+    #[test]
+    fn final_directive_is_parseable_but_not_advertised_by_name_completion() {
+        assert_eq!(canonical_directive_name("final"), Some("final"));
+        assert!(directive_metadata("final").is_some());
+        assert!(build_directive_completion_candidates("%f")
+            .candidates
+            .is_empty());
+        assert!(build_directive_completion_candidates("%final")
+            .candidates
+            .is_empty());
     }
 
     #[test]
