@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.9](https://github.com/sase-org/sase-core/compare/v0.29.8...v0.29.9) - 2026-08-21
+
+### Added
+
+- *(finalizer)* validate and authenticate resolved plan digests
+
 ### Added
 
 - bind `validate_finalizer_plan` and `authenticate_finalizer_plan` for sealed-plan integrity
