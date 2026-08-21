@@ -401,7 +401,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
 ];
 
-const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &["final"];
+const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &[];
 
 pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
     HIDDEN_COMPLETION_DIRECTIVES.contains(&name)
@@ -1537,15 +1537,18 @@ mod tests {
     }
 
     #[test]
-    fn final_directive_is_parseable_but_not_advertised_by_name_completion() {
+    fn final_directive_is_parseable_and_advertised_by_name_completion() {
         assert_eq!(canonical_directive_name("final"), Some("final"));
         assert!(directive_metadata("final").is_some());
-        assert!(build_directive_completion_candidates("%f")
-            .candidates
-            .is_empty());
-        assert!(build_directive_completion_candidates("%final")
-            .candidates
-            .is_empty());
+        assert_eq!(
+            build_directive_completion_candidates("%f").candidates[0].insertion,
+            "%final"
+        );
+        assert_eq!(
+            build_directive_completion_candidates("%final").candidates[0]
+                .insertion,
+            "%final"
+        );
     }
 
     #[test]
