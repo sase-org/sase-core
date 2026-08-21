@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.6](https://github.com/sase-org/sase-core/compare/v0.29.5...v0.29.6) - 2026-08-21
+
+### Added
+
+- *(core)* add versioned feature-flag preference store
+- *(completion)* share model filtering with bindings and LSP
+- *(finalizer)* add shared finalizer protocol
+- *(task_type)* add optional create_refusal on catalog wire
+- *(editor)* drive xprompt LSP directive completion from the shared contract
+- *(prompt_stash)* add optional cursor metadata on stash rows
+- *(editor)* add canonical xprompt directive completion contract
+
+### Fixed
+
+- *(clippy)* use Option::unwrap_or in pull-request URL parser
+- *(artifact-ref)* allow xprompt argument delimiters
+- *(stats)* correct runner occupancy monitor peaks
+- repair core storage identity contracts
+
 ### Added
 
 - *(feature_flag_state)* add a versioned, locked, atomic machine-state store for
