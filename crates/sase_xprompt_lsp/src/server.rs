@@ -44,17 +44,18 @@ use sase_core::{
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
     editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, ArtifactRefContextWire, AtReferenceContextWire,
-    AtReferenceInventoryWire, AtReferenceKindRowWire,
-    AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    editor_hover_at_position, filter_model_completion_candidates,
+    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
+    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories,
     DirectiveModelAliasKey, DirectiveSyntaxForm, DirectiveValueRole,
     DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
     GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
-    XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
+    ModelCompletionEntryWire, VcsNamespaceEntry, VcsProjectEntry,
+    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -127,28 +128,6 @@ impl Default for ServerConfig {
             glossary_catalog: glossary_catalog_path(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ModelCompletionEntry {
-    value: String,
-    display: String,
-    description: String,
-    kind: String,
-    provider: String,
-    aliases: Vec<String>,
-    alias_kind: String,
-    target_provider: String,
-    target_model: String,
-    target_effort: String,
-    provenance: String,
-    reference: String,
-    reference_effort: String,
-    selector_mode: String,
-    pool_available: u64,
-    pool_total: u64,
-    config_source: String,
-    bucket: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2085,37 +2064,12 @@ fn compare_vcs_repo_pushed_at(
 
 fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
     let entries = load_model_catalog(path);
-    let needle = partial.to_lowercase();
     let mut candidates = Vec::new();
-    let matched_entries: Vec<(ModelCompletionEntry, String)> =
-        if needle.starts_with('@') {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    model_alias_entry_filter_text(entry, &needle)
-                        .map(|filter_text| (entry.clone(), filter_text))
-                })
-                .collect()
-        } else if let Some((provider, remainder)) =
-            model_provider_scope(&entries, &needle)
-        {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    scoped_model_entry(entry, &provider, &remainder)
-                })
-                .collect()
-        } else {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    model_entry_filter_text(entry, &needle)
-                        .map(|filter_text| (entry.clone(), filter_text))
-                })
-                .collect()
-        };
-    for (entry, filter_text) in matched_entries {
-        candidates.push(model_completion_candidate(entry, filter_text));
+    for candidate in filter_model_completion_candidates(&entries, partial) {
+        candidates.push(model_completion_candidate(
+            candidate.entry,
+            candidate.filter_text,
+        ));
     }
     CompletionList {
         candidates,
@@ -2124,7 +2078,7 @@ fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
 }
 
 fn model_completion_candidate(
-    entry: ModelCompletionEntry,
+    entry: ModelCompletionEntryWire,
     filter_text: String,
 ) -> CompletionCandidate {
     let display = if entry.display.is_empty() {
@@ -2149,90 +2103,11 @@ fn model_completion_candidate(
     }
 }
 
-fn model_alias_entry_filter_text(
-    entry: &ModelCompletionEntry,
-    needle: &str,
-) -> Option<String> {
-    if !is_model_alias_kind(&entry.kind) {
-        return None;
-    }
-    if entry.value.to_lowercase().starts_with(needle) {
-        return Some(entry.value.clone());
-    }
-    entry.aliases.iter().find_map(|alias| {
-        let normalized = format!("@{}", alias.trim_start_matches('@'));
-        normalized
-            .to_lowercase()
-            .starts_with(needle)
-            .then_some(normalized)
-    })
-}
-
-fn model_entry_filter_text(
-    entry: &ModelCompletionEntry,
-    needle: &str,
-) -> Option<String> {
-    if needle.is_empty() || entry.value.to_lowercase().starts_with(needle) {
-        return Some(entry.value.clone());
-    }
-    entry
-        .aliases
-        .iter()
-        .find(|alias| alias.to_lowercase().starts_with(needle))
-        .cloned()
-}
-
-fn model_provider_scope(
-    entries: &[ModelCompletionEntry],
-    needle: &str,
-) -> Option<(String, String)> {
-    let (head, remainder) = needle.split_once('/')?;
-    if head.is_empty() {
-        return None;
-    }
-    let provider_value = format!("{head}/");
-    entries
-        .iter()
-        .find(|entry| {
-            entry.kind == "provider"
-                && entry.value.eq_ignore_ascii_case(&provider_value)
-        })
-        .map(|entry| {
-            let provider = if entry.provider.is_empty() {
-                head.to_string()
-            } else {
-                entry.provider.clone()
-            };
-            (provider, remainder.to_string())
-        })
-}
-
-fn scoped_model_entry(
-    entry: &ModelCompletionEntry,
-    provider: &str,
-    remainder: &str,
-) -> Option<(ModelCompletionEntry, String)> {
-    if entry.kind != "model" || !entry.provider.eq_ignore_ascii_case(provider) {
-        return None;
-    }
-    let filter_suffix = model_entry_filter_text(entry, remainder)?;
-    let prefix = format!("{provider}/");
-    let display = if entry.display.is_empty() {
-        entry.value.as_str()
-    } else {
-        entry.display.as_str()
-    };
-    let mut qualified = entry.clone();
-    qualified.value = format!("{prefix}{}", entry.value);
-    qualified.display = format!("{prefix}{display}");
-    Some((qualified, format!("{prefix}{filter_suffix}")))
-}
-
 fn is_model_alias_kind(kind: &str) -> bool {
     matches!(kind, "implicit_alias" | "user_alias")
 }
 
-fn model_completion_detail(entry: &ModelCompletionEntry) -> Option<String> {
+fn model_completion_detail(entry: &ModelCompletionEntryWire) -> Option<String> {
     if !is_model_alias_kind(&entry.kind) {
         return (!entry.provider.is_empty()).then(|| entry.provider.clone());
     }
@@ -2271,7 +2146,7 @@ fn model_completion_detail(entry: &ModelCompletionEntry) -> Option<String> {
 }
 
 fn model_completion_documentation(
-    entry: &ModelCompletionEntry,
+    entry: &ModelCompletionEntryWire,
 ) -> Option<String> {
     let mut sections = Vec::new();
     if !entry.description.is_empty() {
@@ -2776,7 +2651,7 @@ fn initialized_project_basename(project: &str) -> Option<&str> {
 ///
 /// Read fresh on every `%model` completion request. Any failure (no path,
 /// unreadable file, malformed JSON) degrades to empty results.
-fn load_model_catalog(path: Option<&Path>) -> Vec<ModelCompletionEntry> {
+fn load_model_catalog(path: Option<&Path>) -> Vec<ModelCompletionEntryWire> {
     let Some(path) = path else {
         return Vec::new();
     };
@@ -2800,66 +2675,16 @@ fn load_model_catalog(path: Option<&Path>) -> Vec<ModelCompletionEntry> {
     value
         .get("entries")
         .and_then(serde_json::Value::as_array)
-        .map(|entries| entries.iter().filter_map(model_entry).collect())
-        .unwrap_or_default()
-}
-
-fn model_entry(value: &serde_json::Value) -> Option<ModelCompletionEntry> {
-    let object = value.as_object()?;
-    let model_value = object.get("value")?.as_str()?.to_string();
-    if model_value.is_empty() {
-        return None;
-    }
-    let aliases = object
-        .get("aliases")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
+        .map(|entries| {
+            entries
                 .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter_map(|entry| {
+                    let entry: ModelCompletionEntryWire =
+                        serde_json::from_value(entry.clone()).ok()?;
+                    (!entry.value.is_empty()).then_some(entry)
+                })
                 .collect()
         })
-        .unwrap_or_default();
-    Some(ModelCompletionEntry {
-        value: model_value,
-        display: json_string(object, "display"),
-        description: json_string(object, "description"),
-        kind: json_string(object, "kind"),
-        provider: json_string(object, "provider"),
-        aliases,
-        alias_kind: json_string(object, "alias_kind"),
-        target_provider: json_string(object, "target_provider"),
-        target_model: json_string(object, "target_model"),
-        target_effort: json_string(object, "target_effort"),
-        provenance: json_string(object, "provenance"),
-        reference: json_string(object, "reference"),
-        reference_effort: json_string(object, "reference_effort"),
-        selector_mode: json_string(object, "selector_mode"),
-        pool_available: json_u64(object, "pool_available"),
-        pool_total: json_u64(object, "pool_total"),
-        config_source: json_string(object, "config_source"),
-        bucket: json_string(object, "bucket"),
-    })
-}
-
-fn json_string(
-    object: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> String {
-    object
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn json_u64(
-    object: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> u64 {
-    object
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
         .unwrap_or_default()
 }
 

@@ -45,6 +45,7 @@ pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
 pub mod markdown_link_refs;
+pub mod model_completion;
 pub mod model_route;
 pub mod notifications;
 pub mod parser;
@@ -635,6 +636,11 @@ pub use markdown_link_refs::{
     allocate_markdown_reference_label, append_markdown_reference_definitions,
     scan_markdown_reference_links, MarkdownReferenceDefinitionWire,
     MarkdownReferenceScanWire, MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
+};
+pub use model_completion::{
+    filter_model_completion_candidates, filter_model_completion_entries,
+    ModelCompletionCandidateWire, ModelCompletionEntryWire,
+    MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
 pub use model_route::{
     public_size_alias, select_epic_land_model, size_model_route,

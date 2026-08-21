@@ -928,7 +928,11 @@ use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
+    filter_model_completion_entries as core_filter_model_completion_entries,
+    load_editor_snippet_catalog as core_load_editor_snippet_catalog,
     validate_snippet_trigger as core_validate_snippet_trigger,
+    EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
+    XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -1480,6 +1484,42 @@ fn py_validate_snippet_trigger(
 ) -> PyResult<PyObject> {
     let validation = core_validate_snippet_trigger(trigger);
     let value = serde_json::to_value(validation).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "load_editor_snippet_catalog")]
+#[pyo3(signature = (project = None, root_dir = None))]
+fn py_load_editor_snippet_catalog(
+    py: Python<'_>,
+    project: Option<String>,
+    root_dir: Option<String>,
+) -> PyResult<PyObject> {
+    let request = EditorSnippetCatalogRequestWire {
+        schema_version: 1,
+        project,
+    };
+    let options = XpromptCatalogLoadOptions::new(root_dir.map(PathBuf::from));
+    let response = core_load_editor_snippet_catalog(&request, &options)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let value = serde_json::to_value(response).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "filter_model_completion_entries")]
+fn py_filter_model_completion_entries(
+    py: Python<'_>,
+    entries: &Bound<'_, PyList>,
+    partial: &str,
+) -> PyResult<PyObject> {
+    let entries = model_completion_entries_from_py_list(entries)?;
+    let filtered = core_filter_model_completion_entries(&entries, partial);
+    let value = serde_json::to_value(filtered).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
@@ -7379,6 +7419,47 @@ fn strings_from_py_list(
     Ok(values)
 }
 
+fn model_completion_entries_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ModelCompletionEntryWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let Some(object) = value.as_object() else {
+            return Err(PyValueError::new_err(format!(
+                "entries[{idx}] must be a dict"
+            )));
+        };
+        for field in MODEL_COMPLETION_ENTRY_WIRE_FIELDS {
+            if !object.contains_key(*field) {
+                return Err(PyValueError::new_err(format!(
+                    "entries[{idx}] is missing field {field:?}"
+                )));
+            }
+        }
+        for field in object.keys() {
+            if !MODEL_COMPLETION_ENTRY_WIRE_FIELDS.contains(&field.as_str()) {
+                return Err(PyValueError::new_err(format!(
+                    "entries[{idx}] contains unexpected field {field:?}"
+                )));
+            }
+        }
+        let entry: ModelCompletionEntryWire =
+            serde_json::from_value(value).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "entries[{idx}] is not a valid ModelCompletionEntryWire dict: {error}"
+                ))
+            })?;
+        if entry.value.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "entries[{idx}].value must be non-empty"
+            )));
+        }
+        values.push(entry);
+    }
+    Ok(values)
+}
+
 fn hooks_from_py(list: &Bound<'_, PyList>) -> PyResult<Vec<HookWire>> {
     let mut values = Vec::with_capacity(list.len());
     for (idx, item) in list.iter().enumerate() {
@@ -9646,6 +9727,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
+    m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_snippet_session_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
@@ -11396,6 +11479,134 @@ mod tests {
     }
 
     #[test]
+    fn load_editor_snippet_catalog_binding_returns_plain_dict_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let xprompts = root.join("sase/xprompts");
+            fs::create_dir_all(&xprompts).unwrap();
+            fs::write(
+                xprompts.join("fix.md"),
+                "---\nsnippet: fixit\ndescription: Fix a bug\n---\nFix it",
+            )
+            .unwrap();
+            fs::write(
+                root.join("sase/sase.yml"),
+                "ace:\n  snippets:\n    todo: TODO $1$0\n",
+            )
+            .unwrap();
+
+            let result = py_load_editor_snippet_catalog(
+                py,
+                None,
+                Some(root.to_string_lossy().to_string()),
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            let triggers = value["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["trigger"].as_str().unwrap())
+                .collect::<Vec<_>>();
+
+            assert!(triggers.contains(&"fixit"));
+            assert!(triggers.contains(&"Fixit"));
+            assert!(triggers.contains(&"todo"));
+            assert_eq!(value["result"]["status"], json!("success"));
+        });
+    }
+
+    #[test]
+    fn filter_model_completion_entries_binding_returns_plain_dict_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_filter_model_completion_entries,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let entries = json_value_to_py(
+                py,
+                &json!([
+                    model_completion_entry_json(
+                        "claude-fable-5",
+                        "model",
+                        "claude",
+                        ["fable"],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "opus",
+                        "model",
+                        "claude",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "@scout",
+                        "user_alias",
+                        "",
+                        ["scout"],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "claude/",
+                        "provider",
+                        "claude",
+                        [],
+                        2,
+                    ),
+                ]),
+            )
+            .unwrap();
+
+            let scoped = module
+                .getattr("filter_model_completion_entries")
+                .unwrap()
+                .call1((entries, "claude/fa"))
+                .unwrap();
+            let value = py_to_json_value(&scoped).unwrap();
+
+            assert_eq!(
+                value,
+                json!([model_completion_entry_json(
+                    "claude/claude-fable-5",
+                    "model",
+                    "claude",
+                    ["fable"],
+                    0,
+                )])
+            );
+            assert_eq!(value[0]["display"], json!("claude/claude-fable-5"));
+        });
+    }
+
+    #[test]
+    fn filter_model_completion_entries_binding_rejects_malformed_rows() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let rows = json_value_to_py(py, &json!([{"value": "model"}]))
+                .unwrap()
+                .into_bound(py);
+            let rows = rows.downcast::<PyList>().unwrap();
+            let error = py_filter_model_completion_entries(py, rows, "")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("missing field"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
     fn compose_snippet_catalog_binding_exposes_missing_and_cycle_graph() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
@@ -11448,6 +11659,38 @@ mod tests {
                 .collect();
             assert_eq!(codes, vec!["missing_target", "direct_cycle"]);
         });
+    }
+
+    fn model_completion_entry_json<const N: usize>(
+        value: &str,
+        kind: &str,
+        provider: &str,
+        aliases: [&str; N],
+        provider_model_count: u64,
+    ) -> JsonValue {
+        json!({
+            "value": value,
+            "display": value,
+            "description": "",
+            "kind": kind,
+            "provider": provider,
+            "aliases": aliases.to_vec(),
+            "alias_kind": "",
+            "target_provider": "",
+            "target_model": "",
+            "target_effort": "",
+            "provenance": "",
+            "reference": "",
+            "reference_effort": "",
+            "selector_mode": "",
+            "pool_available": 0,
+            "pool_total": 0,
+            "config_source": "",
+            "bucket": "",
+            "advisory_label": "",
+            "advisory_severity": "",
+            "provider_model_count": provider_model_count
+        })
     }
 
     #[test]
