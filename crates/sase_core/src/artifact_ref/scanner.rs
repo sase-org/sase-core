@@ -233,7 +233,11 @@ fn argument_needs_quoting(argument: &str) -> bool {
 fn has_allowed_left_context(text: &str, start: usize) -> bool {
     start == 0
         || text[..start].chars().next_back().is_some_and(|character| {
-            character.is_whitespace() || matches!(character, '"' | '\'' | '`')
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '"' | '\'' | '`' | '(' | '[' | '{' | ',' | '='
+                )
         })
 }
 
@@ -339,6 +343,21 @@ mod tests {
         assert_eq!(candidate.reference, "plan:a b.md.");
         let unquoted = only("@plan:a.md.");
         assert_eq!(unquoted.reference, "plan:a.md");
+    }
+
+    #[test]
+    fn xprompt_argument_delimiters_are_allowed_left_context() {
+        let candidates = scan_artifact_refs(
+            "#work(@plan:a.md) %alt(left=@plans:b.md, right=@commit:sase@abcdef1)",
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.text.as_str())
+                .collect::<Vec<_>>(),
+            ["@plan:a.md", "@plans:b.md", "@commit:sase@abcdef1"]
+        );
     }
 
     #[test]
