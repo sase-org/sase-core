@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.7](https://github.com/sase-org/sase-core/compare/v0.29.6...v0.29.7) - 2026-08-21
+
+### Fixed
+
+- *(editor)* hide final directive from name completions
+
 ## [0.29.6](https://github.com/sase-org/sase-core/compare/v0.29.5...v0.29.6) - 2026-08-21
 
 ### Added
