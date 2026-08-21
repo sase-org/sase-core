@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(finalizer)* validate and authenticate a resolved plan against an independently held digest
+
 ## [0.29.8](https://github.com/sase-org/sase-core/compare/v0.29.7...v0.29.8) - 2026-08-21
 
 ### Added

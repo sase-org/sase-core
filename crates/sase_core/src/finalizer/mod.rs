@@ -19,9 +19,10 @@ pub use outcome::{
     aggregate_finalizer_outcomes, validate_finalizer_instance_results,
 };
 pub use selection::{
-    finalizer_instance_spec_digest, finalizer_plan_digest,
-    finalizer_provider_spec_digest, resolve_finalizer_plan,
-    validate_finalizer_instance_spec, validate_finalizer_provider_spec,
+    authenticate_finalizer_plan, finalizer_instance_spec_digest,
+    finalizer_plan_digest, finalizer_provider_spec_digest,
+    resolve_finalizer_plan, validate_finalizer_instance_spec,
+    validate_finalizer_plan, validate_finalizer_provider_spec,
 };
 pub use submission::{
     finalizer_context_digest, validate_finalizer_context,

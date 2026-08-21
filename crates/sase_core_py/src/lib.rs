@@ -310,6 +310,8 @@
 //! - `finalizer_instance_spec_digest(spec: dict) -> str`
 //! - `resolve_finalizer_plan(request: dict) -> dict`
 //! - `finalizer_plan_digest(plan: dict) -> str`
+//! - `validate_finalizer_plan(plan: dict) -> str`
+//! - `authenticate_finalizer_plan(plan: dict, expected_digest: str) -> str`
 //! - `finalizer_context_digest(context: dict) -> str`
 //! - `validate_finalizer_context(plan: dict, context: dict) -> str`
 //! - `validate_finalizer_submission(plan: dict, context: dict, submission: dict) -> dict`
@@ -743,6 +745,7 @@ use sase_core::feature_flag_state::{
 };
 use sase_core::finalizer::{
     aggregate_finalizer_outcomes as core_aggregate_finalizer_outcomes,
+    authenticate_finalizer_plan as core_authenticate_finalizer_plan,
     finalizer_context_digest as core_finalizer_context_digest,
     finalizer_digest_json_value as core_finalizer_digest_json_value,
     finalizer_instance_spec_digest as core_finalizer_instance_spec_digest,
@@ -751,6 +754,7 @@ use sase_core::finalizer::{
     resolve_finalizer_plan as core_resolve_finalizer_plan,
     validate_finalizer_context as core_validate_finalizer_context,
     validate_finalizer_instance_spec as core_validate_finalizer_instance_spec,
+    validate_finalizer_plan as core_validate_finalizer_plan,
     validate_finalizer_provider_spec as core_validate_finalizer_provider_spec,
     validate_finalizer_submission as core_validate_finalizer_submission,
     FinalizerContextWire, FinalizerError, FinalizerInstanceResultWire,
@@ -4399,6 +4403,26 @@ fn py_resolve_finalizer_plan<'py>(
 fn py_finalizer_plan_digest(plan: &Bound<'_, PyDict>) -> PyResult<String> {
     let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
     core_finalizer_plan_digest(&plan).map_err(finalizer_error_to_pyerr)
+}
+
+/// Strictly parse and validate a resolved plan, returning its digest.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_plan")]
+fn py_validate_finalizer_plan(plan: &Bound<'_, PyDict>) -> PyResult<String> {
+    let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
+    core_validate_finalizer_plan(&plan).map_err(finalizer_error_to_pyerr)
+}
+
+/// Validate a plan and bind it to an independently held expected digest.
+#[pyfunction]
+#[pyo3(name = "authenticate_finalizer_plan")]
+fn py_authenticate_finalizer_plan(
+    plan: &Bound<'_, PyDict>,
+    expected_digest: &str,
+) -> PyResult<String> {
+    let plan: FinalizerPlanWire = finalizer_wire_from_pydict(plan, "plan")?;
+    core_authenticate_finalizer_plan(&plan, expected_digest)
+        .map_err(finalizer_error_to_pyerr)
 }
 
 /// Compute the canonical digest for a context, excluding context_digest.
@@ -10058,6 +10082,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_finalizer_instance_spec_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_finalizer_plan, m)?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_plan_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_authenticate_finalizer_plan, m)?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_context_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_submission, m)?)?;
@@ -13853,6 +13879,8 @@ MENTORS:
                 "finalizer_instance_spec_digest",
                 "resolve_finalizer_plan",
                 "finalizer_plan_digest",
+                "validate_finalizer_plan",
+                "authenticate_finalizer_plan",
                 "finalizer_context_digest",
                 "validate_finalizer_context",
                 "validate_finalizer_submission",
@@ -13909,6 +13937,12 @@ MENTORS:
             assert_eq!(
                 py_finalizer_plan_digest(plan).unwrap(),
                 plan_json["plan_digest"].as_str().unwrap()
+            );
+            let plan_digest = plan_json["plan_digest"].as_str().unwrap();
+            assert_eq!(py_validate_finalizer_plan(plan).unwrap(), plan_digest);
+            assert_eq!(
+                py_authenticate_finalizer_plan(plan, plan_digest).unwrap(),
+                plan_digest
             );
 
             let mut context_value = json!({

@@ -250,6 +250,133 @@ pub fn finalizer_plan_digest(
     finalizer_digest_serializable(&normalized)
 }
 
+pub fn validate_finalizer_plan(
+    plan: &FinalizerPlanWire,
+) -> Result<String, FinalizerError> {
+    validate_schema(plan.schema_version, "plan")?;
+    validate_list_len(plan.entries.len(), "entries")?;
+    validate_list_len(plan.required.len(), "required")?;
+    validate_list_len(plan.selectors.len(), "selectors")?;
+    validate_digest(&plan.plan_digest, "plan_digest")?;
+
+    let mut seen_ids: BTreeSet<String> = BTreeSet::new();
+    let mut seen_selector_index = BTreeSet::new();
+    for (idx, entry) in plan.entries.iter().enumerate() {
+        validate_instance_id(&entry.instance_id)?;
+        validate_provider_ref(&entry.provider_ref)?;
+        validate_list_len(entry.after.len(), "after")?;
+        let mut seen_after = BTreeSet::new();
+        for dependency in &entry.after {
+            validate_instance_id(dependency)?;
+            if !seen_after.insert(dependency.as_str()) {
+                return Err(FinalizerError::validation(format!(
+                    "plan entry '{}' repeats dependency '{}'",
+                    entry.instance_id, dependency
+                )));
+            }
+            if dependency == &entry.instance_id {
+                return Err(FinalizerError::validation(format!(
+                    "plan entry '{}' cannot depend on itself",
+                    entry.instance_id
+                )));
+            }
+        }
+        if entry.policy.max_attempts == 0 || entry.policy.max_attempts > 16 {
+            return Err(FinalizerError::validation(format!(
+                "plan entry '{}' max_attempts must be between 1 and 16",
+                entry.instance_id
+            )));
+        }
+        validate_optional_digest(
+            entry.config_digest.as_deref(),
+            "config_digest",
+        )?;
+        validate_optional_bounded_text(
+            entry.provenance_id.as_deref(),
+            "provenance_id",
+            FINALIZER_PROVENANCE_MAX_LEN,
+        )?;
+        if !seen_ids.insert(entry.instance_id.clone()) {
+            return Err(FinalizerError::validation(format!(
+                "duplicate plan entry '{}'",
+                entry.instance_id
+            )));
+        }
+        if entry.resolved_index as usize != idx {
+            return Err(FinalizerError::validation(format!(
+                "plan entry '{}' resolved_index {} does not match order {idx}",
+                entry.instance_id, entry.resolved_index
+            )));
+        }
+        if (entry.selector_index as usize) >= plan.entries.len()
+            || !seen_selector_index.insert(entry.selector_index)
+        {
+            return Err(FinalizerError::validation(format!(
+                "plan entry '{}' has invalid selector_index {}",
+                entry.instance_id, entry.selector_index
+            )));
+        }
+    }
+
+    for entry in &plan.entries {
+        for dependency in &entry.after {
+            if !seen_ids.contains(dependency) {
+                return Err(FinalizerError::validation(format!(
+                    "plan entry '{}' depends on unselected instance '{}'",
+                    entry.instance_id, dependency
+                )));
+            }
+        }
+    }
+
+    let mut required_set = BTreeSet::new();
+    for instance_id in &plan.required {
+        validate_instance_id(instance_id)?;
+        if !seen_ids.contains(instance_id) {
+            return Err(FinalizerError::validation(format!(
+                "required instance '{instance_id}' is not selected"
+            )));
+        }
+        if !required_set.insert(instance_id.as_str()) {
+            return Err(FinalizerError::validation(format!(
+                "required repeats instance '{instance_id}'"
+            )));
+        }
+    }
+
+    for selector in &plan.selectors {
+        match selector {
+            FinalizerSelectorOpWire::Add { instance_id }
+            | FinalizerSelectorOpWire::Remove { instance_id } => {
+                validate_instance_id(instance_id)?;
+            }
+            FinalizerSelectorOpWire::Clear => {}
+        }
+    }
+
+    let actual = finalizer_plan_digest(plan)?;
+    if actual != plan.plan_digest {
+        return Err(FinalizerError::validation(
+            "plan_digest does not match the resolved plan",
+        ));
+    }
+    Ok(actual)
+}
+
+pub fn authenticate_finalizer_plan(
+    plan: &FinalizerPlanWire,
+    expected_digest: &str,
+) -> Result<String, FinalizerError> {
+    let actual = validate_finalizer_plan(plan)?;
+    validate_digest(expected_digest, "expected plan digest")?;
+    if expected_digest != actual {
+        return Err(FinalizerError::validation(
+            "expected plan digest does not match the authenticated plan",
+        ));
+    }
+    Ok(actual)
+}
+
 pub(crate) fn validate_schema(
     actual: u64,
     what: &str,
@@ -618,5 +745,73 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("maximum"));
+    }
+
+    #[test]
+    fn validate_finalizer_plan_accepts_resolved_plans() {
+        let plan = resolve_finalizer_plan(&input(Vec::new())).unwrap();
+        assert_eq!(validate_finalizer_plan(&plan).unwrap(), plan.plan_digest);
+        assert_eq!(
+            authenticate_finalizer_plan(&plan, &plan.plan_digest).unwrap(),
+            plan.plan_digest
+        );
+    }
+
+    #[test]
+    fn validate_finalizer_plan_rejects_forged_or_omitted_digest() {
+        let mut plan = resolve_finalizer_plan(&input(Vec::new())).unwrap();
+        plan.plan_digest = "0".repeat(64);
+        assert!(validate_finalizer_plan(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("plan_digest does not match"));
+
+        plan.plan_digest.clear();
+        assert!(validate_finalizer_plan(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("plan_digest"));
+    }
+
+    #[test]
+    fn authenticate_finalizer_plan_rejects_independent_expected_digest() {
+        let plan = resolve_finalizer_plan(&input(Vec::new())).unwrap();
+        let other = "ab".repeat(32);
+        assert!(authenticate_finalizer_plan(&plan, &other)
+            .unwrap_err()
+            .to_string()
+            .contains("expected plan digest"));
+    }
+
+    #[test]
+    fn validate_finalizer_plan_rejects_mutated_entries_without_new_digest() {
+        let mut forged = resolve_finalizer_plan(&input(Vec::new())).unwrap();
+        forged.entries[0].provider_ref = "builtin@command".to_string();
+        assert!(validate_finalizer_plan(&forged)
+            .unwrap_err()
+            .to_string()
+            .contains("plan_digest does not match"));
+
+        let mut missing_required = resolve_finalizer_plan(&{
+            let mut request = input(Vec::new());
+            request.required = vec!["commit".to_string()];
+            request
+        })
+        .unwrap();
+        missing_required.required.clear();
+        assert!(validate_finalizer_plan(&missing_required)
+            .unwrap_err()
+            .to_string()
+            .contains("plan_digest does not match"));
+    }
+
+    #[test]
+    fn validate_finalizer_plan_rejects_duplicate_or_shifted_indices() {
+        let mut plan = resolve_finalizer_plan(&input(Vec::new())).unwrap();
+        plan.entries[0].resolved_index = 3;
+        assert!(validate_finalizer_plan(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("resolved_index"));
     }
 }
