@@ -403,6 +403,10 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
 
 const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &["final"];
 
+pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
+    HIDDEN_COMPLETION_DIRECTIVES.contains(&name)
+}
+
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
     if raw == "(" || raw == "{" {
         return Some("alt");

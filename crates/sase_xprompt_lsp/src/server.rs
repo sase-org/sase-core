@@ -43,10 +43,11 @@ use sase_core::{
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
-    editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, filter_model_completion_candidates,
-    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
-    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    editor_directive_is_hidden_from_name_completion, editor_directive_metadata,
+    editor_extract_token_at_position, editor_hover_at_position,
+    filter_model_completion_candidates, ArtifactRefContextWire,
+    AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
+    AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories,
@@ -66,10 +67,11 @@ use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     agent_completion_response, apply_replacement,
     at_reference_completion_response, completion_response,
-    diagnostic as lsp_diagnostic, hover as lsp_hover,
-    model_completion_response, placeholder_completion_response,
-    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
-    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
+    diagnostic as lsp_diagnostic, finalizer_completion_response,
+    hover as lsp_hover, model_completion_response,
+    placeholder_completion_response, sase_snippet_completion_item,
+    snippet_completion_item, to_editor_position, to_lsp_range,
+    vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
 use crate::semantic_tokens::{document_semantic_tokens, legend};
@@ -632,6 +634,9 @@ impl XpromptLspServer {
             );
         }
 
+        if is_finalizer_value_context(context) {
+            return self.finalizer_directive_completion(context, config).await;
+        }
         let inventories =
             self.directive_inventories(context, config, document).await;
         if is_rich_model_value_context(context) {
@@ -644,6 +649,39 @@ impl XpromptLspServer {
         let list =
             editor_build_directive_clause_candidates(context, &inventories);
         agent_completion_response(list, context.replacement_range)
+    }
+
+    async fn finalizer_directive_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        config: &ServerConfig,
+    ) -> CompletionResponse {
+        let mut inventories = DirectiveCompletionInventories::default();
+        match self
+            .catalog_cache
+            .finalizer_catalog_for_completion(config.project.clone())
+            .await
+        {
+            Ok(response) if response.status == "ok" => {
+                inventories.finalizers = response.entries.clone();
+            }
+            Ok(response) => {
+                if !response.message.is_empty() {
+                    warn!(
+                        "finalizer catalog returned no entries: {}",
+                        response.message
+                    );
+                }
+                return empty_completion_response();
+            }
+            Err(error) => {
+                self.warn_once(&error).await;
+                return empty_completion_response();
+            }
+        }
+        let list =
+            editor_build_directive_clause_candidates(context, &inventories);
+        finalizer_completion_response(list, context.replacement_range)
     }
 
     async fn directive_inventories(
@@ -1312,6 +1350,7 @@ impl XpromptLspServer {
         self.invalidate_artifact_ref_cache();
         self.invalidate_glossary_cache();
         self.catalog_cache.invalidate_agent_catalogs();
+        self.catalog_cache.invalidate_finalizer_catalogs();
         let config = self.current_config();
         let xprompt_result = self
             .catalog_cache
@@ -1745,6 +1784,15 @@ fn needs_host_catalog(context: &sase_core::CompletionContext) -> bool {
     needs_agent_entries(context) || needs_bead_entries(context)
 }
 
+fn is_finalizer_value_context(context: &sase_core::CompletionContext) -> bool {
+    context.directive_name.as_deref() == Some("final")
+        && matches!(
+            context.kind,
+            CompletionContextKind::DirectiveArgument
+                | CompletionContextKind::DirectiveArgumentValue
+        )
+}
+
 fn needs_agent_entries(context: &sase_core::CompletionContext) -> bool {
     if context.directive_name.as_deref() == Some("wait")
         && context.kind == CompletionContextKind::DirectiveArgument
@@ -1884,6 +1932,60 @@ fn replacement_ends_line(
         .unwrap_or(false)
 }
 
+fn directive_snippet_specs(
+    directive: &sase_core::DirectiveMetadata,
+) -> Vec<(String, String)> {
+    let colon = if directive.name == "alt" {
+        ("%alt:...".to_string(), "%{${1:A} | ${2:B}\\}$0".to_string())
+    } else {
+        let placeholder = match directive.name {
+            "clan" => "name",
+            "id" => "agent-id",
+            "final" => "instance",
+            _ => "value",
+        };
+        (
+            format!("%{}:...", directive.name),
+            format!("%{}:${{1:{placeholder}}}$0", directive.name),
+        )
+    };
+    let mut specs = vec![colon];
+    match directive.name {
+        "clan" => specs.push((
+            "%clan(..., tribe=...)".to_string(),
+            "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
+        )),
+        "wait" => specs.push((
+            "%wait(..., bead=...)".to_string(),
+            "%wait(${1:agent}, bead=${2:bead-id})$0".to_string(),
+        )),
+        "model" => specs.push((
+            "%model(..., alias=...)".to_string(),
+            "%model(${1:model}, ${2:alias}=${3:model})$0".to_string(),
+        )),
+        "id" => {
+            specs.push((
+                "%id(..., clan=...)".to_string(),
+                "%id(${1:id}, clan=${2:clan})$0".to_string(),
+            ));
+            specs.push((
+                "%id(..., family=...)".to_string(),
+                "%id(${1:suffix}, family=${2:family})$0".to_string(),
+            ));
+            specs.push((
+                "%id(tribe=...)".to_string(),
+                "%id(tribe=${1:tribe})$0".to_string(),
+            ));
+        }
+        "final" => specs.push((
+            "%final(...)".to_string(),
+            "%final(${1:instance}, ${2:instance})$0".to_string(),
+        )),
+        _ => {}
+    }
+    specs
+}
+
 fn directive_snippet_items(
     token: Option<&str>,
     replacement_range: sase_core::EditorRange,
@@ -1896,6 +1998,9 @@ fn directive_snippet_items(
         .iter()
         .filter(|directive| directive.takes_argument)
         .filter(|directive| {
+            !editor_directive_is_hidden_from_name_completion(directive.name)
+        })
+        .filter(|directive| {
             directive.name.starts_with(partial)
                 || directive
                     .alias
@@ -1907,72 +2012,16 @@ fn directive_snippet_items(
                     .map(|metadata| metadata.description.to_string())
                     .unwrap_or_else(|| directive.description.to_string()),
             );
-            let syntax = if directive.name == "alt" {
-                // The advertised alt spelling is the `%{A | B}` brace shorthand.
-                "%{${1:A} | ${2:B}\\}$0".to_string()
-            } else {
-                let placeholder = match directive.name {
-                    "clan" => "name",
-                    "id" => "agent-id",
-                    _ => "value",
-                };
-                format!("%{}:${{1:{placeholder}}}$0", directive.name)
-            };
-            let mut items = vec![snippet_completion_item(
-                format!("%{}:...", directive.name),
-                syntax,
-                Some("directive snippet".to_string()),
-                documentation.clone(),
-                replacement_range,
-            )];
-            if directive.name == "clan" {
-                items.push(snippet_completion_item(
-                    "%clan(..., tribe=...)".to_string(),
-                    "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
-                    Some("directive snippet".to_string()),
-                    documentation,
-                    replacement_range,
-                ));
-            } else if directive.name == "wait" {
-                items.push(snippet_completion_item(
-                    "%wait(..., bead=...)".to_string(),
-                    "%wait(${1:agent}, bead=${2:bead-id})$0".to_string(),
-                    Some("directive snippet".to_string()),
-                    documentation,
-                    replacement_range,
-                ));
-            } else if directive.name == "model" {
-                items.push(snippet_completion_item(
-                    "%model(..., alias=...)".to_string(),
-                    "%model(${1:model}, ${2:alias}=${3:model})$0".to_string(),
-                    Some("directive snippet".to_string()),
-                    documentation,
-                    replacement_range,
-                ));
-            } else if directive.name == "id" {
-                items.push(snippet_completion_item(
-                    "%id(..., clan=...)".to_string(),
-                    "%id(${1:id}, clan=${2:clan})$0".to_string(),
+            let specs = directive_snippet_specs(directive);
+            specs.into_iter().map(move |(label, syntax)| {
+                snippet_completion_item(
+                    label,
+                    syntax,
                     Some("directive snippet".to_string()),
                     documentation.clone(),
                     replacement_range,
-                ));
-                items.push(snippet_completion_item(
-                    "%id(..., family=...)".to_string(),
-                    "%id(${1:suffix}, family=${2:family})$0".to_string(),
-                    Some("directive snippet".to_string()),
-                    documentation.clone(),
-                    replacement_range,
-                ));
-                items.push(snippet_completion_item(
-                    "%id(tribe=...)".to_string(),
-                    "%id(tribe=${1:tribe})$0".to_string(),
-                    Some("directive snippet".to_string()),
-                    documentation,
-                    replacement_range,
-                ));
-            }
-            items
+                )
+            })
         })
         .collect()
 }
@@ -2982,7 +3031,8 @@ mod tests {
         EditorPosition as CorePosition, EditorRange as CoreRange,
         EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
         EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
-        HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
+        FinalizerCatalogRequest, FinalizerCatalogResponse, HelperHostBridge,
+        HostBridgeError, MobileHelperProjectContextWire,
         MobileHelperProjectScopeWire, MobileHelperResultWire,
         MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
         MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
@@ -3021,6 +3071,14 @@ mod tests {
         {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.agent_catalog(request)
+        }
+
+        fn finalizer_catalog(
+            &self,
+            request: &FinalizerCatalogRequest,
+        ) -> std::result::Result<FinalizerCatalogResponse, HostBridgeError>
+        {
+            self.inner.finalizer_catalog(request)
         }
 
         fn xprompt_catalog(
@@ -3070,6 +3128,15 @@ mod tests {
         let snippet_total_count = snippets.len() as u64;
         StaticHelperHostBridge {
             agent_catalog_response: serde_json::from_value(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "status": "ok",
+                    "message": "",
+                    "entries": []
+                }),
+            )
+            .unwrap(),
+            finalizer_catalog_response: serde_json::from_value(
                 serde_json::json!({
                     "schema_version": 1,
                     "status": "ok",
@@ -3876,6 +3943,169 @@ mod tests {
         assert_eq!(edit.new_text, "sase-a");
     }
 
+    fn finalizer_catalog_json() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "ok",
+            "message": "",
+            "entries": [
+                {
+                    "value": "commit",
+                    "provider_ref": "builtin@commit",
+                    "required": true,
+                    "default": true,
+                    "documentation": "Commit attributable repository changes"
+                },
+                {
+                    "value": "lint",
+                    "provider_ref": "builtin@command",
+                    "default": true,
+                    "after": ["format"],
+                    "max_attempts": 2,
+                    "documentation": "Lint the tree"
+                },
+                {
+                    "value": "zoom",
+                    "provider_ref": "plugin@zoom",
+                    "documentation": "Optional zoom"
+                }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn final_completion_uses_catalog_and_dedicated_lsp_path() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.finalizer_catalog_response =
+            serde_json::from_value(finalizer_catalog_json()).unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+
+        let response = server
+            .completion_for_text("%final:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["commit", "lint", "zoom"]
+        );
+        assert_eq!(items[0].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[1].kind, Some(CompletionItemKind::VALUE));
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · required")
+        );
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("builtin@commit")
+        );
+        let Some(Documentation::MarkupContent(doc)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(doc.kind, MarkupKind::Markdown);
+        assert!(doc.value.contains("Commit attributable repository changes"));
+        assert!(doc.value.contains("Provider: `builtin@commit`"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected finalizer text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 7));
+        assert_eq!(edit.new_text, "commit");
+
+        let response = server
+            .completion_for_text("%final:!".to_string(), Position::new(0, 8))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["!lint", "!zoom"]
+        );
+        assert_eq!(items[0].kind, Some(CompletionItemKind::OPERATOR));
+        assert!(!items.iter().any(|item| item.label == "none"));
+
+        let text = "%final(commit, !l";
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(0, text.len() as u32),
+            )
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items[0].label, "!lint");
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected clause-local text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 15));
+        assert_eq!(edit.new_text, "!lint");
+    }
+
+    #[tokio::test]
+    async fn final_completion_returns_empty_on_helper_failure() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(UnavailableHelperHostBridge),
+            )
+        });
+        let server = service.inner();
+        let response = server
+            .completion_for_text("%final:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        let CompletionResponse::Array(items) = response else {
+            panic!("expected completion array");
+        };
+        assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[tokio::test]
+    async fn final_completion_does_not_fetch_agent_catalog() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut inner = bridge_with_catalog_entries(Vec::new());
+        inner.finalizer_catalog_response =
+            serde_json::from_value(finalizer_catalog_json()).unwrap();
+        let bridge = CountingAgentBridge {
+            calls: calls.clone(),
+            inner,
+        };
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+        let _ = server
+            .completion_for_text("%final:".to_string(), Position::new(0, 7))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn wait_keywords_survive_helper_failure_and_mixed_version_payloads() {
         let (service, _) = LspService::new(|client| {
@@ -4443,6 +4673,23 @@ mod tests {
             "removed %t directive completed: {items:?}"
         );
 
+        for token in ["%f", "%final"] {
+            let response = server
+                .completion_for_text(
+                    token.to_string(),
+                    Position::new(0, token.len() as u32),
+                )
+                .await
+                .unwrap();
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+            assert!(
+                items.iter().all(|item| !item.label.contains("final")),
+                "hidden %final advertised by name completion: {items:?}"
+            );
+        }
+
         for token in ["%id", "%i"] {
             let response = server
                 .completion_for_text(
@@ -4534,6 +4781,28 @@ mod tests {
             panic!("expected text edit for alt snippet");
         };
         assert_eq!(edit.new_text.as_str(), "%{${1:A} | ${2:B}\\}$0");
+
+        let final_meta = sase_core::EDITOR_DIRECTIVES
+            .iter()
+            .find(|directive| directive.name == "final")
+            .expect("final directive metadata");
+        assert_eq!(
+            directive_snippet_specs(final_meta),
+            vec![
+                (
+                    "%final:...".to_string(),
+                    "%final:${1:instance}$0".to_string()
+                ),
+                (
+                    "%final(...)".to_string(),
+                    "%final(${1:instance}, ${2:instance})$0".to_string()
+                ),
+            ]
+        );
+        assert!(directive_snippet_items(Some("%final"), range).is_empty());
+        assert!(directive_snippet_items(Some("%f"), range)
+            .iter()
+            .all(|item| !item.label.contains("final")));
 
         // No directive snippet should still emit the legacy `%(...)` spelling.
         for item in &items {

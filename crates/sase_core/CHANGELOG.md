@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(editor)* add a versioned finalizer-catalog helper contract and selector-aware `%final` candidates
+- *(lsp)* cache finalizer catalogs independently and convert values through a dedicated LSP path
+
 ## [0.29.7](https://github.com/sase-org/sase-core/compare/v0.29.6...v0.29.7) - 2026-08-21
 
 ### Fixed

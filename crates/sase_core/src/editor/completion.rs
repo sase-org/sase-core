@@ -41,10 +41,11 @@ use super::wire::{
     AgentCompletionEntry, ArtifactRefCompletionMode,
     ArtifactRefCompletionTrigger, CompletionCandidate, CompletionContext,
     CompletionContextKind, CompletionList, DirectiveClauseKind,
-    DirectiveCompletionInventories, DirectiveModelEntry, DirectiveSyntaxForm,
-    DirectiveValueRole, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoEntry,
-    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    DirectiveCompletionInventories, DirectiveFinalizerEntry,
+    DirectiveModelEntry, DirectiveSyntaxForm, DirectiveValueRole,
+    EditorPosition, EditorRange, EditorTextEdit, TokenInfo, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRefTrigger, VcsRepoEntry, VcsRepoTrigger,
+    XpromptAssistEntry, XpromptInputHint,
 };
 
 const ARTIFACT_REF_MAX_DEPTH: usize = 8;
@@ -1674,6 +1675,10 @@ fn build_directive_value_candidates(
     }
 }
 
+const FINALIZER_KIND_ADD: &str = "finalizer";
+const FINALIZER_KIND_REMOVE: &str = "finalizer_remove";
+const FINALIZER_KIND_CLEAR: &str = "finalizer_clear";
+
 fn finalizer_value_candidates(
     token: &str,
     inventories: &DirectiveCompletionInventories,
@@ -1681,17 +1686,23 @@ fn finalizer_value_candidates(
 ) -> CompletionList {
     let removing = token.starts_with('!');
     let query = token.strip_prefix('!').unwrap_or(token).to_lowercase();
+    let has_required =
+        inventories.finalizers.iter().any(|entry| entry.required);
+    let mut entries: Vec<&DirectiveFinalizerEntry> =
+        inventories.finalizers.iter().collect();
+    entries.sort_by(|left, right| {
+        finalizer_policy_rank(left)
+            .cmp(&finalizer_policy_rank(right))
+            .then_with(|| {
+                left.value.to_lowercase().cmp(&right.value.to_lowercase())
+            })
+    });
+
     let mut candidates = Vec::new();
-    if !removing && "none".starts_with(&query) {
-        candidates.push(finalizer_candidate(
-            "none",
-            "none",
-            "clear selection",
-            "Clear the configured finalizer selection for this launch",
-            replacement,
-        ));
-    }
-    for entry in &inventories.finalizers {
+    for entry in entries {
+        if removing && entry.required {
+            continue;
+        }
         if !entry.value.to_lowercase().starts_with(&query) {
             continue;
         }
@@ -1700,11 +1711,27 @@ fn finalizer_value_candidates(
         } else {
             entry.value.clone()
         };
+        let kind = if removing {
+            FINALIZER_KIND_REMOVE
+        } else {
+            FINALIZER_KIND_ADD
+        };
         candidates.push(finalizer_candidate(
-            &entry.display,
             &insertion,
-            &entry.detail,
-            &entry.documentation,
+            kind,
+            finalizer_policy_state(entry),
+            finalizer_provider(entry),
+            &finalizer_markdown_documentation(entry, removing),
+            replacement,
+        ));
+    }
+    if !removing && !has_required && "none".starts_with(&query) {
+        candidates.push(finalizer_candidate(
+            "none",
+            FINALIZER_KIND_CLEAR,
+            "clear",
+            "",
+            "Clear the configured finalizer selection for this launch",
             replacement,
         ));
     }
@@ -1714,20 +1741,71 @@ fn finalizer_value_candidates(
     }
 }
 
+fn finalizer_policy_rank(entry: &DirectiveFinalizerEntry) -> u8 {
+    if entry.required {
+        0
+    } else if entry.is_default {
+        1
+    } else {
+        2
+    }
+}
+
+fn finalizer_policy_state(entry: &DirectiveFinalizerEntry) -> &'static str {
+    if entry.required {
+        "required"
+    } else if entry.is_default {
+        "default"
+    } else {
+        "optional"
+    }
+}
+
+fn finalizer_provider(entry: &DirectiveFinalizerEntry) -> &str {
+    if !entry.provider_ref.is_empty() {
+        &entry.provider_ref
+    } else {
+        &entry.detail
+    }
+}
+
+fn finalizer_markdown_documentation(
+    entry: &DirectiveFinalizerEntry,
+    removing: bool,
+) -> String {
+    let mut sections = Vec::new();
+    if removing {
+        sections.push(format!(
+            "Remove `{}` from the launch selection.",
+            entry.value
+        ));
+    } else if !entry.documentation.is_empty() {
+        sections.push(entry.documentation.clone());
+    }
+    let provider = finalizer_provider(entry);
+    if !provider.is_empty() {
+        sections.push(format!("Provider: `{provider}`"));
+    }
+    if !entry.after.is_empty() {
+        sections.push(format!("Depends on: `{}`", entry.after.join("`, `")));
+    }
+    if let Some(attempts) = entry.max_attempts {
+        let noun = if attempts == 1 { "attempt" } else { "attempts" };
+        sections.push(format!("Retry policy: {attempts} {noun}"));
+    }
+    sections.join("\n\n")
+}
+
 fn finalizer_candidate(
-    display: &str,
     insertion: &str,
+    kind: &str,
+    status: &str,
     detail: &str,
     documentation: &str,
     replacement: Option<EditorRange>,
 ) -> CompletionCandidate {
-    let display = if display.is_empty() {
-        insertion.to_string()
-    } else {
-        display.to_string()
-    };
     CompletionCandidate {
-        display,
+        display: insertion.to_string(),
         insertion: insertion.to_string(),
         detail: Some(detail.to_string()).filter(|value| !value.is_empty()),
         documentation: Some(documentation.to_string())
@@ -1739,9 +1817,9 @@ fn finalizer_candidate(
             new_text: insertion.to_string(),
         }),
         additional_edits: Vec::new(),
-        kind: "finalizer".to_string(),
+        kind: kind.to_string(),
         project: String::new(),
-        status: String::new(),
+        status: status.to_string(),
     }
 }
 
@@ -4764,6 +4842,54 @@ mod tests {
         }
     }
 
+    fn sample_finalizer_inventories() -> DirectiveCompletionInventories {
+        DirectiveCompletionInventories {
+            finalizers: vec![
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "zoom".to_string(),
+                    provider_ref: "builtin@command".to_string(),
+                    documentation: "Optional zoom check".to_string(),
+                    ..Default::default()
+                },
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "lint".to_string(),
+                    provider_ref: "builtin@command".to_string(),
+                    is_default: true,
+                    after: vec!["format".to_string()],
+                    max_attempts: Some(2),
+                    documentation: "Lint the tree".to_string(),
+                    ..Default::default()
+                },
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "commit".to_string(),
+                    provider_ref: "builtin@commit".to_string(),
+                    required: true,
+                    is_default: true,
+                    documentation: "Commit attributable repository changes"
+                        .to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn finalizer_insertions(
+        text: &str,
+        cursor: u32,
+        inventories: &DirectiveCompletionInventories,
+    ) -> Vec<String> {
+        let document = DocumentSnapshot::new(text);
+        let context =
+            classify_completion_context(&document, pos(cursor), &entries())
+                .unwrap();
+        build_directive_clause_candidates(&context, inventories)
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.insertion)
+            .collect()
+    }
+
     #[test]
     fn final_directive_completes_add_and_remove_instance_selectors() {
         let inventories = DirectiveCompletionInventories {
@@ -4774,12 +4900,14 @@ mod tests {
                     detail: "builtin@commit".to_string(),
                     documentation: "Commit attributable repository changes"
                         .to_string(),
+                    ..Default::default()
                 },
                 crate::editor::DirectiveFinalizerEntry {
                     value: "lint".to_string(),
                     display: "lint".to_string(),
                     detail: "builtin@command".to_string(),
                     documentation: String::new(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -4788,21 +4916,147 @@ mod tests {
             ("%final:c", 8, vec!["commit"]),
             ("%final:!c", 9, vec!["!commit"]),
             ("%final:none %final:l", 20, vec!["lint"]),
+            ("%final:LINT", 11, vec!["lint"]),
         ] {
-            let document = DocumentSnapshot::new(text);
+            assert_eq!(
+                finalizer_insertions(text, cursor, &inventories),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn final_directive_orders_required_default_optional_then_clear() {
+        let inventories = sample_finalizer_inventories();
+        let optional_only = DirectiveCompletionInventories {
+            finalizers: vec![
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "zoom".to_string(),
+                    ..Default::default()
+                },
+                crate::editor::DirectiveFinalizerEntry {
+                    value: "lint".to_string(),
+                    is_default: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            finalizer_insertions("%final:", 7, &inventories),
+            vec!["commit", "lint", "zoom"]
+        );
+        assert_eq!(
+            finalizer_insertions("%final:", 7, &optional_only),
+            vec!["lint", "zoom", "none"]
+        );
+        assert_eq!(
+            finalizer_insertions("%final:n", 8, &optional_only),
+            vec!["none"]
+        );
+    }
+
+    #[test]
+    fn final_directive_omits_required_from_remove_and_clear_when_invalid() {
+        let inventories = sample_finalizer_inventories();
+        assert_eq!(
+            finalizer_insertions("%final:!", 8, &inventories),
+            vec!["!lint", "!zoom"]
+        );
+        assert_eq!(
+            finalizer_insertions("%final:none", 11, &inventories),
+            Vec::<String>::new()
+        );
+        let labels = {
+            let document = DocumentSnapshot::new("%final:!");
             let context =
-                classify_completion_context(&document, pos(cursor), &entries())
+                classify_completion_context(&document, pos(8), &entries())
                     .unwrap();
-            assert_eq!(context.directive_name.as_deref(), Some("final"));
-            let list =
-                build_directive_clause_candidates(&context, &inventories);
-            let insertions = list
+            build_directive_clause_candidates(&context, &inventories)
                 .candidates
+                .into_iter()
+                .map(|candidate| {
+                    (candidate.display, candidate.kind, candidate.status)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels,
+            vec![
+                (
+                    "!lint".to_string(),
+                    "finalizer_remove".to_string(),
+                    "default".to_string()
+                ),
+                (
+                    "!zoom".to_string(),
+                    "finalizer_remove".to_string(),
+                    "optional".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn final_directive_replaces_only_the_active_parenthesized_clause() {
+        let inventories = sample_finalizer_inventories();
+        let text = "%final(commit, !l";
+        let document = DocumentSnapshot::new(text);
+        let context = classify_completion_context(
+            &document,
+            pos(text.len() as u32),
+            &entries(),
+        )
+        .unwrap();
+        assert_eq!(context.token.as_ref().unwrap().text, "!l");
+        let list = build_directive_clause_candidates(&context, &inventories);
+        assert_eq!(
+            list.candidates
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(insertions, expected, "{text}");
-        }
+                .collect::<Vec<_>>(),
+            vec!["!lint"]
+        );
+        let replacement = list.candidates[0].replacement.as_ref().unwrap();
+        assert_eq!(replacement.range.start.character, 15);
+        assert_eq!(replacement.range.end.character, text.len() as u32);
+        assert_eq!(replacement.new_text, "!lint");
+
+        let unicode = "%final(café, c";
+        let document = DocumentSnapshot::new(unicode);
+        let cursor = document
+            .byte_offset_to_position(unicode.len())
+            .expect("utf-16 cursor");
+        let context =
+            classify_completion_context(&document, cursor, &entries()).unwrap();
+        assert_eq!(context.token.as_ref().unwrap().text, "c");
+        assert_eq!(
+            context.replacement_range.start.character,
+            "%final(café, ".chars().map(char::len_utf16).sum::<usize>() as u32
+        );
+        let list = build_directive_clause_candidates(&context, &inventories);
+        assert_eq!(
+            list.candidates[0].replacement.as_ref().unwrap().new_text,
+            "commit"
+        );
+    }
+
+    #[test]
+    fn final_directive_documents_provider_dependencies_and_retry_policy() {
+        let inventories = sample_finalizer_inventories();
+        let document = DocumentSnapshot::new("%final:l");
+        let context =
+            classify_completion_context(&document, pos(8), &entries()).unwrap();
+        let list = build_directive_clause_candidates(&context, &inventories);
+        let lint = &list.candidates[0];
+        assert_eq!(lint.status, "default");
+        assert_eq!(lint.detail.as_deref(), Some("builtin@command"));
+        let documentation = lint.documentation.as_deref().unwrap();
+        assert!(documentation.contains("Lint the tree"));
+        assert!(documentation.contains("Provider: `builtin@command`"));
+        assert!(documentation.contains("Depends on: `format`"));
+        assert!(documentation.contains("Retry policy: 2 attempts"));
     }
 
     #[test]

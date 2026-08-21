@@ -601,15 +601,71 @@ pub struct DirectiveModelAliasKey {
 }
 
 /// One configured finalizer instance supplied by the host for `%final`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Additive and mixed-version safe: older helpers may omit policy, provider,
+/// dependency, and retry fields, and older consumers ignore unknown extras.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectiveFinalizerEntry {
+    /// Instance ID used as the selector token.
     pub value: String,
     #[serde(default)]
     pub display: String,
+    /// Legacy provider display string. Prefer [`Self::provider_ref`].
     #[serde(default)]
     pub detail: String,
     #[serde(default)]
     pub documentation: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub provider_ref: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    #[serde(
+        default,
+        rename = "default",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_default: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_id: Option<String>,
+}
+
+pub const FINALIZER_CATALOG_SCHEMA_VERSION: u32 = 1;
+
+/// Fresh finalizer catalog request sent to the Python editor helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizerCatalogRequest {
+    pub schema_version: u32,
+    /// Optional project hint so the helper can prefer that store. Older
+    /// helpers ignore unknown fields; newer helpers still return rows when
+    /// this is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+/// Fresh finalizer catalog returned by the Python editor helper bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizerCatalogResponse {
+    pub schema_version: u32,
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub entries: Vec<DirectiveFinalizerEntry>,
+}
+
+impl FinalizerCatalogResponse {
+    pub fn ok_empty() -> Self {
+        Self {
+            schema_version: FINALIZER_CATALOG_SCHEMA_VERSION,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: Vec::new(),
+        }
+    }
 }
 
 /// Host-supplied dynamic inventories for directive value completion.

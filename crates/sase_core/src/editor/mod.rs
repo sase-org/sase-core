@@ -48,7 +48,8 @@ pub use directive::{
     build_directive_keyword_candidates,
     build_directive_static_value_candidates, canonical_directive_name,
     detect_directive_context_at_position, directive_allows_keywords,
-    directive_argument_candidates, directive_contract, directive_metadata,
+    directive_argument_candidates, directive_contract,
+    directive_is_hidden_from_name_completion, directive_metadata,
     rank_and_filter_bead_entries, BEAD_COMPLETION_LIMIT, DIRECTIVES,
 };
 pub use file::{
@@ -89,12 +90,13 @@ pub use wire::{
     DirectiveMetadata, DirectiveModelAliasKey, DirectiveModelEntry,
     DirectiveSuggestedValue, DirectiveSuggestedValueWire, DirectiveSyntaxForm,
     DirectiveValueRole, EditorDiagnostic, EditorPosition, EditorRange,
-    EditorTextEdit, FrontmatterFieldKind, FrontmatterFieldSchema,
-    FrontmatterInputType, HoverPayload, TokenInfo, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
-    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
-    VCS_REPO_CATALOG_SCHEMA_VERSION,
+    EditorTextEdit, FinalizerCatalogRequest, FinalizerCatalogResponse,
+    FrontmatterFieldKind, FrontmatterFieldSchema, FrontmatterInputType,
+    HoverPayload, TokenInfo, VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
+    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
+    FINALIZER_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
     find_matching_bracket_for_args, parse_xprompt_reference_body,

@@ -19,6 +19,7 @@ use crate::{
     content_layout::MemoryTierWire,
     editor::wire::{
         AgentCatalogRequest, AgentCatalogResponse, EditorRange,
+        FinalizerCatalogRequest, FinalizerCatalogResponse,
         VcsRepoCatalogRequest, VcsRepoCatalogResponse,
     },
 };
@@ -57,6 +58,13 @@ impl DynHelperHostBridge {
         request: &AgentCatalogRequest,
     ) -> Result<AgentCatalogResponse, HostBridgeError> {
         self.0.agent_catalog(request)
+    }
+
+    pub fn finalizer_catalog(
+        &self,
+        request: &FinalizerCatalogRequest,
+    ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+        self.0.finalizer_catalog(request)
     }
 
     pub fn vcs_repo_catalog(
@@ -134,6 +142,15 @@ pub trait HelperHostBridge: Send + Sync {
         &self,
         _request: &AgentCatalogRequest,
     ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "helper_bridge".to_string(),
+        ))
+    }
+
+    fn finalizer_catalog(
+        &self,
+        _request: &FinalizerCatalogRequest,
+    ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
@@ -339,6 +356,13 @@ impl HelperHostBridge for CommandHelperHostBridge {
         self.invoke_editor("agent-catalog", request)
     }
 
+    fn finalizer_catalog(
+        &self,
+        request: &FinalizerCatalogRequest,
+    ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+        self.invoke_editor("finalizer-catalog", request)
+    }
+
     fn list_changespec_tags(
         &self,
         request: &MobileChangeSpecTagListRequestWire,
@@ -399,6 +423,7 @@ impl HelperHostBridge for CommandHelperHostBridge {
 #[derive(Debug, Clone)]
 pub struct StaticHelperHostBridge {
     pub agent_catalog_response: AgentCatalogResponse,
+    pub finalizer_catalog_response: FinalizerCatalogResponse,
     pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
     pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
     pub snippet_catalog_response: EditorSnippetCatalogResponseWire,
@@ -415,6 +440,13 @@ impl HelperHostBridge for StaticHelperHostBridge {
         _request: &AgentCatalogRequest,
     ) -> Result<AgentCatalogResponse, HostBridgeError> {
         Ok(self.agent_catalog_response.clone())
+    }
+
+    fn finalizer_catalog(
+        &self,
+        _request: &FinalizerCatalogRequest,
+    ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+        Ok(self.finalizer_catalog_response.clone())
     }
 
     fn list_changespec_tags(
@@ -936,6 +968,7 @@ mod tests {
                 entries: Vec::new(),
                 beads: Vec::new(),
             },
+            finalizer_catalog_response: FinalizerCatalogResponse::ok_empty(),
             changespec_tags_response: MobileChangeSpecTagListResponseWire {
                 schema_version: 1,
                 result: helper_result(),
@@ -1199,6 +1232,81 @@ mod tests {
     }
 
     #[test]
+    fn static_helper_bridge_returns_finalizer_catalog_response() {
+        let mut bridge = static_bridge();
+        bridge.finalizer_catalog_response = FinalizerCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![crate::editor::DirectiveFinalizerEntry {
+                value: "commit".to_string(),
+                provider_ref: "builtin@commit".to_string(),
+                required: true,
+                documentation: "Commit attributable repository changes"
+                    .to_string(),
+                ..Default::default()
+            }],
+        };
+        let bridge = DynHelperHostBridge::new(Arc::new(bridge));
+        let response = bridge
+            .finalizer_catalog(&FinalizerCatalogRequest {
+                schema_version: 1,
+                project: Some("sase".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.entries[0].value, "commit");
+        assert!(response.entries[0].required);
+        assert_eq!(response.entries[0].provider_ref, "builtin@commit");
+    }
+
+    #[test]
+    fn finalizer_catalog_wire_accepts_legacy_and_extended_entry_json() {
+        let legacy: crate::editor::DirectiveFinalizerEntry =
+            serde_json::from_value(json!({
+                "value": "commit",
+                "display": "commit",
+                "detail": "builtin@commit",
+                "documentation": "Commit changes"
+            }))
+            .unwrap();
+        assert_eq!(legacy.value, "commit");
+        assert!(!legacy.required);
+        assert!(!legacy.is_default);
+        assert!(legacy.after.is_empty());
+        assert_eq!(legacy.provider_ref, "");
+
+        let extended: crate::editor::DirectiveFinalizerEntry =
+            serde_json::from_value(json!({
+                "value": "commit",
+                "provider_ref": "builtin@commit",
+                "required": true,
+                "default": true,
+                "after": ["lint"],
+                "max_attempts": 2,
+                "provenance_id": "user",
+                "unknown_future_field": "ignored"
+            }))
+            .unwrap();
+        assert!(extended.required);
+        assert!(extended.is_default);
+        assert_eq!(extended.after, ["lint"]);
+        assert_eq!(extended.max_attempts, Some(2));
+        assert_eq!(extended.provenance_id.as_deref(), Some("user"));
+
+        let response: FinalizerCatalogResponse =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "status": "ok",
+                "entries": [{"value": "lint"}]
+            }))
+            .unwrap();
+        assert_eq!(response.message, "");
+        assert_eq!(response.entries[0].value, "lint");
+    }
+
+    #[test]
     fn snippet_catalog_wire_accepts_minimal_entry_json() {
         let response: EditorSnippetCatalogResponseWire =
             serde_json::from_value(json!({
@@ -1335,6 +1443,47 @@ printf '%s\n' '{"schema_version":1,"status":"ok","error_kind":null,"message":"",
         .unwrap();
         assert_eq!(request["workflow"], "gh");
         assert_eq!(request["namespace"], "bbugyi200");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_helper_bridge_invokes_editor_finalizer_catalog() {
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("helper");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" != "editor" ] || [ "$2" != "helper-bridge" ] || [ "$3" != "finalizer-catalog" ]; then
+  exit 7
+fi
+cat >"$0.request.json"
+printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value":"commit","provider_ref":"builtin@commit","required":true}]}'
+"#,
+        )
+        .unwrap();
+
+        let bridge = CommandHelperHostBridge::new(sh_bridge_command(&script));
+        let response = bridge
+            .finalizer_catalog(&FinalizerCatalogRequest {
+                schema_version: 1,
+                project: Some("sase".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(response.entries[0].value, "commit");
+        assert!(response.entries[0].required);
+        let request: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(format!(
+                "{}.request.json",
+                script.to_string_lossy()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["schema_version"], 1);
+        assert_eq!(request["project"], "sase");
     }
 
     #[test]

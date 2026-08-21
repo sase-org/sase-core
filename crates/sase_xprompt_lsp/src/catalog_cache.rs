@@ -11,9 +11,10 @@ use sase_core::{
     load_editor_xprompt_catalog, AgentCatalogRequest, AgentCatalogResponse,
     CommandHelperHostBridge, DynHelperHostBridge,
     EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
-    EditorXpromptCatalogRequestWire, HelperHostBridge, HostBridgeError,
+    EditorXpromptCatalogRequestWire, FinalizerCatalogRequest,
+    FinalizerCatalogResponse, HelperHostBridge, HostBridgeError,
     VcsRepoCatalogRequest, VcsRepoCatalogResponse, XpromptAssistEntry,
-    XpromptCatalogLoadOptions,
+    XpromptCatalogLoadOptions, FINALIZER_CATALOG_SCHEMA_VERSION,
 };
 use tokio::time;
 use tracing::warn;
@@ -56,6 +57,12 @@ struct CachedAgentCatalog {
     refreshed_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct CachedFinalizerCatalog {
+    response: Arc<FinalizerCatalogResponse>,
+    refreshed_at: Instant,
+}
+
 #[derive(Debug)]
 pub struct CatalogCache {
     bridge: DynHelperHostBridge,
@@ -65,6 +72,7 @@ pub struct CatalogCache {
     snippet_catalogs: RwLock<HashMap<String, CachedSnippetCatalog>>,
     vcs_repo_catalogs: RwLock<HashMap<(String, String), CachedVcsRepoCatalog>>,
     agent_catalogs: RwLock<HashMap<String, CachedAgentCatalog>>,
+    finalizer_catalogs: RwLock<HashMap<String, CachedFinalizerCatalog>>,
     warned_failure_classes: RwLock<BTreeSet<String>>,
 }
 
@@ -95,6 +103,7 @@ impl CatalogCache {
             snippet_catalogs: RwLock::new(HashMap::new()),
             vcs_repo_catalogs: RwLock::new(HashMap::new()),
             agent_catalogs: RwLock::new(HashMap::new()),
+            finalizer_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -112,6 +121,7 @@ impl CatalogCache {
             snippet_catalogs: RwLock::new(HashMap::new()),
             vcs_repo_catalogs: RwLock::new(HashMap::new()),
             agent_catalogs: RwLock::new(HashMap::new()),
+            finalizer_catalogs: RwLock::new(HashMap::new()),
             warned_failure_classes: RwLock::new(BTreeSet::new()),
         }
     }
@@ -332,6 +342,102 @@ impl CatalogCache {
         Ok(response)
     }
 
+    pub fn cached_finalizer_catalog(
+        &self,
+        project: Option<&str>,
+    ) -> Option<Arc<FinalizerCatalogResponse>> {
+        let catalogs = self.finalizer_catalogs.read().ok()?;
+        catalogs
+            .get(&finalizer_catalog_key(project))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn finalizer_catalog_stale_or_missing(
+        &self,
+        project: Option<&str>,
+    ) -> bool {
+        let Ok(catalogs) = self.finalizer_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&finalizer_catalog_key(project))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub async fn finalizer_catalog_for_completion(
+        &self,
+        project: Option<String>,
+    ) -> Result<Arc<FinalizerCatalogResponse>, CatalogFailure> {
+        if !self.finalizer_catalog_stale_or_missing(project.as_deref()) {
+            if let Some(response) =
+                self.cached_finalizer_catalog(project.as_deref())
+            {
+                return Ok(response);
+            }
+        }
+        match self
+            .refresh_finalizer_catalog_with_timeout(
+                project.clone(),
+                COMPLETION_REFRESH_TIMEOUT,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => self
+                .cached_finalizer_catalog(project.as_deref())
+                .ok_or(error),
+        }
+    }
+
+    async fn refresh_finalizer_catalog_with_timeout(
+        &self,
+        project: Option<String>,
+        timeout: Duration,
+    ) -> Result<Arc<FinalizerCatalogResponse>, CatalogFailure> {
+        let request = FinalizerCatalogRequest {
+            schema_version: FINALIZER_CATALOG_SCHEMA_VERSION,
+            project: project.clone(),
+        };
+        let bridge = self.bridge.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.finalizer_catalog(&request)
+        });
+        let response = match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => Arc::new(response),
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(
+                    error,
+                    "finalizer catalog",
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!(
+                        "finalizer catalog helper failed: {error}"
+                    ),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "finalizer catalog helper timed out".to_string(),
+                });
+            }
+        };
+        if let Ok(mut catalogs) = self.finalizer_catalogs.write() {
+            catalogs.insert(
+                finalizer_catalog_key(project.as_deref()),
+                CachedFinalizerCatalog {
+                    response: response.clone(),
+                    refreshed_at: Instant::now(),
+                },
+            );
+        }
+        Ok(response)
+    }
+
     pub fn should_warn(&self, class: &str) -> bool {
         let Ok(mut warned) = self.warned_failure_classes.write() else {
             return false;
@@ -341,6 +447,12 @@ impl CatalogCache {
 
     pub fn invalidate_agent_catalogs(&self) {
         if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.clear();
+        }
+    }
+
+    pub fn invalidate_finalizer_catalogs(&self) {
+        if let Ok(mut catalogs) = self.finalizer_catalogs.write() {
             catalogs.clear();
         }
     }
@@ -358,6 +470,7 @@ impl CatalogCache {
         if let Ok(mut catalogs) = self.agent_catalogs.write() {
             catalogs.clear();
         }
+        self.invalidate_finalizer_catalogs();
     }
 
     async fn refresh(
@@ -761,6 +874,10 @@ fn agent_catalog_key(project: Option<&str>) -> String {
     project.unwrap_or_default().to_string()
 }
 
+fn finalizer_catalog_key(project: Option<&str>) -> String {
+    project.unwrap_or_default().to_string()
+}
+
 fn plugin_metadata_env_present() -> bool {
     env::var_os(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV).is_some()
         || env::var_os(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV).is_some()
@@ -771,14 +888,15 @@ mod tests {
     use super::*;
     use sase_core::{
         AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
-        EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
-        EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
-        HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
-        MobileHelperProjectScopeWire, MobileHelperResultWire,
-        MobileHelperStatusWire, MobileXpromptCatalogEntryWire,
-        MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-        MobileXpromptCatalogStatsWire, VcsRepoCatalogRequest,
-        VcsRepoCatalogResponse, VcsRepoEntry,
+        DirectiveFinalizerEntry, EditorSnippetCatalogRequestWire,
+        EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+        EditorSnippetEntryWire, FinalizerCatalogRequest,
+        FinalizerCatalogResponse, HelperHostBridge, HostBridgeError,
+        MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
+        MobileHelperResultWire, MobileHelperStatusWire,
+        MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
+        MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
+        VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
     };
     use std::fs;
     use std::sync::Mutex;
@@ -898,6 +1016,68 @@ mod tests {
             _request: &AgentCatalogRequest,
         ) -> Result<AgentCatalogResponse, HostBridgeError> {
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FinalizerCatalogFixtureBridge {
+        response: FinalizerCatalogResponse,
+    }
+
+    impl HelperHostBridge for FinalizerCatalogFixtureBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstFinalizerBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstFinalizerBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(finalizer_catalog_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowFinalizerBridge;
+
+    impl HelperHostBridge for SlowFinalizerBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(finalizer_catalog_response("slow"))
+        }
+    }
+
+    fn finalizer_catalog_response(name: &str) -> FinalizerCatalogResponse {
+        FinalizerCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![DirectiveFinalizerEntry {
+                value: name.to_string(),
+                provider_ref: "builtin@commit".to_string(),
+                ..Default::default()
+            }],
         }
     }
 
@@ -1128,6 +1308,85 @@ mod tests {
     async fn agent_catalog_cache_reports_helper_failure_without_cached_rows() {
         let cache = CatalogCache::new(Arc::new(UnavailableBridge));
         let error = cache.agent_catalog_for_completion(None).await.unwrap_err();
+        assert_eq!(error.class, "helper_unavailable");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_refreshes_from_helper() {
+        let cache =
+            CatalogCache::new(Arc::new(FinalizerCatalogFixtureBridge {
+                response: finalizer_catalog_response("commit"),
+            }));
+
+        let response = cache
+            .finalizer_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].value, "commit");
+        assert!(!cache.finalizer_catalog_stale_or_missing(Some("sase")));
+        assert_eq!(
+            cache
+                .cached_finalizer_catalog(Some("sase"))
+                .unwrap()
+                .entries[0]
+                .value,
+            "commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_returns_stale_rows_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstFinalizerBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache.finalizer_catalog_for_completion(None).await.unwrap();
+        let second =
+            cache.finalizer_catalog_for_completion(None).await.unwrap();
+
+        assert_eq!(first.entries[0].value, "cached");
+        assert_eq!(second.entries[0].value, "cached");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_reports_helper_timeout() {
+        let cache = CatalogCache::new(Arc::new(SlowFinalizerBridge));
+        let error = cache
+            .refresh_finalizer_catalog_with_timeout(
+                None,
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.class, "helper_timeout");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_invalidate_all_drops_cached_rows() {
+        let cache =
+            CatalogCache::new(Arc::new(FinalizerCatalogFixtureBridge {
+                response: finalizer_catalog_response("commit"),
+            }));
+        cache
+            .finalizer_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+        assert!(cache.cached_finalizer_catalog(Some("sase")).is_some());
+        cache.invalidate_all();
+        assert!(cache.cached_finalizer_catalog(Some("sase")).is_none());
+        assert!(cache.finalizer_catalog_stale_or_missing(Some("sase")));
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_reports_helper_failure_without_cached_rows(
+    ) {
+        let cache = CatalogCache::new(Arc::new(UnavailableBridge));
+        let error = cache
+            .finalizer_catalog_for_completion(None)
+            .await
+            .unwrap_err();
         assert_eq!(error.class, "helper_unavailable");
     }
 

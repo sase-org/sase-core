@@ -362,6 +362,73 @@ fn agent_completion_sort_group(kind: &str) -> u8 {
     }
 }
 
+/// Render `%final` values with operation-aware kinds, labels, and docs.
+pub fn finalizer_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                finalizer_completion_item(candidate, replacement_range, index)
+            })
+            .collect(),
+    )
+}
+
+fn finalizer_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let status = candidate.status.clone();
+    let detail = candidate.detail.clone();
+    let group = if kind == "finalizer_clear" { 1 } else { 0 };
+    let mut item = completion_item(candidate, replacement_range);
+    item.kind = Some(finalizer_completion_item_kind(&kind, &status));
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" · {status}")),
+        description: Some(finalizer_label_description(
+            &kind,
+            detail.as_deref(),
+        )),
+    });
+    item.sort_text = Some(format!("{group}:{index:04}"));
+    item
+}
+
+fn finalizer_completion_item_kind(
+    kind: &str,
+    status: &str,
+) -> CompletionItemKind {
+    match kind {
+        "finalizer_clear" => CompletionItemKind::KEYWORD,
+        "finalizer_remove" => CompletionItemKind::OPERATOR,
+        _ if status == "required" => CompletionItemKind::ENUM_MEMBER,
+        _ => CompletionItemKind::VALUE,
+    }
+}
+
+fn finalizer_label_description(kind: &str, detail: Option<&str>) -> String {
+    let operation = match kind {
+        "finalizer_clear" => "clear",
+        "finalizer_remove" => "remove",
+        _ => {
+            return match detail.filter(|detail| !detail.is_empty()) {
+                Some(provider) => provider.to_string(),
+                None => "finalizer".to_string(),
+            }
+        }
+    };
+    match detail.filter(|detail| !detail.is_empty()) {
+        Some(provider) => format!("{operation} · {provider}"),
+        None => operation.to_string(),
+    }
+}
+
 fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
     let normalized = match kind {
         "keyword" | "bead" | "tribe" | "clan" | "family" => kind,
@@ -1408,5 +1475,151 @@ mod tests {
             range,
         );
         assert!(ordinary.command.is_none());
+    }
+
+    fn finalizer_candidate(
+        insertion: &str,
+        kind: &str,
+        status: &str,
+        detail: &str,
+        documentation: &str,
+        start: u32,
+        end: u32,
+    ) -> CompletionCandidate {
+        CompletionCandidate {
+            display: insertion.to_string(),
+            insertion: insertion.to_string(),
+            detail: Some(detail.to_string()).filter(|value| !value.is_empty()),
+            documentation: Some(documentation.to_string())
+                .filter(|value| !value.is_empty()),
+            is_dir: false,
+            name: insertion.to_string(),
+            replacement: Some(EditorTextEdit {
+                range: EditorRange {
+                    start: EditorPosition {
+                        line: 0,
+                        character: start,
+                    },
+                    end: EditorPosition {
+                        line: 0,
+                        character: end,
+                    },
+                },
+                new_text: insertion.to_string(),
+            }),
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn finalizer_completion_emits_operation_aware_lsp_metadata() {
+        let fallback = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 10,
+            },
+        };
+        let list = CompletionList {
+            candidates: vec![
+                finalizer_candidate(
+                    "commit",
+                    "finalizer",
+                    "required",
+                    "builtin@commit",
+                    "Commit changes\n\nProvider: `builtin@commit`",
+                    7,
+                    7,
+                ),
+                finalizer_candidate(
+                    "!lint",
+                    "finalizer_remove",
+                    "default",
+                    "builtin@command",
+                    "Remove `lint` from the launch selection.",
+                    15,
+                    17,
+                ),
+                finalizer_candidate(
+                    "none",
+                    "finalizer_clear",
+                    "clear",
+                    "",
+                    "Clear the configured finalizer selection for this launch",
+                    7,
+                    7,
+                ),
+            ],
+            shared_extension: String::new(),
+        };
+        let CompletionResponse::Array(items) =
+            finalizer_completion_response(list, fallback)
+        else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items[0].label, "commit");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · required")
+        );
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("builtin@commit")
+        );
+        let Some(Documentation::MarkupContent(doc)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(doc.kind, MarkupKind::Markdown);
+        assert!(doc.value.contains("Provider: `builtin@commit`"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected clause-local text edit");
+        };
+        assert_eq!(edit.range.start.character, 7);
+        assert_eq!(edit.new_text, "commit");
+
+        assert_eq!(items[1].label, "!lint");
+        assert_eq!(items[1].kind, Some(CompletionItemKind::OPERATOR));
+        assert_eq!(
+            items[1]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("remove · builtin@command")
+        );
+        let Some(CompletionTextEdit::Edit(remove_edit)) =
+            items[1].text_edit.as_ref()
+        else {
+            panic!("expected remove text edit");
+        };
+        assert_eq!(remove_edit.range.start.character, 15);
+        assert_eq!(remove_edit.range.end.character, 17);
+        assert_eq!(remove_edit.new_text, "!lint");
+
+        assert_eq!(items[2].kind, Some(CompletionItemKind::KEYWORD));
+        assert_eq!(items[2].sort_text.as_deref(), Some("1:0002"));
+        assert_eq!(
+            items[2]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("clear")
+        );
     }
 }
