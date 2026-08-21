@@ -39,6 +39,7 @@ pub mod editor;
 pub mod effort;
 pub mod effort_override;
 pub mod external_pr;
+pub mod feature_flag_state;
 pub mod finalizer;
 pub mod git_query;
 pub mod glossary;
@@ -571,6 +572,13 @@ pub use external_pr::{
     CanonicalPullRequestUrl, ExternalPrImportPlanWire,
     ExternalPrImportRequestWire, LocalPatchWire, RemotePullRequestWire,
     EXTERNAL_PR_WIRE_SCHEMA_VERSION,
+};
+pub use feature_flag_state::{
+    feature_flag_state_get, feature_flag_state_path, feature_flag_state_set,
+    FeatureFlagStateDiagnosticWire, FeatureFlagStateError,
+    FeatureFlagStateSetOutcomeWire, FeatureFlagStateSnapshotWire,
+    FEATURE_FLAG_STATE_FILENAME, FEATURE_FLAG_STATE_MAX_BYTES,
+    FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
 };
 pub use finalizer::{
     aggregate_finalizer_outcomes, canonical_json_bytes, canonical_json_sha256,

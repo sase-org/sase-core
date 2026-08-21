@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- bind `feature_flag_state_get` and `feature_flag_state_set` for the machine-local
+  feature-flag preference store
 - bind `directive_contract`, `directive_completion_context`, and
   `directive_completion_candidates` for ACE/LSP parity
 

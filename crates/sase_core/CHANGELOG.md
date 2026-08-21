@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(feature_flag_state)* add a versioned, locked, atomic machine-state store for
+  persistent feature-flag booleans
 - *(editor)* expand the xprompt directive completion contract with syntax forms,
   keyword conflicts, value-provider roles, a grammar-aware classifier, and
   shared static/dynamic candidate builders (including `%wait bead=` and bead

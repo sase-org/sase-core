@@ -151,6 +151,9 @@
 //! - `effort_override_set_relative(sase_home: str, effort: str, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `effort_override_set_until(sase_home: str, effort: str, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `effort_override_clear(sase_home: str) -> bool`
+//! - `feature_flag_state_wire_schema_version() -> int`
+//! - `feature_flag_state_get(sase_home: str) -> dict`
+//! - `feature_flag_state_set(sase_home: str, flag: str, enabled: bool) -> dict`
 //! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
 //! - `runner_limit_override_set_relative(sase_home: str, limit: int, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `runner_limit_override_set_until(sase_home: str, limit: int, expires_at: float, source: str, now: float | None = None) -> dict`
@@ -732,6 +735,11 @@ use sase_core::external_pr::{
     canonical_pull_request_url as core_canonical_pull_request_url,
     plan_external_pr_import as core_plan_external_pr_import,
     ExternalPrImportRequestWire,
+};
+use sase_core::feature_flag_state::{
+    feature_flag_state_get as core_feature_flag_state_get,
+    feature_flag_state_set as core_feature_flag_state_set,
+    FeatureFlagStateError as FeatureFlagStateDomainError,
 };
 use sase_core::finalizer::{
     aggregate_finalizer_outcomes as core_aggregate_finalizer_outcomes,
@@ -8797,6 +8805,66 @@ fn py_provider_disable_clear(
         .map_err(provider_disable_error_to_pyerr)
 }
 
+fn feature_flag_state_error_to_pyerr(
+    err: FeatureFlagStateDomainError,
+) -> PyErr {
+    let message = err.to_string();
+    match err {
+        FeatureFlagStateDomainError::Invalid { .. } => {
+            PyValueError::new_err(message)
+        }
+        FeatureFlagStateDomainError::LockTimeout { .. } => {
+            PyTimeoutError::new_err(message)
+        }
+        FeatureFlagStateDomainError::Io { .. } => {
+            PyRuntimeError::new_err(message)
+        }
+    }
+}
+
+fn feature_flag_state_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal feature-flag state serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "feature_flag_state_wire_schema_version")]
+fn py_feature_flag_state_wire_schema_version() -> u32 {
+    sase_core::FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "feature_flag_state_get")]
+fn py_feature_flag_state_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+) -> PyResult<PyObject> {
+    let snapshot = core_feature_flag_state_get(&PathBuf::from(sase_home))
+        .map_err(feature_flag_state_error_to_pyerr)?;
+    feature_flag_state_wire_to_py(py, &snapshot)
+}
+
+#[pyfunction]
+#[pyo3(name = "feature_flag_state_set")]
+fn py_feature_flag_state_set<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    flag: &str,
+    enabled: bool,
+) -> PyResult<PyObject> {
+    let outcome =
+        core_feature_flag_state_set(&PathBuf::from(sase_home), flag, enabled)
+            .map_err(feature_flag_state_error_to_pyerr)?;
+    feature_flag_state_wire_to_py(py, &outcome)
+}
+
 #[pyfunction]
 #[pyo3(
     name = "resolve_effective_effort",
@@ -10252,6 +10320,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_provider_disable_try_set_relative, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_try_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_feature_flag_state_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_feature_flag_state_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_feature_flag_state_set, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_size_model_route, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_epic_land_model, m)?)?;
@@ -12407,6 +12481,94 @@ mod tests {
                 py_provider_disable_get(py, &home, Some(1.0)).unwrap();
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["disables"], json!([]));
+        });
+    }
+
+    #[test]
+    fn feature_flag_state_bindings_are_exported_and_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "feature_flag_state_wire_schema_version",
+                "feature_flag_state_get",
+                "feature_flag_state_set",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(
+                py_feature_flag_state_wire_schema_version(),
+                sase_core::FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION
+            );
+
+            let missing = py_feature_flag_state_get(py, &home).unwrap();
+            let missing_value = py_to_json_value(missing.bind(py)).unwrap();
+            assert_eq!(missing_value["version"], json!(1));
+            assert_eq!(missing_value["flags"], json!({}));
+            assert_eq!(missing_value["diagnostics"], json!([]));
+
+            let first =
+                py_feature_flag_state_set(py, &home, "prettier_enabled", false)
+                    .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            assert_eq!(first_value["flag"], json!("prettier_enabled"));
+            assert_eq!(first_value["enabled"], json!(false));
+            assert_eq!(first_value["previous"], json!(null));
+            assert_eq!(first_value["changed"], json!(true));
+
+            let second =
+                py_feature_flag_state_set(py, &home, "epic_resume_gate", true)
+                    .unwrap();
+            let second_value = py_to_json_value(second.bind(py)).unwrap();
+            assert_eq!(
+                second_value["flags"],
+                json!({
+                    "epic_resume_gate": true,
+                    "prettier_enabled": false
+                })
+            );
+
+            let loaded = py_feature_flag_state_get(py, &home).unwrap();
+            let loaded_value = py_to_json_value(loaded.bind(py)).unwrap();
+            assert_eq!(loaded_value["flags"], second_value["flags"]);
+
+            let again =
+                py_feature_flag_state_set(py, &home, "epic_resume_gate", true)
+                    .unwrap();
+            let again_value = py_to_json_value(again.bind(py)).unwrap();
+            assert_eq!(again_value["previous"], json!(true));
+            assert_eq!(again_value["changed"], json!(false));
+        });
+    }
+
+    #[test]
+    fn feature_flag_state_binding_rejects_invalid_keys_and_corrupt_files() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let path = temp.path().join("feature_flags.json");
+        Python::with_gil(|py| {
+            let error = py_feature_flag_state_set(py, &home, "NotSnake", true)
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            std::fs::write(&path, "not json").unwrap();
+            let snapshot = py_feature_flag_state_get(py, &home).unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["flags"], json!({}));
+            assert_eq!(
+                snapshot_value["diagnostics"][0]["code"],
+                json!("malformed_json")
+            );
+            let error =
+                py_feature_flag_state_set(py, &home, "epic_resume_gate", true)
+                    .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert!(error.to_string().contains("left unchanged"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json");
         });
     }
 
