@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(agent-launch)* native `%proc` dispatch helpers: private 0600 scripts,
+  sanitized proc environment, duration/cwd/workspace policy, and additive
+  `xprompt_proc` proc-store metadata
+
 ## [0.31.4](https://github.com/sase-org/sase-core/compare/v0.31.3...v0.31.4) - 2026-08-22
 
 ### Added

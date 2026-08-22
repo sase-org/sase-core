@@ -389,6 +389,7 @@ fn rust_proc_snapshot() -> ProcStoreSnapshotWire {
             settled_at: None,
             finished_by: None,
             result: None,
+            xprompt_proc: None,
         }],
         stats: ProcStoreStatsWire {
             total_lines: 1,

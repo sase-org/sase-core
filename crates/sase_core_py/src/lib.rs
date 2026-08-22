@@ -457,28 +457,38 @@ use sase_core::agent_launch::{
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
     build_condition_context as core_build_condition_context,
     classify_condition_status as core_classify_condition_status,
+    cleanup_proc_private_inputs as core_cleanup_proc_private_inputs,
     decide_workspace_occupant_conflict as core_decide_workspace_occupant_conflict,
     dispatch_fingerprint as core_dispatch_fingerprint,
     evaluate_launch_condition as core_evaluate_launch_condition,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     next_admission_actions as core_next_admission_actions,
+    parse_proc_duration_seconds as core_parse_proc_duration_seconds,
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
     plan_typed_launch_units as core_plan_typed_launch_units,
     prepare_agent_launch as core_prepare_agent_launch,
+    prepare_proc_script as core_prepare_proc_script,
+    proc_script_argv as core_proc_script_argv,
     reconcile_admission_journal as core_reconcile_admission_journal,
+    resolve_proc_execution_cwd as core_resolve_proc_execution_cwd,
     sanitize_safe_inputs as core_sanitize_safe_inputs,
+    sanitized_proc_env as core_sanitized_proc_env,
     summarize_admission as core_summarize_admission,
+    validate_proc_workspace_intent as core_validate_proc_workspace_intent,
+    validate_standalone_proc_shell_name as core_validate_standalone_proc_shell_name,
     wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, AgentUnitWire, ConditionEvalRequestWire,
     LaunchAdmissionJournalEntryWire, LaunchAdmissionUnitStateWire,
     LaunchAdmissionWaitFactWire, LaunchPlanWire, LaunchUnitPayloadWire,
-    LaunchUnitWire, OccupancyCallerWire, OccupantRecordWire, WaitTargetWire,
-    WaitedOutcomeWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    LaunchUnitWire, OccupancyCallerWire, OccupantRecordWire,
+    ProcDispatchRequestWire, WaitTargetWire, WaitedOutcomeWire,
+    WorkspaceClaimRequestWire, WorkspaceClaimWire,
     CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
     CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
     CONDITION_OUTPUT_CAP_BYTES, LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
+    PROC_DISPATCH_WIRE_SCHEMA_VERSION, XPROMPT_PROC_ORIGIN,
 };
 use sase_core::agent_name_template::{
     agent_name_template_key as core_agent_name_template_key,
@@ -9557,6 +9567,143 @@ fn py_evaluate_launch_condition<'py>(
     json_value_to_py(py, &encoded)
 }
 
+#[pyfunction]
+#[pyo3(name = "proc_dispatch_wire_schema_version")]
+fn py_proc_dispatch_wire_schema_version() -> u32 {
+    PROC_DISPATCH_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "xprompt_proc_origin")]
+fn py_xprompt_proc_origin() -> &'static str {
+    XPROMPT_PROC_ORIGIN
+}
+
+#[pyfunction]
+#[pyo3(name = "prepare_proc_script")]
+fn py_prepare_proc_script<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let request: ProcDispatchRequestWire =
+        serde_json::from_value(py_to_json_value(request)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid proc dispatch request: {err}"
+            ))
+        })?;
+    let prepared =
+        core_prepare_proc_script(&request).map_err(PyValueError::new_err)?;
+    let encoded = serde_json::to_value(&prepared).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &encoded)
+}
+
+#[pyfunction]
+#[pyo3(name = "parse_proc_duration_seconds")]
+fn py_parse_proc_duration_seconds(raw: &str) -> PyResult<u64> {
+    core_parse_proc_duration_seconds(raw).map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(name = "proc_script_argv")]
+fn py_proc_script_argv(
+    language: &str,
+    work_dir: &str,
+    python_executable: &str,
+) -> PyResult<Vec<String>> {
+    core_proc_script_argv(
+        language,
+        PathBuf::from(work_dir).as_path(),
+        python_executable,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "validate_standalone_proc_shell_name",
+    signature = (name = None)
+)]
+fn py_validate_standalone_proc_shell_name(name: Option<&str>) -> PyResult<()> {
+    core_validate_standalone_proc_shell_name(name)
+        .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "validate_proc_workspace_intent",
+    signature = (workspace, selected_project = None, declared_cwd = None)
+)]
+fn py_validate_proc_workspace_intent(
+    workspace: bool,
+    selected_project: Option<&str>,
+    declared_cwd: Option<&str>,
+) -> PyResult<()> {
+    core_validate_proc_workspace_intent(
+        workspace,
+        selected_project,
+        declared_cwd,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "resolve_proc_execution_cwd",
+    signature = (workspace, declared_cwd = None, source_cwd = None, lease_root = None)
+)]
+fn py_resolve_proc_execution_cwd(
+    workspace: bool,
+    declared_cwd: Option<&str>,
+    source_cwd: Option<&str>,
+    lease_root: Option<&str>,
+) -> PyResult<String> {
+    core_resolve_proc_execution_cwd(
+        workspace,
+        declared_cwd,
+        source_cwd,
+        lease_root,
+    )
+    .map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "sanitized_proc_env",
+    signature = (proc_id, cwd, work_dir, python_executable, selected_project = None, project_file = None, workspace_num = None)
+)]
+fn py_sanitized_proc_env<'py>(
+    py: Python<'py>,
+    proc_id: &str,
+    cwd: &str,
+    work_dir: &str,
+    python_executable: &str,
+    selected_project: Option<&str>,
+    project_file: Option<&str>,
+    workspace_num: Option<u32>,
+) -> PyResult<PyObject> {
+    let env = core_sanitized_proc_env(
+        proc_id,
+        PathBuf::from(cwd).as_path(),
+        PathBuf::from(work_dir).as_path(),
+        python_executable,
+        selected_project,
+        project_file,
+        workspace_num,
+    );
+    let encoded = serde_json::to_value(&env).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &encoded)
+}
+
+#[pyfunction]
+#[pyo3(name = "cleanup_proc_private_inputs")]
+fn py_cleanup_proc_private_inputs(work_dir: &str) {
+    core_cleanup_proc_private_inputs(PathBuf::from(work_dir).as_path());
+}
+
 /// Return single-line inline-code ranges as UTF-8 byte offsets.
 #[pyfunction]
 #[pyo3(name = "inline_code_ranges")]
@@ -10744,6 +10891,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sanitize_condition_inputs, m)?)?;
     m.add_function(wrap_pyfunction!(py_build_condition_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_launch_condition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_proc_dispatch_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_xprompt_proc_origin, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prepare_proc_script, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_proc_duration_seconds, m)?)?;
+    m.add_function(wrap_pyfunction!(py_proc_script_argv, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_standalone_proc_shell_name,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_validate_proc_workspace_intent, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_proc_execution_cwd, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sanitized_proc_env, m)?)?;
+    m.add_function(wrap_pyfunction!(py_cleanup_proc_private_inputs, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;

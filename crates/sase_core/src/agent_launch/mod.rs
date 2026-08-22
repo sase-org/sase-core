@@ -2,6 +2,7 @@
 
 mod admission;
 mod condition;
+mod proc_runtime;
 
 pub use admission::{
     admission_unit_results, agent_unit_dispatch_prompt, dispatch_fingerprint,
@@ -21,6 +22,16 @@ pub use condition::{
     CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
     CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
     CONDITION_OUTPUT_CAP_BYTES,
+};
+pub use proc_runtime::{
+    cleanup_proc_private_inputs, parse_proc_duration_seconds,
+    prepare_proc_script, proc_script_argv, resolve_proc_execution_cwd,
+    sanitized_proc_env, validate_proc_workspace_intent,
+    validate_standalone_proc_shell_name, ProcDispatchPreparedWire,
+    ProcDispatchRequestWire, PROC_DISPATCH_WIRE_SCHEMA_VERSION,
+    PROC_PHASE_ACQUIRING_WORKSPACE, PROC_PHASE_CHECKING,
+    PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING, PROC_PHASE_SETTLING,
+    PROC_PHASE_WAITING, XPROMPT_PROC_ORIGIN,
 };
 
 use crate::effort::split_model_effort;

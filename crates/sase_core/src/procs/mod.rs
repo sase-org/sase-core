@@ -11,5 +11,6 @@ pub use wire::{
     ProcReserveOutcomeWire, ProcReserveWire, ProcSettlementWire,
     ProcStopRequestWire, ProcStoreSnapshotWire, ProcStoreStatsWire,
     ProcSupervisorClaimWire, ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire,
-    PROC_WIRE_SCHEMA_VERSION, SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
+    XpromptProcMetaWire, PROC_WIRE_SCHEMA_VERSION,
+    SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };

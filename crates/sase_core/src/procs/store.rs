@@ -650,6 +650,7 @@ fn proc_from_reserve_request(
         settled_at: None,
         finished_by: None,
         result: None,
+        xprompt_proc: request.xprompt_proc.clone(),
     };
     normalize_and_validate_proc(&mut proc, ValidationMode::ProcShellWrite)?;
     Ok(proc)
@@ -926,6 +927,9 @@ fn apply_update(
     }
     if let Some(value) = &update.result {
         proc.result.clone_from(value);
+    }
+    if let Some(value) = &update.xprompt_proc {
+        proc.xprompt_proc.clone_from(value);
     }
 
     normalize_and_validate_proc(proc, ValidationMode::LegacyWrite)
@@ -1377,6 +1381,7 @@ mod tests {
             settled_at: None,
             finished_by: None,
             result: None,
+            xprompt_proc: None,
         }
     }
 
@@ -1409,6 +1414,7 @@ mod tests {
             reserved_by: "agent-one".to_string(),
             timeout_seconds: Some(30),
             idle_timeout_seconds: Some(10),
+            xprompt_proc: None,
         }
     }
 

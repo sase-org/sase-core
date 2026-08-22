@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bind `prepare_proc_script`, proc cwd/duration/shell-name validators, and
+  `xprompt_proc_origin` for stand-alone `%proc` dispatch
+
 ## [0.31.4](https://github.com/sase-org/sase-core/compare/v0.31.3...v0.31.4) - 2026-08-22
 
 ### Added

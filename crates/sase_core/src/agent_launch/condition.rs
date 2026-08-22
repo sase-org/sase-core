@@ -482,7 +482,9 @@ fn evaluate_launch_condition_inner(
     Ok(result)
 }
 
-fn code_from_wire(code: &CodeValueWire) -> Result<CodeValue, String> {
+pub(crate) fn code_from_wire(
+    code: &CodeValueWire,
+) -> Result<CodeValue, String> {
     let language = language_from_info_string(Some(code.language.as_str()))
         .or_else(|_| language_from_info_string(code.info_string.as_deref()))?;
     let value = CodeValue {
@@ -671,7 +673,10 @@ fn format_diagnostics(stdout: &str, stderr: &str) -> String {
     )
 }
 
-fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private_file(
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut options = OpenOptions::new();

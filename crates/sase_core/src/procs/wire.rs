@@ -76,6 +76,31 @@ pub struct ProcWire {
     pub finished_by: Option<String>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xprompt_proc: Option<XpromptProcMetaWire>,
+}
+
+/// Additive `%proc` launch metadata stored on a native proc-shell row.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct XpromptProcMetaWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_intent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_receipt: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +162,8 @@ pub struct ProcReserveWire {
     pub reserved_by: String,
     pub timeout_seconds: Option<u64>,
     pub idle_timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xprompt_proc: Option<XpromptProcMetaWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -397,6 +424,12 @@ pub struct ProcUpdateWire {
         skip_serializing_if = "Option::is_none"
     )]
     pub result: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub xprompt_proc: Option<Option<XpromptProcMetaWire>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
