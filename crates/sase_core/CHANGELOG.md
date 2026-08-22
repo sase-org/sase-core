@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0](https://github.com/sase-org/sase-core/compare/v0.30.0...v0.31.0) - 2026-08-22
+
+### Added
+
+- *(agent-cleanup)* [**breaking**] add monitor cleanup side effects
+
 ### Added
 
 - *(agent-cleanup)* classify live monitors as a dedicated kill kind with
