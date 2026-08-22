@@ -1,5 +1,17 @@
 //! Wire records and deterministic helpers for agent launch.
 
+mod admission;
+
+pub use admission::{
+    admission_unit_results, agent_unit_dispatch_prompt, dispatch_fingerprint,
+    next_admission_actions, reconcile_admission_journal, summarize_admission,
+    wait_target_key, LaunchAdmissionActionWire,
+    LaunchAdmissionJournalEntryWire, LaunchAdmissionSummaryWire,
+    LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire,
+    LaunchUnitPhaseWire, WaitedOutcomeWire,
+    LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
+};
+
 use crate::effort::split_model_effort;
 use crate::fenced_code::{
     fenced_block_ranges, language_from_info_string,

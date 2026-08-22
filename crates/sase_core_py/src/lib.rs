@@ -451,17 +451,27 @@ use sase_core::agent_identity::{
     LegacyV1GroupOwnershipEvidence, AGENT_RELATIONSHIP_SCHEMA_VERSION,
 };
 use sase_core::agent_launch::{
+    admission_unit_results as core_admission_unit_results,
+    agent_unit_dispatch_prompt as core_agent_unit_dispatch_prompt,
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
     decide_workspace_occupant_conflict as core_decide_workspace_occupant_conflict,
+    dispatch_fingerprint as core_dispatch_fingerprint,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
+    next_admission_actions as core_next_admission_actions,
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
     plan_typed_launch_units as core_plan_typed_launch_units,
-    prepare_agent_launch as core_prepare_agent_launch, AgentLaunchPreparedWire,
-    AgentLaunchRequestWire, OccupancyCallerWire, OccupantRecordWire,
-    WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    prepare_agent_launch as core_prepare_agent_launch,
+    reconcile_admission_journal as core_reconcile_admission_journal,
+    summarize_admission as core_summarize_admission,
+    wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
+    AgentLaunchRequestWire, AgentUnitWire, LaunchAdmissionJournalEntryWire,
+    LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire, LaunchPlanWire,
+    LaunchUnitPayloadWire, OccupancyCallerWire, OccupantRecordWire,
+    WaitTargetWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
 };
 use sase_core::agent_name_template::{
     agent_name_template_key as core_agent_name_template_key,
@@ -9280,6 +9290,146 @@ fn py_plan_typed_launch_units<'py>(
     json_value_to_py(py, &value)
 }
 
+#[pyfunction]
+#[pyo3(name = "launch_admission_journal_schema_version")]
+fn py_launch_admission_journal_schema_version() -> u32 {
+    LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "reconcile_admission_journal")]
+fn py_reconcile_admission_journal<'py>(
+    py: Python<'py>,
+    entries: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let entries: Vec<LaunchAdmissionJournalEntryWire> =
+        serde_json::from_value(py_to_json_value(entries)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid launch admission journal: {err}"
+            ))
+        })?;
+    let states = core_reconcile_admission_journal(&entries);
+    let value = serde_json::to_value(&states).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "next_admission_actions")]
+fn py_next_admission_actions<'py>(
+    py: Python<'py>,
+    plan: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
+    wait_facts: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let plan: LaunchPlanWire = serde_json::from_value(py_to_json_value(plan)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid launch plan: {err}"))
+        })?;
+    let states: BTreeMap<String, LaunchAdmissionUnitStateWire> =
+        serde_json::from_value(py_to_json_value(states)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid launch admission states: {err}"
+            ))
+        })?;
+    let wait_facts: Vec<LaunchAdmissionWaitFactWire> = serde_json::from_value(
+        py_to_json_value(wait_facts)?,
+    )
+    .map_err(|err| {
+        PyValueError::new_err(format!(
+            "invalid launch admission wait facts: {err}"
+        ))
+    })?;
+    let actions = core_next_admission_actions(&plan, &states, &wait_facts);
+    let value = serde_json::to_value(&actions).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "summarize_admission")]
+fn py_summarize_admission<'py>(
+    py: Python<'py>,
+    plan: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let plan: LaunchPlanWire = serde_json::from_value(py_to_json_value(plan)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid launch plan: {err}"))
+        })?;
+    let states: BTreeMap<String, LaunchAdmissionUnitStateWire> =
+        serde_json::from_value(py_to_json_value(states)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid launch admission states: {err}"
+            ))
+        })?;
+    let summary = core_summarize_admission(&plan, &states);
+    let value = serde_json::to_value(&summary).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "admission_unit_results")]
+fn py_admission_unit_results<'py>(
+    py: Python<'py>,
+    plan: &Bound<'_, PyAny>,
+    states: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let plan: LaunchPlanWire = serde_json::from_value(py_to_json_value(plan)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid launch plan: {err}"))
+        })?;
+    let states: BTreeMap<String, LaunchAdmissionUnitStateWire> =
+        serde_json::from_value(py_to_json_value(states)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid launch admission states: {err}"
+            ))
+        })?;
+    let results = core_admission_unit_results(&plan, &states);
+    let value = serde_json::to_value(&results).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "dispatch_fingerprint")]
+fn py_dispatch_fingerprint(
+    plan_digest: &str,
+    logical_id: &str,
+    payload: &Bound<'_, PyAny>,
+) -> PyResult<String> {
+    let payload: LaunchUnitPayloadWire =
+        serde_json::from_value(py_to_json_value(payload)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid launch unit payload: {err}"))
+        })?;
+    Ok(core_dispatch_fingerprint(plan_digest, logical_id, &payload))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_unit_dispatch_prompt")]
+fn py_agent_unit_dispatch_prompt(agent: &Bound<'_, PyAny>) -> PyResult<String> {
+    let agent: AgentUnitWire = serde_json::from_value(py_to_json_value(agent)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid agent unit: {err}"))
+        })?;
+    Ok(core_agent_unit_dispatch_prompt(&agent))
+}
+
+#[pyfunction]
+#[pyo3(name = "wait_target_key")]
+fn py_wait_target_key(target: &Bound<'_, PyAny>) -> PyResult<String> {
+    let target: WaitTargetWire =
+        serde_json::from_value(py_to_json_value(target)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid wait target: {err}"))
+        })?;
+    Ok(core_wait_target_key(&target))
+}
+
 /// Return single-line inline-code ranges as UTF-8 byte offsets.
 #[pyfunction]
 #[pyo3(name = "inline_code_ranges")]
@@ -10444,6 +10594,17 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_launch_admission_journal_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_reconcile_admission_journal, m)?)?;
+    m.add_function(wrap_pyfunction!(py_next_admission_actions, m)?)?;
+    m.add_function(wrap_pyfunction!(py_summarize_admission, m)?)?;
+    m.add_function(wrap_pyfunction!(py_admission_unit_results, m)?)?;
+    m.add_function(wrap_pyfunction!(py_dispatch_fingerprint, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_unit_dispatch_prompt, m)?)?;
+    m.add_function(wrap_pyfunction!(py_wait_target_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;
