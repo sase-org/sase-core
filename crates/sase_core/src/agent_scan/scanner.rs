@@ -1113,6 +1113,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
             data.get("monitor_idle_timeout_seconds"),
         ),
         monitor_next_output: coerce_str(data.get("monitor_next_output")),
+        monitor_next_model: coerce_str(data.get("monitor_next_model")),
         monitor_request_fingerprint: coerce_str(
             data.get("monitor_request_fingerprint"),
         ),
@@ -1326,6 +1327,68 @@ mod tests {
     fn write_json(path: &Path, payload: Value) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, serde_json::to_string(&payload).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn scanner_round_trips_monitor_next_model() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120000");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "acme--mon",
+                "agent_family": "acme",
+                "agent_family_role": "monitor",
+                "monitor_id": "m4kq",
+                "monitor_next_action": "Reply to the user.",
+                "monitor_next_model": "@small"
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(
+            meta.monitor_next_action.as_deref(),
+            Some("Reply to the user.")
+        );
+        assert_eq!(meta.monitor_next_model.as_deref(), Some("@small"));
+    }
+
+    #[test]
+    fn scanner_defaults_absent_monitor_next_model() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120100");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "legacy-monitor",
+                "agent_family_role": "monitor",
+                "monitor_id": "oldmon"
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(meta.monitor_id.as_deref(), Some("oldmon"));
+        assert_eq!(meta.monitor_next_model, None);
     }
 
     #[test]

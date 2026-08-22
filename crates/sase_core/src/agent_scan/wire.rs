@@ -604,6 +604,9 @@ pub struct AgentMetaWire {
     pub monitor_idle_timeout_seconds: Option<f64>,
     #[serde(default)]
     pub monitor_next_output: Option<String>,
+    /// Optional `--model` expression for the `--next` follow-up agent.
+    #[serde(default)]
+    pub monitor_next_model: Option<String>,
     #[serde(default)]
     pub monitor_request_fingerprint: Option<String>,
     /// `--next` launch disposition (`launched` / `launched-degraded` /
@@ -953,6 +956,7 @@ mod tests {
             monitor_settled: true,
             monitor_idle_timeout_seconds: Some(600.0),
             monitor_next_output: Some("tail".to_string()),
+            monitor_next_model: Some("@small".to_string()),
             monitor_request_fingerprint: Some("sha256:deadbeef".to_string()),
             monitor_followup_outcome: Some("launched-degraded".to_string()),
             monitor_followup_error: Some(
@@ -991,6 +995,7 @@ mod tests {
         assert!(!decoded.monitor_settled);
         assert_eq!(decoded.monitor_idle_timeout_seconds, None);
         assert_eq!(decoded.monitor_next_output, None);
+        assert_eq!(decoded.monitor_next_model, None);
         assert_eq!(decoded.monitor_request_fingerprint, None);
         assert_eq!(decoded.monitor_followup_outcome, None);
         assert_eq!(decoded.monitor_followup_error, None);
