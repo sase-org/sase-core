@@ -11,6 +11,7 @@ use super::wire::{
     AgentCleanupArtifactDeleteIntentWire, AgentCleanupBundleSaveIntentWire,
     AgentCleanupCountsWire, AgentCleanupDismissItemWire,
     AgentCleanupIdentityWire, AgentCleanupKillItemWire,
+    AgentCleanupMonitorStopIntentWire,
     AgentCleanupNotificationDismissIntentWire, AgentCleanupPlanWire,
     AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
     AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
@@ -21,9 +22,9 @@ use super::wire::{
     CLEANUP_SCOPE_FOCUSED_GROUP, CLEANUP_SCOPE_FOCUSED_PANEL,
     CLEANUP_SCOPE_TRIBE, CONFIRMATION_SEVERITY_DESTRUCTIVE,
     CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
-    KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_RUNNING, KILL_KIND_WORKFLOW,
-    SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
-    SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
+    KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_MONITOR, KILL_KIND_RUNNING,
+    KILL_KIND_WORKFLOW, SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE,
+    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 
@@ -177,6 +178,9 @@ fn is_direct_child_target(
 }
 
 fn classify_kill_kind(target: &AgentCleanupTargetWire) -> Option<&'static str> {
+    if target.is_live_monitor {
+        return Some(KILL_KIND_MONITOR);
+    }
     let workflow = target.workflow.as_deref().unwrap_or("");
     if target.agent_type == "workflow" {
         return Some(KILL_KIND_WORKFLOW);
@@ -266,6 +270,115 @@ fn workflow_children_by_parent(
             .push(target);
     }
     children
+}
+
+fn children_by_parent_timestamp(
+    targets: &[AgentCleanupTargetWire],
+) -> BTreeMap<String, Vec<&AgentCleanupTargetWire>> {
+    let mut children: BTreeMap<String, Vec<&AgentCleanupTargetWire>> =
+        BTreeMap::new();
+    for target in targets {
+        let Some(parent_ts) = &target.parent_timestamp else {
+            continue;
+        };
+        children.entry(parent_ts.clone()).or_default().push(target);
+    }
+    children
+}
+
+fn collect_live_monitor_descendants(
+    owner: &AgentCleanupTargetWire,
+    children_by_parent_ts: &BTreeMap<String, Vec<&AgentCleanupTargetWire>>,
+    owned: &mut BTreeSet<AgentCleanupIdentityWire>,
+) {
+    let Some(raw_suffix) = &owner.raw_suffix else {
+        return;
+    };
+    let mut stack = vec![raw_suffix.clone()];
+    let mut seen = BTreeSet::new();
+    while let Some(ts) = stack.pop() {
+        if !seen.insert(ts.clone()) {
+            continue;
+        }
+        let Some(children) = children_by_parent_ts.get(&ts) else {
+            continue;
+        };
+        for child in children {
+            if child.is_live_monitor {
+                owned.insert(child.identity.clone());
+            }
+            if let Some(child_ts) = &child.raw_suffix {
+                stack.push(child_ts.clone());
+            }
+        }
+    }
+}
+
+fn owned_live_monitor_identities(
+    targets: &[AgentCleanupTargetWire],
+    request: &AgentCleanupRequestWire,
+    selected_ids: &BTreeSet<AgentCleanupIdentityWire>,
+    parent_tribes: &BTreeMap<String, Option<String>>,
+    children_by_parent_ts: &BTreeMap<String, Vec<&AgentCleanupTargetWire>>,
+) -> BTreeSet<AgentCleanupIdentityWire> {
+    let mut owned = BTreeSet::new();
+    if request.mode != CLEANUP_MODE_KILL_AND_DISMISS {
+        return owned;
+    }
+    for target in targets {
+        if !selected_by_scope(target, request, selected_ids, parent_tribes) {
+            continue;
+        }
+        if is_workflow_step_child(target)
+            && !is_direct_child_target(
+                target,
+                targets,
+                request,
+                selected_ids,
+                parent_tribes,
+            )
+        {
+            continue;
+        }
+        collect_live_monitor_descendants(
+            target,
+            children_by_parent_ts,
+            &mut owned,
+        );
+    }
+    owned
+}
+
+fn monitor_id_for_kill(target: &AgentCleanupTargetWire) -> Option<String> {
+    target
+        .monitor_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn push_monitor_kill_item(
+    kill_items: &mut Vec<AgentCleanupKillItemWire>,
+    target: &AgentCleanupTargetWire,
+) -> bool {
+    let Some(monitor_id) = monitor_id_for_kill(target) else {
+        return false;
+    };
+    kill_items.push(AgentCleanupKillItemWire {
+        identity: target.identity.clone(),
+        kind: KILL_KIND_MONITOR.to_string(),
+        pid: None,
+        display_name: target.display_name.clone(),
+        monitor_id: Some(monitor_id),
+    });
+    true
+}
+
+fn sort_monitor_kills_first(kill_items: &mut [AgentCleanupKillItemWire]) {
+    kill_items.sort_by(|left, right| {
+        (left.kind != KILL_KIND_MONITOR).cmp(&(right.kind != KILL_KIND_MONITOR))
+    });
 }
 
 fn parent_tribes_by_suffix(
@@ -433,6 +546,23 @@ fn add_workspace_release(
     }
 }
 
+fn add_monitor_stop(
+    side_effects: &mut AgentCleanupSideEffectsWire,
+    seen: &mut BTreeSet<String>,
+    target: &AgentCleanupTargetWire,
+    monitor_id: &str,
+) {
+    if !seen.insert(monitor_id.to_string()) {
+        return;
+    }
+    side_effects.monitor_stop_requests.push(
+        AgentCleanupMonitorStopIntentWire {
+            identity: target.identity.clone(),
+            monitor_id: monitor_id.to_string(),
+        },
+    );
+}
+
 fn add_held_workspace_release(
     side_effects: &mut AgentCleanupSideEffectsWire,
     seen: &mut BTreeSet<AgentCleanupIdentityWire>,
@@ -499,6 +629,7 @@ fn build_side_effects(
     let mut seen_workspace = BTreeSet::new();
     let mut seen_held_workspace = BTreeSet::new();
     let mut seen_notifications = BTreeSet::new();
+    let mut seen_monitor_stops = BTreeSet::new();
 
     for dismiss in dismiss_items {
         let Some(target) = by_id.get(&dismiss.identity).copied() else {
@@ -536,6 +667,23 @@ fn build_side_effects(
         let Some(target) = by_id.get(&kill.identity).copied() else {
             continue;
         };
+        if kill.kind == KILL_KIND_MONITOR {
+            if let Some(monitor_id) = &kill.monitor_id {
+                add_monitor_stop(
+                    &mut side_effects,
+                    &mut seen_monitor_stops,
+                    target,
+                    monitor_id,
+                );
+            }
+            add_index_identity(&mut side_effects, &mut seen_index, target);
+            add_notification_candidate(
+                &mut side_effects,
+                &mut seen_notifications,
+                target,
+            );
+            continue;
+        }
         let related = related_workflow_targets(target, children_by_parent);
         for item in related {
             add_index_identity(&mut side_effects, &mut seen_index, item);
@@ -587,7 +735,15 @@ pub fn plan_agent_cleanup(
         request.identities.iter().cloned().collect();
     let parent_tribes = parent_tribes_by_suffix(targets);
     let children_by_parent = workflow_children_by_parent(targets);
+    let children_by_parent_ts = children_by_parent_timestamp(targets);
     let parallel_members_by_parent = parallel_members_by_parent(targets);
+    let owned_live_monitors = owned_live_monitor_identities(
+        targets,
+        request,
+        &selected_ids,
+        &parent_tribes,
+        &children_by_parent_ts,
+    );
 
     let mut seen_live = BTreeSet::new();
     let mut selected = Vec::new();
@@ -611,7 +767,11 @@ pub fn plan_agent_cleanup(
             counts.running += 1;
         }
 
-        if !selected_by_scope(target, request, &selected_ids, &parent_tribes) {
+        let in_scope =
+            selected_by_scope(target, request, &selected_ids, &parent_tribes);
+        let cascaded_monitor =
+            !in_scope && owned_live_monitors.contains(&target.identity);
+        if !in_scope && !cascaded_monitor {
             add_skip(&mut skipped_items, target, SKIPPED_NOT_IN_SCOPE, None);
             continue;
         }
@@ -638,7 +798,9 @@ pub fn plan_agent_cleanup(
             continue;
         }
 
-        selected.push(target.identity.clone());
+        if !cascaded_monitor {
+            selected.push(target.identity.clone());
+        }
 
         if request.mode == CLEANUP_MODE_PREVIEW_ONLY {
             add_skip(
@@ -650,9 +812,10 @@ pub fn plan_agent_cleanup(
             continue;
         }
 
-        let dismissable = target_is_dismissable(target, request);
-        let killable =
-            target.pid.is_some() && !is_dismissable_status(&target.status);
+        let dismissable =
+            !target.is_live_monitor && target_is_dismissable(target, request);
+        let killable = target.is_live_monitor
+            || (target.pid.is_some() && !is_dismissable_status(&target.status));
 
         if request.mode == CLEANUP_MODE_DISMISS_COMPLETED {
             if dismissable {
@@ -681,6 +844,18 @@ pub fn plan_agent_cleanup(
                     target,
                     SKIPPED_NOT_DISMISSABLE,
                     Some(target.status.clone()),
+                );
+            }
+            continue;
+        }
+
+        if target.is_live_monitor {
+            if !push_monitor_kill_item(&mut kill_items, target) {
+                add_skip(
+                    &mut skipped_items,
+                    target,
+                    SKIPPED_UNKNOWN_KILL_KIND,
+                    Some("live monitor missing monitor_id".to_string()),
                 );
             }
             continue;
@@ -719,6 +894,7 @@ pub fn plan_agent_cleanup(
             kind: kind.to_string(),
             pid: target.pid,
             display_name: target.display_name.clone(),
+            monitor_id: None,
         });
 
         if kind == KILL_KIND_WORKFLOW {
@@ -758,9 +934,16 @@ pub fn plan_agent_cleanup(
                 action_identities.insert(member.identity.clone());
                 continue;
             }
-            if request.mode != CLEANUP_MODE_KILL_AND_DISMISS
-                || member.pid.is_none()
-            {
+            if request.mode != CLEANUP_MODE_KILL_AND_DISMISS {
+                continue;
+            }
+            if member.is_live_monitor {
+                if push_monitor_kill_item(&mut kill_items, member) {
+                    action_identities.insert(member.identity.clone());
+                }
+                continue;
+            }
+            if member.pid.is_none() {
                 continue;
             }
             let Some(kind) = classify_kill_kind(member) else {
@@ -771,10 +954,13 @@ pub fn plan_agent_cleanup(
                 kind: kind.to_string(),
                 pid: member.pid,
                 display_name: member.display_name.clone(),
+                monitor_id: None,
             });
             action_identities.insert(member.identity.clone());
         }
     }
+
+    sort_monitor_kills_first(&mut kill_items);
 
     counts.selected = selected.len() as u64;
     counts.kill = kill_items.len() as u64;
@@ -871,6 +1057,8 @@ mod tests {
             agent_family_parallel: false,
             appears_as_agent: false,
             step_type: None,
+            monitor_id: None,
+            is_live_monitor: false,
         }
     }
 
@@ -1688,5 +1876,253 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.side_effects.dismissed_index_additions.len(), 2);
+    }
+
+    fn live_monitor(
+        cl_name: &str,
+        raw_suffix: &str,
+        parent_timestamp: &str,
+        monitor_id: &str,
+        pid: Option<i64>,
+    ) -> AgentCleanupTargetWire {
+        let mut monitor =
+            target("run", cl_name, Some(raw_suffix), "MONITORING", pid);
+        monitor.parent_timestamp = Some(parent_timestamp.to_string());
+        monitor.monitor_id = Some(monitor_id.to_string());
+        monitor.is_live_monitor = true;
+        monitor.workspace = Some(15);
+        monitor
+    }
+
+    #[test]
+    fn rejects_previous_cleanup_wire_schema() {
+        let mut request =
+            req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.schema_version = 3;
+        let err = plan_agent_cleanup(&[], &request).unwrap_err();
+        assert!(err.contains("schema mismatch"));
+        assert!(err.contains("expected 4"));
+    }
+
+    #[test]
+    fn direct_live_monitor_selection_is_a_monitor_stop() {
+        let owner = target("run", "owner", Some("owner-ts"), "DONE", None);
+        let monitor = live_monitor(
+            "owner--mon",
+            "mon-ts",
+            "owner-ts",
+            "monid123456",
+            Some(1_665_545),
+        );
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![monitor.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[owner, monitor], &request).unwrap();
+
+        assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].kind, KILL_KIND_MONITOR);
+        assert_eq!(
+            plan.kill_items[0].monitor_id.as_deref(),
+            Some("monid123456")
+        );
+        assert_eq!(plan.kill_items[0].pid, None);
+        assert_eq!(plan.side_effects.monitor_stop_requests.len(), 1);
+        assert_eq!(
+            plan.side_effects.monitor_stop_requests[0].monitor_id,
+            "monid123456"
+        );
+        assert!(plan.side_effects.workspace_release_requests.is_empty());
+        assert_eq!(
+            plan.side_effects
+                .dismissed_index_additions
+                .iter()
+                .map(|identity| identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner--mon"]
+        );
+    }
+
+    #[test]
+    fn selected_owner_cascades_to_nested_live_monitor() {
+        let plan_root =
+            target("run", "sase-ru.6", Some("root-ts"), "DONE", None);
+        let mut family =
+            target("run", "sase-ru.6--1", Some("family-ts"), "DONE", None);
+        family.parent_timestamp = Some("root-ts".to_string());
+        let monitor = live_monitor(
+            "sase-ru.6--mon-1",
+            "mon-ts",
+            "family-ts",
+            "0fmbm91hgytw",
+            Some(99),
+        );
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![plan_root.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[plan_root, family, monitor], &request)
+            .unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| (
+                    item.identity.cl_name.as_str(),
+                    item.kind.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("sase-ru.6--mon-1", KILL_KIND_MONITOR)]
+        );
+        assert_eq!(
+            plan.dismiss_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-ru.6"]
+        );
+        assert_eq!(plan.side_effects.monitor_stop_requests.len(), 1);
+        assert!(plan
+            .side_effects
+            .workspace_release_requests
+            .iter()
+            .all(|intent| intent.identity.cl_name != "sase-ru.6--mon-1"));
+    }
+
+    #[test]
+    fn clan_scope_deduplicates_already_selected_live_monitor() {
+        let mut owner =
+            target("run", "clan.one", Some("owner-ts"), "DONE", None);
+        owner.agent_clan = Some("shipping".to_string());
+        owner.agent_clan_generation = Some("gen".to_string());
+        let mut monitor = live_monitor(
+            "clan.one--mon",
+            "mon-ts",
+            "owner-ts",
+            "monabc123456",
+            Some(7),
+        );
+        monitor.agent_clan = Some("shipping".to_string());
+        monitor.agent_clan_generation = Some("gen".to_string());
+        let mut request =
+            req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.clan_name = Some("shipping".to_string());
+        request.clan_generation = Some("gen".to_string());
+
+        let plan = plan_agent_cleanup(&[owner, monitor], &request).unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clan.one--mon"]
+        );
+        assert_eq!(plan.side_effects.monitor_stop_requests.len(), 1);
+    }
+
+    #[test]
+    fn custom_scope_owner_does_not_stop_unrelated_sibling_monitor() {
+        let owner = target("run", "lane.a", Some("a-ts"), "RUNNING", Some(1));
+        let sibling = target("run", "lane.b", Some("b-ts"), "RUNNING", Some(2));
+        let owned = live_monitor(
+            "lane.a--mon",
+            "a-mon-ts",
+            "a-ts",
+            "mona11111111",
+            Some(3),
+        );
+        let unrelated = live_monitor(
+            "lane.b--mon",
+            "b-mon-ts",
+            "b-ts",
+            "monb22222222",
+            Some(4),
+        );
+        let mut request = req(
+            CLEANUP_SCOPE_CUSTOM_SELECTION,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![owner.identity.clone()];
+
+        let plan =
+            plan_agent_cleanup(&[owner, sibling, owned, unrelated], &request)
+                .unwrap();
+
+        let killed: Vec<&str> = plan
+            .kill_items
+            .iter()
+            .map(|item| item.identity.cl_name.as_str())
+            .collect();
+        assert!(killed.contains(&"lane.a"));
+        assert!(killed.contains(&"lane.a--mon"));
+        assert!(!killed.contains(&"lane.b"));
+        assert!(!killed.contains(&"lane.b--mon"));
+        assert_eq!(
+            plan.side_effects
+                .monitor_stop_requests
+                .iter()
+                .map(|intent| intent.monitor_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mona11111111"]
+        );
+    }
+
+    #[test]
+    fn terminal_monitor_is_dismissed_not_stopped() {
+        let mut monitor =
+            target("run", "owner--mon", Some("mon-ts"), "DONE", None);
+        monitor.parent_timestamp = Some("owner-ts".to_string());
+        monitor.monitor_id = Some("monid123456".to_string());
+        monitor.is_live_monitor = false;
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![monitor.identity.clone()];
+
+        let plan = plan_agent_cleanup(std::slice::from_ref(&monitor), &request)
+            .unwrap();
+
+        assert!(plan.kill_items.is_empty());
+        assert_eq!(plan.dismiss_items.len(), 1);
+        assert!(plan.side_effects.monitor_stop_requests.is_empty());
+    }
+
+    #[test]
+    fn running_owner_kill_releases_owner_workspace_not_monitor_claim() {
+        let mut owner =
+            target("run", "owner", Some("owner-ts"), "RUNNING", Some(11));
+        owner.workspace = Some(4);
+        let monitor = live_monitor(
+            "owner--mon",
+            "mon-ts",
+            "owner-ts",
+            "monid123456",
+            Some(12),
+        );
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![owner.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[owner, monitor], &request).unwrap();
+
+        assert_eq!(plan.kill_items[0].kind, KILL_KIND_MONITOR);
+        assert_eq!(plan.kill_items[1].kind, KILL_KIND_RUNNING);
+        assert_eq!(
+            plan.side_effects
+                .workspace_release_requests
+                .iter()
+                .map(|intent| intent.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner"]
+        );
+        assert_eq!(plan.side_effects.monitor_stop_requests.len(), 1);
     }
 }

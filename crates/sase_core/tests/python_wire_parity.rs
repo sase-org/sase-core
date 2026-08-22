@@ -545,4 +545,6 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
     assert!(!legacy.agent_family_parallel);
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.agent_clan_generation.is_none());
+    assert!(legacy.monitor_id.is_none());
+    assert!(!legacy.is_live_monitor);
 }

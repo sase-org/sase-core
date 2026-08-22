@@ -113,6 +113,7 @@ pub use agent_cleanup::{
     AgentCleanupBundleSaveIntentWire, AgentCleanupBundleWriteResultWire,
     AgentCleanupCountsWire, AgentCleanupDismissItemWire,
     AgentCleanupIdentityWire, AgentCleanupKillItemWire,
+    AgentCleanupMonitorStopIntentWire,
     AgentCleanupNotificationDismissIntentWire, AgentCleanupPlanWire,
     AgentCleanupRequestWire, AgentCleanupSideEffectsWire,
     AgentCleanupSkippedItemWire, AgentCleanupTargetWire,
@@ -124,9 +125,9 @@ pub use agent_cleanup::{
     CLEANUP_SCOPE_FOCUSED_GROUP, CLEANUP_SCOPE_FOCUSED_PANEL,
     CLEANUP_SCOPE_TRIBE, CONFIRMATION_SEVERITY_DESTRUCTIVE,
     CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
-    KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_RUNNING, KILL_KIND_WORKFLOW,
-    SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE, SKIPPED_NOT_IN_SCOPE,
-    SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
+    KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_MONITOR, KILL_KIND_RUNNING,
+    KILL_KIND_WORKFLOW, SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE,
+    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 pub use agent_family::{

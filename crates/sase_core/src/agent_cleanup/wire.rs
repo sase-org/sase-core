@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 4;
 
 pub const CLEANUP_SCOPE_FOCUSED_PANEL: &str = "focused_panel";
 pub const CLEANUP_SCOPE_ALL_PANELS: &str = "all_panels";
@@ -30,6 +30,7 @@ pub const KILL_KIND_HOOK: &str = "hook";
 pub const KILL_KIND_MENTOR: &str = "mentor";
 pub const KILL_KIND_CRS: &str = "crs";
 pub const KILL_KIND_WORKFLOW: &str = "workflow";
+pub const KILL_KIND_MONITOR: &str = "monitor";
 
 pub const SKIPPED_NOT_IN_SCOPE: &str = "not_in_scope";
 pub const SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY: &str =
@@ -98,6 +99,10 @@ pub struct AgentCleanupTargetWire {
     pub appears_as_agent: bool,
     #[serde(default)]
     pub step_type: Option<String>,
+    #[serde(default)]
+    pub monitor_id: Option<String>,
+    #[serde(default)]
+    pub is_live_monitor: bool,
 }
 
 /// Scope and mode requested by the host.
@@ -129,6 +134,8 @@ pub struct AgentCleanupKillItemWire {
     pub pid: Option<i64>,
     #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub monitor_id: Option<String>,
 }
 
 /// One dismissal decision.
@@ -203,10 +210,20 @@ pub struct AgentCleanupNotificationDismissIntentWire {
     pub raw_suffix: Option<String>,
 }
 
+/// Canonical monitor stop. The host must resolve this monitor ID and call the
+/// monitor/proc stop path; the supervisor PID is never a process-group ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCleanupMonitorStopIntentWire {
+    pub identity: AgentCleanupIdentityWire,
+    pub monitor_id: String,
+}
+
 /// Deterministic side-effect plan. The host consumes these intents and keeps
 /// ownership of all process signalling, filesystem, and project-file writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCleanupSideEffectsWire {
+    #[serde(default)]
+    pub monitor_stop_requests: Vec<AgentCleanupMonitorStopIntentWire>,
     #[serde(default)]
     pub dismissed_index_additions: Vec<AgentCleanupIdentityWire>,
     #[serde(default)]
