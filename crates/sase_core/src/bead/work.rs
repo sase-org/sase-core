@@ -83,16 +83,16 @@ pub fn build_epic_work_plan_from_issues(
         .iter()
         .map(|phase| phase.id.clone())
         .collect();
+    if phase_children.is_empty() {
+        return Err(BeadError::validation(format!(
+            "Epic '{epic_id}' has no authored phase children"
+        )));
+    }
     let open_phases: Vec<&IssueWire> = phase_children
         .iter()
         .copied()
         .filter(|issue| issue.status != StatusWire::Closed)
         .collect();
-    if open_phases.is_empty() {
-        return Err(BeadError::validation(format!(
-            "Epic '{epic_id}' has no non-closed phase children"
-        )));
-    }
 
     let in_epic_phase_ids: BTreeSet<&str> = phase_children
         .iter()
@@ -395,6 +395,27 @@ mod tests {
     }
 
     #[test]
+    fn closed_only_plan_returns_land_only_work_plan() {
+        let mut epic = epic("e1");
+        epic.model = "codex/gpt-5.6-sol".to_string();
+        let mut p1 = phase("p1", "e1");
+        p1.status = StatusWire::Closed;
+        let mut p2 = phase("p2", "e1");
+        p2.status = StatusWire::Closed;
+
+        let plan =
+            build_epic_work_plan_from_issues(vec![epic, p1, p2], "e1").unwrap();
+
+        assert_eq!(plan.total_phase_count, 2);
+        assert_eq!(plan.phase_bead_ids, vec!["p1", "p2"]);
+        assert!(plan.waves.is_empty());
+        assert!(plan.land_waits_on.is_empty());
+        assert_eq!(plan.land_agent_name, "e1.land");
+        assert_eq!(plan.land_model, "codex/gpt-5.6-sol");
+        assert_eq!(plan.launch_tag_id, "e1");
+    }
+
+    #[test]
     fn claimed_phase_is_still_scheduled() {
         let mut claimed = phase("p1", "e1");
         claimed.status = StatusWire::Claimed;
@@ -595,6 +616,15 @@ mod tests {
                 "Phase 'p1' depends on missing blocker 'missing'; treating the dangling dependency as satisfied"
             ]
         );
+    }
+
+    #[test]
+    fn rejects_epic_with_no_phase_children() {
+        let err = build_epic_work_plan_from_issues(vec![epic("e1")], "e1")
+            .unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert_eq!(err.message, "Epic 'e1' has no authored phase children");
     }
 
     #[test]
