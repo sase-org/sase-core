@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(agent-cleanup)* classify live monitors as a dedicated kill kind with
+  typed monitor-stop intents, ownership cascade, and schema version 4
+
 ## [0.30.0](https://github.com/sase-org/sase-core/compare/v0.29.13...v0.30.0) - 2026-08-22
 
 ### Added
