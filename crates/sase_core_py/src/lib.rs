@@ -455,8 +455,11 @@ use sase_core::agent_launch::{
     agent_unit_dispatch_prompt as core_agent_unit_dispatch_prompt,
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
+    build_condition_context as core_build_condition_context,
+    classify_condition_status as core_classify_condition_status,
     decide_workspace_occupant_conflict as core_decide_workspace_occupant_conflict,
     dispatch_fingerprint as core_dispatch_fingerprint,
+    evaluate_launch_condition as core_evaluate_launch_condition,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     next_admission_actions as core_next_admission_actions,
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
@@ -465,13 +468,17 @@ use sase_core::agent_launch::{
     plan_typed_launch_units as core_plan_typed_launch_units,
     prepare_agent_launch as core_prepare_agent_launch,
     reconcile_admission_journal as core_reconcile_admission_journal,
+    sanitize_safe_inputs as core_sanitize_safe_inputs,
     summarize_admission as core_summarize_admission,
     wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
-    AgentLaunchRequestWire, AgentUnitWire, LaunchAdmissionJournalEntryWire,
-    LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire, LaunchPlanWire,
-    LaunchUnitPayloadWire, OccupancyCallerWire, OccupantRecordWire,
-    WaitTargetWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
-    LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
+    AgentLaunchRequestWire, AgentUnitWire, ConditionEvalRequestWire,
+    LaunchAdmissionJournalEntryWire, LaunchAdmissionUnitStateWire,
+    LaunchAdmissionWaitFactWire, LaunchPlanWire, LaunchUnitPayloadWire,
+    LaunchUnitWire, OccupancyCallerWire, OccupantRecordWire, WaitTargetWire,
+    WaitedOutcomeWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
+    CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
+    CONDITION_OUTPUT_CAP_BYTES, LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
 };
 use sase_core::agent_name_template::{
     agent_name_template_key as core_agent_name_template_key,
@@ -9430,6 +9437,126 @@ fn py_wait_target_key(target: &Bound<'_, PyAny>) -> PyResult<String> {
     Ok(core_wait_target_key(&target))
 }
 
+#[pyfunction]
+#[pyo3(name = "condition_eval_wire_schema_version")]
+fn py_condition_eval_wire_schema_version() -> u32 {
+    CONDITION_EVAL_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "condition_context_schema_version")]
+fn py_condition_context_schema_version() -> u32 {
+    CONDITION_CONTEXT_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "condition_default_timeout_seconds")]
+fn py_condition_default_timeout_seconds() -> f64 {
+    CONDITION_DEFAULT_TIMEOUT_SECONDS
+}
+
+#[pyfunction]
+#[pyo3(name = "condition_max_timeout_seconds")]
+fn py_condition_max_timeout_seconds() -> f64 {
+    CONDITION_MAX_TIMEOUT_SECONDS
+}
+
+#[pyfunction]
+#[pyo3(name = "condition_output_cap_bytes")]
+fn py_condition_output_cap_bytes() -> usize {
+    CONDITION_OUTPUT_CAP_BYTES
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_condition_status")]
+#[pyo3(signature = (exit_code=None, signal=None, timed_out=false, exec_error=false, cancelled=false))]
+fn py_classify_condition_status(
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    timed_out: bool,
+    exec_error: bool,
+    cancelled: bool,
+) -> &'static str {
+    core_classify_condition_status(
+        exit_code, signal, timed_out, exec_error, cancelled,
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "sanitize_condition_inputs")]
+fn py_sanitize_condition_inputs<'py>(
+    py: Python<'py>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let parsed = py_to_json_value(value)?;
+    let sanitized = core_sanitize_safe_inputs(&parsed);
+    let encoded = serde_json::to_value(sanitized).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &encoded)
+}
+
+#[pyfunction]
+#[pyo3(name = "build_condition_context")]
+#[pyo3(signature = (unit, waited, selected_project=None, safe_inputs=None, share_workspace=false))]
+fn py_build_condition_context<'py>(
+    py: Python<'py>,
+    unit: &Bound<'_, PyAny>,
+    waited: &Bound<'_, PyAny>,
+    selected_project: Option<&str>,
+    safe_inputs: Option<&Bound<'_, PyAny>>,
+    share_workspace: bool,
+) -> PyResult<PyObject> {
+    let unit: LaunchUnitWire = serde_json::from_value(py_to_json_value(unit)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid launch unit: {err}"))
+        })?;
+    let waited: Vec<WaitedOutcomeWire> =
+        serde_json::from_value(py_to_json_value(waited)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid waited outcomes: {err}"))
+        })?;
+    let inputs = match safe_inputs {
+        Some(value) => {
+            let parsed = py_to_json_value(value)?;
+            match parsed {
+                JsonValue::Object(map) => map.into_iter().collect(),
+                _ => BTreeMap::new(),
+            }
+        }
+        None => BTreeMap::new(),
+    };
+    let context = core_build_condition_context(
+        &unit,
+        selected_project,
+        inputs,
+        &waited,
+        share_workspace,
+    );
+    let encoded = serde_json::to_value(&context).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &encoded)
+}
+
+#[pyfunction]
+#[pyo3(name = "evaluate_launch_condition")]
+fn py_evaluate_launch_condition<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let request: ConditionEvalRequestWire =
+        serde_json::from_value(py_to_json_value(request)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid condition eval request: {err}"
+            ))
+        })?;
+    let result = core_evaluate_launch_condition(&request);
+    let encoded = serde_json::to_value(&result).map_err(|err| {
+        PyValueError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &encoded)
+}
+
 /// Return single-line inline-code ranges as UTF-8 byte offsets.
 #[pyfunction]
 #[pyo3(name = "inline_code_ranges")]
@@ -10605,6 +10732,18 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_dispatch_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_unit_dispatch_prompt, m)?)?;
     m.add_function(wrap_pyfunction!(py_wait_target_key, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_condition_eval_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_condition_context_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_condition_default_timeout_seconds, m)?)?;
+    m.add_function(wrap_pyfunction!(py_condition_max_timeout_seconds, m)?)?;
+    m.add_function(wrap_pyfunction!(py_condition_output_cap_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_condition_status, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sanitize_condition_inputs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_build_condition_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_launch_condition, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;

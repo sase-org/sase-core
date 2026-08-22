@@ -1,6 +1,7 @@
 //! Wire records and deterministic helpers for agent launch.
 
 mod admission;
+mod condition;
 
 pub use admission::{
     admission_unit_results, agent_unit_dispatch_prompt, dispatch_fingerprint,
@@ -10,6 +11,16 @@ pub use admission::{
     LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire,
     LaunchUnitPhaseWire, WaitedOutcomeWire,
     LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
+};
+pub use condition::{
+    build_condition_context, classify_condition_status, condition_command_argv,
+    condition_context_digest, evaluate_launch_condition, sanitize_safe_inputs,
+    sanitized_condition_env, ConditionCheckWire, ConditionContextWire,
+    ConditionEvalRequestWire, ConditionEvalResultWire,
+    ConditionLogicalUnitWire, ConditionWaitedOutcomeWire,
+    CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
+    CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
+    CONDITION_OUTPUT_CAP_BYTES,
 };
 
 use crate::effort::split_model_effort;

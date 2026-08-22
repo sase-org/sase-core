@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(xprompt)* internal `type: code` input (parsed, not advertised)
 - *(agent-launch)* durable launch-admission journal, dispatch fingerprints,
   wait-aware next-action planner, and per-unit result summary wires
+- *(agent-launch)* sandboxed `%if` condition evaluator with versioned
+  `SASE_CONDITION_CONTEXT`, private 0600 scripts, process-group timeout,
+  and exit 0/1/other classification
 
 ## [0.31.2](https://github.com/sase-org/sase-core/compare/v0.31.1...v0.31.2) - 2026-08-22
 
