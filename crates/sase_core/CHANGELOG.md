@@ -15,14 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.31.0](https://github.com/sase-org/sase-core/compare/v0.30.0...v0.31.0) - 2026-08-22
 
-### Added
+### Changed
 
-- *(agent-cleanup)* [**breaking**] add monitor cleanup side effects
-
-### Added
-
-- *(agent-cleanup)* classify live monitors as a dedicated kill kind with
-  typed monitor-stop intents, ownership cascade, and schema version 4
+- *(release)* metadata and crate-version follow-up; runtime code is unchanged
+  from 0.30.0
 
 ## [0.30.0](https://github.com/sase-org/sase-core/compare/v0.29.13...v0.30.0) - 2026-08-22
 
