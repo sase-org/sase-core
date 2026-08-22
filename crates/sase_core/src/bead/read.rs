@@ -8,8 +8,10 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::events::{
-    apply_event, merge_stream_events, reduce_event_streams,
-    validated_event_streams, BeadEventOperationWire, BeadEventStreamWire,
+    apply_event, artifact_link_row_from_provenance, merge_stream_events,
+    reduce_event_streams, reduce_event_streams_with_link_provenance,
+    validated_event_streams, ActiveLinkProvenance, BeadEventOperationWire,
+    BeadEventStreamWire, StoredLinkIdentity,
 };
 use super::jsonl::{
     event_manifest_path, event_store_present, event_streams_dir,
@@ -17,6 +19,9 @@ use super::jsonl::{
 };
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
+};
+use crate::artifact_link::{
+    ArtifactLinkRowWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
@@ -49,6 +54,12 @@ pub struct BeadIssueDetailWire {
     pub children: Vec<IssueWire>,
     pub depends_on: Vec<Option<IssueWire>>,
     pub blocks: Vec<IssueWire>,
+    /// Provenance-bearing neighborhood of bead-owned artifact links.
+    ///
+    /// Empty when the caller skipped the extra projection. This is not the
+    /// outbound `issue.links` storage projection used by list/search.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_links: Vec<ArtifactLinkRowWire>,
 }
 
 pub fn read_store_issues(
@@ -90,9 +101,40 @@ pub fn show_issue_detail(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<BeadIssueDetailWire, BeadError> {
-    let issues = read_store_issues(beads_dir)?;
-    let resolved_id = resolve_issue_id_in_issues(&issues, issue_id)?;
-    show_issue_detail_in_issues(&issues, &resolved_id)
+    show_issue_detail_with_options(beads_dir, issue_id, true)
+}
+
+/// Resolve one issue's detail graph, optionally projecting bead-owned links.
+///
+/// The event store is reduced only once. When `include_links` is false the
+/// extra neighborhood projection is skipped entirely.
+pub fn show_issue_detail_with_options(
+    beads_dir: &Path,
+    issue_id: &str,
+    include_links: bool,
+) -> Result<BeadIssueDetailWire, BeadError> {
+    if !beads_dir.is_dir() {
+        return Err(BeadError::io(format!(
+            "No beads directory found at {}",
+            beads_dir.display()
+        )));
+    }
+    if event_store_present(beads_dir) {
+        let (_manifest, streams) = read_event_store(beads_dir)?;
+        let (issues, provenance) = if include_links {
+            reduce_event_streams_with_link_provenance(&streams)?
+        } else {
+            (reduce_event_streams(&streams)?, BTreeMap::new())
+        };
+        return finish_issue_detail(
+            &issues,
+            issue_id,
+            include_links,
+            Some(&provenance),
+        );
+    }
+    let issues = read_legacy_jsonl_issues(beads_dir)?;
+    finish_issue_detail(&issues, issue_id, include_links, None)
 }
 
 pub fn resolve_issue_id(
@@ -710,7 +752,142 @@ fn show_issue_detail_in_issues(
         children,
         depends_on,
         blocks,
+        artifact_links: Vec::new(),
     })
+}
+
+fn finish_issue_detail(
+    issues: &[IssueWire],
+    issue_id: &str,
+    include_links: bool,
+    provenance: Option<&BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>>,
+) -> Result<BeadIssueDetailWire, BeadError> {
+    let resolved_id = resolve_issue_id_in_issues(issues, issue_id)?;
+    let mut detail = show_issue_detail_in_issues(issues, &resolved_id)?;
+    if include_links {
+        detail.artifact_links = match provenance {
+            Some(provenance) => {
+                neighborhood_from_provenance(issues, &resolved_id, provenance)
+            }
+            None => fallback_neighborhood_from_issues(issues, &resolved_id),
+        };
+    }
+    Ok(detail)
+}
+
+fn neighborhood_from_provenance(
+    issues: &[IssueWire],
+    issue_id: &str,
+    provenance: &BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>,
+) -> Vec<ArtifactLinkRowWire> {
+    let surviving: BTreeSet<&str> =
+        issues.iter().map(|issue| issue.id.as_str()).collect();
+    let mut rows: Vec<ArtifactLinkRowWire> = provenance
+        .values()
+        .filter(|link| surviving.contains(link.source_issue_id.as_str()))
+        .filter(|link| {
+            row_touches_bead(
+                &canonical_bead_ref(&link.source_issue_id),
+                &link.target_ref,
+                issue_id,
+                issues,
+            )
+        })
+        .map(artifact_link_row_from_provenance)
+        .collect();
+    sort_artifact_link_rows(&mut rows);
+    rows
+}
+
+fn fallback_neighborhood_from_issues(
+    issues: &[IssueWire],
+    issue_id: &str,
+) -> Vec<ArtifactLinkRowWire> {
+    let mut rows = Vec::new();
+    for issue in issues {
+        let source_ref = canonical_bead_ref(&issue.id);
+        for link in &issue.links {
+            if !row_touches_bead(
+                &source_ref,
+                &link.target_ref,
+                issue_id,
+                issues,
+            ) {
+                continue;
+            }
+            let created_by = if !issue.owner.is_empty() {
+                issue.owner.clone()
+            } else if !issue.created_by.is_empty() {
+                issue.created_by.clone()
+            } else {
+                "bead-store".to_string()
+            };
+            let created_at = if !issue.updated_at.is_empty() {
+                issue.updated_at.clone()
+            } else if !issue.created_at.is_empty() {
+                issue.created_at.clone()
+            } else {
+                "1970-01-01T00:00:00Z".to_string()
+            };
+            rows.push(ArtifactLinkRowWire {
+                schema_version: ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+                source_ref: source_ref.clone(),
+                relation: link.relation.clone(),
+                target_ref: link.target_ref.clone(),
+                description: link.description.clone(),
+                origin: link.origin,
+                created_by,
+                created_at,
+                uses: 1,
+            });
+        }
+    }
+    sort_artifact_link_rows(&mut rows);
+    rows
+}
+
+fn row_touches_bead(
+    source_ref: &str,
+    target_ref: &str,
+    issue_id: &str,
+    issues: &[IssueWire],
+) -> bool {
+    let canonical = canonical_bead_ref(issue_id);
+    if source_ref == canonical || target_ref == canonical {
+        return true;
+    }
+    for candidate in [source_ref, target_ref] {
+        let Some(raw_id) = candidate.strip_prefix("bead:") else {
+            continue;
+        };
+        if resolve_issue_id_in_issues(issues, raw_id).ok().as_deref()
+            == Some(issue_id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn canonical_bead_ref(issue_id: &str) -> String {
+    format!("bead:{issue_id}")
+}
+
+fn sort_artifact_link_rows(rows: &mut [ArtifactLinkRowWire]) {
+    rows.sort_by(|left, right| {
+        (
+            left.source_ref.as_str(),
+            left.relation.as_str(),
+            left.target_ref.as_str(),
+            left.created_at.as_str(),
+        )
+            .cmp(&(
+                right.source_ref.as_str(),
+                right.relation.as_str(),
+                right.target_ref.as_str(),
+                right.created_at.as_str(),
+            ))
+    });
 }
 
 fn issue_ancestors_in_issues(

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(bead)* return provenance-bearing artifact-link neighborhood rows from one
+  detail read, with an `include_links` fast path that skips the extra
+  projection
+
 ## [0.29.12](https://github.com/sase-org/sase-core/compare/v0.29.11...v0.29.12) - 2026-08-22
 
 ### Added

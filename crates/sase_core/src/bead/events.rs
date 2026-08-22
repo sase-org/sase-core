@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::artifact_link::{
     canonicalize_artifact_link_ref, lookup_artifact_relation,
-    validate_artifact_link_description, ArtifactLinkOriginWire, BeadLinkWire,
+    validate_artifact_link_description, ArtifactLinkOriginWire,
+    ArtifactLinkRowWire, BeadLinkWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use crate::serde_option::deserialize_present_option;
 
@@ -590,11 +591,63 @@ pub fn import_issues_to_event_streams(
 pub fn reduce_event_streams(
     streams: &[BeadEventStreamWire],
 ) -> Result<Vec<IssueWire>, BeadError> {
+    Ok(reduce_event_streams_inner(streams, false)?.0)
+}
+
+/// Identity of one stored bead-owned link, keyed as the owning event stream
+/// recorded it (source issue, relation, canonical target).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct StoredLinkIdentity {
+    pub source_issue_id: String,
+    pub relation: String,
+    pub target_ref: String,
+}
+
+/// Winning `LinkAdded` provenance for one currently active stored link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ActiveLinkProvenance {
+    pub source_issue_id: String,
+    pub target_ref: String,
+    pub relation: String,
+    pub description: String,
+    pub origin: ArtifactLinkOriginWire,
+    pub actor: String,
+    pub timestamp: String,
+}
+
+/// Reduce streams once, optionally collecting exact `LinkAdded` provenance.
+pub(super) fn reduce_event_streams_with_link_provenance(
+    streams: &[BeadEventStreamWire],
+) -> Result<
+    (
+        Vec<IssueWire>,
+        BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>,
+    ),
+    BeadError,
+> {
+    reduce_event_streams_inner(streams, true)
+}
+
+fn reduce_event_streams_inner(
+    streams: &[BeadEventStreamWire],
+    collect_links: bool,
+) -> Result<
+    (
+        Vec<IssueWire>,
+        BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>,
+    ),
+    BeadError,
+> {
     let mut issues: BTreeMap<String, IssueWire> = BTreeMap::new();
+    let mut provenance: BTreeMap<StoredLinkIdentity, ActiveLinkProvenance> =
+        BTreeMap::new();
     let streams = validated_event_streams(streams)?;
 
     for event in merge_stream_events(&streams) {
         apply_event(&mut issues, event)?;
+        if collect_links {
+            apply_link_provenance(&mut provenance, event)?;
+        }
     }
 
     let mut reduced: Vec<IssueWire> = issues.into_values().collect();
@@ -604,7 +657,86 @@ pub fn reduce_event_streams(
     }
     let reduced = collapse_duplicate_external_refs(reduced);
     validate_unique_external_refs(&reduced)?;
-    Ok(reduced)
+    Ok((reduced, provenance))
+}
+
+fn apply_link_provenance(
+    provenance: &mut BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>,
+    event: &BeadEventRecordWire,
+) -> Result<(), BeadError> {
+    match &event.payload {
+        BeadEventPayloadWire::LinkAdded {
+            target_ref,
+            relation,
+            description,
+            origin,
+        } => {
+            let target_ref = canonicalize_artifact_link_ref(target_ref)
+                .map_err(link_error)?;
+            let identity = StoredLinkIdentity {
+                source_issue_id: event.issue_id.clone(),
+                relation: relation.clone(),
+                target_ref: target_ref.clone(),
+            };
+            provenance.insert(
+                identity,
+                ActiveLinkProvenance {
+                    source_issue_id: event.issue_id.clone(),
+                    target_ref,
+                    relation: relation.clone(),
+                    description: description.clone(),
+                    origin: *origin,
+                    actor: event.actor.clone(),
+                    timestamp: event.timestamp.clone(),
+                },
+            );
+        }
+        BeadEventPayloadWire::LinkRemoved {
+            target_ref,
+            relation,
+        } => {
+            if let Ok(target_ref) = canonicalize_artifact_link_ref(target_ref) {
+                provenance.remove(&StoredLinkIdentity {
+                    source_issue_id: event.issue_id.clone(),
+                    relation: relation.clone(),
+                    target_ref,
+                });
+            }
+        }
+        BeadEventPayloadWire::IssueRemoved {
+            cascade_removed_issue_ids,
+        } => {
+            let mut removed: BTreeSet<String> =
+                cascade_removed_issue_ids.iter().cloned().collect();
+            removed.insert(event.issue_id.clone());
+            let removed_refs: BTreeSet<String> = removed
+                .iter()
+                .map(|id| canonical_bead_source_ref(id))
+                .collect();
+            provenance.retain(|_, link| {
+                !removed.contains(&link.source_issue_id)
+                    && !removed_refs.contains(&link.target_ref)
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn artifact_link_row_from_provenance(
+    link: &ActiveLinkProvenance,
+) -> ArtifactLinkRowWire {
+    ArtifactLinkRowWire {
+        schema_version: ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+        source_ref: canonical_bead_source_ref(&link.source_issue_id),
+        relation: link.relation.clone(),
+        target_ref: link.target_ref.clone(),
+        description: link.description.clone(),
+        origin: link.origin,
+        created_by: link.actor.clone(),
+        created_at: link.timestamp.clone(),
+        uses: 1,
+    }
 }
 
 /// Collapse independently created issues that share one non-empty
@@ -2266,6 +2398,81 @@ mod tests {
             .unwrap_err()
             .message
             .contains("sase bead dep"));
+    }
+
+    #[test]
+    fn link_added_provenance_tracks_rewrite_removal_and_readd() {
+        let issue = issue_with_refs(Vec::new());
+        let mut streams =
+            import_issues_to_event_streams(std::slice::from_ref(&issue))
+                .unwrap();
+
+        let mut added = link_event(
+            "add",
+            BeadEventOperationWire::LinkAdded,
+            "plan:202608/a.md",
+            "implements",
+            "first why",
+        );
+        added.timestamp = "2026-01-02T00:00:00Z".to_string();
+        added.actor = "alice".to_string();
+        streams[0].events.push(added);
+
+        let (issues, provenance) =
+            reduce_event_streams_with_link_provenance(&streams).unwrap();
+        assert_eq!(issues[0].links.len(), 1);
+        assert_eq!(provenance.len(), 1);
+        let row = provenance.values().next().unwrap();
+        assert_eq!(row.actor, "alice");
+        assert_eq!(row.timestamp, "2026-01-02T00:00:00Z");
+        assert_eq!(row.description, "first why");
+
+        let mut rewrite = link_event(
+            "rewrite",
+            BeadEventOperationWire::LinkAdded,
+            "plan:202608/a.md",
+            "implements",
+            "second why",
+        );
+        rewrite.timestamp = "2026-01-03T00:00:00Z".to_string();
+        rewrite.actor = "bob".to_string();
+        streams[0].events.push(rewrite);
+
+        let (_issues, provenance) =
+            reduce_event_streams_with_link_provenance(&streams).unwrap();
+        assert_eq!(provenance.len(), 1);
+        let row = provenance.values().next().unwrap();
+        assert_eq!(row.actor, "bob");
+        assert_eq!(row.timestamp, "2026-01-03T00:00:00Z");
+        assert_eq!(row.description, "second why");
+
+        streams[0].events.push(link_event(
+            "remove",
+            BeadEventOperationWire::LinkRemoved,
+            "plan:202608/a.md",
+            "implements",
+            "",
+        ));
+        let (_issues, provenance) =
+            reduce_event_streams_with_link_provenance(&streams).unwrap();
+        assert!(provenance.is_empty());
+
+        let mut readd = link_event(
+            "readd",
+            BeadEventOperationWire::LinkAdded,
+            "plan:202608/a.md",
+            "implements",
+            "third why",
+        );
+        readd.timestamp = "2026-01-04T00:00:00Z".to_string();
+        readd.actor = "carol".to_string();
+        streams[0].events.push(readd);
+        let (_issues, provenance) =
+            reduce_event_streams_with_link_provenance(&streams).unwrap();
+        let row = provenance.values().next().unwrap();
+        assert_eq!(row.actor, "carol");
+        assert_eq!(row.timestamp, "2026-01-04T00:00:00Z");
+        assert_eq!(row.description, "third why");
     }
 
     fn created_stream(issue: &IssueWire) -> BeadEventStreamWire {

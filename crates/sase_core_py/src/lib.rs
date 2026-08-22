@@ -678,7 +678,7 @@ use sase_core::bead::{
     resolve_issue_id as core_bead_resolve_issue_id,
     search_issues as core_bead_search_issues,
     show_issue as core_bead_show_issue,
-    show_issue_detail as core_bead_show_issue_detail,
+    show_issue_detail_with_options as core_bead_show_issue_detail,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
     snooze_task as core_bead_snooze_task,
     snoozed_status_migration_sql as core_bead_snoozed_status_migration_sql,
@@ -3724,15 +3724,19 @@ fn py_bead_show<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_show_issue_detail")]
+#[pyo3(signature = (beads_dir, issue_id, include_links=true))]
 fn py_bead_show_issue_detail<'py>(
     py: Python<'py>,
     beads_dir: &str,
     issue_id: &str,
+    include_links: bool,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     bead_result_to_py(
         py,
-        py.allow_threads(|| core_bead_show_issue_detail(&beads_dir, issue_id)),
+        py.allow_threads(|| {
+            core_bead_show_issue_detail(&beads_dir, issue_id, include_links)
+        }),
     )
 }
 

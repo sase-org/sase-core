@@ -62,8 +62,9 @@ pub use read::{
     list_issues, read_event_store_issues, read_legacy_jsonl_issues,
     read_store_issues, ready_issues, reference_diagnostics, resolve_issue_id,
     resolve_issue_id_in_issues, resolve_issue_ids, show_issue,
-    show_issue_detail, stats, BeadDoctorReportWire, BeadIssueDetailWire,
-    BeadProjectionDriftWire, BEAD_READ_WIRE_SCHEMA_VERSION,
+    show_issue_detail, show_issue_detail_with_options, stats,
+    BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
+    BEAD_READ_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, drop_flag_type_migration_sql,

@@ -4,13 +4,17 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sase_core::bead::BeadResolutionWire;
 use sase_core::{
-    bead_blocked_issues, bead_doctor, bead_doctor_report,
-    bead_doctor_with_plan_roots, bead_get_epic_children, bead_list_issues,
-    bead_ready_issues, bead_show_issue, bead_show_issue_detail, bead_stats,
-    import_issues_from_jsonl, import_issues_to_event_streams,
-    repair_event_store_manifest, BeadEventManifestRepairStatusWire,
-    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
-    BeadEventStoreManifestWire, BeadEventStreamWire, BEAD_EVENT_SCHEMA_VERSION,
+    add_bead_link, bead_blocked_issues, bead_create_issue, bead_doctor,
+    bead_doctor_report, bead_doctor_with_plan_roots, bead_get_epic_children,
+    bead_init_store, bead_list_issues, bead_ready_issues, bead_show_issue,
+    bead_show_issue_detail, bead_show_issue_detail_with_options, bead_stats,
+    bead_update_issue, import_issues_from_jsonl,
+    import_issues_to_event_streams, remove_bead_link,
+    repair_event_store_manifest, ArtifactLinkOriginWire, BeadCreateRequestWire,
+    BeadEventManifestRepairStatusWire, BeadEventOperationWire,
+    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
+    BeadEventStreamWire, BeadUpdateFieldsWire, IssueTypeWire,
+    BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -620,6 +624,262 @@ fn doctor_notes_explicitly_unavailable_plan_roots() {
         vec![
             "NOTE: bead design reference validation skipped: plan roots unavailable"
         ]
+    );
+}
+
+#[test]
+fn issue_detail_link_neighborhood_preserves_event_provenance() {
+    let temp = tempdir().unwrap();
+    bead_init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let left = bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Left".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    let right = bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Right".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    add_bead_link(
+        &beads_dir,
+        &left.id,
+        "plan:202608/example.md",
+        "implements",
+        "lands the approved CLI design",
+        ArtifactLinkOriginWire::Manual,
+        Some("2026-08-22T14:10:00Z".to_string()),
+    )
+    .unwrap();
+    add_bead_link(
+        &beads_dir,
+        &right.id,
+        &format!("bead:{}", left.id),
+        "implements",
+        "right implements left",
+        ArtifactLinkOriginWire::Manual,
+        Some("2026-08-22T14:11:00Z".to_string()),
+    )
+    .unwrap();
+    add_bead_link(
+        &beads_dir,
+        &left.id,
+        &format!("bead:{}", right.id),
+        "related",
+        "shares the same rendering contract",
+        ArtifactLinkOriginWire::Migrated,
+        Some("2026-08-20T09:00:00Z".to_string()),
+    )
+    .unwrap();
+    add_bead_link(
+        &beads_dir,
+        &right.id,
+        &format!("bead:{}", left.id),
+        "cites",
+        "prompt citation of the left bead",
+        ArtifactLinkOriginWire::PromptRef,
+        Some("2026-08-22T15:00:00Z".to_string()),
+    )
+    .unwrap();
+
+    bead_update_issue(
+        &beads_dir,
+        &left.id,
+        BeadUpdateFieldsWire {
+            title: Some("Left updated".to_string()),
+            now: Some("2026-08-23T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let suffix = left.id.rsplit_once('-').unwrap().1;
+    let detail =
+        bead_show_issue_detail_with_options(&beads_dir, suffix, true).unwrap();
+    assert_eq!(detail.issue.id, left.id);
+    assert_eq!(detail.issue.title, "Left updated");
+    assert_eq!(detail.issue.updated_at, "2026-08-23T00:00:00Z");
+    assert_eq!(detail.artifact_links.len(), 4);
+
+    let implements = detail
+        .artifact_links
+        .iter()
+        .find(|row| {
+            row.relation == "implements"
+                && row.source_ref == format!("bead:{}", left.id)
+        })
+        .unwrap();
+    assert_eq!(implements.target_ref, "plan:202608/example.md");
+    assert_eq!(implements.created_at, "2026-08-22T14:10:00Z");
+    assert_eq!(implements.created_by, "owner@example.com");
+    assert_eq!(implements.origin, ArtifactLinkOriginWire::Manual);
+    assert_ne!(implements.created_at, detail.issue.updated_at);
+
+    let incoming = detail
+        .artifact_links
+        .iter()
+        .find(|row| {
+            row.relation == "implements"
+                && row.source_ref == format!("bead:{}", right.id)
+        })
+        .unwrap();
+    assert_eq!(incoming.target_ref, format!("bead:{}", left.id));
+    assert_eq!(incoming.created_at, "2026-08-22T14:11:00Z");
+
+    let related = detail
+        .artifact_links
+        .iter()
+        .find(|row| row.relation == "related")
+        .unwrap();
+    assert_eq!(related.origin, ArtifactLinkOriginWire::Migrated);
+    assert_eq!(related.created_at, "2026-08-20T09:00:00Z");
+
+    let cites = detail
+        .artifact_links
+        .iter()
+        .find(|row| row.relation == "cites")
+        .unwrap();
+    assert_eq!(cites.origin, ArtifactLinkOriginWire::PromptRef);
+    assert_eq!(cites.created_at, "2026-08-22T15:00:00Z");
+
+    let keys: Vec<(String, String, String, String)> = detail
+        .artifact_links
+        .iter()
+        .map(|row| {
+            (
+                row.source_ref.clone(),
+                row.relation.clone(),
+                row.target_ref.clone(),
+                row.created_at.clone(),
+            )
+        })
+        .collect();
+    let mut expected = keys.clone();
+    expected.sort();
+    assert_eq!(keys, expected);
+
+    add_bead_link(
+        &beads_dir,
+        &left.id,
+        "plan:202608/example.md",
+        "implements",
+        "rewritten why",
+        ArtifactLinkOriginWire::Manual,
+        Some("2026-08-24T12:00:00Z".to_string()),
+    )
+    .unwrap();
+    let rewritten =
+        bead_show_issue_detail_with_options(&beads_dir, &left.id, true)
+            .unwrap();
+    let implements = rewritten
+        .artifact_links
+        .iter()
+        .find(|row| {
+            row.relation == "implements"
+                && row.source_ref == format!("bead:{}", left.id)
+        })
+        .unwrap();
+    assert_eq!(implements.description, "rewritten why");
+    assert_eq!(implements.created_at, "2026-08-24T12:00:00Z");
+
+    remove_bead_link(
+        &beads_dir,
+        &left.id,
+        &format!("bead:{}", right.id),
+        Some("related"),
+        Some("2026-08-24T13:00:00Z".to_string()),
+    )
+    .unwrap();
+    let after_remove =
+        bead_show_issue_detail_with_options(&beads_dir, &left.id, true)
+            .unwrap();
+    assert!(!after_remove
+        .artifact_links
+        .iter()
+        .any(|row| row.relation == "related"));
+
+    add_bead_link(
+        &beads_dir,
+        &left.id,
+        &format!("bead:{}", right.id),
+        "related",
+        "re-added related",
+        ArtifactLinkOriginWire::Manual,
+        Some("2026-08-24T14:00:00Z".to_string()),
+    )
+    .unwrap();
+    let after_readd =
+        bead_show_issue_detail_with_options(&beads_dir, &left.id, true)
+            .unwrap();
+    let related = after_readd
+        .artifact_links
+        .iter()
+        .find(|row| row.relation == "related")
+        .unwrap();
+    assert_eq!(related.created_at, "2026-08-24T14:00:00Z");
+    assert_eq!(related.description, "re-added related");
+
+    let disabled =
+        bead_show_issue_detail_with_options(&beads_dir, &left.id, false)
+            .unwrap();
+    assert!(disabled.artifact_links.is_empty());
+    assert!(!disabled.issue.links.is_empty());
+}
+
+#[test]
+fn issue_detail_legacy_snapshot_keeps_import_compatible_fallback() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+    let mut payload: serde_json::Value = serde_json::from_str(&issue(
+        "beads-1",
+        "Legacy linked",
+        "plan",
+        None,
+        "open",
+        "2026-01-01T00:00:00Z",
+        "",
+    ))
+    .unwrap();
+    payload["updated_at"] = serde_json::json!("2026-01-02T00:00:00Z");
+    payload["created_by"] = serde_json::json!("owner@example.com");
+    payload["links"] = serde_json::json!([{
+        "target_ref": "plan:202608/a.md",
+        "relation": "implements",
+        "description": "lands the design",
+        "origin": "manual"
+    }]);
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        serde_json::to_string(&payload).unwrap() + "\n",
+    )
+    .unwrap();
+
+    let detail = bead_show_issue_detail(&beads_dir, "beads-1").unwrap();
+    assert_eq!(detail.artifact_links.len(), 1);
+    assert_eq!(detail.artifact_links[0].source_ref, "bead:beads-1");
+    assert_eq!(detail.artifact_links[0].target_ref, "plan:202608/a.md");
+    assert_eq!(detail.artifact_links[0].created_at, "2026-01-02T00:00:00Z");
+    assert_eq!(detail.artifact_links[0].created_by, "owner@example.com");
+    assert_eq!(
+        detail.artifact_links[0].origin,
+        ArtifactLinkOriginWire::Manual
     );
 }
 

@@ -403,6 +403,7 @@ pub use bead::{
     repair_event_store_manifest, save_config,
     search_issues as bead_search_issues, show_issue as bead_show_issue,
     show_issue_detail as bead_show_issue_detail,
+    show_issue_detail_with_options as bead_show_issue_detail_with_options,
     size_check_relax_migration_sql, size_migration_sql,
     snooze_task as bead_snooze_task, snoozed_status_migration_sql,
     stats as bead_stats, sync_is_clean as bead_sync_is_clean,
