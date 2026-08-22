@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- bind `fenced_block_ranges`, `fenced_block_details`,
+  `scan_directive_owned_fences`, and `code_value_wire_schema_version`
+
 ## [0.29.13](https://github.com/sase-org/sase-core/compare/v0.29.12...v0.29.13) - 2026-08-22
 
 ### Added

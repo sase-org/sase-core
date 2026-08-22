@@ -40,6 +40,7 @@ pub mod effort;
 pub mod effort_override;
 pub mod external_pr;
 pub mod feature_flag_state;
+pub mod fenced_code;
 pub mod finalizer;
 pub mod git_query;
 pub mod glossary;
@@ -484,6 +485,7 @@ pub use editor::{
     build_bead_completion_candidates as editor_build_bead_completion_candidates,
     build_directive_clause_candidates as editor_build_directive_clause_candidates,
     build_directive_completion_candidates as editor_build_directive_completion_candidates,
+    build_directive_completion_candidates_with_flags as editor_build_directive_completion_candidates_with_flags,
     build_directive_keyword_candidates as editor_build_directive_keyword_candidates,
     build_file_completion_candidates as editor_build_file_completion_candidates,
     build_file_completion_candidates_with_base as editor_build_file_completion_candidates_with_base,
@@ -515,6 +517,7 @@ pub use editor::{
     directive_argument_candidates as editor_directive_argument_candidates,
     directive_contract as editor_directive_contract,
     directive_is_hidden_from_name_completion as editor_directive_is_hidden_from_name_completion,
+    directive_is_hidden_from_name_completion_with_flags as editor_directive_is_hidden_from_name_completion_with_flags,
     directive_metadata as editor_directive_metadata,
     extract_placeholder_spans as editor_extract_placeholder_spans,
     extract_token_at_position as editor_extract_token_at_position,
@@ -543,22 +546,23 @@ pub use editor::{
     AtReferencePayloadRowWire, AtReferenceRowWire, AtReferenceStage,
     BeadCompletionEntry, CompletionCandidate, CompletionContext,
     CompletionContextKind, CompletionList, DefinitionTarget,
-    DiagnosticSeverity, DirectiveClauseContext, DirectiveClauseKind,
-    DirectiveCompletionInventories, DirectiveContractEntry,
-    DirectiveFinalizerEntry, DirectiveMetadata, DirectiveModelAliasKey,
-    DirectiveModelEntry, DirectiveSyntaxForm, DirectiveValueRole,
-    DocumentSnapshot, EditorDiagnostic, EditorPosition, EditorRange,
-    EditorTextEdit, FinalizerCatalogRequest, FinalizerCatalogResponse,
-    FrontmatterFieldKind, FrontmatterFieldSchema, FrontmatterInputType,
-    FuzzyMatch, HoverPayload, PlaceholderCandidate, PlaceholderCandidateSource,
-    PlaceholderCompletion, PlaceholderContext, PlaceholderSpan,
-    RawPlaceholderField, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRefTrigger, VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
-    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
-    AGENT_CATALOG_SCHEMA_VERSION, AT_REFERENCE_MAX_GROUP_ROWS,
-    BEAD_COMPLETION_LIMIT, DIRECTIVES as EDITOR_DIRECTIVES,
-    EDITOR_WIRE_SCHEMA_VERSION, FINALIZER_CATALOG_SCHEMA_VERSION,
-    PLACEHOLDER_MAX_INNER_CHARS, VCS_REPO_CATALOG_SCHEMA_VERSION,
+    DiagnosticSeverity, DirectiveBodyKind, DirectiveClauseContext,
+    DirectiveClauseKind, DirectiveCompletionInventories,
+    DirectiveContractEntry, DirectiveFinalizerEntry, DirectiveMetadata,
+    DirectiveModelAliasKey, DirectiveModelEntry, DirectiveSyntaxForm,
+    DirectiveValueRole, DocumentSnapshot, EditorDiagnostic, EditorPosition,
+    EditorRange, EditorTextEdit, FinalizerCatalogRequest,
+    FinalizerCatalogResponse, FrontmatterFieldKind, FrontmatterFieldSchema,
+    FrontmatterInputType, FuzzyMatch, HoverPayload, PlaceholderCandidate,
+    PlaceholderCandidateSource, PlaceholderCompletion, PlaceholderContext,
+    PlaceholderSpan, RawPlaceholderField, TokenInfo, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
+    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
+    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION,
+    AT_REFERENCE_MAX_GROUP_ROWS, BEAD_COMPLETION_LIMIT,
+    DIRECTIVES as EDITOR_DIRECTIVES, EDITOR_WIRE_SCHEMA_VERSION,
+    FINALIZER_CATALOG_SCHEMA_VERSION, PLACEHOLDER_MAX_INNER_CHARS,
+    VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{
     is_valid_effort, resolve_effective_effort, split_model_effort,
@@ -583,6 +587,14 @@ pub use feature_flag_state::{
     FeatureFlagStateSetOutcomeWire, FeatureFlagStateSnapshotWire,
     FEATURE_FLAG_STATE_FILENAME, FEATURE_FLAG_STATE_MAX_BYTES,
     FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
+};
+pub use fenced_code::{
+    fenced_block_details, fenced_block_details_wire, fenced_block_ranges,
+    language_from_info_string, scan_directive_owned_fences,
+    typed_launch_units_flag_key, CodeDirectiveDiagnosticWire,
+    CodeDirectiveScanWire, CodeDirectiveSpanWire, CodeLanguage, CodeValue,
+    CodeValueWire, FencedBlock, FencedBlockWire,
+    CODE_VALUE_WIRE_SCHEMA_VERSION,
 };
 pub use finalizer::{
     aggregate_finalizer_outcomes, authenticate_finalizer_plan,

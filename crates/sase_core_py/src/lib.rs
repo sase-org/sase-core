@@ -135,6 +135,10 @@
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
+//! - `fenced_block_ranges(text: str) -> list[tuple[int, int]]`
+//! - `fenced_block_details(text: str) -> list[dict]`
+//! - `scan_directive_owned_fences(text: str) -> dict`
+//! - `code_value_wire_schema_version() -> int`
 //! - `resolve_agent_family_parent(request: dict) -> dict`
 //! - `resolve_clan_summary(request: dict) -> dict`
 //! - `resolve_clan_tribe(request: dict) -> dict`
@@ -248,6 +252,7 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `directive_contract() -> list[dict]`
+//! - `code_value_wire_schema_version() -> int`
 //! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
 //! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", now: str | None = None) -> dict`
@@ -743,6 +748,8 @@ use sase_core::feature_flag_state::{
     feature_flag_state_set as core_feature_flag_state_set,
     FeatureFlagStateError as FeatureFlagStateDomainError,
 };
+use sase_core::fenced_block_details_wire as core_fenced_block_details_wire;
+use sase_core::fenced_block_ranges as core_fenced_block_ranges;
 use sase_core::finalizer::{
     aggregate_finalizer_outcomes as core_aggregate_finalizer_outcomes,
     authenticate_finalizer_plan as core_authenticate_finalizer_plan,
@@ -897,6 +904,7 @@ use sase_core::runner_limit_override::{
     set_runner_limit_override_until as core_set_runner_limit_override_until,
     RunnerLimitOverrideError as RunnerLimitOverrideDomainError,
 };
+use sase_core::scan_directive_owned_fences as core_scan_directive_owned_fences;
 use sase_core::snippet_session::{
     apply_session_event as core_apply_snippet_session_event,
     SnippetSessionEvent, SnippetSessionState,
@@ -938,6 +946,7 @@ use sase_core::vcs_log::{
 };
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
+use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
     filter_model_completion_entries as core_filter_model_completion_entries,
@@ -9262,6 +9271,48 @@ fn py_inline_code_ranges(
     core_inline_code_ranges(text, masked_ranges.as_deref().unwrap_or(&[]))
 }
 
+/// Return fenced-block byte ranges as `(start, end)` tuples.
+#[pyfunction]
+#[pyo3(name = "fenced_block_ranges")]
+fn py_fenced_block_ranges(text: &str) -> Vec<(usize, usize)> {
+    core_fenced_block_ranges(text)
+}
+
+/// Return structured fenced-block details as JSON-shaped dicts.
+#[pyfunction]
+#[pyo3(name = "fenced_block_details")]
+fn py_fenced_block_details<'py>(
+    py: Python<'py>,
+    text: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_fenced_block_details_wire(text))
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Scan `%if::` / `%proc::` directive-owned fences into a versioned wire.
+#[pyfunction]
+#[pyo3(name = "scan_directive_owned_fences")]
+fn py_scan_directive_owned_fences<'py>(
+    py: Python<'py>,
+    text: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_scan_directive_owned_fences(text))
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Wire schema version for `CodeValue` and directive-owned fence scans.
+#[pyfunction]
+#[pyo3(name = "code_value_wire_schema_version")]
+fn py_code_value_wire_schema_version() -> u32 {
+    CODE_VALUE_WIRE_SCHEMA_VERSION
+}
+
 /// Return parsed RUNNING workspace claims from project-file content.
 #[pyfunction]
 #[pyo3(name = "list_workspace_claims_from_content")]
@@ -10373,6 +10424,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;
+    m.add_function(wrap_pyfunction!(py_scan_directive_owned_fences, m)?)?;
+    m.add_function(wrap_pyfunction!(py_code_value_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_tribe, m)?)?;
@@ -16985,6 +17040,8 @@ MENTORS:
                     "id",
                     "clan",
                     "wait",
+                    "if",
+                    "proc",
                     "auto",
                     "hide",
                     "repeat",

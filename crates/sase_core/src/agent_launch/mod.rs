@@ -1,6 +1,7 @@
 //! Wire records and deterministic helpers for agent launch.
 
 use crate::effort::split_model_effort;
+use crate::fenced_code::fenced_block_ranges;
 use crate::prompt_literals::inline_code_ranges;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
@@ -1468,36 +1469,6 @@ fn cartesian_product<T: Clone>(
         cartesian_product(lists, idx + 1, current, out);
         current.pop();
     }
-}
-
-fn fenced_block_ranges(text: &str) -> Vec<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut ranges = Vec::new();
-    let mut i = 0;
-    while i + 2 < bytes.len() {
-        if bytes[i] != b'`' {
-            i += 1;
-            continue;
-        }
-        let mut tick_count = 1;
-        while i + tick_count < bytes.len() && bytes[i + tick_count] == b'`' {
-            tick_count += 1;
-        }
-        if tick_count < 3 {
-            i += tick_count;
-            continue;
-        }
-        let fence = "`".repeat(tick_count);
-        let search_start = i + tick_count;
-        if let Some(rel_end) = text[search_start..].find(&fence) {
-            let end = search_start + rel_end + tick_count;
-            ranges.push((i, end));
-            i = end;
-        } else {
-            break;
-        }
-    }
-    ranges
 }
 
 fn disabled_region_ranges(text: &str) -> Vec<(usize, usize)> {

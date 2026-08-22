@@ -30,7 +30,7 @@ use sase_core::{
     editor_build_artifact_ref_payload_inventory,
     editor_build_at_reference_menu_with_options,
     editor_build_directive_clause_candidates,
-    editor_build_directive_completion_candidates,
+    editor_build_directive_completion_candidates_with_flags,
     editor_build_file_completion_candidates_with_base,
     editor_build_file_history_completion_candidates,
     editor_build_placeholder_completion_candidates,
@@ -43,11 +43,11 @@ use sase_core::{
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
-    editor_directive_is_hidden_from_name_completion, editor_directive_metadata,
-    editor_extract_token_at_position, editor_hover_at_position,
-    filter_model_completion_candidates, ArtifactRefContextWire,
-    AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
-    AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    editor_directive_is_hidden_from_name_completion_with_flags,
+    editor_directive_metadata, editor_extract_token_at_position,
+    editor_hover_at_position, filter_model_completion_candidates,
+    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
+    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories,
@@ -90,6 +90,7 @@ const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
+const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -114,6 +115,8 @@ struct ServerConfig {
     /// catalogs are cached briefly and invalidated by file signature, explicit
     /// refresh, or watched project config changes.
     glossary_catalog: Option<PathBuf>,
+    /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
+    typed_launch_units: bool,
 }
 
 impl Default for ServerConfig {
@@ -128,6 +131,7 @@ impl Default for ServerConfig {
             model_catalog: model_catalog_path(),
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
+            typed_launch_units: typed_launch_units_from_env(),
         }
     }
 }
@@ -437,6 +441,7 @@ impl XpromptLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
+                    &enabled_feature_flags(config.typed_launch_units),
                 ));
             }
         }
@@ -656,7 +661,12 @@ impl XpromptLspServer {
         context: &sase_core::CompletionContext,
         config: &ServerConfig,
     ) -> CompletionResponse {
-        let mut inventories = DirectiveCompletionInventories::default();
+        let mut inventories = DirectiveCompletionInventories {
+            enabled_feature_flags: enabled_feature_flags(
+                config.typed_launch_units,
+            ),
+            ..DirectiveCompletionInventories::default()
+        };
         match self
             .catalog_cache
             .finalizer_catalog_for_completion(config.project.clone())
@@ -690,7 +700,12 @@ impl XpromptLspServer {
         config: &ServerConfig,
         _document: &DocumentSnapshot,
     ) -> DirectiveCompletionInventories {
-        let mut inventories = DirectiveCompletionInventories::default();
+        let mut inventories = DirectiveCompletionInventories {
+            enabled_feature_flags: enabled_feature_flags(
+                config.typed_launch_units,
+            ),
+            ..DirectiveCompletionInventories::default()
+        };
         if needs_model_alias_keys(context) {
             inventories.model_alias_keys =
                 model_alias_keys_from_catalog(config.model_catalog.as_deref());
@@ -1296,7 +1311,10 @@ impl XpromptLspServer {
                 editor_build_file_history_completion_candidates(file_history())
             }
             CompletionContextKind::DirectiveName => {
-                editor_build_directive_completion_candidates(token)
+                editor_build_directive_completion_candidates_with_flags(
+                    token,
+                    &enabled_feature_flags(config.typed_launch_units),
+                )
             }
             CompletionContextKind::DirectiveArgument
             | CompletionContextKind::DirectiveArgumentKeyword
@@ -1740,6 +1758,41 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         model_catalog: model_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
         glossary_catalog: glossary_catalog_path(),
+        typed_launch_units: typed_launch_units_from_initialize(params)
+            .unwrap_or_else(typed_launch_units_from_env),
+    }
+}
+
+fn typed_launch_units_from_initialize(
+    params: &InitializeParams,
+) -> Option<bool> {
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("typed_launch_units"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn typed_launch_units_from_env() -> bool {
+    std::env::var(TYPED_LAUNCH_UNITS_ENV)
+        .ok()
+        .as_deref()
+        .map(env_flag_enabled)
+        .unwrap_or(false)
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn enabled_feature_flags(typed_launch_units: bool) -> Vec<String> {
+    if typed_launch_units {
+        vec!["typed_launch_units".to_string()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1989,6 +2042,7 @@ fn directive_snippet_specs(
 fn directive_snippet_items(
     token: Option<&str>,
     replacement_range: sase_core::EditorRange,
+    enabled_feature_flags: &[String],
 ) -> Vec<CompletionItem> {
     let partial = token
         .unwrap_or_default()
@@ -1998,7 +2052,10 @@ fn directive_snippet_items(
         .iter()
         .filter(|directive| directive.takes_argument)
         .filter(|directive| {
-            !editor_directive_is_hidden_from_name_completion(directive.name)
+            !editor_directive_is_hidden_from_name_completion_with_flags(
+                directive.name,
+                enabled_feature_flags,
+            )
         })
         .filter(|directive| {
             directive.name.starts_with(partial)
@@ -4782,15 +4839,15 @@ mod tests {
                 character: 4,
             },
         };
-        let wait_items = directive_snippet_items(Some("%wait"), range);
+        let wait_items = directive_snippet_items(Some("%wait"), range, &[]);
         assert!(wait_items
             .iter()
             .any(|item| item.label == "%wait(..., bead=...)"));
-        let model_items = directive_snippet_items(Some("%model"), range);
+        let model_items = directive_snippet_items(Some("%model"), range, &[]);
         assert!(model_items
             .iter()
             .any(|item| item.label == "%model(..., alias=...)"));
-        let items = directive_snippet_items(Some("%alt"), range);
+        let items = directive_snippet_items(Some("%alt"), range, &[]);
         let alt = items
             .iter()
             .find(|item| item.label == "%alt:...")
@@ -4821,7 +4878,7 @@ mod tests {
             ]
         );
         for token in [Some("%final"), Some("%f")] {
-            let items = directive_snippet_items(token, range);
+            let items = directive_snippet_items(token, range, &[]);
             assert_snippet_item(&items, "%final:...", "%final:${1:instance}$0");
             assert_snippet_item(
                 &items,

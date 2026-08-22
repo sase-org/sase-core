@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(editor)* gated `%if`/`%proc` directive contract, `CodeValue` wire, and
+  CommonMark directive-owned fence scanner shared by launch and editor
+  surfaces
+- *(xprompt)* internal `type: code` input (parsed, not advertised)
+
 ## [0.31.2](https://github.com/sase-org/sase-core/compare/v0.31.1...v0.31.2) - 2026-08-22
 
 ### Other

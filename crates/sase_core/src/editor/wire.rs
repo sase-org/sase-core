@@ -394,6 +394,7 @@ pub enum DirectiveSyntaxForm {
     Parenthesized,
     Plus,
     BraceShorthand,
+    DoubleColon,
 }
 
 /// Dynamic or static value provider role for a positional argument or
@@ -416,6 +417,9 @@ pub enum DirectiveValueRole {
     FinalizerInstance,
     FreeText,
     GateOwned,
+    Code,
+    Duration,
+    Language,
 }
 
 /// Which part of a directive argument clause the cursor is in.
@@ -482,6 +486,15 @@ pub struct DirectiveMetadata {
     pub dynamic_keyword_role: Option<DirectiveValueRole>,
 }
 
+/// How a directive binds a code body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectiveBodyKind {
+    None,
+    FencedCode,
+    OptionalFencedCode,
+}
+
 /// JSON-shaped owned copy of [`DirectiveMetadata`] for Python/ACE bindings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectiveContractEntry {
@@ -496,6 +509,12 @@ pub struct DirectiveContractEntry {
     pub positional_suggestions: Vec<DirectiveSuggestedValueWire>,
     pub keywords: Vec<DirectiveKeywordContract>,
     pub dynamic_keyword_role: Option<DirectiveValueRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_flag: Option<String>,
+    pub body_kind: DirectiveBodyKind,
+    pub synopsis: String,
+    #[serde(default)]
+    pub examples: Vec<String>,
 }
 
 impl From<&DirectiveMetadata> for DirectiveContractEntry {
@@ -541,7 +560,58 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
                 })
                 .collect(),
             dynamic_keyword_role: metadata.dynamic_keyword_role,
+            feature_flag: directive_feature_flag(metadata.name)
+                .map(str::to_string),
+            body_kind: directive_body_kind(metadata.name),
+            synopsis: directive_synopsis(metadata).to_string(),
+            examples: directive_examples(metadata.name)
+                .iter()
+                .map(|example| (*example).to_string())
+                .collect(),
         }
+    }
+}
+
+/// Feature flag that gates a directive, if any.
+pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
+    match name {
+        "if" | "proc" => Some("typed_launch_units"),
+        _ => None,
+    }
+}
+
+/// How a named directive binds its executable body.
+pub fn directive_body_kind(name: &str) -> DirectiveBodyKind {
+    match name {
+        "if" => DirectiveBodyKind::FencedCode,
+        "proc" => DirectiveBodyKind::OptionalFencedCode,
+        _ => DirectiveBodyKind::None,
+    }
+}
+
+/// One-line synopsis used by hover and completion documentation.
+pub fn directive_synopsis(metadata: &DirectiveMetadata) -> &'static str {
+    match metadata.name {
+        "if" => "%if:: plus exactly one bash or python fence; attaches to the next launch unit",
+        "proc" => "%proc(\"cmd\"), %proc(bash=|python=), or %proc:: plus one fence",
+        _ => metadata.argument_hint,
+    }
+}
+
+/// Copyable examples for a directive. Empty for ungated historical directives.
+pub fn directive_examples(name: &str) -> &'static [&'static str] {
+    match name {
+        "if" => &[
+            "%if::\n\n```bash\ntest -f pyproject.toml\n```",
+            "%if::\n\n```python\nraise SystemExit(0)\n```",
+        ],
+        "proc" => &[
+            "%proc(\"just check\")",
+            "%proc(bash=\"just check\", timeout=\"20m\", label=\"Scoped verification\")",
+            "%proc(python=\"print('ready')\", workspace=false)",
+            "%proc(timeout=\"20m\")::\n\n```bash\njust check\n```",
+        ],
+        _ => &[],
     }
 }
 
@@ -685,6 +755,10 @@ pub struct DirectiveCompletionInventories {
     /// agent's own bead).
     #[serde(default)]
     pub excluded_bead_ids: Vec<String>,
+    /// Startup-resolved feature-flag keys that are currently enabled.
+    /// Completion never reads feature-flag state itself.
+    #[serde(default)]
+    pub enabled_feature_flags: Vec<String>,
 }
 
 impl CompletionContext {
@@ -793,4 +867,12 @@ pub struct FrontmatterInputType {
     pub aliases: Vec<String>,
     /// One-line human rule describing what values the type accepts.
     pub rule: String,
+    /// When false the type is parsed and transported but not advertised in
+    /// public completion, pickers, or helper catalogs.
+    #[serde(default = "default_true")]
+    pub advertised: bool,
+}
+
+fn default_true() -> bool {
+    true
 }

@@ -1491,8 +1491,9 @@ pub fn build_directive_clause_candidates(
     let replacement = Some(context.replacement_range);
     match context.kind {
         CompletionContextKind::DirectiveName => {
-            return super::directive::build_directive_completion_candidates(
+            return super::directive::build_directive_completion_candidates_with_flags(
                 token,
+                &inventories.enabled_feature_flags,
             );
         }
         CompletionContextKind::DirectiveArgumentKeyword => {

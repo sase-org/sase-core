@@ -8,7 +8,7 @@ use super::wire::{
 };
 
 const XPROMPT_INPUT_TYPE_EXPECTED: &str =
-    "word, line, text, path, agent, int/integer, bool/boolean, float, enum";
+    "word, line, text, path, agent, int/integer, bool/boolean, float, enum, code";
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
 ///
@@ -169,6 +169,7 @@ enum InputType {
     Bool,
     Float,
     Enum,
+    Code,
 }
 
 pub(super) fn diagnostics(
@@ -265,6 +266,7 @@ pub fn input_type_schema() -> Vec<FrontmatterInputType> {
                 .map(|alias| (*alias).to_string())
                 .collect(),
             rule: input_type.rule().to_string(),
+            advertised: input_type.advertised(),
         })
         .collect()
 }
@@ -952,6 +954,7 @@ fn validate_input_default(
         InputType::Float => raw.parse::<f64>().is_ok(),
         InputType::Bool => is_bool_spelling(&raw),
         InputType::Enum => choices.iter().any(|choice| choice == &raw),
+        InputType::Code => true,
     };
     if !valid {
         builder.push(
@@ -2323,7 +2326,7 @@ fn yaml_scalar_to_string(value: &Value) -> Option<String> {
 
 impl InputType {
     /// Every input type, in catalog order, for schema enumeration.
-    const ALL: [InputType; 9] = [
+    const ALL: [InputType; 10] = [
         InputType::Word,
         InputType::Agent,
         InputType::Line,
@@ -2333,6 +2336,7 @@ impl InputType {
         InputType::Float,
         InputType::Bool,
         InputType::Enum,
+        InputType::Code,
     ];
 
     /// Accepted aliases for this type's canonical name (see
@@ -2360,7 +2364,14 @@ impl InputType {
                 "A boolean: true or false (also yes/no, on/off, 1/0)."
             }
             InputType::Enum => "One of the values declared under `choices`.",
+            InputType::Code => {
+                "Structured source plus language, not a plain string convention."
+            }
         }
+    }
+
+    fn advertised(self) -> bool {
+        !matches!(self, InputType::Code)
     }
 }
 
@@ -2375,6 +2386,7 @@ fn parse_input_type(raw: &str) -> Option<InputType> {
         "bool" | "boolean" => Some(InputType::Bool),
         "float" => Some(InputType::Float),
         "enum" => Some(InputType::Enum),
+        "code" => Some(InputType::Code),
         _ => None,
     }
 }
@@ -2390,6 +2402,7 @@ fn declared_type_name(input_type: InputType) -> &'static str {
         InputType::Bool => "bool",
         InputType::Float => "float",
         InputType::Enum => "enum",
+        InputType::Code => "code",
     }
 }
 

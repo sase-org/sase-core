@@ -1,10 +1,11 @@
 use super::token::DocumentSnapshot;
 use super::wire::{
-    BeadCompletionEntry, CompletionCandidate, CompletionContext,
-    CompletionContextKind, CompletionList, DirectiveClauseContext,
-    DirectiveClauseKind, DirectiveContractEntry, DirectiveKeywordSpec,
-    DirectiveMetadata, DirectiveSuggestedValue, DirectiveSyntaxForm,
-    DirectiveValueRole, EditorPosition, EditorRange, EditorTextEdit, TokenInfo,
+    directive_feature_flag, BeadCompletionEntry, CompletionCandidate,
+    CompletionContext, CompletionContextKind, CompletionList,
+    DirectiveClauseContext, DirectiveClauseKind, DirectiveContractEntry,
+    DirectiveKeywordSpec, DirectiveMetadata, DirectiveSuggestedValue,
+    DirectiveSyntaxForm, DirectiveValueRole, EditorPosition, EditorRange,
+    EditorTextEdit, TokenInfo,
 };
 const AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
@@ -136,6 +137,12 @@ const ALT_FORMS: &[DirectiveSyntaxForm] = &[
     DirectiveSyntaxForm::Colon,
     DirectiveSyntaxForm::Parenthesized,
 ];
+const DOUBLE_COLON: &[DirectiveSyntaxForm] =
+    &[DirectiveSyntaxForm::DoubleColon];
+const PAREN_DOUBLE_COLON: &[DirectiveSyntaxForm] = &[
+    DirectiveSyntaxForm::Parenthesized,
+    DirectiveSyntaxForm::DoubleColon,
+];
 
 const ID_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
@@ -193,6 +200,87 @@ const CLAN_KEYWORDS: &[DirectiveKeywordSpec] = &[
         name: "tribe",
         description: "Assign this clan to a user-managed tribe",
         value_role: DirectiveValueRole::Tribe,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+];
+
+const BOOL_TRUE_FALSE: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "true",
+        documentation: "Acquire an operational workspace lease",
+    },
+    DirectiveSuggestedValue {
+        value: "false",
+        documentation: "Skip the workspace lease and use an ordinary cwd",
+    },
+];
+
+const DURATION_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "20m",
+        documentation: "Twenty minutes",
+    },
+    DirectiveSuggestedValue {
+        value: "1h",
+        documentation: "One hour",
+    },
+];
+
+const PROC_KEYWORDS: &[DirectiveKeywordSpec] = &[
+    DirectiveKeywordSpec {
+        name: "bash",
+        description: "Bash script body",
+        value_role: DirectiveValueRole::Code,
+        repeatable: false,
+        conflicts_with: &["python"],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "python",
+        description: "Python script body",
+        value_role: DirectiveValueRole::Code,
+        repeatable: false,
+        conflicts_with: &["bash"],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "timeout",
+        description: "Total execution timeout from child start",
+        value_role: DirectiveValueRole::Duration,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: DURATION_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "idle_timeout",
+        description: "Idle-output timeout from child start",
+        value_role: DirectiveValueRole::Duration,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: DURATION_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "cwd",
+        description: "Working directory for the proc",
+        value_role: DirectiveValueRole::PathOrExecutable,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "workspace",
+        description: "Whether to acquire an operational workspace lease",
+        value_role: DirectiveValueRole::Bool,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: BOOL_TRUE_FALSE,
+    },
+    DirectiveKeywordSpec {
+        name: "label",
+        description: "Descriptive label; never identity",
+        value_role: DirectiveValueRole::FreeText,
         repeatable: false,
         conflicts_with: &[],
         suggested_values: &[],
@@ -329,6 +417,35 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         dynamic_keyword_role: None,
     },
     DirectiveMetadata {
+        name: "if",
+        alias: None,
+        description:
+            "Run a fenced Bash or Python admission predicate before launching the next unit",
+        argument_hint: ":: plus one bash or python fence",
+        takes_argument: true,
+        allows_multiple: false,
+        syntax_forms: DOUBLE_COLON,
+        positional_role: None,
+        positional_suggestions: &[],
+        keywords: &[],
+        dynamic_keyword_role: None,
+    },
+    DirectiveMetadata {
+        name: "proc",
+        alias: None,
+        description:
+            "Launch a stand-alone proc unit with a Bash or Python body",
+        argument_hint:
+            "(\"cmd\"), (bash=|python=, timeout=, idle_timeout=, cwd=, workspace=, label=), or :: fence",
+        takes_argument: true,
+        allows_multiple: false,
+        syntax_forms: PAREN_DOUBLE_COLON,
+        positional_role: Some(DirectiveValueRole::Code),
+        positional_suggestions: &[],
+        keywords: PROC_KEYWORDS,
+        dynamic_keyword_role: None,
+    },
+    DirectiveMetadata {
         name: "auto",
         alias: Some("a"),
         description:
@@ -404,7 +521,21 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
 const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &[];
 
 pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
-    HIDDEN_COMPLETION_DIRECTIVES.contains(&name)
+    directive_is_hidden_from_name_completion_with_flags(name, &[])
+}
+
+/// Hide gated directives unless *enabled_feature_flags* contains their flag.
+pub fn directive_is_hidden_from_name_completion_with_flags(
+    name: &str,
+    enabled_feature_flags: &[String],
+) -> bool {
+    if HIDDEN_COMPLETION_DIRECTIVES.contains(&name) {
+        return true;
+    }
+    match directive_feature_flag(name) {
+        Some(flag) => !enabled_feature_flags.iter().any(|value| value == flag),
+        None => false,
+    }
 }
 
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
@@ -445,10 +576,20 @@ pub fn directive_allows_keywords(
 }
 
 pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
+    build_directive_completion_candidates_with_flags(token, &[])
+}
+
+pub fn build_directive_completion_candidates_with_flags(
+    token: &str,
+    enabled_feature_flags: &[String],
+) -> CompletionList {
     let partial = token.strip_prefix('%').unwrap_or(token).to_lowercase();
     let mut candidates = Vec::new();
     for directive in DIRECTIVES {
-        if HIDDEN_COMPLETION_DIRECTIVES.contains(&directive.name) {
+        if directive_is_hidden_from_name_completion_with_flags(
+            directive.name,
+            enabled_feature_flags,
+        ) {
             continue;
         }
         if directive.name.starts_with(&partial)
@@ -1262,6 +1403,8 @@ mod tests {
                 "id",
                 "clan",
                 "wait",
+                "if",
+                "proc",
                 "auto",
                 "hide",
                 "repeat",
@@ -1287,6 +1430,53 @@ mod tests {
         assert!(wait.syntax_forms.contains(&DirectiveSyntaxForm::Colon));
         assert_eq!(wait.positional_role, Some(DirectiveValueRole::Agent));
         assert_eq!(wait.keywords[0].value_role, DirectiveValueRole::Bead);
+
+        let if_directive = contract
+            .iter()
+            .find(|entry| entry.name == "if")
+            .expect("if contract");
+        assert_eq!(
+            if_directive.feature_flag.as_deref(),
+            Some("typed_launch_units")
+        );
+        assert_eq!(
+            if_directive.body_kind,
+            crate::DirectiveBodyKind::FencedCode
+        );
+        assert_eq!(
+            if_directive.syntax_forms,
+            vec![DirectiveSyntaxForm::DoubleColon]
+        );
+        assert!(directive_is_hidden_from_name_completion("if"));
+        assert!(!directive_is_hidden_from_name_completion_with_flags(
+            "if",
+            &["typed_launch_units".to_string()]
+        ));
+
+        let proc = contract
+            .iter()
+            .find(|entry| entry.name == "proc")
+            .expect("proc contract");
+        assert_eq!(proc.feature_flag.as_deref(), Some("typed_launch_units"));
+        assert_eq!(
+            proc.body_kind,
+            crate::DirectiveBodyKind::OptionalFencedCode
+        );
+        assert_eq!(
+            proc.keywords
+                .iter()
+                .map(|keyword| keyword.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "bash",
+                "python",
+                "timeout",
+                "idle_timeout",
+                "cwd",
+                "workspace",
+                "label"
+            ]
+        );
 
         let id = contract
             .iter()
@@ -1928,6 +2118,7 @@ mod tests {
             }],
             finalizers: Vec::new(),
             excluded_bead_ids: Vec::new(),
+            enabled_feature_flags: Vec::new(),
         };
 
         let insertions = |text: &str, character: u32| -> Vec<String> {
