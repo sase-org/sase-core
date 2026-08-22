@@ -401,7 +401,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
 ];
 
-const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &["final"];
+const HIDDEN_COMPLETION_DIRECTIVES: &[&str] = &[];
 
 pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
     HIDDEN_COMPLETION_DIRECTIVES.contains(&name)
@@ -1537,16 +1537,22 @@ mod tests {
     }
 
     #[test]
-    fn final_directive_is_parseable_but_hidden_from_name_completion() {
+    fn final_directive_is_public_in_name_completion() {
         assert_eq!(canonical_directive_name("final"), Some("final"));
         assert!(directive_metadata("final").is_some());
-        assert!(directive_is_hidden_from_name_completion("final"));
-        assert!(build_directive_completion_candidates("%f")
-            .candidates
-            .is_empty());
-        assert!(build_directive_completion_candidates("%final")
-            .candidates
-            .is_empty());
+        assert!(!directive_is_hidden_from_name_completion("final"));
+
+        for token in ["%f", "%final"] {
+            let completions = build_directive_completion_candidates(token);
+            assert_eq!(completions.candidates.len(), 1, "{token} completion");
+            let candidate = &completions.candidates[0];
+            assert_eq!(candidate.insertion, "%final");
+            assert_eq!(candidate.name, "final");
+            assert_eq!(
+                candidate.documentation.as_deref(),
+                Some("Select configured finalizer instances for this launch")
+            );
+        }
     }
 
     #[test]
