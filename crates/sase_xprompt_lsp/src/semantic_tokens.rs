@@ -5,8 +5,9 @@ use lsp_types::{
     SemanticTokensLegend,
 };
 use sase_core::{
-    prompt_literal_zone_ranges, scan_artifact_refs, ArtifactRefContextWire,
-    ArtifactRefSpanWire, CompiledGlossaryCatalog, DocumentSnapshot,
+    fenced_block_details, prompt_literal_zone_ranges, scan_artifact_refs,
+    scan_directive_owned_fences, ArtifactRefContextWire, ArtifactRefSpanWire,
+    CompiledGlossaryCatalog, DocumentSnapshot,
 };
 
 const KIND_TOKEN_TYPE: u32 = 0;
@@ -15,6 +16,7 @@ const FRAGMENT_TOKEN_TYPE: u32 = 2;
 const GLOSSARY_TOKEN_TYPE: u32 = 3;
 const DOCUMENT_ROLE_MODIFIER: u32 = 1;
 const ARTIFACT_PRIORITY: u8 = 0;
+const CODE_PRIORITY: u8 = 0;
 const GLOSSARY_PRIORITY: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub(crate) fn document_semantic_tokens(
     if let Some(context) = artifact_context {
         raw_tokens.extend(raw_artifact_ref_tokens(document, context));
     }
+    raw_tokens.extend(raw_directive_code_tokens(document));
     if let Some(catalog) = glossary_catalog {
         raw_tokens.extend(raw_glossary_tokens(document, catalog));
     }
@@ -110,6 +113,65 @@ fn raw_artifact_ref_tokens(
     }
 
     tokens
+}
+
+fn raw_directive_code_tokens(
+    document: &DocumentSnapshot,
+) -> Vec<RawSemanticToken> {
+    let text = document.text();
+    let scan = scan_directive_owned_fences(text);
+    if scan.directives.is_empty() {
+        return Vec::new();
+    }
+    let fences = fenced_block_details(text);
+    let mut tokens = Vec::new();
+    for directive in scan.directives {
+        if directive.code.is_none() {
+            continue;
+        }
+        let directive_span = (directive.span[0], directive.span[1]);
+        let Some(fence) = fences.iter().find(|fence| {
+            directive_span.0 <= fence.block_range.0
+                && fence.block_range.1 <= directive_span.1
+        }) else {
+            continue;
+        };
+        for (start, end) in non_empty_line_spans(text, fence.content_range) {
+            tokens.push(RawSemanticToken {
+                byte_start: start,
+                byte_end: end,
+                token_type: PAYLOAD_TOKEN_TYPE,
+                token_modifiers_bitset: 0,
+                priority: CODE_PRIORITY,
+            });
+        }
+    }
+    tokens
+}
+
+fn non_empty_line_spans(
+    text: &str,
+    range: (usize, usize),
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = range.0;
+    while start < range.1 {
+        let relative = &text[start..range.1];
+        let line_end = relative
+            .find('\n')
+            .map(|offset| start + offset)
+            .unwrap_or(range.1);
+        let trimmed_end =
+            text[start..line_end].trim_end_matches('\r').len() + start;
+        if !text[start..trimmed_end].trim().is_empty() {
+            spans.push((start, trimmed_end));
+        }
+        if line_end == range.1 {
+            break;
+        }
+        start = line_end + 1;
+    }
+    spans
 }
 
 fn raw_glossary_tokens(

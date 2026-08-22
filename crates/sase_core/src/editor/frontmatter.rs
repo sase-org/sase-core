@@ -266,7 +266,7 @@ pub fn input_type_schema() -> Vec<FrontmatterInputType> {
                 .map(|alias| (*alias).to_string())
                 .collect(),
             rule: input_type.rule().to_string(),
-            advertised: input_type.advertised(),
+            advertised: true,
         })
         .collect()
 }
@@ -2369,10 +2369,6 @@ impl InputType {
             }
         }
     }
-
-    fn advertised(self) -> bool {
-        !matches!(self, InputType::Code)
-    }
 }
 
 fn parse_input_type(raw: &str) -> Option<InputType> {
@@ -2501,11 +2497,12 @@ mod tests {
             names,
             [
                 "word", "agent", "line", "text", "path", "int", "float",
-                "bool", "enum"
+                "bool", "enum", "code"
             ]
         );
         for input in &schema {
             assert!(!input.rule.is_empty(), "{} has no rule", input.name);
+            assert!(input.advertised, "{} is hidden", input.name);
             // Canonical name and every alias must parse back to a known type.
             assert!(parse_input_type(&input.name).is_some());
             for alias in &input.aliases {

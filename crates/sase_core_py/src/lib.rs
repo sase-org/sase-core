@@ -17244,7 +17244,10 @@ MENTORS:
                     .iter()
                     .map(|keyword| keyword["name"].as_str().unwrap())
                     .collect::<Vec<_>>(),
-                ["bead", "priority", "runners", "time"]
+                [
+                    "agent", "bead", "priority", "proc", "runners", "time",
+                    "unit"
+                ]
             );
 
             let context =
@@ -17309,7 +17312,16 @@ MENTORS:
                 .collect();
             assert_eq!(
                 insertions,
-                ["bead=", "priority=", "runners=", "time=", "worker"]
+                [
+                    "agent=",
+                    "bead=",
+                    "priority=",
+                    "proc=",
+                    "runners=",
+                    "time=",
+                    "unit=",
+                    "worker"
+                ]
             );
 
             let colon =

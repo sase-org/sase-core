@@ -43,11 +43,13 @@ use sase_core::{
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
+    editor_directive_contract,
     editor_directive_is_hidden_from_name_completion_with_flags,
-    editor_directive_metadata, editor_extract_token_at_position,
-    editor_hover_at_position, filter_model_completion_candidates,
-    ArtifactRefContextWire, AtReferenceContextWire, AtReferenceInventoryWire,
-    AtReferenceKindRowWire, AtReferenceMenuOptionsWire, AtReferencePathRowWire,
+    editor_extract_token_at_position, editor_hover_at_position,
+    editor_typed_launch_directive_diagnostics,
+    filter_model_completion_candidates, ArtifactRefContextWire,
+    AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
+    AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories,
@@ -434,14 +436,13 @@ impl XpromptLspServer {
             )));
         }
         let mut response = completion_response(list, context.replacement_range);
-        if config.snippet_support
-            && context.kind == CompletionContextKind::DirectiveName
-        {
+        if context.kind == CompletionContextKind::DirectiveName {
             if let CompletionResponse::Array(items) = &mut response {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
                     &enabled_feature_flags(config.typed_launch_units),
+                    config.snippet_support,
                 ));
             }
         }
@@ -883,6 +884,10 @@ impl XpromptLspServer {
         let entries = self.entries_for_completion(&config).await;
         let mut diagnostics =
             editor_analyze_document(&document, entries.as_slice());
+        diagnostics.extend(editor_typed_launch_directive_diagnostics(
+            &document,
+            config.typed_launch_units,
+        ));
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
@@ -1018,6 +1023,10 @@ impl XpromptLspServer {
                     );
                 }
             }
+        }
+
+        if config.typed_launch_units {
+            actions.extend(typed_launch_code_actions(&uri, &document, range));
         }
 
         actions.push(CodeActionOrCommand::Command(Command::new(
@@ -1985,75 +1994,23 @@ fn replacement_ends_line(
         .unwrap_or(false)
 }
 
-fn directive_snippet_specs(
-    directive: &sase_core::DirectiveMetadata,
-) -> Vec<(String, String)> {
-    let colon = if directive.name == "alt" {
-        ("%alt:...".to_string(), "%{${1:A} | ${2:B}\\}$0".to_string())
-    } else {
-        let placeholder = match directive.name {
-            "clan" => "name",
-            "id" => "agent-id",
-            "final" => "instance",
-            _ => "value",
-        };
-        (
-            format!("%{}:...", directive.name),
-            format!("%{}:${{1:{placeholder}}}$0", directive.name),
-        )
-    };
-    let mut specs = vec![colon];
-    match directive.name {
-        "clan" => specs.push((
-            "%clan(..., tribe=...)".to_string(),
-            "%clan(${1:name}, tribe=${2:tribe})$0".to_string(),
-        )),
-        "wait" => specs.push((
-            "%wait(..., bead=...)".to_string(),
-            "%wait(${1:agent}, bead=${2:bead-id})$0".to_string(),
-        )),
-        "model" => specs.push((
-            "%model(..., alias=...)".to_string(),
-            "%model(${1:model}, ${2:alias}=${3:model})$0".to_string(),
-        )),
-        "id" => {
-            specs.push((
-                "%id(..., clan=...)".to_string(),
-                "%id(${1:id}, clan=${2:clan})$0".to_string(),
-            ));
-            specs.push((
-                "%id(..., family=...)".to_string(),
-                "%id(${1:suffix}, family=${2:family})$0".to_string(),
-            ));
-            specs.push((
-                "%id(tribe=...)".to_string(),
-                "%id(tribe=${1:tribe})$0".to_string(),
-            ));
-        }
-        "final" => specs.push((
-            "%final(...)".to_string(),
-            "%final(${1:instance}, ${2:instance})$0".to_string(),
-        )),
-        _ => {}
-    }
-    specs
-}
-
 fn directive_snippet_items(
     token: Option<&str>,
     replacement_range: sase_core::EditorRange,
     enabled_feature_flags: &[String],
+    snippet_support: bool,
 ) -> Vec<CompletionItem> {
     let partial = token
         .unwrap_or_default()
         .strip_prefix('%')
         .unwrap_or_default();
-    sase_core::EDITOR_DIRECTIVES
-        .iter()
+    editor_directive_contract()
+        .into_iter()
+        .filter(|directive| !directive.recipes.is_empty())
         .filter(|directive| directive.takes_argument)
         .filter(|directive| {
             !editor_directive_is_hidden_from_name_completion_with_flags(
-                directive.name,
+                &directive.name,
                 enabled_feature_flags,
             )
         })
@@ -2061,26 +2018,50 @@ fn directive_snippet_items(
             directive.name.starts_with(partial)
                 || directive
                     .alias
+                    .as_deref()
                     .is_some_and(|alias| alias.starts_with(partial))
         })
         .flat_map(|directive| {
-            let documentation = Some(
-                editor_directive_metadata(directive.name)
-                    .map(|metadata| metadata.description.to_string())
-                    .unwrap_or_else(|| directive.description.to_string()),
-            );
-            let specs = directive_snippet_specs(directive);
-            specs.into_iter().map(move |(label, syntax)| {
-                snippet_completion_item(
-                    label,
-                    syntax,
-                    Some("directive snippet".to_string()),
-                    documentation.clone(),
-                    replacement_range,
-                )
+            directive.recipes.into_iter().map(move |recipe| {
+                if snippet_support {
+                    snippet_completion_item(
+                        recipe.label,
+                        recipe.insert_text,
+                        Some(recipe.detail),
+                        Some(recipe.documentation),
+                        replacement_range,
+                    )
+                } else {
+                    directive_plain_completion_item(recipe, replacement_range)
+                }
             })
         })
         .collect()
+}
+
+fn directive_plain_completion_item(
+    recipe: sase_core::DirectiveSnippetRecipeContract,
+    replacement_range: sase_core::EditorRange,
+) -> CompletionItem {
+    CompletionItem {
+        label: recipe.label,
+        label_details: Some(lsp_types::CompletionItemLabelDetails {
+            detail: Some(" template".to_string()),
+            description: None,
+        }),
+        kind: Some(lsp_types::CompletionItemKind::TEXT),
+        documentation: Some(lsp_types::Documentation::MarkupContent(
+            lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: recipe.documentation,
+            },
+        )),
+        text_edit: Some(lsp_types::CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: recipe.plain_text,
+        })),
+        ..Default::default()
+    }
 }
 
 fn sase_snippet_items(
@@ -2831,6 +2812,62 @@ fn canonical_marker_action(
         CodeActionKind::QUICKFIX,
         true,
     ))
+}
+
+fn typed_launch_code_actions(
+    uri: &Uri,
+    document: &DocumentSnapshot,
+    range: Range,
+) -> Vec<CodeActionOrCommand> {
+    let Some(line) = document.line_text(range.start.line) else {
+        return Vec::new();
+    };
+    let leading = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let header = line[leading..].trim_end();
+    if !is_typed_launch_fence_header(header) {
+        return Vec::new();
+    }
+    let line_end = line.chars().map(char::len_utf16).sum::<usize>() as u32;
+    let edit_range = EditorRange {
+        start: sase_core::EditorPosition {
+            line: range.start.line,
+            character: leading_utf16_units(line),
+        },
+        end: sase_core::EditorPosition {
+            line: range.start.line,
+            character: line_end,
+        },
+    };
+    let directive = if header.starts_with("%if") {
+        "%if"
+    } else {
+        "%proc"
+    };
+    vec![text_edit_action(
+        &format!("Complete {directive} bash fence"),
+        uri,
+        edit_range,
+        format!("{header}\n\n```bash\n\n```"),
+        CodeActionKind::QUICKFIX,
+        false,
+    )
+    .into()]
+}
+
+fn is_typed_launch_fence_header(header: &str) -> bool {
+    if !header.ends_with("::") {
+        return false;
+    }
+    header == "%if::"
+        || header == "%proc::"
+        || (header.starts_with("%proc(") && header.ends_with(")::"))
+}
+
+fn leading_utf16_units(line: &str) -> u32 {
+    line.chars()
+        .take_while(|ch| matches!(ch, ' ' | '\t'))
+        .map(char::len_utf16)
+        .sum::<usize>() as u32
 }
 
 fn text_edit_action(
@@ -3624,10 +3661,12 @@ mod tests {
             let CompletionResponse::Array(items) = response else {
                 panic!("expected completion array");
             };
-            assert_eq!(items.len(), 1, "{token}");
-            let item = &items[0];
+            let expected_label = format!("%{name}");
+            let item = items
+                .iter()
+                .find(|item| item.label == expected_label)
+                .unwrap_or_else(|| panic!("expected canonical row for {token}"));
             let expected_detail = format!("alias %{alias}");
-            assert_eq!(item.label, format!("%{name}"), "{token}");
             assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
             assert_eq!(item.filter_text.as_deref(), Some(name));
             assert_eq!(item.detail.as_deref(), Some(expected_detail.as_str()));
@@ -3888,30 +3927,33 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "agent=",
                 "bead=",
                 "priority=",
+                "proc=",
                 "runners=",
                 "time=",
+                "unit=",
                 "@ops",
                 "builders",
                 "review"
             ]
         );
         assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-        assert_eq!(items[4].kind, Some(CompletionItemKind::ENUM_MEMBER));
-        assert_eq!(items[5].kind, Some(CompletionItemKind::MODULE));
-        assert_eq!(items[6].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[4].sort_text.as_deref(), Some("1:0004"));
+        assert_eq!(items[7].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[8].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[9].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[7].sort_text.as_deref(), Some("1:0007"));
         assert_eq!(
-            items[5]
+            items[8]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("clan · 3 members")
         );
-        assert!(items[5].documentation.is_none());
+        assert!(items[8].documentation.is_none());
         let Some(Documentation::MarkupContent(review_doc)) =
-            items[6].documentation.as_ref()
+            items[9].documentation.as_ref()
         else {
             panic!("expected markdown documentation for review family entry");
         };
@@ -4184,7 +4226,15 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["bead=", "priority=", "runners=", "time="]
+            vec![
+                "agent=",
+                "bead=",
+                "priority=",
+                "proc=",
+                "runners=",
+                "time=",
+                "unit="
+            ]
         );
 
         let mut mixed = bridge_with_catalog_entries(Vec::new());
@@ -4827,6 +4877,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn typed_launch_directive_recipes_follow_flag_and_snippet_support() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+        {
+            let mut config = server.config.write().unwrap();
+            *config = ServerConfig {
+                snippet_support: true,
+                typed_launch_units: false,
+                ..ServerConfig::default()
+            };
+        }
+
+        let disabled = server
+            .completion_for_text("%if".to_string(), Position::new(0, 3))
+            .await
+            .unwrap();
+        assert!(completion_items(disabled).is_empty());
+
+        server.config.write().unwrap().typed_launch_units = true;
+        let enabled = server
+            .completion_for_text("%if".to_string(), Position::new(0, 3))
+            .await
+            .unwrap();
+        let enabled_items = completion_items(enabled);
+        assert_snippet_item(
+            &enabled_items,
+            "%if:: bash",
+            "%if::\n\n```bash\n${1:test -f pyproject.toml}\n```$0",
+        );
+
+        {
+            let mut config = server.config.write().unwrap();
+            config.snippet_support = false;
+        }
+        let plain = server
+            .completion_for_text("%proc".to_string(), Position::new(0, 5))
+            .await
+            .unwrap();
+        let plain_items = completion_items(plain);
+        let item = plain_items
+            .iter()
+            .find(|item| item.label == "%proc:: bash")
+            .expect("plain %proc:: bash recipe");
+        assert_eq!(item.kind, Some(CompletionItemKind::TEXT));
+        assert_eq!(item.insert_text_format, None);
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected plain text edit");
+        };
+        assert_eq!(
+            edit.new_text.as_str(),
+            "%proc(timeout=\"20m\")::\n\n```bash\n\n```"
+        );
+    }
+
     #[test]
     fn directive_snippet_for_alt_uses_brace_shorthand() {
         let range = CoreRange {
@@ -4839,15 +4950,17 @@ mod tests {
                 character: 4,
             },
         };
-        let wait_items = directive_snippet_items(Some("%wait"), range, &[]);
+        let wait_items =
+            directive_snippet_items(Some("%wait"), range, &[], true);
         assert!(wait_items
             .iter()
             .any(|item| item.label == "%wait(..., bead=...)"));
-        let model_items = directive_snippet_items(Some("%model"), range, &[]);
+        let model_items =
+            directive_snippet_items(Some("%model"), range, &[], true);
         assert!(model_items
             .iter()
             .any(|item| item.label == "%model(..., alias=...)"));
-        let items = directive_snippet_items(Some("%alt"), range, &[]);
+        let items = directive_snippet_items(Some("%alt"), range, &[], true);
         let alt = items
             .iter()
             .find(|item| item.label == "%alt:...")
@@ -4860,12 +4973,19 @@ mod tests {
         };
         assert_eq!(edit.new_text.as_str(), "%{${1:A} | ${2:B}\\}$0");
 
-        let final_meta = sase_core::EDITOR_DIRECTIVES
-            .iter()
+        let final_meta = sase_core::editor_directive_contract()
+            .into_iter()
             .find(|directive| directive.name == "final")
-            .expect("final directive metadata");
+            .expect("final directive contract");
         assert_eq!(
-            directive_snippet_specs(final_meta),
+            final_meta
+                .recipes
+                .iter()
+                .map(|recipe| (
+                    recipe.label.clone(),
+                    recipe.insert_text.clone()
+                ))
+                .collect::<Vec<_>>(),
             vec![
                 (
                     "%final:...".to_string(),
@@ -4878,7 +4998,7 @@ mod tests {
             ]
         );
         for token in [Some("%final"), Some("%f")] {
-            let items = directive_snippet_items(token, range, &[]);
+            let items = directive_snippet_items(token, range, &[], true);
             assert_snippet_item(&items, "%final:...", "%final:${1:instance}$0");
             assert_snippet_item(
                 &items,
@@ -5133,6 +5253,63 @@ mod tests {
             panic!("expected scalar definition");
         };
         assert_eq!(location.uri, uri);
+    }
+
+    #[tokio::test]
+    async fn typed_launch_diagnostics_and_code_actions_use_cached_flag() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let disabled = server
+            .diagnostics_for_text("%if::\n\n```bash\ntrue\n```".to_string())
+            .await;
+        assert!(diagnostics_contain_code(
+            &disabled,
+            "typed_launch_units_disabled"
+        ));
+
+        server.config.write().unwrap().typed_launch_units = true;
+        let missing_fence = server
+            .diagnostics_for_text("%if::\n\nReview".to_string())
+            .await;
+        assert!(diagnostics_contain_code(
+            &missing_fence,
+            "typed_launch_missing_fence"
+        ));
+
+        let valid = server
+            .diagnostics_for_text("%if::\n\n```bash\ntrue\n```".to_string())
+            .await;
+        assert!(!diagnostics_contain_code(
+            &valid,
+            "typed_launch_missing_fence"
+        ));
+        assert!(!diagnostics_contain_code(
+            &valid,
+            "typed_launch_units_disabled"
+        ));
+
+        let uri = Uri::from_file_path(
+            std::env::current_dir().unwrap().join("prompt.md"),
+        )
+        .unwrap();
+        let actions = server
+            .code_actions_for_text(
+                uri,
+                "%if::".to_string(),
+                Range::new(Position::new(0, 0), Position::new(0, 0)),
+            )
+            .await;
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            CodeActionOrCommand::CodeAction(action)
+                if action.title == "Complete %if bash fence"
+        )));
     }
 
     #[tokio::test]
@@ -7604,6 +7781,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn semantic_tokens_mark_directive_owned_code_bodies() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+
+        let tokens = server.semantic_tokens_for_text(
+            "%if::\n\n```bash\necho ok\n```\n".to_string(),
+        );
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(absolute.contains(&(3, 0, 7, 1, 0)), "{absolute:?}");
     }
 
     #[tokio::test]

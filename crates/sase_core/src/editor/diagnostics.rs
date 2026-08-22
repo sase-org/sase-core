@@ -4,9 +4,10 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::{
-    content_layout::is_reserved_memory_reference, parse_artifact_ref,
-    prompt_literal_zone_ranges, resolve_artifact_ref, scan_artifact_refs,
-    ArtifactRefContextWire, ArtifactRefKindWire,
+    content_layout::is_reserved_memory_reference, fenced_block_ranges,
+    inline_code_ranges, parse_artifact_ref, prompt_literal_zone_ranges,
+    resolve_artifact_ref, scan_artifact_refs, scan_directive_owned_fences,
+    typed_launch_units_flag_key, ArtifactRefContextWire, ArtifactRefKindWire,
 };
 
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
@@ -110,6 +111,62 @@ pub fn analyze_artifact_refs(
         }
     }
     diagnostics
+}
+
+pub fn typed_launch_directive_diagnostics(
+    document: &DocumentSnapshot,
+    typed_launch_units_enabled: bool,
+) -> Vec<EditorDiagnostic> {
+    if !typed_launch_units_enabled {
+        return disabled_typed_launch_directive_diagnostics(document);
+    }
+
+    scan_directive_owned_fences(document.text())
+        .diagnostics
+        .into_iter()
+        .filter_map(|diagnostic| {
+            document
+                .byte_range_to_range(diagnostic.span[0], diagnostic.span[1])
+                .map(|range| EditorDiagnostic {
+                    range,
+                    severity: DiagnosticSeverity::Error,
+                    code: format!("typed_launch_{}", diagnostic.code),
+                    message: diagnostic.message,
+                })
+        })
+        .collect()
+}
+
+fn disabled_typed_launch_directive_diagnostics(
+    document: &DocumentSnapshot,
+) -> Vec<EditorDiagnostic> {
+    let mut literal_ranges = fenced_block_ranges(document.text());
+    literal_ranges.extend(inline_code_ranges(document.text(), &literal_ranges));
+    typed_launch_directive_re()
+        .captures_iter(document.text())
+        .filter_map(|captures| {
+            let marker = captures.get(0)?;
+            let span = (marker.start(), marker.end());
+            if literal_ranges
+                .iter()
+                .any(|literal| ranges_intersect(span, *literal))
+            {
+                return None;
+            }
+            let name = captures.name("name")?.as_str();
+            document.byte_range_to_range(span.0, span.1).map(|range| {
+                EditorDiagnostic {
+                    range,
+                    severity: DiagnosticSeverity::Error,
+                    code: "typed_launch_units_disabled".to_string(),
+                    message: format!(
+                        "%{name} requires the {} feature flag",
+                        typed_launch_units_flag_key()
+                    ),
+                }
+            })
+        })
+        .collect()
 }
 
 fn known_artifact_ref_kinds(
@@ -682,6 +739,13 @@ fn directive_re() -> &'static Regex {
     })
 }
 
+fn typed_launch_directive_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?m)(?:^|[\s\(\[\{"'])(?:%(?P<name>if|proc)\b)"#).unwrap()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1070,6 +1134,23 @@ mod tests {
                 "missing diagnostic for %{name}: {diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_launch_diagnostics_follow_flag_and_scanner_results() {
+        let valid = DocumentSnapshot::new("%if::\n\n```bash\ntrue\n```");
+        let disabled = typed_launch_directive_diagnostics(&valid, false);
+        assert_eq!(
+            diagnostic_count(&disabled, "typed_launch_units_disabled"),
+            1
+        );
+
+        let missing = DocumentSnapshot::new("%if::\n\nReview");
+        let enabled = typed_launch_directive_diagnostics(&missing, true);
+        assert_eq!(diagnostic_count(&enabled, "typed_launch_missing_fence"), 1);
+
+        let enabled_valid = typed_launch_directive_diagnostics(&valid, true);
+        assert!(enabled_valid.is_empty(), "{enabled_valid:?}");
     }
 
     #[test]

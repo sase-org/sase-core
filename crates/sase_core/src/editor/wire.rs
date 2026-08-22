@@ -467,6 +467,21 @@ pub struct DirectiveKeywordContract {
     pub suggested_values: Vec<DirectiveSuggestedValueWire>,
 }
 
+/// One directive authoring template advertised to editor frontends.
+///
+/// `insert_text` is LSP snippet syntax, while `template` uses SASE's prompt
+/// snippet tabstop syntax (`$1`, `$2`, `$0`) for ACE. `plain_text` is the
+/// non-snippet fallback for clients that cannot expand snippets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveSnippetRecipeContract {
+    pub label: String,
+    pub detail: String,
+    pub insert_text: String,
+    pub template: String,
+    pub plain_text: String,
+    pub documentation: String,
+}
+
 /// Canonical editor/domain metadata for one xprompt directive.
 ///
 /// Extra fields beyond the historical name/alias/description triple are the
@@ -515,6 +530,8 @@ pub struct DirectiveContractEntry {
     pub synopsis: String,
     #[serde(default)]
     pub examples: Vec<String>,
+    #[serde(default)]
+    pub recipes: Vec<DirectiveSnippetRecipeContract>,
 }
 
 impl From<&DirectiveMetadata> for DirectiveContractEntry {
@@ -568,6 +585,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
                 .iter()
                 .map(|example| (*example).to_string())
                 .collect(),
+            recipes: directive_snippet_recipes(metadata.name),
         }
     }
 }
@@ -612,6 +630,228 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
             "%proc(timeout=\"20m\")::\n\n```bash\njust check\n```",
         ],
         _ => &[],
+    }
+}
+
+/// Snippet recipes for full directive forms and common option combinations.
+pub fn directive_snippet_recipes(
+    name: &str,
+) -> Vec<DirectiveSnippetRecipeContract> {
+    match name {
+        "alt" => vec![recipe(
+            "%alt:...",
+            "directive snippet",
+            "%{${1:A} | ${2:B}\\}$0",
+            "%{$1 | $2}$0",
+            "%{A | B}",
+            "Branch fan-out between two prompt alternatives.",
+        )],
+        "clan" => vec![
+            colon_recipe("clan", "name"),
+            recipe(
+                "%clan(..., tribe=...)",
+                "directive snippet",
+                "%clan(${1:name}, tribe=${2:tribe})$0",
+                "%clan($1, tribe=$2)$0",
+                "%clan(name, tribe=tribe)",
+                "Declare a parallel clan and assign it to a tribe.",
+            ),
+        ],
+        "wait" => vec![
+            colon_recipe("wait", "value"),
+            recipe(
+                "%wait(..., bead=...)",
+                "directive snippet",
+                "%wait(${1:agent}, bead=${2:bead-id})$0",
+                "%wait($1, bead=$2)$0",
+                "%wait(agent, bead=bead-id)",
+                "Wait on an agent and an open bead before launching.",
+            ),
+            recipe(
+                "%wait(proc=...)",
+                "typed launch unit snippet",
+                "%wait(proc=${1:proc-id-or-shell-name})$0",
+                "%wait(proc=$1)$0",
+                "%wait(proc=proc-id-or-shell-name)",
+                "Wait for a prompt-owned proc by ID or shell name.",
+            ),
+            recipe(
+                "%wait(time=...)",
+                "directive snippet",
+                "%wait(time=${1:5m})$0",
+                "%wait(time=$1)$0",
+                "%wait(time=5m)",
+                "Wait for a duration floor before launching.",
+            ),
+        ],
+        "model" => vec![
+            colon_recipe("model", "value"),
+            recipe(
+                "%model(..., alias=...)",
+                "directive snippet",
+                "%model(${1:model}, ${2:alias}=${3:model})$0",
+                "%model($1, $2=$3)$0",
+                "%model(model, alias=model)",
+                "Select a model and bind an alias override.",
+            ),
+        ],
+        "id" => vec![
+            colon_recipe("id", "agent-id"),
+            recipe(
+                "%id(..., clan=...)",
+                "directive snippet",
+                "%id(${1:id}, clan=${2:clan})$0",
+                "%id($1, clan=$2)$0",
+                "%id(id, clan=clan)",
+                "Assign an explicit ID inside an existing clan.",
+            ),
+            recipe(
+                "%id(..., family=...)",
+                "directive snippet",
+                "%id(${1:suffix}, family=${2:family})$0",
+                "%id($1, family=$2)$0",
+                "%id(suffix, family=family)",
+                "Assign a family child suffix.",
+            ),
+            recipe(
+                "%id(tribe=...)",
+                "directive snippet",
+                "%id(tribe=${1:tribe})$0",
+                "%id(tribe=$1)$0",
+                "%id(tribe=tribe)",
+                "Assign a tribe to an auto-named launch.",
+            ),
+        ],
+        "final" => vec![
+            colon_recipe("final", "instance"),
+            recipe(
+                "%final(...)",
+                "directive snippet",
+                "%final(${1:instance}, ${2:instance})$0",
+                "%final($1, $2)$0",
+                "%final(instance, instance)",
+                "Select finalizer instances.",
+            ),
+        ],
+        "if" => vec![
+            recipe(
+                "%if:: bash",
+                "typed launch unit snippet",
+                "%if::\n\n```bash\n${1:test -f pyproject.toml}\n```$0",
+                "%if::\n\n```bash\n$1\n```$0",
+                "%if::\n\n```bash\n\n```",
+                "Attach a bash guard to the next launch unit.",
+            ),
+            recipe(
+                "%if:: python",
+                "typed launch unit snippet",
+                "%if::\n\n```python\n${1:raise SystemExit(0)}\n```$0",
+                "%if::\n\n```python\n$1\n```$0",
+                "%if::\n\n```python\n\n```",
+                "Attach a Python guard to the next launch unit.",
+            ),
+        ],
+        "proc" => vec![
+            recipe(
+                "%proc(\"...\")",
+                "typed launch unit snippet",
+                "%proc(\"${1:just check}\")$0",
+                "%proc(\"$1\")$0",
+                "%proc(\"just check\")",
+                "Run a prompt-owned process from a command string.",
+            ),
+            recipe(
+                "%proc(bash=...)",
+                "typed launch unit snippet",
+                "%proc(bash=\"${1:just check}\")$0",
+                "%proc(bash=\"$1\")$0",
+                "%proc(bash=\"just check\")",
+                "Run a bash prompt-owned process.",
+            ),
+            recipe(
+                "%proc(python=...)",
+                "typed launch unit snippet",
+                "%proc(python=\"${1:print('ready')}\")$0",
+                "%proc(python=\"$1\")$0",
+                "%proc(python=\"print('ready')\")",
+                "Run a Python prompt-owned process.",
+            ),
+            recipe(
+                "%proc(..., timeout=...)",
+                "typed launch unit snippet",
+                "%proc(bash=\"${1:just check}\", timeout=\"${2:20m}\")$0",
+                "%proc(bash=\"$1\", timeout=\"$2\")$0",
+                "%proc(bash=\"just check\", timeout=\"20m\")",
+                "Run a process with an explicit timeout.",
+            ),
+            recipe(
+                "%proc:: bash",
+                "typed launch unit snippet",
+                "%proc(timeout=\"${1:20m}\")::\n\n```bash\n${2:just check}\n```$0",
+                "%proc(timeout=\"$1\")::\n\n```bash\n$2\n```$0",
+                "%proc(timeout=\"20m\")::\n\n```bash\n\n```",
+                "Run a bash prompt-owned process from a fenced body.",
+            ),
+            recipe(
+                "%proc:: python",
+                "typed launch unit snippet",
+                "%proc(timeout=\"${1:20m}\")::\n\n```python\n${2:print('ready')}\n```$0",
+                "%proc(timeout=\"$1\")::\n\n```python\n$2\n```$0",
+                "%proc(timeout=\"20m\")::\n\n```python\n\n```",
+                "Run a Python prompt-owned process from a fenced body.",
+            ),
+        ],
+        _ => directive_metadata_supports_colon(name)
+            .then(|| colon_recipe(name, "value"))
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn directive_metadata_supports_colon(name: &str) -> bool {
+    matches!(
+        name,
+        "model"
+            | "effort"
+            | "id"
+            | "clan"
+            | "wait"
+            | "repeat"
+            | "auto"
+            | "final"
+            | "xprompts_enabled"
+    )
+}
+
+fn colon_recipe(
+    name: &str,
+    placeholder: &str,
+) -> DirectiveSnippetRecipeContract {
+    recipe(
+        &format!("%{name}:..."),
+        "directive snippet",
+        &format!("%{name}:${{1:{placeholder}}}$0"),
+        &format!("%{name}:$1$0"),
+        &format!("%{name}:{placeholder}"),
+        "Fill the directive's colon-form argument.",
+    )
+}
+
+fn recipe(
+    label: &str,
+    detail: &str,
+    insert_text: &str,
+    template: &str,
+    plain_text: &str,
+    documentation: &str,
+) -> DirectiveSnippetRecipeContract {
+    DirectiveSnippetRecipeContract {
+        label: label.to_string(),
+        detail: detail.to_string(),
+        insert_text: insert_text.to_string(),
+        template: template.to_string(),
+        plain_text: plain_text.to_string(),
+        documentation: documentation.to_string(),
     }
 }
 

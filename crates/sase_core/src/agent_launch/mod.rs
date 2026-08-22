@@ -2696,13 +2696,8 @@ fn unquote_directive_arg_value(trimmed: &str) -> String {
         && trimmed.len() >= 4
     {
         trimmed[2..trimmed.len() - 2].to_string()
-    } else if trimmed.starts_with('"')
-        && trimmed.ends_with('"')
-        && trimmed.len() >= 2
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else if trimmed.starts_with('\'')
-        && trimmed.ends_with('\'')
+    } else if ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
         && trimmed.len() >= 2
     {
         trimmed[1..trimmed.len() - 1].to_string()

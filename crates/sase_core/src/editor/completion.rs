@@ -5579,10 +5579,13 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "agent=",
                 "bead=",
                 "priority=",
+                "proc=",
                 "runners=",
                 "time=",
+                "unit=",
                 "@ops",
                 "builders",
                 "review",
@@ -5599,7 +5602,17 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
-            vec!["bead=", "priority=", "runners=", "@ops", "review", "worker"]
+            vec![
+                "agent=",
+                "bead=",
+                "priority=",
+                "proc=",
+                "runners=",
+                "unit=",
+                "@ops",
+                "review",
+                "worker"
+            ]
         );
 
         let colon = build_wait_completion_candidates_for_form(

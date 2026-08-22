@@ -1851,7 +1851,18 @@ mod tests {
         let candidates = directive_argument_candidates("wait").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["bead=", "priority=", "runners=", "time="]);
+        assert_eq!(
+            values,
+            [
+                "agent=",
+                "bead=",
+                "priority=",
+                "proc=",
+                "runners=",
+                "time=",
+                "unit="
+            ]
+        );
         assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 
@@ -2166,10 +2177,13 @@ mod tests {
         assert_eq!(
             at_end("%wait("),
             [
+                "agent=",
                 "bead=",
                 "priority=",
+                "proc=",
                 "runners=",
                 "time=",
+                "unit=",
                 "builders",
                 "planner"
             ]

@@ -42,7 +42,9 @@ pub use completion::{
     named_args_skeleton,
 };
 pub use definition::{definition_at_position, DefinitionTarget};
-pub use diagnostics::{analyze_artifact_refs, analyze_document};
+pub use diagnostics::{
+    analyze_artifact_refs, analyze_document, typed_launch_directive_diagnostics,
+};
 pub use directive::{
     build_bead_completion_candidates, build_directive_completion_candidates,
     build_directive_completion_candidates_with_flags,
@@ -83,22 +85,23 @@ pub use token::{
 };
 pub use wire::{
     directive_body_kind, directive_examples, directive_feature_flag,
-    directive_synopsis, AgentCatalogRequest, AgentCatalogResponse,
-    AgentCompletionEntry, ArtifactRefCompletionMode,
+    directive_snippet_recipes, directive_synopsis, AgentCatalogRequest,
+    AgentCatalogResponse, AgentCompletionEntry, ArtifactRefCompletionMode,
     ArtifactRefCompletionTrigger, BeadCompletionEntry, CompletionCandidate,
     CompletionContext, CompletionContextKind, CompletionList,
     DiagnosticSeverity, DirectiveBodyKind, DirectiveClauseContext,
     DirectiveClauseKind, DirectiveCompletionInventories,
     DirectiveContractEntry, DirectiveFinalizerEntry, DirectiveKeywordContract,
     DirectiveKeywordSpec, DirectiveMetadata, DirectiveModelAliasKey,
-    DirectiveModelEntry, DirectiveSuggestedValue, DirectiveSuggestedValueWire,
-    DirectiveSyntaxForm, DirectiveValueRole, EditorDiagnostic, EditorPosition,
-    EditorRange, EditorTextEdit, FinalizerCatalogRequest,
-    FinalizerCatalogResponse, FrontmatterFieldKind, FrontmatterFieldSchema,
-    FrontmatterInputType, HoverPayload, TokenInfo, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
-    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
+    DirectiveModelEntry, DirectiveSnippetRecipeContract,
+    DirectiveSuggestedValue, DirectiveSuggestedValueWire, DirectiveSyntaxForm,
+    DirectiveValueRole, EditorDiagnostic, EditorPosition, EditorRange,
+    EditorTextEdit, FinalizerCatalogRequest, FinalizerCatalogResponse,
+    FrontmatterFieldKind, FrontmatterFieldSchema, FrontmatterInputType,
+    HoverPayload, TokenInfo, VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
+    VcsRepoTrigger, XpromptAssistEntry, XpromptInputHint,
+    AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
     FINALIZER_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
