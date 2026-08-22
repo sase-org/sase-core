@@ -393,8 +393,13 @@ fn code_directive_double_colon_name(line: &str) -> Option<&'static str> {
     match name {
         "if" => Some("if"),
         "proc" => Some("proc"),
+        other if proc_option_header(other) => Some("proc"),
         _ => None,
     }
+}
+
+fn proc_option_header(value: &str) -> bool {
+    value.starts_with("proc(") && value.ends_with(')')
 }
 
 fn position_in_ranges(position: usize, fences: &[FencedBlock]) -> bool {

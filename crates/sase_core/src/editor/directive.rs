@@ -289,6 +289,14 @@ const PROC_KEYWORDS: &[DirectiveKeywordSpec] = &[
 
 const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
+        name: "agent",
+        description: "Wait for an explicit agent identity",
+        value_role: DirectiveValueRole::Agent,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
         name: "bead",
         description: "Wait until this bead is closed",
         value_role: DirectiveValueRole::Bead,
@@ -305,6 +313,14 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: WAIT_PRIORITY_SUGGESTIONS,
     },
     DirectiveKeywordSpec {
+        name: "proc",
+        description: "Wait for a proc ID or shell name",
+        value_role: DirectiveValueRole::FreeText,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
         name: "runners",
         description: "Start when at most this many agents are already running",
         value_role: DirectiveValueRole::NonNegativeInt,
@@ -319,6 +335,14 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         repeatable: false,
         conflicts_with: &[],
         suggested_values: WAIT_TIME_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "unit",
+        description: "Wait for a logical launch unit ID",
+        value_role: DirectiveValueRole::FreeText,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
     },
 ];
 
@@ -1422,14 +1446,20 @@ mod tests {
                 .iter()
                 .map(|keyword| keyword.name.as_str())
                 .collect::<Vec<_>>(),
-            ["bead", "priority", "runners", "time"]
+            ["agent", "bead", "priority", "proc", "runners", "time", "unit"]
         );
         assert!(wait
             .syntax_forms
             .contains(&DirectiveSyntaxForm::Parenthesized));
         assert!(wait.syntax_forms.contains(&DirectiveSyntaxForm::Colon));
         assert_eq!(wait.positional_role, Some(DirectiveValueRole::Agent));
-        assert_eq!(wait.keywords[0].value_role, DirectiveValueRole::Bead);
+        assert_eq!(
+            wait.keywords
+                .iter()
+                .find(|keyword| keyword.name == "bead")
+                .map(|keyword| keyword.value_role),
+            Some(DirectiveValueRole::Bead)
+        );
 
         let if_directive = contract
             .iter()

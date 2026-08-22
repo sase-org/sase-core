@@ -458,6 +458,7 @@ use sase_core::agent_launch::{
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
+    plan_typed_launch_units as core_plan_typed_launch_units,
     prepare_agent_launch as core_prepare_agent_launch, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, OccupancyCallerWire, OccupantRecordWire,
     WorkspaceClaimRequestWire, WorkspaceClaimWire,
@@ -9260,6 +9261,25 @@ fn py_plan_agent_launch_fanout<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Plan a pure typed Agent/Proc launch graph without launching children.
+#[pyfunction]
+#[pyo3(name = "plan_typed_launch_units")]
+#[pyo3(signature = (prompt, launch_kind = None, selected_project = None))]
+fn py_plan_typed_launch_units<'py>(
+    py: Python<'py>,
+    prompt: &str,
+    launch_kind: Option<&str>,
+    selected_project: Option<&str>,
+) -> PyResult<PyObject> {
+    let plan =
+        core_plan_typed_launch_units(prompt, launch_kind, selected_project)
+            .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Return single-line inline-code ranges as UTF-8 byte offsets.
 #[pyfunction]
 #[pyo3(name = "inline_code_ranges")]
@@ -10423,6 +10443,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;

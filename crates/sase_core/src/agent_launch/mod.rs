@@ -1,11 +1,15 @@
 //! Wire records and deterministic helpers for agent launch.
 
 use crate::effort::split_model_effort;
-use crate::fenced_code::fenced_block_ranges;
+use crate::fenced_code::{
+    fenced_block_ranges, language_from_info_string,
+    scan_directive_owned_fences, CodeLanguage, CodeValue, CodeValueWire,
+};
 use crate::prompt_literals::inline_code_ranges;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
@@ -13,6 +17,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 1;
 const EMPTY_ALT_SENTINEL: char = '\u{E000}';
 const EMPTY_ALT_SENTINEL_STR: &str = "\u{E000}";
 
@@ -179,6 +184,149 @@ pub struct LaunchFanoutPlanWire {
     pub fanout_sleep_seconds: f64,
 }
 
+/// Pure, schema-versioned launch graph. It is produced before approval and
+/// contains only logical launch units, typed waits, code digests/previews, and
+/// resource intent. Runtime identities remain layered on top by later phases.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaunchPlanWire {
+    pub schema_version: u32,
+    pub launch_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_project: Option<String>,
+    #[serde(default)]
+    pub units: Vec<LaunchUnitWire>,
+    #[serde(default)]
+    pub approval_preview: Vec<String>,
+    pub content_digest: String,
+    #[serde(default)]
+    pub diagnostics: Vec<LaunchPlanDiagnosticWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaunchUnitWire {
+    pub logical_id: String,
+    pub source_order: u32,
+    #[serde(default)]
+    pub waits: Vec<WaitTargetWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<LaunchConditionWire>,
+    pub payload: LaunchUnitPayloadWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchUnitPayloadWire {
+    Agent(AgentUnitWire),
+    Proc(ProcUnitWire),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentUnitWire {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub identity_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bead_id: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub auto_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_mode: Option<String>,
+    #[serde(default)]
+    pub finalizers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_runners: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_priority: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcUnitWire {
+    pub code: CodeValueWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub workspace: bool,
+    #[serde(default)]
+    pub workspace_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_project: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchConditionWire {
+    pub code: CodeValueWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub context_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WaitTargetWire {
+    Logical {
+        logical_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+    Agent {
+        name: String,
+    },
+    Proc {
+        identifier: String,
+    },
+    Bead {
+        bead_id: String,
+    },
+    Time {
+        value: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchOutcomeWire {
+    Eligible,
+    Launched,
+    Skipped,
+    ConditionError,
+    LaunchError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchUnitResultWire {
+    pub logical_id: String,
+    pub outcome: LaunchOutcomeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchPlanDiagnosticWire {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<[usize; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum AgentLaunchPreparationError {
     SchemaVersion { expected: u32, actual: u32 },
@@ -243,7 +391,13 @@ impl std::error::Error for TimestampBatchAllocationError {}
 pub enum AgentLaunchFanoutPlanError {
     UnsupportedKind(String),
     MultiModelUnsupported(String),
-    UnclosedDirective { name: String, close: char },
+    UnclosedDirective {
+        name: String,
+        close: char,
+    },
+    TypedLaunchPlan {
+        diagnostics: Vec<LaunchPlanDiagnosticWire>,
+    },
 }
 
 impl fmt::Display for AgentLaunchFanoutPlanError {
@@ -258,6 +412,13 @@ impl fmt::Display for AgentLaunchFanoutPlanError {
                     f,
                     "unclosed {name} directive: missing closing '{close}'"
                 )
+            }
+            Self::TypedLaunchPlan { diagnostics } => {
+                if let Some(first) = diagnostics.first() {
+                    write!(f, "{}", first.message)
+                } else {
+                    write!(f, "typed launch plan validation failed")
+                }
             }
         }
     }
@@ -456,6 +617,1124 @@ pub fn plan_agent_launch_fanout(
             other.to_string(),
         )),
     }
+}
+
+pub fn plan_typed_launch_units(
+    prompt: &str,
+    launch_kind: Option<&str>,
+    selected_project: Option<&str>,
+) -> Result<LaunchPlanWire, AgentLaunchFanoutPlanError> {
+    let fanout = plan_agent_launch_fanout(prompt, launch_kind)?;
+    let plan_project = selected_project
+        .map(str::to_string)
+        .or_else(|| project_context_from_prompt(prompt));
+    let mut diagnostics = Vec::new();
+    let mut raw_units = Vec::with_capacity(fanout.slots.len());
+
+    for slot in &fanout.slots {
+        raw_units.push(classify_typed_launch_unit(
+            slot,
+            plan_project.as_deref(),
+            &mut diagnostics,
+        ));
+    }
+    validate_typed_unit_identities(&raw_units, &mut diagnostics);
+    resolve_typed_waits(&mut raw_units, &mut diagnostics);
+    validate_typed_wait_cycles(&raw_units, &mut diagnostics);
+
+    if !diagnostics.is_empty() {
+        return Err(AgentLaunchFanoutPlanError::TypedLaunchPlan {
+            diagnostics,
+        });
+    }
+
+    let units: Vec<LaunchUnitWire> =
+        raw_units.into_iter().map(|raw| raw.unit).collect();
+    let approval_preview = render_launch_approval_preview(
+        &fanout.launch_kind,
+        plan_project.as_deref(),
+        &units,
+    );
+    let content_digest = launch_plan_content_digest(
+        &fanout.launch_kind,
+        plan_project.as_deref(),
+        &units,
+    );
+    Ok(LaunchPlanWire {
+        schema_version: LAUNCH_PLAN_WIRE_SCHEMA_VERSION,
+        launch_kind: fanout.launch_kind,
+        selected_project: plan_project,
+        units,
+        approval_preview,
+        content_digest,
+        diagnostics: Vec::new(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RawLaunchUnit {
+    unit: LaunchUnitWire,
+    raw_waits: Vec<RawWaitTarget>,
+}
+
+#[derive(Debug, Clone)]
+struct RawWaitTarget {
+    target: RawWaitTargetKind,
+    source: Option<String>,
+    source_span: Option<[usize; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RawWaitTargetKind {
+    Previous,
+    Unit(String),
+    Agent(String),
+    Proc(String),
+    Bead(String),
+    Time(String),
+}
+
+#[derive(Debug, Clone)]
+struct ParsedProcDirective {
+    code: Option<CodeValueWire>,
+    options: BTreeMap<String, String>,
+}
+
+fn classify_typed_launch_unit(
+    slot: &LaunchFanoutSlotWire,
+    selected_project: Option<&str>,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) -> RawLaunchUnit {
+    let prompt = slot.prompt.as_str();
+    let logical_id = format!("unit-{}", slot.slot_index + 1);
+    let mut regions_to_remove = project_ref_ranges(prompt);
+    let mut condition: Option<LaunchConditionWire> = None;
+    let mut proc_code: Option<CodeValueWire> = None;
+    let mut proc_options: BTreeMap<String, String> = BTreeMap::new();
+    let mut raw_waits = Vec::new();
+    let mut agent_identity = slot.repeat_name.clone();
+    let mut agent_identity_explicit = agent_identity.is_some();
+    let mut agent_model = slot.model.clone();
+    let mut agent_effort: Option<String> = None;
+    let mut agent_bead_id = slot.bead_id.clone();
+    let mut agent_hidden = false;
+    let mut auto_enabled = false;
+    let mut auto_mode: Option<String> = None;
+    let mut finalizers = Vec::new();
+    let mut wait_runners: Option<u32> = None;
+    let mut wait_priority: Option<i32> = None;
+    let mut proc_forbidden_directives = Vec::new();
+
+    let scan = scan_directive_owned_fences(prompt);
+    for diagnostic in scan.diagnostics {
+        diagnostics.push(LaunchPlanDiagnosticWire {
+            code: diagnostic.code,
+            severity: "error".to_string(),
+            message: diagnostic.message,
+            source_span: Some(diagnostic.span),
+            logical_id: Some(logical_id.clone()),
+        });
+    }
+    for directive in scan.directives {
+        regions_to_remove.push((directive.span[0], directive.span[1]));
+        match directive.name.as_str() {
+            "if" => {
+                if condition.is_some() {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-condition",
+                        "Only one %if is allowed per launch unit.",
+                        &logical_id,
+                        Some(directive.span),
+                    ));
+                    continue;
+                }
+                if let Some(code) = directive.code {
+                    condition = Some(LaunchConditionWire {
+                        code,
+                        cwd: None,
+                        context_fields: vec![
+                            "logical_unit".to_string(),
+                            "selected_project".to_string(),
+                            "safe_inputs".to_string(),
+                            "waited_outcomes".to_string(),
+                        ],
+                    });
+                }
+            }
+            "proc" => {
+                if proc_code.is_some() {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-proc",
+                        "Only one %proc is allowed per launch unit.",
+                        &logical_id,
+                        Some(directive.span),
+                    ));
+                    continue;
+                }
+                proc_code = directive.code;
+            }
+            _ => {}
+        }
+    }
+
+    let ignored_ranges = typed_directive_ignored_ranges(prompt);
+    for directive in directive_occurrences(prompt).unwrap_or_default() {
+        if position_in_ranges(directive.start, &ignored_ranges) {
+            continue;
+        }
+        let span = [directive.start, directive.end];
+        match directive.canonical_name.as_str() {
+            "proc" => {
+                regions_to_remove.push((directive.start, directive.end));
+                match parse_proc_directive(
+                    prompt,
+                    &directive,
+                    proc_code.is_some(),
+                ) {
+                    Ok(parsed) => {
+                        if let Some(code) = parsed.code {
+                            if proc_code.is_some() {
+                                diagnostics.push(typed_unit_diagnostic(
+                                    "duplicate-proc-body",
+                                    "%proc cannot combine a parenthesized body with a fenced body.",
+                                    &logical_id,
+                                    Some(span),
+                                ));
+                            } else {
+                                proc_code = Some(code);
+                            }
+                        }
+                        for (key, value) in parsed.options {
+                            proc_options.insert(key, value);
+                        }
+                    }
+                    Err(diagnostic) => {
+                        diagnostics
+                            .push(with_logical_id(diagnostic, &logical_id));
+                    }
+                }
+            }
+            "if" => {
+                regions_to_remove.push((directive.start, directive.end));
+                diagnostics.push(typed_unit_diagnostic(
+                    "invalid-if-form",
+                    "%if requires %if:: followed by exactly one closed bash or python fence.",
+                    &logical_id,
+                    Some(span),
+                ));
+            }
+            "wait" => {
+                regions_to_remove.push((directive.start, directive.end));
+                parse_wait_directive(
+                    prompt,
+                    &directive,
+                    &logical_id,
+                    &mut raw_waits,
+                    &mut wait_runners,
+                    &mut wait_priority,
+                    diagnostics,
+                );
+            }
+            "id" => {
+                regions_to_remove.push((directive.start, directive.end));
+                let parsed = parse_id_directive(&directive);
+                if let Some(identity) = parsed.identity {
+                    agent_identity = Some(identity);
+                    agent_identity_explicit = true;
+                }
+                if let Some(bead_id) = parsed.bead_id {
+                    agent_bead_id = Some(bead_id);
+                }
+                if parsed.unsupported_on_proc {
+                    proc_forbidden_directives
+                        .push("%id(..., bead=...)".to_string());
+                }
+            }
+            "model" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%model".to_string());
+                if let Some(value) =
+                    directive.args.first().filter(|arg| !arg.is_empty())
+                {
+                    let (model, effort) = split_model_effort(value);
+                    agent_model = Some(model.to_string());
+                    if let Some(effort) = effort {
+                        agent_effort = Some(effort.to_string());
+                    }
+                }
+            }
+            "effort" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%effort".to_string());
+                if let Some(value) =
+                    directive.args.first().filter(|arg| !arg.is_empty())
+                {
+                    agent_effort = Some(value.clone());
+                }
+            }
+            "auto" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%auto".to_string());
+                auto_enabled = true;
+                auto_mode = Some(
+                    directive
+                        .args
+                        .first()
+                        .filter(|arg| !arg.is_empty() && arg.as_str() != "true")
+                        .cloned()
+                        .unwrap_or_else(|| "plan".to_string()),
+                );
+            }
+            "final" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%final".to_string());
+                finalizers.extend(
+                    directive
+                        .args
+                        .iter()
+                        .filter(|arg| !arg.is_empty())
+                        .cloned(),
+                );
+            }
+            "clan" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%clan".to_string());
+            }
+            "hide" => {
+                regions_to_remove.push((directive.start, directive.end));
+                proc_forbidden_directives.push("%hide".to_string());
+                agent_hidden = true;
+            }
+            "repeat" => {
+                regions_to_remove.push((directive.start, directive.end));
+            }
+            _ => {}
+        }
+    }
+
+    let cleaned_prompt = strip_prompt_regions(prompt, &regions_to_remove)
+        .trim()
+        .to_string();
+    let unit_project = selected_project
+        .map(str::to_string)
+        .or_else(|| project_context_from_prompt(prompt));
+    let payload = if let Some(code) = proc_code {
+        if !cleaned_prompt.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "proc-residual-prompt",
+                "%proc launch units cannot include residual prompt prose; put launch text in an agent unit.",
+                &logical_id,
+                None,
+            ));
+        }
+        if !proc_forbidden_directives.is_empty() {
+            proc_forbidden_directives.sort();
+            proc_forbidden_directives.dedup();
+            diagnostics.push(typed_unit_diagnostic(
+                "agent-directive-on-proc",
+                &format!(
+                    "{} {} not valid on %proc launch units.",
+                    proc_forbidden_directives.join(", "),
+                    if proc_forbidden_directives.len() == 1 {
+                        "is"
+                    } else {
+                        "are"
+                    }
+                ),
+                &logical_id,
+                None,
+            ));
+        }
+        let shell_name = agent_identity.clone();
+        validate_proc_shell_name(
+            shell_name.as_deref(),
+            &logical_id,
+            diagnostics,
+        );
+        let workspace = parse_proc_workspace(
+            proc_options.get("workspace").map(String::as_str),
+            unit_project.as_deref(),
+            &logical_id,
+            diagnostics,
+        );
+        validate_proc_project_policy(
+            unit_project.as_deref(),
+            workspace,
+            proc_options.get("cwd").map(String::as_str),
+            &logical_id,
+            diagnostics,
+        );
+        LaunchUnitPayloadWire::Proc(ProcUnitWire {
+            code,
+            shell_name,
+            label: proc_options.get("label").cloned().filter(|v| !v.is_empty()),
+            timeout: proc_options
+                .get("timeout")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            idle_timeout: proc_options
+                .get("idle_timeout")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            cwd: proc_options.get("cwd").cloned().filter(|v| !v.is_empty()),
+            workspace,
+            workspace_explicit: proc_options.contains_key("workspace"),
+            selected_project: unit_project,
+        })
+    } else {
+        LaunchUnitPayloadWire::Agent(AgentUnitWire {
+            prompt: cleaned_prompt,
+            identity: agent_identity,
+            identity_explicit: agent_identity_explicit,
+            model: agent_model,
+            reasoning_effort: agent_effort,
+            bead_id: agent_bead_id,
+            hidden: agent_hidden,
+            auto_enabled,
+            auto_mode,
+            finalizers,
+            wait_runners,
+            wait_priority,
+        })
+    };
+
+    RawLaunchUnit {
+        unit: LaunchUnitWire {
+            logical_id,
+            source_order: slot.slot_index,
+            waits: Vec::new(),
+            condition,
+            payload,
+        },
+        raw_waits,
+    }
+}
+
+fn parse_proc_directive(
+    prompt: &str,
+    directive: &DirectiveOccurrence,
+    fenced_body_present: bool,
+) -> Result<ParsedProcDirective, LaunchPlanDiagnosticWire> {
+    let source = &prompt[directive.start..directive.end];
+    let Some(open_rel) = source.find('(') else {
+        return Err(typed_plan_diagnostic(
+            "invalid-proc-form",
+            "%proc requires a body: %proc(\"cmd\"), %proc(bash=...|python=...), or %proc:: plus a fence.",
+            Some([directive.start, directive.end]),
+        ));
+    };
+    let open = directive.start + open_rel;
+    let Some(close) = find_matching_paren(prompt, open) else {
+        return Err(typed_plan_diagnostic(
+            "malformed-proc",
+            "Malformed %proc(...) directive: missing closing ')'.",
+            Some([directive.start, directive.end]),
+        ));
+    };
+    let args = parse_directive_args_with_names(&prompt[open + 1..close], ',');
+    let allowed: BTreeSet<&str> = [
+        "bash",
+        "python",
+        "timeout",
+        "idle_timeout",
+        "cwd",
+        "workspace",
+        "label",
+    ]
+    .into_iter()
+    .collect();
+    let mut positional_body: Option<String> = None;
+    let mut named_body: Option<(String, String)> = None;
+    let mut options = BTreeMap::new();
+    for arg in args {
+        match arg.name.as_deref() {
+            None => {
+                if !arg.value.is_empty() {
+                    if positional_body.is_some() {
+                        return Err(typed_plan_diagnostic(
+                            "duplicate-proc-body",
+                            "%proc accepts exactly one body.",
+                            Some([directive.start, directive.end]),
+                        ));
+                    }
+                    positional_body = Some(arg.value);
+                }
+            }
+            Some("bash") | Some("python") => {
+                if named_body.is_some() {
+                    return Err(typed_plan_diagnostic(
+                        "duplicate-proc-body",
+                        "%proc cannot combine bash= and python=.",
+                        Some([directive.start, directive.end]),
+                    ));
+                }
+                named_body = Some((arg.name.clone().unwrap(), arg.value));
+            }
+            Some(key) if allowed.contains(key) => {
+                options.insert(key.to_string(), arg.value);
+            }
+            Some(key) => {
+                return Err(typed_plan_diagnostic(
+                    "unknown-proc-option",
+                    &format!(
+                        "Unsupported keyword on %proc: {key}=. Only bash=, python=, timeout=, idle_timeout=, cwd=, workspace=, and label= are supported."
+                    ),
+                    Some([directive.start, directive.end]),
+                ));
+            }
+        }
+    }
+    if positional_body.is_some() && named_body.is_some() {
+        return Err(typed_plan_diagnostic(
+            "duplicate-proc-body",
+            "%proc cannot combine a positional body with bash= or python=.",
+            Some([directive.start, directive.end]),
+        ));
+    }
+    let code = match (positional_body, named_body) {
+        (Some(source), None) => Some(make_proc_code_value(source, CodeLanguage::Bash)?),
+        (None, Some((language, source))) => {
+            Some(make_proc_code_value(source, parse_code_language(&language)?)?)
+        }
+        (None, None) if fenced_body_present => None,
+        (None, None) => {
+            return Err(typed_plan_diagnostic(
+                "missing-proc-body",
+                "%proc requires a body: %proc(\"cmd\"), %proc(bash=...|python=...), or %proc:: plus a fence.",
+                Some([directive.start, directive.end]),
+            ))
+        }
+        _ => unreachable!("duplicate combinations are validated above"),
+    };
+    Ok(ParsedProcDirective { code, options })
+}
+
+fn make_proc_code_value(
+    source: String,
+    language: CodeLanguage,
+) -> Result<CodeValueWire, LaunchPlanDiagnosticWire> {
+    if source.trim().is_empty() {
+        return Err(typed_plan_diagnostic(
+            "empty-proc-body",
+            "%proc requires a non-empty body.",
+            None,
+        ));
+    }
+    Ok(CodeValue {
+        source,
+        language,
+        info_string: None,
+    }
+    .to_wire())
+}
+
+fn parse_code_language(
+    value: &str,
+) -> Result<CodeLanguage, LaunchPlanDiagnosticWire> {
+    language_from_info_string(Some(value)).map_err(|message| {
+        typed_plan_diagnostic("unknown-code-language", &message, None)
+    })
+}
+
+fn parse_wait_directive(
+    prompt: &str,
+    directive: &DirectiveOccurrence,
+    logical_id: &str,
+    raw_waits: &mut Vec<RawWaitTarget>,
+    wait_runners: &mut Option<u32>,
+    wait_priority: &mut Option<i32>,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let span = [directive.start, directive.end];
+    let source = Some(prompt[directive.start..directive.end].to_string());
+    let mut args = Vec::new();
+    for arg in &directive.args {
+        if arg.contains(',') && !arg.contains('=') {
+            args.extend(
+                arg.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+        } else {
+            args.push(arg.clone());
+        }
+    }
+    if args.is_empty() || args.iter().all(|arg| arg.is_empty()) {
+        raw_waits.push(RawWaitTarget {
+            target: RawWaitTargetKind::Previous,
+            source,
+            source_span: Some(span),
+        });
+        return;
+    }
+    for arg in args {
+        let (name, value_raw) = split_named_directive_arg(&arg);
+        let value = unquote_directive_arg_value(value_raw.trim());
+        match name.as_deref() {
+            Some("unit") => raw_waits.push(raw_wait("unit", value, span, source.clone())),
+            Some("agent") => raw_waits.push(raw_wait("agent", value, span, source.clone())),
+            Some("proc") => raw_waits.push(raw_wait("proc", value, span, source.clone())),
+            Some("bead") => raw_waits.push(raw_wait("bead", value, span, source.clone())),
+            Some("time") => raw_waits.push(raw_wait("time", value, span, source.clone())),
+            Some("runners") => match value.parse::<u32>() {
+                Ok(parsed) => *wait_runners = Some(parsed),
+                Err(_) => diagnostics.push(typed_unit_diagnostic(
+                    "invalid-wait-runners",
+                    "%wait(runners=...) requires a non-negative integer.",
+                    logical_id,
+                    Some(span),
+                )),
+            },
+            Some("priority") => match value.parse::<i32>() {
+                Ok(parsed) => *wait_priority = Some(parsed),
+                Err(_) => diagnostics.push(typed_unit_diagnostic(
+                    "invalid-wait-priority",
+                    "%wait(priority=...) requires an integer.",
+                    logical_id,
+                    Some(span),
+                )),
+            },
+            Some(key) => diagnostics.push(typed_unit_diagnostic(
+                "unknown-wait-target",
+                &format!(
+                    "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, time=, runners=, or priority=."
+                ),
+                logical_id,
+                Some(span),
+            )),
+            None => raw_waits.push(RawWaitTarget {
+                target: RawWaitTargetKind::Agent(value),
+                source: source.clone(),
+                source_span: Some(span),
+            }),
+        }
+    }
+}
+
+fn raw_wait(
+    kind: &str,
+    value: String,
+    span: [usize; 2],
+    source: Option<String>,
+) -> RawWaitTarget {
+    let target = match kind {
+        "unit" => RawWaitTargetKind::Unit(value),
+        "agent" => RawWaitTargetKind::Agent(value),
+        "proc" => RawWaitTargetKind::Proc(value),
+        "bead" => RawWaitTargetKind::Bead(value),
+        "time" => RawWaitTargetKind::Time(value),
+        _ => RawWaitTargetKind::Agent(value),
+    };
+    RawWaitTarget {
+        target,
+        source,
+        source_span: Some(span),
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedIdDirective {
+    identity: Option<String>,
+    bead_id: Option<String>,
+    unsupported_on_proc: bool,
+}
+
+fn parse_id_directive(directive: &DirectiveOccurrence) -> ParsedIdDirective {
+    let mut parsed = ParsedIdDirective::default();
+    for (index, arg) in directive.args.iter().enumerate() {
+        let (name, value_raw) = split_named_directive_arg(arg);
+        let value = unquote_directive_arg_value(value_raw.trim());
+        match name.as_deref() {
+            Some("bead") => {
+                parsed.bead_id = Some(value);
+                parsed.unsupported_on_proc = true;
+            }
+            None if index == 0 && !value.is_empty() => {
+                parsed.identity = Some(value);
+            }
+            Some(_) => {
+                parsed.unsupported_on_proc = true;
+            }
+            None => {}
+        }
+    }
+    parsed
+}
+
+fn validate_typed_unit_identities(
+    raw_units: &[RawLaunchUnit],
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for raw in raw_units {
+        let identity = match &raw.unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => agent.identity.as_deref(),
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                proc_unit.shell_name.as_deref()
+            }
+        };
+        let Some(identity) = identity else {
+            continue;
+        };
+        if let Some(first) =
+            seen.insert(identity.to_string(), raw.unit.logical_id.clone())
+        {
+            diagnostics.push(typed_unit_diagnostic(
+                "identity-collision",
+                &format!(
+                    "Launch identity {identity:?} is ambiguous between {first} and {}.",
+                    raw.unit.logical_id
+                ),
+                &raw.unit.logical_id,
+                None,
+            ));
+        }
+    }
+}
+
+fn resolve_typed_waits(
+    raw_units: &mut [RawLaunchUnit],
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let logical_ids: BTreeSet<String> = raw_units
+        .iter()
+        .map(|raw| raw.unit.logical_id.clone())
+        .collect();
+    let mut agent_names: BTreeMap<String, String> = BTreeMap::new();
+    let mut proc_names: BTreeMap<String, String> = BTreeMap::new();
+    for raw in raw_units.iter() {
+        match &raw.unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                if let Some(identity) = agent.identity.as_ref() {
+                    agent_names
+                        .insert(identity.clone(), raw.unit.logical_id.clone());
+                }
+            }
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                if let Some(shell_name) = proc_unit.shell_name.as_ref() {
+                    proc_names.insert(
+                        shell_name.clone(),
+                        raw.unit.logical_id.clone(),
+                    );
+                }
+            }
+        }
+    }
+
+    for index in 0..raw_units.len() {
+        let logical_id = raw_units[index].unit.logical_id.clone();
+        let mut waits = Vec::new();
+        for wait in raw_units[index].raw_waits.clone() {
+            match wait.target {
+                RawWaitTargetKind::Previous => {
+                    if index == 0 {
+                        diagnostics.push(typed_unit_diagnostic(
+                            "bare-wait-without-predecessor",
+                            "Bare %wait requires a preceding launch unit.",
+                            &logical_id,
+                            wait.source_span,
+                        ));
+                    } else {
+                        waits.push(WaitTargetWire::Logical {
+                            logical_id: raw_units[index - 1]
+                                .unit
+                                .logical_id
+                                .clone(),
+                            source: wait.source,
+                        });
+                    }
+                }
+                RawWaitTargetKind::Unit(target) => {
+                    if logical_ids.contains(&target) {
+                        waits.push(WaitTargetWire::Logical {
+                            logical_id: target,
+                            source: wait.source,
+                        });
+                    } else {
+                        diagnostics.push(typed_unit_diagnostic(
+                            "unknown-logical-wait",
+                            &format!(
+                                "Unknown launch unit wait target {target:?}."
+                            ),
+                            &logical_id,
+                            wait.source_span,
+                        ));
+                    }
+                }
+                RawWaitTargetKind::Agent(target) => {
+                    if let Some(unit) = agent_names.get(&target) {
+                        waits.push(WaitTargetWire::Logical {
+                            logical_id: unit.clone(),
+                            source: wait.source,
+                        });
+                    } else {
+                        waits.push(WaitTargetWire::Agent { name: target });
+                    }
+                }
+                RawWaitTargetKind::Proc(target) => {
+                    if let Some(unit) = proc_names.get(&target) {
+                        waits.push(WaitTargetWire::Logical {
+                            logical_id: unit.clone(),
+                            source: wait.source,
+                        });
+                    } else if logical_ids.contains(&target) {
+                        waits.push(WaitTargetWire::Logical {
+                            logical_id: target,
+                            source: wait.source,
+                        });
+                    } else {
+                        waits.push(WaitTargetWire::Proc { identifier: target });
+                    }
+                }
+                RawWaitTargetKind::Bead(bead_id) => {
+                    waits.push(WaitTargetWire::Bead { bead_id });
+                }
+                RawWaitTargetKind::Time(value) => {
+                    waits.push(WaitTargetWire::Time { value });
+                }
+            }
+        }
+        raw_units[index].unit.waits = waits;
+    }
+}
+
+fn validate_typed_wait_cycles(
+    raw_units: &[RawLaunchUnit],
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let index_by_id: BTreeMap<String, usize> = raw_units
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| (raw.unit.logical_id.clone(), index))
+        .collect();
+    let mut graph: Vec<Vec<usize>> = vec![Vec::new(); raw_units.len()];
+    for (index, raw) in raw_units.iter().enumerate() {
+        for wait in &raw.unit.waits {
+            if let WaitTargetWire::Logical { logical_id, .. } = wait {
+                if let Some(target) = index_by_id.get(logical_id) {
+                    graph[index].push(*target);
+                }
+            }
+        }
+    }
+    let mut state = vec![0_u8; raw_units.len()];
+    for index in 0..raw_units.len() {
+        if state[index] == 0
+            && wait_cycle_visit(index, &graph, &mut state).is_some()
+        {
+            diagnostics.push(typed_plan_diagnostic(
+                "wait-cycle",
+                "Typed launch waits contain a cycle.",
+                None,
+            ));
+            return;
+        }
+    }
+}
+
+fn wait_cycle_visit(
+    index: usize,
+    graph: &[Vec<usize>],
+    state: &mut [u8],
+) -> Option<usize> {
+    state[index] = 1;
+    for target in &graph[index] {
+        if state[*target] == 1 {
+            return Some(*target);
+        }
+        if state[*target] == 0
+            && wait_cycle_visit(*target, graph, state).is_some()
+        {
+            return Some(*target);
+        }
+    }
+    state[index] = 2;
+    None
+}
+
+fn validate_proc_shell_name(
+    shell_name: Option<&str>,
+    logical_id: &str,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let Some(shell_name) = shell_name else {
+        return;
+    };
+    if shell_name.contains("--") {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-proc-shell-name",
+            "Proc %id names cannot use the agent-family `--` convention.",
+            logical_id,
+            None,
+        ));
+    }
+    if !is_valid_proc_shell_name(shell_name) {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-proc-shell-name",
+            "Proc %id names must be bare identifiers containing only letters, digits, `_`, `.`, or `-`.",
+            logical_id,
+            None,
+        ));
+    }
+}
+
+fn is_valid_proc_shell_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-')
+        })
+}
+
+fn parse_proc_workspace(
+    raw: Option<&str>,
+    selected_project: Option<&str>,
+    logical_id: &str,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) -> bool {
+    let Some(raw) = raw else {
+        return selected_project.is_some();
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-proc-workspace",
+                "%proc workspace= must be a Boolean.",
+                logical_id,
+                None,
+            ));
+            false
+        }
+    }
+}
+
+fn validate_proc_project_policy(
+    selected_project: Option<&str>,
+    workspace: bool,
+    cwd: Option<&str>,
+    logical_id: &str,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    if workspace && selected_project.is_none() {
+        diagnostics.push(typed_unit_diagnostic(
+            "workspace-without-project",
+            "%proc workspace=true requires a selected project.",
+            logical_id,
+            None,
+        ));
+    }
+    if selected_project.is_none() && !workspace && cwd.is_none() {
+        diagnostics.push(typed_unit_diagnostic(
+            "proc-cwd-required",
+            "%proc without a selected project requires an explicit cwd=.",
+            logical_id,
+            None,
+        ));
+    }
+}
+
+fn typed_directive_ignored_ranges(prompt: &str) -> Vec<(usize, usize)> {
+    let mut ranges = fenced_block_ranges(prompt);
+    ranges.extend(disabled_region_ranges(prompt));
+    if prompt.contains('`') {
+        ranges.extend(launch_inline_literal_ranges(prompt));
+    }
+    ranges
+}
+
+fn strip_prompt_regions(prompt: &str, regions: &[(usize, usize)]) -> String {
+    let mut merged = merge_ranges(regions);
+    merged.sort_by_key(|range| std::cmp::Reverse(range.0));
+    let mut cleaned = prompt.to_string();
+    for (start, end) in merged {
+        if start <= end && end <= cleaned.len() {
+            cleaned.replace_range(start..end, "");
+        }
+    }
+    leading_blank_line_re().replace(&cleaned, "").to_string()
+}
+
+fn merge_ranges(regions: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut sorted: Vec<(usize, usize)> = regions
+        .iter()
+        .copied()
+        .filter(|(start, end)| start < end)
+        .collect();
+    sorted.sort_by_key(|range| range.0);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in sorted {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+fn project_context_from_prompt(prompt: &str) -> Option<String> {
+    let ignored = typed_directive_ignored_ranges(prompt);
+    project_ref_re()
+        .captures_iter(prompt)
+        .filter_map(|captures| {
+            let marker = captures.get(2)?;
+            if position_in_ranges(marker.start(), &ignored) {
+                return None;
+            }
+            Some(marker.as_str().to_string())
+        })
+        .next()
+}
+
+fn project_ref_ranges(prompt: &str) -> Vec<(usize, usize)> {
+    let ignored = typed_directive_ignored_ranges(prompt);
+    project_ref_re()
+        .captures_iter(prompt)
+        .filter_map(|captures| {
+            let marker = captures.get(2)?;
+            (!position_in_ranges(marker.start(), &ignored))
+                .then_some((marker.start(), marker.end()))
+        })
+        .collect()
+}
+
+fn project_ref_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?m)(^|[\s\(\[\{"'])(#(?:gh|git):[A-Za-z0-9_.~,+/@-]+)"#)
+            .unwrap()
+    })
+}
+
+fn render_launch_approval_preview(
+    launch_kind: &str,
+    selected_project: Option<&str>,
+    units: &[LaunchUnitWire],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "LaunchPlan v{} kind={} units={} project={}",
+        LAUNCH_PLAN_WIRE_SCHEMA_VERSION,
+        launch_kind,
+        units.len(),
+        selected_project.unwrap_or("none")
+    ));
+    for unit in units {
+        let waits = if unit.waits.is_empty() {
+            "none".to_string()
+        } else {
+            unit.waits
+                .iter()
+                .map(wait_preview)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let condition = unit
+            .condition
+            .as_ref()
+            .map(|condition| {
+                format!(
+                    " if={}:{}",
+                    condition.code.language, condition.code.digest
+                )
+            })
+            .unwrap_or_default();
+        match &unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => lines.push(format!(
+                "{} agent identity={} model={} waits={}{} prompt={:?}",
+                unit.logical_id,
+                agent.identity.as_deref().unwrap_or("auto"),
+                agent.model.as_deref().unwrap_or("default"),
+                waits,
+                condition,
+                agent.prompt
+            )),
+            LaunchUnitPayloadWire::Proc(proc_unit) => lines.push(format!(
+                "{} proc shell={} project={} workspace={} waits={}{} code={}:{} preview={:?}",
+                unit.logical_id,
+                proc_unit.shell_name.as_deref().unwrap_or("auto"),
+                proc_unit.selected_project.as_deref().unwrap_or("none"),
+                proc_unit.workspace,
+                waits,
+                condition,
+                proc_unit.code.language,
+                proc_unit.code.digest,
+                proc_unit.code.preview
+            )),
+        }
+    }
+    lines
+}
+
+fn wait_preview(wait: &WaitTargetWire) -> String {
+    match wait {
+        WaitTargetWire::Logical { logical_id, .. } => {
+            format!("unit:{logical_id}")
+        }
+        WaitTargetWire::Agent { name } => format!("agent:{name}"),
+        WaitTargetWire::Proc { identifier } => format!("proc:{identifier}"),
+        WaitTargetWire::Bead { bead_id } => format!("bead:{bead_id}"),
+        WaitTargetWire::Time { value } => format!("time:{value}"),
+    }
+}
+
+fn launch_plan_content_digest(
+    launch_kind: &str,
+    selected_project: Option<&str>,
+    units: &[LaunchUnitWire],
+) -> String {
+    let value = serde_json::json!({
+        "schema_version": LAUNCH_PLAN_WIRE_SCHEMA_VERSION,
+        "launch_kind": launch_kind,
+        "selected_project": selected_project,
+        "units": units,
+    });
+    hex::encode(Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn typed_plan_diagnostic(
+    code: &str,
+    message: &str,
+    source_span: Option<[usize; 2]>,
+) -> LaunchPlanDiagnosticWire {
+    LaunchPlanDiagnosticWire {
+        code: code.to_string(),
+        severity: "error".to_string(),
+        message: message.to_string(),
+        source_span,
+        logical_id: None,
+    }
+}
+
+fn typed_unit_diagnostic(
+    code: &str,
+    message: &str,
+    logical_id: &str,
+    source_span: Option<[usize; 2]>,
+) -> LaunchPlanDiagnosticWire {
+    LaunchPlanDiagnosticWire {
+        code: code.to_string(),
+        severity: "error".to_string(),
+        message: message.to_string(),
+        source_span,
+        logical_id: Some(logical_id.to_string()),
+    }
+}
+
+fn with_logical_id(
+    mut diagnostic: LaunchPlanDiagnosticWire,
+    logical_id: &str,
+) -> LaunchPlanDiagnosticWire {
+    diagnostic.logical_id = Some(logical_id.to_string());
+    diagnostic
 }
 
 fn split_multi_prompt_segments(prompt: &str) -> Vec<String> {
@@ -1202,10 +2481,22 @@ fn xprompt_occurrences(prompt: &str) -> Vec<XPromptOccurrence> {
 pub(crate) fn launch_literal_zone_ranges(prompt: &str) -> Vec<(usize, usize)> {
     let mut ranges = fenced_block_ranges(prompt);
     ranges.extend(disabled_region_ranges(prompt));
+    ranges.extend(code_directive_call_ranges(prompt));
     if prompt.contains('`') {
         ranges.extend(launch_inline_literal_ranges(prompt));
     }
     ranges
+}
+
+fn code_directive_call_ranges(prompt: &str) -> Vec<(usize, usize)> {
+    directive_occurrences(prompt)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|directive| {
+            matches!(directive.canonical_name.as_str(), "if" | "proc")
+        })
+        .map(|directive| (directive.start, directive.end))
+        .collect()
 }
 
 fn launch_inline_literal_ranges(prompt: &str) -> Vec<(usize, usize)> {
@@ -1277,12 +2568,17 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
     let mut start = 0;
     let mut depth = 0_i32;
     let mut in_backticks = false;
+    let mut in_double_quotes = false;
     for (idx, ch) in inner.char_indices() {
-        if ch == '`' {
+        if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
             continue;
         }
-        if in_backticks {
+        if ch == '"' && !in_backticks {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        if in_backticks || in_double_quotes {
             continue;
         }
         match ch {
@@ -1307,12 +2603,17 @@ fn parse_directive_args_with_names(
     let mut start = 0;
     let mut depth = 0_i32;
     let mut in_backticks = false;
+    let mut in_double_quotes = false;
     for (idx, ch) in inner.char_indices() {
-        if ch == '`' {
+        if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
             continue;
         }
-        if in_backticks {
+        if ch == '"' && !in_backticks {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        if in_backticks || in_double_quotes {
             continue;
         }
         match ch {
@@ -1347,12 +2648,17 @@ fn push_arg(args: &mut Vec<String>, raw: &str) {
 fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
     let mut depth = 0_i32;
     let mut in_backticks = false;
+    let mut in_double_quotes = false;
     for (idx, ch) in raw.char_indices() {
-        if ch == '`' {
+        if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
             continue;
         }
-        if in_backticks {
+        if ch == '"' && !in_backticks {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        if in_backticks || in_double_quotes {
             continue;
         }
         match ch {
@@ -1378,6 +2684,16 @@ fn unquote_directive_arg_value(trimmed: &str) -> String {
         && trimmed.len() >= 4
     {
         trimmed[2..trimmed.len() - 2].to_string()
+    } else if trimmed.starts_with('"')
+        && trimmed.ends_with('"')
+        && trimmed.len() >= 2
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else if trimmed.starts_with('\'')
+        && trimmed.ends_with('\'')
+        && trimmed.len() >= 2
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
     } else {
         unquote_backticks(trimmed)
     }
@@ -1433,13 +2749,18 @@ fn find_matching_delimiter(
 ) -> Option<usize> {
     let mut depth = 0_i32;
     let mut in_backticks = false;
+    let mut in_double_quotes = false;
     for (rel_idx, ch) in text[open_start..].char_indices() {
         let idx = open_start + rel_idx;
-        if ch == '`' {
+        if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
             continue;
         }
-        if in_backticks {
+        if ch == '"' && !in_backticks {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        if in_backticks || in_double_quotes {
             continue;
         }
         if ch == open {
@@ -2441,6 +3762,114 @@ mod tests {
         assert_eq!(value["slots"][0]["alt_id"], json!(null));
         let back: LaunchFanoutPlanWire = serde_json::from_value(value).unwrap();
         assert_eq!(back, plan);
+    }
+
+    #[test]
+    fn typed_launch_plan_builds_mixed_proc_agent_wait_graph() {
+        let prompt = "%proc(\"just check\")\n---\n%wait\n%id:reviewer\n%model:opus\nReview";
+
+        let plan =
+            plan_typed_launch_units(prompt, Some("multi_prompt"), Some("sase"))
+                .unwrap();
+
+        assert_eq!(plan.schema_version, LAUNCH_PLAN_WIRE_SCHEMA_VERSION);
+        assert_eq!(plan.launch_kind, "multi_prompt");
+        assert_eq!(plan.units.len(), 2);
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                assert_eq!(proc_unit.code.source, "just check");
+                assert_eq!(proc_unit.code.language, "bash");
+                assert_eq!(proc_unit.selected_project.as_deref(), Some("sase"));
+                assert!(proc_unit.workspace);
+            }
+            other => panic!("expected proc payload, got {other:?}"),
+        }
+        match &plan.units[1].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.identity.as_deref(), Some("reviewer"));
+                assert_eq!(agent.model.as_deref(), Some("opus"));
+                assert_eq!(agent.prompt, "Review");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert_eq!(
+            plan.units[1].waits,
+            vec![WaitTargetWire::Logical {
+                logical_id: "unit-1".to_string(),
+                source: Some("%wait".to_string())
+            }]
+        );
+        assert!(plan.approval_preview[1].contains("proc"));
+        assert_eq!(plan.content_digest.len(), 64);
+    }
+
+    #[test]
+    fn typed_launch_plan_resolves_forward_proc_wait() {
+        let prompt =
+            "%wait(proc=build)\nReview\n---\n%id:build\n%proc(\"echo ready\")";
+
+        let plan =
+            plan_typed_launch_units(prompt, Some("multi_prompt"), Some("sase"))
+                .unwrap();
+
+        assert_eq!(
+            plan.units[0].waits,
+            vec![WaitTargetWire::Logical {
+                logical_id: "unit-2".to_string(),
+                source: Some("%wait(proc=build)".to_string())
+            }]
+        );
+        match &plan.units[1].payload {
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                assert_eq!(proc_unit.shell_name.as_deref(), Some("build"));
+            }
+            other => panic!("expected proc payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_rejects_agent_directives_on_proc() {
+        let err = plan_typed_launch_units(
+            "%model:opus\n%proc(\"just check\")",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not valid on %proc"));
+        match err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code
+                        == "agent-directive-on-proc"));
+            }
+            other => panic!("expected typed launch diagnostic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_rejects_wait_cycles() {
+        let err = plan_typed_launch_units(
+            "%wait(unit=unit-2)\nFirst\n---\n%wait(unit=unit-1)\nSecond",
+            Some("multi_prompt"),
+            Some("sase"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn typed_launch_plan_validates_proc_project_policy() {
+        let err = plan_typed_launch_units(
+            "%proc(workspace=false)::\n```bash\njust check\n```",
+            Some("auto"),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("requires an explicit cwd"));
     }
 
     #[test]
