@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.9](https://github.com/sase-org/sase-core/compare/v0.31.8...v0.31.9) - 2026-08-23
+
+### Added
+
+- Proc metadata changes
+
 ## [0.31.8](https://github.com/sase-org/sase-core/compare/v0.31.7...v0.31.8) - 2026-08-23
 
 ### Added
