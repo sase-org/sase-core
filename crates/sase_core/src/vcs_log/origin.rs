@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::commit_footer::parse_commit_footer;
+use crate::commit_footer::{parse_commit_footer, CommitFooterWire};
 
 /// Where a commit originated from.
 #[derive(
@@ -26,7 +26,12 @@ pub enum CommitOriginWire {
 /// Classify a full commit message as stitch, auto, or manual.
 pub fn classify_commit_origin(message: &str) -> CommitOriginWire {
     let footer = parse_commit_footer(message);
+    classify_commit_origin_from_footer(&footer)
+}
 
+pub(crate) fn classify_commit_origin_from_footer(
+    footer: &CommitFooterWire,
+) -> CommitOriginWire {
     if let Some(tag) = footer.tags.iter().rev().find(|tag| tag.key == "TYPE") {
         if tag.label.trim().eq_ignore_ascii_case("stitch") {
             return CommitOriginWire::Stitch;

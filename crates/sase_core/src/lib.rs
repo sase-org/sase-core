@@ -876,9 +876,9 @@ pub use telemetry::{
     TELEMETRY_WIRE_SCHEMA_VERSION,
 };
 pub use vcs_log::{
-    aggregate_commit_log, classify_commit_origin, parse_git_log,
-    AggregatedCommitWire, CommitOriginWire, VcsCommitWire,
-    VCS_LOG_WIRE_SCHEMA_VERSION,
+    aggregate_commit_log, classify_commit_origin, classify_commit_types,
+    classify_commit_types_for_commit, parse_git_log, AggregatedCommitWire,
+    CommitOriginWire, VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     ChangeSpecWire, CommentWire, CommitWire, DeltaWire, HookStatusLineWire,

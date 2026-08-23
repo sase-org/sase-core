@@ -9,8 +9,9 @@
 use sase_core::vcs_log::parsers::{RECORD_SEP, UNIT_SEP};
 use sase_core::vcs_log::{
     aggregate_commit_log, classify_commit_origin, classify_commit_presence,
-    parse_git_log, AggregatedCommitWire, CommitOriginWire, CommitPresenceWire,
-    VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
+    classify_commit_types, classify_commit_types_for_commit, parse_git_log,
+    AggregatedCommitWire, CommitOriginWire, CommitPresenceWire, VcsCommitWire,
+    VCS_LOG_WIRE_SCHEMA_VERSION,
 };
 use serde_json::json;
 
@@ -396,6 +397,67 @@ fn classify_commit_origin_distinguishes_auto_and_legacy_stitch() {
     assert_eq!(
         classify_commit_origin("fix: legacy\n\nSASE_AGENT=sase-1"),
         CommitOriginWire::Stitch,
+    );
+}
+
+// -- classify_commit_types ------------------------------------------------
+
+#[test]
+fn classify_commit_types_adds_provenance_concrete_merge_and_patch_labels() {
+    assert_eq!(
+        classify_commit_types(
+            "Merge tracked work\n\nSASE_TYPE=bead_work\nSASE_PATCH=feat-x",
+            true,
+        ),
+        vec![
+            "automatic".to_string(),
+            "bead_work".to_string(),
+            "merge".to_string(),
+            "patch".to_string(),
+        ],
+    );
+}
+
+#[test]
+fn classify_commit_types_supports_legacy_spellings_and_unknown_values() {
+    assert_eq!(
+        classify_commit_types(
+            "fix: legacy\n\nTYPE=Future Kind\nPATCH=feat-x",
+            false
+        ),
+        vec![
+            "automatic".to_string(),
+            "future kind".to_string(),
+            "patch".to_string(),
+        ],
+    );
+}
+
+#[test]
+fn classify_commit_types_uses_terminal_footer_and_deduplicates_stitch() {
+    assert_eq!(
+        classify_commit_types("fix: manual\n\nSASE_TYPE=stitch\n\nMore", true),
+        vec!["manual".to_string(), "merge".to_string()],
+    );
+    assert_eq!(
+        classify_commit_types("fix: tracked\n\nSASE_TYPE=stitch", false),
+        vec!["stitch".to_string()],
+    );
+}
+
+#[test]
+fn classify_commit_types_for_commit_uses_parent_ids_for_merge_detection() {
+    let mut row = commit("abcdef", 42, "Merge branch");
+    row.parent_ids = vec!["p1".to_string(), "p2".to_string()];
+    row.body = "Details\n\nSASE_TYPE=init".to_string();
+
+    assert_eq!(
+        classify_commit_types_for_commit(&row),
+        vec![
+            "automatic".to_string(),
+            "init".to_string(),
+            "merge".to_string(),
+        ],
     );
 }
 

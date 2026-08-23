@@ -68,6 +68,7 @@
 //! - `parse_git_log(stdout: str) -> list[dict]`
 //! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
 //! - `classify_commit_origin(message: str) -> str`
+//! - `classify_commit_types(commit: dict) -> list[str]`
 //! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
 //! - `parse_merge_summary(subject: str, body: str) -> dict | None`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
@@ -968,6 +969,7 @@ use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
     classify_commit_origin as core_classify_commit_origin,
     classify_commit_presence as core_classify_commit_presence,
+    classify_commit_types_for_commit as core_classify_commit_types_for_commit,
     parse_git_log as core_parse_git_log,
     parse_merge_summary as core_parse_merge_summary, CommitOriginWire,
     CommitPresenceWire, VcsCommitWire, VCS_LOG_WIRE_SCHEMA_VERSION,
@@ -3398,6 +3400,27 @@ fn py_classify_commit_presence<'py>(
 #[pyo3(name = "classify_commit_origin")]
 fn py_classify_commit_origin(message: &str) -> &'static str {
     commit_origin_to_str(core_classify_commit_origin(message))
+}
+
+/// Return derived type labels for one `VcsCommitWire` dict.
+#[pyfunction]
+#[pyo3(name = "classify_commit_types")]
+fn py_classify_commit_types<'py>(
+    py: Python<'py>,
+    commit: &Bound<'_, PyAny>,
+) -> PyResult<Bound<'py, PyList>> {
+    let value = py_to_json_value(commit)?;
+    let parsed: VcsCommitWire = serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "commit is not a valid VcsCommitWire: {e}"
+        ))
+    })?;
+    let labels = core_classify_commit_types_for_commit(&parsed);
+    let list = PyList::empty_bound(py);
+    for label in labels {
+        list.append(label)?;
+    }
+    Ok(list)
 }
 
 /// Interleave per-repo commit lists into a single newest-first timeline.
@@ -10457,6 +10480,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_origin, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_commit_types, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_merge_summary, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -11036,6 +11060,36 @@ mod tests {
             py_classify_commit_origin("fix: automatic\n\nSASE_TYPE=sase init"),
             "auto",
         );
+    }
+
+    #[test]
+    fn classify_commit_types_binding_returns_label_list() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let commit = PyDict::new_bound(py);
+            commit.set_item("full_id", "full").unwrap();
+            commit.set_item("short_id", "short").unwrap();
+            commit.set_item("author_name", "A").unwrap();
+            commit.set_item("author_email", "a@example.com").unwrap();
+            commit.set_item("timestamp", 42).unwrap();
+            commit.set_item("parent_ids", vec!["p1", "p2"]).unwrap();
+            commit.set_item("subject", "Merge tracked work").unwrap();
+            commit
+                .set_item(
+                    "body",
+                    "Details\n\nSASE_TYPE=bead_work\nSASE_PATCH=feat-x",
+                )
+                .unwrap();
+            commit.set_item("presence", "unknown").unwrap();
+            commit.set_item("origin", "manual").unwrap();
+
+            let labels = py_classify_commit_types(py, commit.as_any()).unwrap();
+            let value = py_to_json_value(labels.as_any()).unwrap();
+            assert_eq!(
+                value,
+                json!(["automatic", "bead_work", "merge", "patch"])
+            );
+        });
     }
 
     #[test]

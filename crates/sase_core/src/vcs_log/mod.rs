@@ -28,6 +28,7 @@
 
 pub mod aggregate;
 pub mod classify;
+pub mod commit_type;
 pub mod merge_summary;
 pub mod origin;
 pub mod parsers;
@@ -35,6 +36,9 @@ pub mod wire;
 
 pub use aggregate::aggregate_commit_log;
 pub use classify::classify_commit_presence;
+pub use commit_type::{
+    classify_commit_types, classify_commit_types_for_commit,
+};
 pub use merge_summary::{
     parse_merge_summary, MergeSummaryKindWire, MergeSummaryWire,
 };
