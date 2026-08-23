@@ -5,9 +5,11 @@
 //! and case-sensitive `c"..."` literals are rejected. Repeated positive
 //! values for one field compile as an any-match constraint.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::query::profile::{CompiledQueryProfile, FieldValueKind};
+use crate::query::profile::{
+    host_duration_bound_direction, CompiledQueryProfile, FieldValueKind,
+};
 use crate::query::types::{
     QueryErrorWire, QueryExprWire, QueryTokenKind, QueryTokenWire,
 };
@@ -137,9 +139,9 @@ fn collect_clauses(
         pos: 0,
     };
     let mut clauses = Vec::new();
-    let mut seen_positive: HashMap<String, ()> = HashMap::new();
+    let mut seen_fields: HashSet<String> = HashSet::new();
     while let Some(token) = lexer.next_token()? {
-        clauses.push(classify_token(token, profile, &mut seen_positive)?);
+        clauses.push(classify_token(token, profile, &mut seen_fields)?);
     }
     Ok(clauses)
 }
@@ -147,7 +149,7 @@ fn collect_clauses(
 fn classify_token(
     token: DecodedToken,
     profile: &CompiledQueryProfile,
-    seen_positive: &mut HashMap<String, ()>,
+    seen_fields: &mut HashSet<String>,
 ) -> Result<FlatClause, QueryErrorWire> {
     let negated = is_negated(&token);
     if negated && !profile.allows_negation() {
@@ -183,6 +185,17 @@ fn classify_token(
         return Ok(clause);
     }
     let colon = unquoted_index(body, body_quoted, b':');
+    if let Some(clause) = classify_bare_bool_flag(
+        body,
+        body_quoted,
+        colon,
+        negated,
+        &token,
+        profile,
+        seen_fields,
+    )? {
+        return Ok(clause);
+    }
     if token.wholly_quoted || colon.is_none() {
         if is_boolean_keyword(body) && !token.wholly_quoted {
             return Err(QueryErrorWire::tokenizer(
@@ -241,21 +254,14 @@ fn classify_token(
             token.start,
         ));
     }
-    if !field.repeatable && !negated {
-        if seen_positive.contains_key(&field.key) {
-            return Err(QueryErrorWire::tokenizer(
-                format!("{}: may only appear once", field.key),
-                token.start,
-            ));
-        }
-        seen_positive.insert(field.key.clone(), ());
-    }
+    record_single_field(seen_fields, field, token.start)?;
+    let mut values = Vec::with_capacity(parts.len());
     for part in &parts {
-        validate_typed_value(field, part, token.start)?;
+        values.push(normalize_typed_value(field, part, token.start)?);
     }
     Ok(FlatClause::Field {
         key: field.key.clone(),
-        values: parts,
+        values,
         negated,
         position: token.start as u32,
     })
@@ -359,7 +365,7 @@ fn reprint_clauses(
                 quoted,
                 ..
             } => {
-                let rendered = quote_value(value, false, *quoted);
+                let rendered = render_text_value(value, *quoted, profile);
                 text_tokens.push(if *negated {
                     format!("-{rendered}")
                 } else {
@@ -418,6 +424,28 @@ fn render_field_values(values: &[String]) -> String {
         .map(|value| quote_value(value, true, false))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn render_text_value(
+    value: &str,
+    quoted: bool,
+    profile: &CompiledQueryProfile,
+) -> String {
+    let rendered = quote_value(value, false, quoted);
+    if rendered == value && is_filterable_bool_key(value, profile) {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        rendered
+    }
+}
+
+fn is_filterable_bool_key(value: &str, profile: &CompiledQueryProfile) -> bool {
+    profile
+        .field(&value.to_ascii_lowercase())
+        .is_some_and(|field| {
+            field.filterable && field.value_kind == FieldValueKind::Bool
+        })
 }
 
 fn quote_value(value: &str, keyed: bool, force: bool) -> String {
@@ -501,6 +529,60 @@ impl<'a> FlatLexer<'a> {
             self.pos += 1;
         }
     }
+}
+
+fn classify_bare_bool_flag(
+    body: &str,
+    body_quoted: &[bool],
+    colon: Option<usize>,
+    negated: bool,
+    token: &DecodedToken,
+    profile: &CompiledQueryProfile,
+    seen_fields: &mut HashSet<String>,
+) -> Result<Option<FlatClause>, QueryErrorWire> {
+    if token.wholly_quoted
+        || colon.is_some()
+        || body_quoted.iter().any(|quoted| *quoted)
+    {
+        return Ok(None);
+    }
+    let key = body.to_ascii_lowercase();
+    let Some(field) = profile.field(&key).filter(|item| item.filterable) else {
+        return Ok(None);
+    };
+    if field.value_kind != FieldValueKind::Bool {
+        return Ok(None);
+    }
+    if negated && !field.negatable {
+        return Err(QueryErrorWire::tokenizer(
+            format!("{}: may not be negated", field.key),
+            token.start,
+        ));
+    }
+    record_single_field(seen_fields, field, token.start)?;
+    Ok(Some(FlatClause::Field {
+        key: field.key.clone(),
+        values: vec!["true".to_string()],
+        negated,
+        position: token.start as u32,
+    }))
+}
+
+fn record_single_field(
+    seen_fields: &mut HashSet<String>,
+    field: &crate::query::profile::QueryFieldSpec,
+    position: usize,
+) -> Result<(), QueryErrorWire> {
+    if field.repeatable {
+        return Ok(());
+    }
+    if !seen_fields.insert(field.key.clone()) {
+        return Err(QueryErrorWire::tokenizer(
+            format!("{}: may only appear once", field.key),
+            position,
+        ));
+    }
+    Ok(())
 }
 
 fn classify_predicate(
@@ -618,11 +700,11 @@ fn unknown_key_message(key: &str, profile: &CompiledQueryProfile) -> String {
     }
 }
 
-fn validate_typed_value(
+fn normalize_typed_value(
     field: &crate::query::profile::QueryFieldSpec,
     value: &str,
     position: usize,
-) -> Result<(), QueryErrorWire> {
+) -> Result<String, QueryErrorWire> {
     match field.value_kind {
         FieldValueKind::Enum => {
             let allowed = &field.static_values;
@@ -639,6 +721,7 @@ fn validate_typed_value(
                     position,
                 ));
             }
+            Ok(value.to_string())
         }
         FieldValueKind::Bool => {
             if parse_bool_literal(value).is_none() {
@@ -650,8 +733,12 @@ fn validate_typed_value(
                     position,
                 ));
             }
+            Ok(value.to_string())
         }
         FieldValueKind::Int => {
+            if host_duration_bound_direction(&field.key).is_some() {
+                return parse_duration_bound_value(&field.key, value, position);
+            }
             if parse_int_literal(value).is_none() {
                 return Err(QueryErrorWire::tokenizer(
                     format!(
@@ -661,10 +748,85 @@ fn validate_typed_value(
                     position,
                 ));
             }
+            Ok(value.to_string())
         }
-        FieldValueKind::String | FieldValueKind::Date => {}
+        FieldValueKind::String | FieldValueKind::Date => Ok(value.to_string()),
     }
-    Ok(())
+}
+
+fn parse_duration_bound_value(
+    key: &str,
+    value: &str,
+    position: usize,
+) -> Result<String, QueryErrorWire> {
+    if let Some(seconds) = parse_whole_unit_duration(value) {
+        return Ok(seconds.to_string());
+    }
+    if is_composite_duration(value) {
+        return Err(QueryErrorWire::tokenizer(
+            format!(
+                "{key}: composite durations are not supported; use seconds \
+                 or one whole-unit literal such as 90m"
+            ),
+            position,
+        ));
+    }
+    Err(QueryErrorWire::tokenizer(
+        format!("{key}: must be seconds or a whole-unit duration like 5m"),
+        position,
+    ))
+}
+
+fn parse_whole_unit_duration(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == 0 {
+        return None;
+    }
+    let amount: i64 = value[..idx].parse().ok()?;
+    let unit = if idx == bytes.len() {
+        b's'
+    } else if idx + 1 == bytes.len() {
+        bytes[idx].to_ascii_lowercase()
+    } else {
+        return None;
+    };
+    let multiplier = match unit {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 60 * 60,
+        b'd' => 24 * 60 * 60,
+        _ => return None,
+    };
+    amount.checked_mul(multiplier)
+}
+
+fn is_composite_duration(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut idx = 0usize;
+    let mut units = 0usize;
+    while idx < bytes.len() {
+        let start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if idx == start || idx >= bytes.len() {
+            return false;
+        }
+        let unit = bytes[idx].to_ascii_lowercase();
+        if !matches!(unit, b's' | b'm' | b'h' | b'd') {
+            return false;
+        }
+        idx += 1;
+        units += 1;
+    }
+    units >= 2
 }
 
 pub fn parse_bool_literal(value: &str) -> Option<bool> {

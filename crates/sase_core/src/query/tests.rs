@@ -7,7 +7,8 @@
 
 use crate::query::profile::{
     profile_from_parts, CompiledQueryProfile, FieldValueKind, QueryFieldSpec,
-    QueryMacroSpec, QuerySigilSpec,
+    QueryMacroSpec, QuerySigilSpec, HOST_DATE_BOUND_KEYS,
+    HOST_DURATION_BOUND_KEYS,
 };
 use crate::query::row::{QueryFieldValues, QueryPredicateFacts, QueryRow};
 use crate::query::types::{
@@ -632,6 +633,103 @@ fn exact_string_field(
     }
 }
 
+fn typed_field(
+    key: &str,
+    value_kind: FieldValueKind,
+    negatable: bool,
+) -> QueryFieldSpec {
+    QueryFieldSpec {
+        key: key.to_string(),
+        value_kind,
+        filterable: true,
+        searchable: false,
+        repeatable: false,
+        negatable,
+        exact_match: false,
+        static_values: if value_kind == FieldValueKind::Bool {
+            vec!["true".into(), "false".into()]
+        } else {
+            Vec::new()
+        },
+        hint: String::new(),
+    }
+}
+
+fn flags_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "flags",
+        false,
+        vec![
+            typed_field("flag", FieldValueKind::Bool, true),
+            typed_field("locked", FieldValueKind::Bool, false),
+            QueryFieldSpec {
+                key: "title".into(),
+                value_kind: FieldValueKind::String,
+                filterable: false,
+                searchable: true,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+        ],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("flags profile")
+}
+
+fn bounds_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "bounds",
+        false,
+        vec![
+            typed_field("after", FieldValueKind::Date, false),
+            typed_field("before", FieldValueKind::Date, false),
+            typed_field("since", FieldValueKind::Date, false),
+            typed_field("until", FieldValueKind::Date, false),
+            typed_field("created", FieldValueKind::Date, false),
+            typed_field("min", FieldValueKind::Int, false),
+            typed_field("max", FieldValueKind::Int, false),
+            typed_field("exit", FieldValueKind::Int, false),
+        ],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("bounds profile")
+}
+
+fn sidecar_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "stitches",
+        false,
+        vec![
+            typed_field("sidecar", FieldValueKind::Bool, false),
+            QueryFieldSpec {
+                key: "subject".into(),
+                value_kind: FieldValueKind::String,
+                filterable: false,
+                searchable: true,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+        ],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("sidecar profile")
+}
+
 fn flat_predicate_profile() -> CompiledQueryProfile {
     profile_from_parts(
         "facts",
@@ -1103,4 +1201,203 @@ fn patch_wrappers_match_explicit_patch_profile() {
     );
     let program = compile_query(query).unwrap();
     assert_eq!(program.profile_digest, patch_query_profile().digest);
+}
+
+#[test]
+fn host_bound_key_tables_match_python_registry() {
+    assert_eq!(
+        HOST_DATE_BOUND_KEYS,
+        &[
+            ("since", ">="),
+            ("after", ">="),
+            ("until", "<="),
+            ("before", "<="),
+        ]
+    );
+    assert_eq!(HOST_DURATION_BOUND_KEYS, &[("min", ">="), ("max", "<=")]);
+}
+
+#[test]
+fn flat_bare_boolean_flags_canonicalize_to_long_form() {
+    let profile = flags_profile();
+    assert_eq!(
+        canonicalize_query_with_profile("flag", &profile).unwrap(),
+        "flag:true"
+    );
+    assert_eq!(
+        canonicalize_query_with_profile("-flag", &profile).unwrap(),
+        "-flag:true"
+    );
+    let toks = tokenize_query_with_profile("flag", &profile).unwrap();
+    assert_eq!(toks[0].kind, QueryTokenKind::Property);
+    assert_eq!(toks[0].value, "true");
+    assert_eq!(toks[0].property_key.as_deref(), Some("flag"));
+}
+
+#[test]
+fn flat_quoted_boolean_key_remains_free_text() {
+    let profile = flags_profile();
+    assert_eq!(
+        canonicalize_query_with_profile(r#""flag""#, &profile).unwrap(),
+        r#""flag""#
+    );
+    assert_eq!(
+        canonicalize_query_with_profile(r#"-"flag""#, &profile).unwrap(),
+        r#"-"flag""#
+    );
+}
+
+#[test]
+fn flat_partially_quoted_boolean_key_canonicalizes_as_quoted_text() {
+    let profile = flags_profile();
+    assert_eq!(
+        canonicalize_query_with_profile(r#"fl"ag""#, &profile).unwrap(),
+        r#""flag""#
+    );
+}
+
+#[test]
+fn flat_bare_boolean_flags_keep_existing_field_guards() {
+    let profile = flags_profile();
+    let once = parse_query_with_profile("flag -flag", &profile).unwrap_err();
+    assert!(
+        once.message.contains("flag: may only appear once"),
+        "{once}"
+    );
+    let locked = parse_query_with_profile("-locked", &profile).unwrap_err();
+    assert!(
+        locked.message.contains("locked: may not be negated"),
+        "{locked}"
+    );
+}
+
+#[test]
+fn stitches_sidecar_bare_token_is_a_boolean_flag() {
+    let profile = sidecar_profile();
+    assert_eq!(
+        canonicalize_query_with_profile("sidecar", &profile).unwrap(),
+        "sidecar:true"
+    );
+    let rows = vec![
+        QueryRow {
+            fields: [("sidecar".into(), QueryFieldValues::from_string("true"))]
+                .into_iter()
+                .collect(),
+            searchable_text: String::new(),
+            predicates: QueryPredicateFacts::default(),
+        },
+        QueryRow {
+            fields: [(
+                "sidecar".into(),
+                QueryFieldValues::from_string("false"),
+            )]
+            .into_iter()
+            .collect(),
+            searchable_text: "sidecar".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let program = compile_query_with_profile("sidecar", &profile).unwrap();
+    assert_eq!(
+        evaluate_query_many_in_corpus(&program, &corpus),
+        vec![true, false]
+    );
+}
+
+#[test]
+fn flat_bare_boolean_flags_evaluate_like_key_true() {
+    let profile = flags_profile();
+    let rows = vec![
+        QueryRow {
+            fields: [("flag".into(), QueryFieldValues::from_string("true"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "plain".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+        QueryRow {
+            fields: [("flag".into(), QueryFieldValues::from_string("false"))]
+                .into_iter()
+                .collect(),
+            searchable_text: "flag".into(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    assert_eq!(matches("flag"), vec![true, false]);
+    assert_eq!(matches("-flag"), vec![false, true]);
+    assert_eq!(matches(r#""flag""#), vec![false, true]);
+    assert_eq!(matches(r#"-"flag""#), vec![true, false]);
+}
+
+#[test]
+fn flat_date_and_duration_bound_keys_compare_by_host_direction() {
+    let profile = bounds_profile();
+    let rows = vec![
+        bound_row("1999", "299"),
+        bound_row("2000", "300"),
+        bound_row("2001", "301"),
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    assert_eq!(matches("after:2000"), vec![false, true, true]);
+    assert_eq!(matches("since:2000"), vec![false, true, true]);
+    assert_eq!(matches("before:2000"), vec![true, true, false]);
+    assert_eq!(matches("until:2000"), vec![true, true, false]);
+    assert_eq!(matches("created:2000"), vec![false, true, false]);
+    assert_eq!(matches("min:5m"), vec![false, true, true]);
+    assert_eq!(matches("max:5m"), vec![true, true, false]);
+    assert_eq!(matches("exit:300"), vec![false, true, false]);
+}
+
+#[test]
+fn flat_duration_bound_values_normalize_canonically() {
+    let profile = bounds_profile();
+    assert_eq!(
+        canonicalize_query_with_profile("min:30s max:2h", &profile).unwrap(),
+        "max:7200 min:30"
+    );
+    assert_eq!(
+        canonicalize_query_with_profile("min:1d", &profile).unwrap(),
+        "min:86400"
+    );
+    let composite =
+        parse_query_with_profile("min:1h30m", &profile).unwrap_err();
+    assert!(
+        composite.message.contains("composite durations"),
+        "{composite}"
+    );
+    let not_duration =
+        parse_query_with_profile("exit:5m", &profile).unwrap_err();
+    assert!(not_duration.message.contains("integer"), "{not_duration}");
+}
+
+fn bound_row(epoch: &str, duration: &str) -> QueryRow {
+    QueryRow {
+        fields: [
+            ("after", epoch),
+            ("before", epoch),
+            ("since", epoch),
+            ("until", epoch),
+            ("created", epoch),
+            ("min", duration),
+            ("max", duration),
+            ("exit", duration),
+        ]
+        .into_iter()
+        .map(|(key, value)| {
+            (key.to_string(), QueryFieldValues::from_string(value))
+        })
+        .collect(),
+        searchable_text: String::new(),
+        predicates: QueryPredicateFacts::default(),
+    }
 }

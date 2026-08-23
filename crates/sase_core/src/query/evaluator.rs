@@ -26,6 +26,7 @@ use crate::query::flat::{parse_bool_literal, parse_int_literal};
 use crate::query::matchers::{get_base_status, strip_reverted_suffix};
 use crate::query::parser::parse_query_with_profile;
 use crate::query::profile::{
+    host_date_bound_direction, host_duration_bound_direction,
     patch_query_profile, CompiledQueryProfile, FieldValueKind,
 };
 use crate::query::row::{patch_rows_from_specs, IndexedQueryRow, QueryRow};
@@ -275,32 +276,34 @@ impl QueryEvaluationContext {
                 let Some(wanted) = parse_int_literal(&query_value) else {
                     return false;
                 };
-                field
+                let values = field
                     .values
                     .iter()
-                    .any(|item| parse_int_literal(item) == Some(wanted))
+                    .filter_map(|item| parse_int_literal(item));
+                compare_numeric_bound(
+                    host_duration_bound_direction(key),
+                    values,
+                    wanted,
+                )
             }
             FieldValueKind::Date => {
                 // Row values are pre-resolved epoch-second integers (the
                 // host resolves relative/absolute date text before a query
-                // ever reaches Rust). `since`/`until` are a closed,
-                // host-owned field-name convention mirroring
-                // `sase.ace.query.profile_evaluator._match_date_field`:
-                // range comparison by name, exact match otherwise.
+                // ever reaches Rust). Direction comes from the closed
+                // host-owned `HOST_DATE_BOUND_KEYS` table, mirroring
+                // `sase.ace.query.profile_evaluator._match_date_field`.
                 let Some(wanted) = parse_int_literal(&query_value) else {
                     return false;
                 };
-                let mut values = field
+                let values = field
                     .values
                     .iter()
                     .filter_map(|item| parse_int_literal(item));
-                if key.eq_ignore_ascii_case("since") {
-                    values.any(|value| value >= wanted)
-                } else if key.eq_ignore_ascii_case("until") {
-                    values.any(|value| value <= wanted)
-                } else {
-                    values.any(|value| value == wanted)
-                }
+                compare_numeric_bound(
+                    host_date_bound_direction(key),
+                    values,
+                    wanted,
+                )
             }
             FieldValueKind::String | FieldValueKind::Enum => {
                 let wanted = query_value.to_ascii_lowercase();
@@ -354,6 +357,18 @@ impl QueryEvaluationContext {
                 operands.iter().any(|op| self.evaluate(corpus, idx, op))
             }
         }
+    }
+}
+
+fn compare_numeric_bound(
+    direction: Option<&str>,
+    mut values: impl Iterator<Item = i64>,
+    wanted: i64,
+) -> bool {
+    match direction {
+        Some(">=") => values.any(|value| value >= wanted),
+        Some("<=") => values.any(|value| value <= wanted),
+        _ => values.any(|value| value == wanted),
     }
 }
 

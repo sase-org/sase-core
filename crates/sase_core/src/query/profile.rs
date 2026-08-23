@@ -24,6 +24,48 @@ pub const HOST_MACRO_TRIGGERS: &[char] = &['%'];
 pub const HOST_PREDICATE_NAMES: &[&str] =
     &["error_suffix", "running_agent", "running_process"];
 
+/// Closed host date-bound field names and comparison directions.
+///
+/// Mirrors `sase.ace.query_profile.registry.HOST_DATE_BOUND_KEYS` so a
+/// `date`-kind field named here compares in that direction instead of by
+/// equality. `since`/`after` are inclusive lower bounds; `until`/`before`
+/// are inclusive upper bounds.
+pub const HOST_DATE_BOUND_KEYS: &[(&str, &str)] = &[
+    ("since", ">="),
+    ("after", ">="),
+    ("until", "<="),
+    ("before", "<="),
+];
+
+/// Closed host duration-bound field names and comparison directions.
+///
+/// Mirrors `sase.ace.query_profile.registry.HOST_DURATION_BOUND_KEYS`. An
+/// `int`-kind field named here accepts a bare-second or whole-unit
+/// duration literal and compares in that direction; every other `int`
+/// field keeps equality.
+pub const HOST_DURATION_BOUND_KEYS: &[(&str, &str)] =
+    &[("min", ">="), ("max", "<=")];
+
+/// Return the comparison direction for a host date-bound field key.
+pub fn host_date_bound_direction(key: &str) -> Option<&'static str> {
+    host_bound_direction(HOST_DATE_BOUND_KEYS, key)
+}
+
+/// Return the comparison direction for a host duration-bound field key.
+pub fn host_duration_bound_direction(key: &str) -> Option<&'static str> {
+    host_bound_direction(HOST_DURATION_BOUND_KEYS, key)
+}
+
+fn host_bound_direction(
+    table: &'static [(&'static str, &'static str)],
+    key: &str,
+) -> Option<&'static str> {
+    table
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, direction)| *direction)
+}
+
 /// Field value kinds accepted on a compiled profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
