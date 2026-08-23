@@ -242,6 +242,11 @@ pub struct ArtifactRefContextWire {
     pub home_dir: Option<String>,
     #[serde(default)]
     pub file_capture_max_bytes: Option<u64>,
+    /// Configured-timezone UTC offset in seconds, used to render dates (e.g.
+    /// `@commit` completion ages) on the caller's calendar day rather than
+    /// UTC's. `None`/`0` preserves prior UTC-only behavior.
+    #[serde(default)]
+    pub utc_offset_seconds: Option<i32>,
 }
 
 impl Default for ArtifactRefContextWire {
@@ -259,6 +264,7 @@ impl Default for ArtifactRefContextWire {
             agent_owner: None,
             home_dir: None,
             file_capture_max_bytes: None,
+            utc_offset_seconds: None,
         }
     }
 }

@@ -556,7 +556,13 @@ fn append_commit_candidates(
         .ok()
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or_default();
-    append_ranked_commit_candidates(payloads, seen, commits, now)
+    append_ranked_commit_candidates(
+        payloads,
+        seen,
+        commits,
+        now,
+        context.utc_offset_seconds.unwrap_or(0),
+    )
 }
 
 fn repository_is_sdd_sidecar(
@@ -580,6 +586,7 @@ fn append_ranked_commit_candidates(
     seen: &mut BTreeSet<String>,
     commits: Vec<CommitCandidate>,
     now: i64,
+    utc_offset_seconds: i32,
 ) -> usize {
     let mut unique = Vec::new();
     for commit in commits {
@@ -603,7 +610,7 @@ fn append_ranked_commit_candidates(
                 commit.subject
             },
             detail: String::new(),
-            age: commit_age_label(commit.timestamp, now),
+            age: commit_age_label(commit.timestamp, now, utc_offset_seconds),
             scope: commit.repository,
             rank: Some(rank as u32),
             body: commit.body,
@@ -840,7 +847,11 @@ fn parse_commit_log(repository: &str, output: &[u8]) -> Vec<CommitCandidate> {
         .collect()
 }
 
-fn commit_age_label(timestamp: i64, now: i64) -> String {
+fn commit_age_label(
+    timestamp: i64,
+    now: i64,
+    utc_offset_seconds: i32,
+) -> String {
     if timestamp == 0 {
         return String::new();
     }
@@ -854,11 +865,14 @@ fn commit_age_label(timestamp: i64, now: i64) -> String {
     } else if seconds < 7 * 86_400 {
         format!("{}d", seconds / 86_400)
     } else {
-        DateTime::<Utc>::from_timestamp(timestamp, 0)
-            .map(|datetime| {
-                datetime.date_naive().format("%Y-%m-%d").to_string()
-            })
-            .unwrap_or_default()
+        // Shift by the caller's configured-tz offset before taking the date so
+        // the displayed calendar day matches their wall clock, not UTC's.
+        DateTime::<Utc>::from_timestamp(
+            timestamp + i64::from(utc_offset_seconds),
+            0,
+        )
+        .map(|datetime| datetime.date_naive().format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
     }
 }
 
@@ -4061,6 +4075,7 @@ mod tests {
             &mut seen,
             commits,
             10_000,
+            0,
         );
 
         assert_eq!(payloads.len(), ARTIFACT_REF_COMMIT_MAX_ROWS);
@@ -4122,13 +4137,24 @@ mod tests {
     #[test]
     fn commit_age_labels_match_prompt_bar_thresholds() {
         let now = 1_700_000_000;
-        assert_eq!(commit_age_label(0, now), "");
-        assert_eq!(commit_age_label(now + 1, now), "now");
-        assert_eq!(commit_age_label(now - 59, now), "now");
-        assert_eq!(commit_age_label(now - 60, now), "1m");
-        assert_eq!(commit_age_label(now - 3_600, now), "1h");
-        assert_eq!(commit_age_label(now - 86_400, now), "1d");
-        assert_eq!(commit_age_label(now - 7 * 86_400, now), "2023-11-07");
+        assert_eq!(commit_age_label(0, now, 0), "");
+        assert_eq!(commit_age_label(now + 1, now, 0), "now");
+        assert_eq!(commit_age_label(now - 59, now, 0), "now");
+        assert_eq!(commit_age_label(now - 60, now, 0), "1m");
+        assert_eq!(commit_age_label(now - 3_600, now, 0), "1h");
+        assert_eq!(commit_age_label(now - 86_400, now, 0), "1d");
+        assert_eq!(commit_age_label(now - 7 * 86_400, now, 0), "2023-11-07");
+    }
+
+    #[test]
+    fn commit_age_label_applies_the_utc_offset_before_the_date_falls_back() {
+        // 2023-11-01T01:00:00Z: just after UTC midnight, so a negative
+        // (western) offset pins the *previous* calendar day.
+        let timestamp = 1_698_800_400;
+        let now = timestamp + 8 * 86_400;
+
+        assert_eq!(commit_age_label(timestamp, now, 0), "2023-11-01");
+        assert_eq!(commit_age_label(timestamp, now, -4 * 3_600), "2023-10-31");
     }
 
     /// Make `git` block forever inside this repository.
