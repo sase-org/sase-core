@@ -1329,6 +1329,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
+    use crate::procs::wire::XpromptProcMetaWire;
+
     use super::*;
 
     fn proc(proc_id: &str, status: &str, created_at: &str) -> ProcWire {
@@ -1508,6 +1510,46 @@ mod tests {
             read_procs_snapshot(&path).unwrap().procs[0].kind,
             "detached"
         );
+    }
+
+    #[test]
+    fn xprompt_proc_meta_preserves_label_provenance() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut request = reserve_request("proc-meta", "checks", "fp-meta");
+        request.xprompt_proc = Some(XpromptProcMetaWire {
+            logical_id: Some("unit-1".to_string()),
+            label: Some("Verify docs".to_string()),
+            shell_name: Some("checks".to_string()),
+            ..XpromptProcMetaWire::default()
+        });
+
+        let reserved = reserve_proc(&path, &request, 10).unwrap().proc;
+        let meta = reserved.xprompt_proc.unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Verify docs"));
+        assert_eq!(meta.shell_name.as_deref(), Some("checks"));
+
+        let updated = update_proc(
+            &path,
+            &ProcUpdateWire {
+                proc_id: "proc-meta".to_string(),
+                xprompt_proc: Some(Some(XpromptProcMetaWire {
+                    logical_id: Some("unit-1".to_string()),
+                    label: Some("Verify docs".to_string()),
+                    shell_name: Some("checks".to_string()),
+                    code_preview: Some("just check".to_string()),
+                    ..XpromptProcMetaWire::default()
+                })),
+                ..ProcUpdateWire::default()
+            },
+        )
+        .unwrap()
+        .proc
+        .unwrap();
+        let meta = updated.xprompt_proc.unwrap();
+        assert_eq!(meta.label.as_deref(), Some("Verify docs"));
+        assert_eq!(meta.shell_name.as_deref(), Some("checks"));
+        assert_eq!(meta.code_preview.as_deref(), Some("just check"));
     }
 
     #[test]

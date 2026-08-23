@@ -86,6 +86,10 @@ pub struct XpromptProcMetaWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_digest: Option<String>,
