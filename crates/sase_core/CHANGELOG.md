@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.7](https://github.com/sase-org/sase-core/compare/v0.31.6...v0.31.7) - 2026-08-23
+
+### Added
+
+- *(query)* port bare-boolean flags and host bound keys
+
 ## [0.31.6](https://github.com/sase-org/sase-core/compare/v0.31.5...v0.31.6) - 2026-08-23
 
 ### Added
