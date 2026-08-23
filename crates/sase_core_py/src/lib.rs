@@ -9673,6 +9673,9 @@ fn py_resolve_proc_execution_cwd(
     name = "sanitized_proc_env",
     signature = (proc_id, cwd, work_dir, python_executable, selected_project = None, project_file = None, workspace_num = None)
 )]
+// The argument list mirrors the exported Python binding signature; grouping it
+// locally would add a wrapper type the caller could not use directly.
+#[allow(clippy::too_many_arguments)]
 fn py_sanitized_proc_env<'py>(
     py: Python<'py>,
     proc_id: &str,
