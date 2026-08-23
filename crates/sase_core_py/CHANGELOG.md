@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.5](https://github.com/sase-org/sase-core/compare/v0.31.4...v0.31.5) - 2026-08-23
+
+### Added
+
+- *(agent-launch)* add native %proc dispatch helpers
+
+### Fixed
+
+- Clippy error
+
 ### Added
 
 - bind `prepare_proc_script`, proc cwd/duration/shell-name validators, and
