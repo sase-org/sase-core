@@ -760,6 +760,11 @@ fn classify_typed_launch_unit(
     let mut proc_forbidden_directives = Vec::new();
 
     let scan = scan_directive_owned_fences(prompt);
+    let owned_spans: Vec<(usize, usize)> = scan
+        .directives
+        .iter()
+        .map(|directive| (directive.span[0], directive.span[1]))
+        .collect();
     for diagnostic in scan.diagnostics {
         diagnostics.push(LaunchPlanDiagnosticWire {
             code: diagnostic.code,
@@ -814,6 +819,15 @@ fn classify_typed_launch_unit(
     let ignored_ranges = typed_directive_ignored_ranges(prompt);
     for directive in directive_occurrences(prompt).unwrap_or_default() {
         if position_in_ranges(directive.start, &ignored_ranges) {
+            continue;
+        }
+        // `%if::` is owned by the fence scanner. Re-parsing it as a bare
+        // `%if` would emit a false invalid-if-form diagnostic after the
+        // condition was already captured. `%proc(...)::` still needs this
+        // loop so parenthesized options survive.
+        if directive.canonical_name == "if"
+            && position_in_ranges(directive.start, &owned_spans)
+        {
             continue;
         }
         let span = [directive.start, directive.end];
@@ -3830,6 +3844,57 @@ mod tests {
         );
         assert!(plan.approval_preview[1].contains("proc"));
         assert_eq!(plan.content_digest.len(), 64);
+    }
+
+    #[test]
+    fn typed_launch_plan_captures_if_fence_without_duplicate_form_error() {
+        let prompt = "%if::\n\n```bash\ntest -f pyproject.toml\n```\nReview";
+
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+
+        assert_eq!(plan.units.len(), 1);
+        let condition =
+            plan.units[0].condition.as_ref().expect("conditioned unit");
+        assert_eq!(condition.code.language, "bash");
+        assert!(condition.code.source.contains("test -f pyproject.toml"));
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.prompt, "Review");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+    }
+
+    #[test]
+    fn typed_launch_plan_rejects_bare_if_without_owned_fence() {
+        let err = plan_typed_launch_units(
+            "%if:true\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("%if requires %if::"));
+    }
+
+    #[test]
+    fn typed_launch_plan_keeps_fenced_proc_options() {
+        let prompt = "%proc(timeout=\"20m\", cwd=\"docs\", workspace=\"true\")::\n\n```bash\njust docs-check\n```\n";
+
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                assert_eq!(proc_unit.timeout.as_deref(), Some("20m"));
+                assert_eq!(proc_unit.cwd.as_deref(), Some("docs"));
+                assert!(proc_unit.workspace);
+                assert!(proc_unit.code.source.contains("just docs-check"));
+            }
+            other => panic!("expected proc payload, got {other:?}"),
+        }
     }
 
     #[test]
