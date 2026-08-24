@@ -26,21 +26,22 @@ pub use selection::{
 };
 pub use submission::{
     finalizer_context_digest, validate_finalizer_context,
-    validate_finalizer_submission,
+    validate_finalizer_deferral, validate_finalizer_submission,
 };
 pub use wire::{
     FinalizerAggregateResultWire, FinalizerAggregateStatusWire,
-    FinalizerAttemptWire, FinalizerContextWire,
-    FinalizerDiagnosticSeverityWire, FinalizerDiagnosticWire,
-    FinalizerInstancePolicyWire, FinalizerInstanceResultWire,
-    FinalizerInstanceSpecWire, FinalizerInstanceStatusWire,
-    FinalizerObligationWire, FinalizerOutcomeEvidenceWire,
-    FinalizerPayloadRequirementWire, FinalizerPlanEntryWire,
-    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderCapabilityWire,
-    FinalizerProviderSpecWire, FinalizerRefusalPolicyWire,
-    FinalizerSelectorOpWire, FinalizerSubmissionEnvelopeWire,
-    FinalizerSubmissionPayloadWire, FinalizerSubmissionValidationWire,
-    FinalizerTriggerKindWire, FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerAttemptWire, FinalizerContextWire, FinalizerDeferralReasonWire,
+    FinalizerDeferralWire, FinalizerDiagnosticSeverityWire,
+    FinalizerDiagnosticWire, FinalizerInstancePolicyWire,
+    FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
+    FinalizerInstanceStatusWire, FinalizerObligationWire,
+    FinalizerOutcomeEvidenceWire, FinalizerPayloadRequirementWire,
+    FinalizerPlanEntryWire, FinalizerPlanInputWire, FinalizerPlanWire,
+    FinalizerProviderCapabilityWire, FinalizerProviderSpecWire,
+    FinalizerRefusalPolicyWire, FinalizerSelectorOpWire,
+    FinalizerSubmissionEnvelopeWire, FinalizerSubmissionPayloadWire,
+    FinalizerSubmissionValidationWire, FinalizerTriggerKindWire,
+    FINALIZER_WIRE_SCHEMA_VERSION,
 };
 
 use thiserror::Error;

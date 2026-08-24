@@ -6,9 +6,10 @@ use super::selection::{
     validate_list_len, validate_required_text, validate_schema,
 };
 use super::wire::{
-    FinalizerContextWire, FinalizerPlanWire, FinalizerSubmissionEnvelopeWire,
-    FinalizerSubmissionValidationWire, FinalizerTriggerKindWire,
-    FINALIZER_PAYLOAD_MAX_BYTES, FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerContextWire, FinalizerDeferralWire, FinalizerPlanWire,
+    FinalizerSubmissionEnvelopeWire, FinalizerSubmissionValidationWire,
+    FinalizerTriggerKindWire, FINALIZER_PAYLOAD_MAX_BYTES,
+    FINALIZER_WIRE_SCHEMA_VERSION,
 };
 use super::FinalizerError;
 
@@ -210,6 +211,22 @@ pub fn validate_finalizer_submission(
     })
 }
 
+/// Validate the shape of one typed deferral. `reason` is already a closed
+/// enum, so serde rejects an unknown value before this ever runs; this
+/// checks what serde cannot: that the deferral names at least one path,
+/// bounded by the same list-length limit as every other wire list.
+pub fn validate_finalizer_deferral(
+    deferral: &FinalizerDeferralWire,
+) -> Result<(), FinalizerError> {
+    validate_list_len(deferral.paths.len(), "deferral.paths")?;
+    if deferral.paths.is_empty() {
+        return Err(FinalizerError::validation(
+            "deferral.paths must name at least one path",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -217,10 +234,11 @@ mod tests {
     use super::*;
     use crate::finalizer::selection::resolve_finalizer_plan;
     use crate::finalizer::wire::{
-        FinalizerInstancePolicyWire, FinalizerInstanceSpecWire,
-        FinalizerPayloadRequirementWire, FinalizerPlanInputWire,
-        FinalizerRefusalPolicyWire, FinalizerSelectorOpWire,
-        FinalizerSubmissionPayloadWire,
+        FinalizerDeferralReasonWire, FinalizerInstancePolicyWire,
+        FinalizerInstanceSpecWire, FinalizerPayloadRequirementWire,
+        FinalizerPlanInputWire, FinalizerRefusalPolicyWire,
+        FinalizerSelectorOpWire, FinalizerSubmissionPayloadWire,
+        FINALIZER_LIST_MAX_LEN,
     };
 
     fn plan() -> FinalizerPlanWire {
@@ -359,5 +377,31 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("not required"));
+    }
+
+    #[test]
+    fn deferral_paths_must_be_nonempty_and_bounded() {
+        let empty = FinalizerDeferralWire {
+            reason: FinalizerDeferralReasonWire::ProtectedPaths,
+            paths: Vec::new(),
+        };
+        assert!(validate_finalizer_deferral(&empty)
+            .unwrap_err()
+            .to_string()
+            .contains("at least one path"));
+
+        let too_many = FinalizerDeferralWire {
+            reason: FinalizerDeferralReasonWire::ForeignWork,
+            paths: (0..=FINALIZER_LIST_MAX_LEN)
+                .map(|index| format!("path-{index}"))
+                .collect(),
+        };
+        assert!(validate_finalizer_deferral(&too_many).is_err());
+
+        let ok = FinalizerDeferralWire {
+            reason: FinalizerDeferralReasonWire::UnsafeContent,
+            paths: vec!["notes/secret.md".to_string()],
+        };
+        assert!(validate_finalizer_deferral(&ok).is_ok());
     }
 }

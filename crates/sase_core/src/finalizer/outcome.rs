@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use super::selection::{
     validate_instance_id, validate_list_len, validate_required_text,
 };
+use super::submission::validate_finalizer_deferral;
 use super::wire::{
     FinalizerAggregateResultWire, FinalizerAggregateStatusWire,
     FinalizerDiagnosticSeverityWire, FinalizerDiagnosticWire,
@@ -54,6 +55,22 @@ pub fn validate_finalizer_instance_results(
                 result.instance_id
             )));
         }
+        if result.status == FinalizerInstanceStatusWire::Deferred {
+            match &result.deferral {
+                Some(deferral) => validate_finalizer_deferral(deferral)?,
+                None => {
+                    return Err(FinalizerError::validation(format!(
+                        "instance '{}' deferred status requires a deferral payload",
+                        result.instance_id
+                    )));
+                }
+            }
+        } else if result.deferral.is_some() {
+            return Err(FinalizerError::validation(format!(
+                "instance '{}' has deferral payload without deferred status",
+                result.instance_id
+            )));
+        }
         validate_attempt_ledger(result)?;
         validate_diagnostics(&result.diagnostics)?;
         for evidence in &result.evidence {
@@ -83,6 +100,11 @@ pub fn aggregate_finalizer_outcomes(
         .any(|result| result.status == FinalizerInstanceStatusWire::Pending)
     {
         FinalizerAggregateStatusWire::Pending
+    } else if results
+        .iter()
+        .any(|result| result.status == FinalizerInstanceStatusWire::Deferred)
+    {
+        FinalizerAggregateStatusWire::Deferred
     } else {
         FinalizerAggregateStatusWire::Success
     };
@@ -99,11 +121,21 @@ fn aggregate_diagnostics(
     status: FinalizerAggregateStatusWire,
     results: &[FinalizerInstanceResultWire],
 ) -> Vec<FinalizerDiagnosticWire> {
-    let code = match status {
+    let (code, severity) = match status {
         FinalizerAggregateStatusWire::Success => return Vec::new(),
-        FinalizerAggregateStatusWire::Pending => "finalizer_pending",
-        FinalizerAggregateStatusWire::Refused => "finalizer_refused",
-        FinalizerAggregateStatusWire::Failed => "finalizer_failed",
+        FinalizerAggregateStatusWire::Pending => {
+            ("finalizer_pending", FinalizerDiagnosticSeverityWire::Error)
+        }
+        FinalizerAggregateStatusWire::Refused => {
+            ("finalizer_refused", FinalizerDiagnosticSeverityWire::Error)
+        }
+        FinalizerAggregateStatusWire::Failed => {
+            ("finalizer_failed", FinalizerDiagnosticSeverityWire::Error)
+        }
+        FinalizerAggregateStatusWire::Deferred => (
+            "finalizer_deferred",
+            FinalizerDiagnosticSeverityWire::Warning,
+        ),
     };
     let instance_id = results
         .iter()
@@ -114,6 +146,9 @@ fn aggregate_diagnostics(
             FinalizerAggregateStatusWire::Refused => {
                 result.status == FinalizerInstanceStatusWire::Refused
             }
+            FinalizerAggregateStatusWire::Deferred => {
+                result.status == FinalizerInstanceStatusWire::Deferred
+            }
             FinalizerAggregateStatusWire::Failed => {
                 result.status == FinalizerInstanceStatusWire::Failed
             }
@@ -123,7 +158,7 @@ fn aggregate_diagnostics(
     Vec::from([FinalizerDiagnosticWire {
         code: code.to_string(),
         message: format!("aggregate finalizer status is {status:?}"),
-        severity: FinalizerDiagnosticSeverityWire::Error,
+        severity,
         instance_id,
         attempt: None,
     }])
@@ -158,7 +193,8 @@ fn validate_attempt_ledger(
             }
         }
         FinalizerInstanceStatusWire::Failed
-        | FinalizerInstanceStatusWire::Refused => {
+        | FinalizerInstanceStatusWire::Refused
+        | FinalizerInstanceStatusWire::Deferred => {
             if result.attempts.is_empty() {
                 return Err(FinalizerError::validation(format!(
                     "instance '{}' {} status requires a terminal attempt",
@@ -187,6 +223,7 @@ fn instance_status_name(status: FinalizerInstanceStatusWire) -> &'static str {
         FinalizerInstanceStatusWire::Skipped => "skipped",
         FinalizerInstanceStatusWire::Success => "success",
         FinalizerInstanceStatusWire::Refused => "refused",
+        FinalizerInstanceStatusWire::Deferred => "deferred",
         FinalizerInstanceStatusWire::Failed => "failed",
     }
 }
@@ -213,7 +250,10 @@ fn validate_diagnostics(
 mod tests {
     use serde_json::json;
 
-    use super::super::wire::FinalizerAttemptWire;
+    use super::super::wire::{
+        FinalizerAttemptWire, FinalizerDeferralReasonWire,
+        FinalizerDeferralWire,
+    };
     use super::*;
 
     fn result(
@@ -222,7 +262,8 @@ mod tests {
     ) -> FinalizerInstanceResultWire {
         let attempts = match status {
             FinalizerInstanceStatusWire::Failed
-            | FinalizerInstanceStatusWire::Refused => {
+            | FinalizerInstanceStatusWire::Refused
+            | FinalizerInstanceStatusWire::Deferred => {
                 vec![FinalizerAttemptWire {
                     attempt: 1,
                     status,
@@ -237,6 +278,12 @@ mod tests {
             attempts,
             refusal_reason: (status == FinalizerInstanceStatusWire::Refused)
                 .then(|| "No attributable commit should be made".to_string()),
+            deferral: (status == FinalizerInstanceStatusWire::Deferred).then(
+                || FinalizerDeferralWire {
+                    reason: FinalizerDeferralReasonWire::ProtectedPaths,
+                    paths: vec!["sase/memory/sase.md".to_string()],
+                },
+            ),
             evidence: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -262,6 +309,75 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(aggregate.status, FinalizerAggregateStatusWire::Refused);
+    }
+
+    #[test]
+    fn deferred_aggregate_is_a_warning_not_a_failure() {
+        let aggregate = aggregate_finalizer_outcomes(vec![
+            result("sidecar", FinalizerInstanceStatusWire::Deferred),
+            result("lint", FinalizerInstanceStatusWire::Skipped),
+        ])
+        .unwrap();
+        assert_eq!(aggregate.status, FinalizerAggregateStatusWire::Deferred);
+        assert_eq!(aggregate.diagnostics.len(), 1);
+        assert_eq!(aggregate.diagnostics[0].code, "finalizer_deferred");
+        assert_eq!(
+            aggregate.diagnostics[0].severity,
+            FinalizerDiagnosticSeverityWire::Warning
+        );
+        assert_eq!(
+            aggregate.diagnostics[0].instance_id.as_deref(),
+            Some("sidecar")
+        );
+    }
+
+    #[test]
+    fn deferred_ranks_below_pending_and_refused_but_above_success() {
+        let aggregate = aggregate_finalizer_outcomes(vec![
+            result("sidecar", FinalizerInstanceStatusWire::Deferred),
+            result("lint", FinalizerInstanceStatusWire::Pending),
+        ])
+        .unwrap();
+        assert_eq!(aggregate.status, FinalizerAggregateStatusWire::Pending);
+
+        let aggregate = aggregate_finalizer_outcomes(vec![
+            result("sidecar", FinalizerInstanceStatusWire::Deferred),
+            result("commit", FinalizerInstanceStatusWire::Refused),
+        ])
+        .unwrap();
+        assert_eq!(aggregate.status, FinalizerAggregateStatusWire::Refused);
+
+        let aggregate = aggregate_finalizer_outcomes(vec![result(
+            "sidecar",
+            FinalizerInstanceStatusWire::Deferred,
+        )])
+        .unwrap();
+        assert_eq!(aggregate.status, FinalizerAggregateStatusWire::Deferred);
+    }
+
+    #[test]
+    fn deferred_status_requires_deferral_payload() {
+        let mut deferred =
+            result("sidecar", FinalizerInstanceStatusWire::Deferred);
+        deferred.deferral = None;
+        assert!(validate_finalizer_instance_results(&[deferred])
+            .unwrap_err()
+            .to_string()
+            .contains("deferral payload"));
+    }
+
+    #[test]
+    fn deferral_payload_requires_deferred_status() {
+        let mut success =
+            result("commit", FinalizerInstanceStatusWire::Success);
+        success.deferral = Some(FinalizerDeferralWire {
+            reason: FinalizerDeferralReasonWire::ProtectedPaths,
+            paths: vec!["sase/memory/sase.md".to_string()],
+        });
+        assert!(validate_finalizer_instance_results(&[success])
+            .unwrap_err()
+            .to_string()
+            .contains("deferral payload"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const FINALIZER_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const FINALIZER_WIRE_SCHEMA_VERSION: u64 = 2;
 
 pub const FINALIZER_INSTANCE_ID_MAX_LEN: usize = 64;
 pub const FINALIZER_PROVIDER_REF_MAX_LEN: usize = 160;
@@ -45,6 +45,18 @@ pub struct FinalizerProviderSpecWire {
 #[serde(rename_all = "snake_case")]
 pub enum FinalizerRefusalPolicyWire {
     Fail,
+    Defer,
+}
+
+/// Closed set of reasons a repository obligation may be deferred instead of
+/// committed. Every member describes the tree; none expresses "not asked".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalizerDeferralReasonWire {
+    ProtectedPaths,
+    ForeignWork,
+    UnsafeContent,
+    BelongsToAnotherTurn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +273,7 @@ pub enum FinalizerInstanceStatusWire {
     Skipped,
     Success,
     Refused,
+    Deferred,
     Failed,
 }
 
@@ -270,7 +283,17 @@ pub enum FinalizerAggregateStatusWire {
     Pending,
     Success,
     Refused,
+    Deferred,
     Failed,
+}
+
+/// The typed reason and the paths it names for one deferred instance
+/// result. Required exactly when `status` is `Deferred`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizerDeferralWire {
+    pub reason: FinalizerDeferralReasonWire,
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +305,8 @@ pub struct FinalizerInstanceResultWire {
     pub attempts: Vec<FinalizerAttemptWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<FinalizerDeferralWire>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<FinalizerOutcomeEvidenceWire>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -296,4 +321,36 @@ pub struct FinalizerAggregateResultWire {
     pub instances: Vec<FinalizerInstanceResultWire>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<FinalizerDiagnosticWire>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn defer_refusal_policy_round_trips_through_serde() {
+        let value =
+            serde_json::to_value(FinalizerRefusalPolicyWire::Defer).unwrap();
+        assert_eq!(value, json!("defer"));
+        let parsed: FinalizerRefusalPolicyWire =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, FinalizerRefusalPolicyWire::Defer);
+    }
+
+    #[test]
+    fn fail_stays_the_serde_default_refusal_policy() {
+        let policy: FinalizerInstancePolicyWire =
+            serde_json::from_value(json!({})).unwrap();
+        assert_eq!(policy.refusal, FinalizerRefusalPolicyWire::Fail);
+    }
+
+    #[test]
+    fn unknown_deferral_reason_is_rejected() {
+        let value = json!({"reason": "not_asked_to_commit", "paths": ["a"]});
+        let error =
+            serde_json::from_value::<FinalizerDeferralWire>(value).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+    }
 }

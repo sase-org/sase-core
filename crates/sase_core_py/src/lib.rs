@@ -14488,7 +14488,7 @@ MENTORS:
             }
 
             let provider_value = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "provider_ref": "builtin@commit",
                 "capabilities": ["validate", "execute", "verify"],
                 "provenance_id": "builtin"
@@ -14500,20 +14500,20 @@ MENTORS:
                 py_finalizer_provider_spec_digest(provider).unwrap().len(),
                 64
             );
-            assert_eq!(py_finalizer_wire_schema_version(), 1);
+            assert_eq!(py_finalizer_wire_schema_version(), 2);
 
             let request_value = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "instances": [
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "instance_id": "commit",
                         "provider_ref": "builtin@commit",
                         "after": ["lint"],
                         "policy": {"max_attempts": 2, "refusal": "fail"}
                     },
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "instance_id": "lint",
                         "provider_ref": "builtin@command",
                         "after": [],
@@ -14543,7 +14543,7 @@ MENTORS:
             );
 
             let mut context_value = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "run-1",
                 "agent_id": "agent-1",
                 "turn_nonce": "nonce-1",
@@ -14574,7 +14574,7 @@ MENTORS:
             );
 
             let submission_value = json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": "run-1",
                 "agent_id": "agent-1",
                 "turn_nonce": "nonce-1",
