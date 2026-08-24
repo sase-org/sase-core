@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.11](https://github.com/sase-org/sase-core/compare/v0.31.10...v0.31.11) - 2026-08-24
+
+### Fixed
+
+- *(xprompt)* close [[...]] blocks at terminator-position ]]
+
 ## [0.31.10](https://github.com/sase-org/sase-core/compare/v0.31.9...v0.31.10) - 2026-08-24
 
 ### Added
