@@ -1,10 +1,10 @@
 //! Canonical glossary validation, catalog normalization, and text matching.
 //!
-//! Python owns config discovery and source-preserving YAML parsing. This
-//! module owns the deterministic glossary domain contract that editor, memory,
-//! and generated-document callers can share. Multiword phrases match across
-//! horizontal whitespace or one line break with surrounding indentation, but
-//! never across a blank line.
+//! Python owns config and strand file discovery plus source-preserving YAML
+//! parsing. This module owns the deterministic glossary domain contract that
+//! editor, memory, and generated-document callers can share. Multiword phrases
+//! match across horizontal whitespace or one line break with surrounding
+//! indentation, but never across a blank line.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,18 +15,30 @@ use thiserror::Error;
 use crate::editor::{DocumentSnapshot, EditorPosition, EditorRange};
 use crate::prompt_literal_zone_ranges;
 
-pub const GLOSSARY_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const GLOSSARY_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GlossarySourceWire {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_path: Option<String>,
-    #[serde(default)]
-    pub config_key_path: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub term_range: Option<EditorRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_range: Option<EditorRange>,
+    #[serde(
+        default,
+        alias = "config_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_path: Option<String>,
+    #[serde(default, alias = "config_key_path")]
+    pub key_path: Vec<String>,
+    #[serde(
+        default,
+        alias = "term_range",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keyword_range: Option<EditorRange>,
+    #[serde(
+        default,
+        alias = "definition_range",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub body_range: Option<EditorRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aliases_range: Option<EditorRange>,
 }
@@ -702,8 +714,8 @@ fn entry_path(
     suffix: Option<&str>,
 ) -> Option<String> {
     if let Some(source) = &entry.source {
-        if !source.config_key_path.is_empty() {
-            let mut path = source.config_key_path.join(".");
+        if !source.key_path.is_empty() {
+            let mut path = source.key_path.join(".");
             if let Some(suffix) = suffix {
                 path.push('.');
                 path.push_str(suffix);
@@ -747,6 +759,69 @@ mod tests {
             aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
             source: None,
         }
+    }
+
+    #[test]
+    fn glossary_source_wire_accepts_v1_payload_names() {
+        let source: GlossarySourceWire =
+            serde_json::from_value(serde_json::json!({
+                "config_path": "/repo/sase/sase.yml",
+                "config_key_path": ["memory", "glossary", "Agent Clan"],
+                "term_range": {
+                    "start": {"line": 2, "character": 4},
+                    "end": {"line": 2, "character": 14}
+                },
+                "definition_range": {
+                    "start": {"line": 5, "character": 18},
+                    "end": {"line": 7, "character": 19}
+                },
+                "aliases_range": {
+                    "start": {"line": 4, "character": 8},
+                    "end": {"line": 4, "character": 14}
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(source.source_path.as_deref(), Some("/repo/sase/sase.yml"));
+        assert_eq!(source.key_path, ["memory", "glossary", "Agent Clan"]);
+        assert_eq!(source.keyword_range, Some(range(2, 4, 2, 14)));
+        assert_eq!(source.body_range, Some(range(5, 18, 7, 19)));
+        assert_eq!(source.aliases_range, Some(range(4, 8, 4, 14)));
+    }
+
+    #[test]
+    fn glossary_source_wire_emits_v2_payload_names() {
+        let source = GlossarySourceWire {
+            source_path: Some(
+                "/repo/sase/memory/glossary/agent-clan.md".to_string(),
+            ),
+            key_path: Vec::new(),
+            keyword_range: Some(range(1, 9, 1, 20)),
+            body_range: Some(range(4, 0, 6, 12)),
+            aliases_range: None,
+        };
+
+        let payload = serde_json::to_value(&source).unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "source_path": "/repo/sase/memory/glossary/agent-clan.md",
+                "key_path": [],
+                "keyword_range": {
+                    "start": {"line": 1, "character": 9},
+                    "end": {"line": 1, "character": 20}
+                },
+                "body_range": {
+                    "start": {"line": 4, "character": 0},
+                    "end": {"line": 6, "character": 12}
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<GlossarySourceWire>(payload).unwrap(),
+            source
+        );
     }
 
     #[test]
@@ -821,7 +896,7 @@ mod tests {
         )])
         .unwrap();
 
-        assert_eq!(catalog.schema_version, GLOSSARY_WIRE_SCHEMA_VERSION);
+        assert_eq!(catalog.schema_version, 2);
         assert_eq!(catalog.entries[0].term, "Agent Clan");
         assert_eq!(
             catalog.entries[0].configured_aliases,
@@ -831,6 +906,29 @@ mod tests {
         assert_eq!(
             catalog.entries[0].effective_aliases,
             vec!["Agent Clan", "agent clans"]
+        );
+    }
+
+    #[test]
+    fn entry_path_falls_back_when_source_key_path_is_empty() {
+        let entry = GlossaryInputEntryWire {
+            term: "Agent Clan".to_string(),
+            definition: "A named rootless container.".to_string(),
+            aliases: Vec::new(),
+            source: Some(GlossarySourceWire {
+                source_path: Some(
+                    "/repo/sase/memory/glossary/agent-clan.md".to_string(),
+                ),
+                key_path: Vec::new(),
+                keyword_range: None,
+                body_range: None,
+                aliases_range: None,
+            }),
+        };
+
+        assert_eq!(
+            entry_path(&entry, Some("definition")).as_deref(),
+            Some("glossary.Agent Clan.definition")
         );
     }
 

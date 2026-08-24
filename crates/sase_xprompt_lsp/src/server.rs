@@ -2948,14 +2948,14 @@ fn glossary_definition_at_position(
     let entry = glossary_entry_for_span(project, &span)?;
     let source = entry.source.as_ref();
     let path = source
-        .and_then(|source| source.config_path.as_deref())
+        .and_then(|source| source.source_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .unwrap_or(project.config_path.as_str());
     let uri = Uri::from_file_path(Path::new(path))?;
     Some(Location {
         uri,
         range: source
-            .and_then(|source| source.definition_range)
+            .and_then(|source| source.body_range)
             .map(to_lsp_range)
             .unwrap_or_else(zero_range),
     })
