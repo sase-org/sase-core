@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.12](https://github.com/sase-org/sase-core/compare/v0.31.11...v0.31.12) - 2026-08-24
+
+### Added
+
+- *(finalizer)* add typed deferral reason and non-failing Deferred status
+
+### Other
+
+- *(xprompt)* parse the shared text-block argument corpus
+
 ## [0.31.11](https://github.com/sase-org/sase-core/compare/v0.31.10...v0.31.11) - 2026-08-24
 
 ### Fixed
