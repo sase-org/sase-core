@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.3](https://github.com/sase-org/sase-core/compare/v0.32.2...v0.32.3) - 2026-08-24
+
+### Added
+
+- *(glossary)* add source-backed wire v2
+
 ## [0.32.2](https://github.com/sase-org/sase-core/compare/v0.32.1...v0.32.2) - 2026-08-24
 
 ### Fixed
