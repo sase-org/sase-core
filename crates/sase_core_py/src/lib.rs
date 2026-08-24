@@ -9694,25 +9694,26 @@ fn py_resolve_proc_execution_cwd(
 #[pyfunction]
 #[pyo3(
     name = "sanitized_proc_env",
-    signature = (proc_id, cwd, work_dir, python_executable, selected_project = None, project_file = None, workspace_num = None)
+    signature = (base_env, proc_id, cwd, python_executable, selected_project = None, project_file = None, workspace_num = None)
 )]
 // The argument list mirrors the exported Python binding signature; grouping it
 // locally would add a wrapper type the caller could not use directly.
 #[allow(clippy::too_many_arguments)]
 fn py_sanitized_proc_env<'py>(
     py: Python<'py>,
+    base_env: &Bound<'_, PyDict>,
     proc_id: &str,
     cwd: &str,
-    work_dir: &str,
     python_executable: &str,
     selected_project: Option<&str>,
     project_file: Option<&str>,
     workspace_num: Option<u32>,
 ) -> PyResult<PyObject> {
+    let base_env = env_dict_from_pydict(base_env)?;
     let env = core_sanitized_proc_env(
+        &base_env,
         proc_id,
         PathBuf::from(cwd).as_path(),
-        PathBuf::from(work_dir).as_path(),
         python_executable,
         selected_project,
         project_file,

@@ -59,6 +59,10 @@ pub struct ProcDispatchRequestWire {
     pub idle_timeout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_name: Option<String>,
+    /// Caller-supplied executable environment to overlay proc context onto.
+    /// Absent on older persisted requests; falls back to the system PATH.
+    #[serde(default)]
+    pub base_env: BTreeMap<String, String>,
 }
 
 /// Prepared argv, cwd, environment, and script path for one `%proc`.
@@ -219,32 +223,40 @@ pub fn resolve_proc_execution_cwd(
         .map_err(|err| format!("proc cwd is unavailable: {err}"))
 }
 
-/// Documented sanitized environment for a stand-alone `%proc` child.
+/// Additive overlay for a stand-alone `%proc` child, layered onto a caller-
+/// supplied executable environment (an already scrubbed supervisor
+/// environment). Only execution-derived keys are returned here; ordinary
+/// host variables such as `HOME`, locale, and `TMPDIR` are left to the
+/// caller's base environment and are never overridden.
 pub fn sanitized_proc_env(
+    base_env: &BTreeMap<String, String>,
     proc_id: &str,
     cwd: &Path,
-    work_dir: &Path,
     python_executable: &str,
     selected_project: Option<&str>,
     project_file: Option<&str>,
     workspace_num: Option<u32>,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    let mut path = DEFAULT_PATH.to_string();
+    let base_path = base_env
+        .get("PATH")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_PATH);
+    let mut path = base_path.to_string();
     if let Some(parent) = Path::new(python_executable).parent() {
         if !parent.as_os_str().is_empty() {
-            path = format!("{}:{path}", parent.display());
+            let interpreter_dir = parent.to_string_lossy().into_owned();
+            let already_prefixed = path
+                .split(':')
+                .next()
+                .is_some_and(|first| first == interpreter_dir);
+            if !already_prefixed {
+                path = format!("{interpreter_dir}:{path}");
+            }
         }
     }
     env.insert("PATH".to_string(), path);
-    env.insert("LANG".to_string(), "C".to_string());
-    env.insert("LC_ALL".to_string(), "C".to_string());
-    env.insert("TZ".to_string(), "UTC".to_string());
-    env.insert("HOME".to_string(), work_dir.to_string_lossy().into_owned());
-    env.insert(
-        "TMPDIR".to_string(),
-        work_dir.to_string_lossy().into_owned(),
-    );
     env.insert("PWD".to_string(), cwd.to_string_lossy().into_owned());
     env.insert("SASE_PROC_ID".to_string(), proc_id.to_string());
     if let Some(project) =
@@ -345,19 +357,14 @@ pub fn prepare_proc_script(
         .filter(|value| !value.is_empty())
         .unwrap_or(request.logical_id.as_str());
     let env = sanitized_proc_env(
+        &request.base_env,
         proc_id,
         &cwd,
-        &work_dir,
         python_executable,
         request.selected_project.as_deref(),
         request.project_file.as_deref(),
         request.workspace_num,
     );
-    if env.contains_key("SASE_AGENT")
-        || env.keys().any(|key| key.starts_with("SASE_AGENT_"))
-    {
-        return Err("proc environment must not set SASE_AGENT".to_string());
-    }
     Ok(ProcDispatchPreparedWire {
         schema_version: PROC_DISPATCH_WIRE_SCHEMA_VERSION,
         argv,
@@ -472,6 +479,7 @@ mod tests {
             timeout: Some("20m".to_string()),
             idle_timeout: Some("5m".to_string()),
             shell_name: Some("checks".to_string()),
+            base_env: BTreeMap::new(),
         }
     }
 
@@ -517,6 +525,124 @@ mod tests {
             .get("PATH")
             .unwrap()
             .starts_with("/opt/sase/bin:"));
+    }
+
+    #[test]
+    fn prepare_proc_script_preserves_an_inherited_user_bin_directory() {
+        let temp = TempDir::new().unwrap();
+        let mut req = request(&temp, bash_code("just install"));
+        req.python_executable = "/opt/sase/bin/python".to_string();
+        req.base_env = BTreeMap::from([(
+            "PATH".to_string(),
+            "/home/user/.cargo/bin:/usr/bin:/bin".to_string(),
+        )]);
+        let prepared = prepare_proc_script(&req).unwrap();
+        assert_eq!(
+            prepared.env.get("PATH").unwrap(),
+            "/opt/sase/bin:/home/user/.cargo/bin:/usr/bin:/bin"
+        );
+    }
+
+    #[test]
+    fn sanitized_proc_env_preserves_inherited_path_and_prefixes_interpreter_once(
+    ) {
+        let base = BTreeMap::from([(
+            "PATH".to_string(),
+            "/home/user/.cargo/bin:/usr/bin:/bin".to_string(),
+        )]);
+        let env = sanitized_proc_env(
+            &base,
+            "proc-1",
+            Path::new("/tmp/cwd"),
+            "/opt/sase/bin/python",
+            Some("sase"),
+            Some("/tmp/sase.sase"),
+            Some(7),
+        );
+        assert_eq!(
+            env.get("PATH").unwrap(),
+            "/opt/sase/bin:/home/user/.cargo/bin:/usr/bin:/bin"
+        );
+        assert_eq!(env.get("SASE_PROJECT").unwrap(), "sase");
+        assert_eq!(env.get("SASE_PROJECT_FILE").unwrap(), "/tmp/sase.sase");
+        assert_eq!(env.get("SASE_WORKSPACE_NUM").unwrap(), "7");
+        assert_eq!(env.get("PWD").unwrap(), "/tmp/cwd");
+        assert!(!env.contains_key("HOME"));
+        assert!(!env.contains_key("LANG"));
+        assert!(!env.contains_key("LC_ALL"));
+        assert!(!env.contains_key("TZ"));
+        assert!(!env.contains_key("TMPDIR"));
+    }
+
+    #[test]
+    fn sanitized_proc_env_does_not_duplicate_an_already_prefixed_interpreter_dir(
+    ) {
+        let base = BTreeMap::from([(
+            "PATH".to_string(),
+            "/opt/sase/bin:/usr/bin".to_string(),
+        )]);
+        let env = sanitized_proc_env(
+            &base,
+            "proc-1",
+            Path::new("/tmp"),
+            "/opt/sase/bin/python",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(env.get("PATH").unwrap(), "/opt/sase/bin:/usr/bin");
+    }
+
+    #[test]
+    fn sanitized_proc_env_falls_back_to_default_path_without_a_base() {
+        let base = BTreeMap::new();
+        let env = sanitized_proc_env(
+            &base,
+            "proc-1",
+            Path::new("/tmp"),
+            "/opt/sase/bin/python",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            env.get("PATH").unwrap(),
+            &format!("/opt/sase/bin:{DEFAULT_PATH}")
+        );
+    }
+
+    #[test]
+    fn sanitized_proc_env_never_copies_forbidden_identity_from_the_base() {
+        let base = BTreeMap::from([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("SASE_AGENT".to_string(), "some-agent".to_string()),
+            ("SASE_AGENT_NAME".to_string(), "some-agent".to_string()),
+            ("SASE_CHOP_ID".to_string(), "some-chop".to_string()),
+            (
+                "SASE_ARTIFACTS_DIR".to_string(),
+                "/tmp/artifacts".to_string(),
+            ),
+            ("SASE_PROC_ID".to_string(), "stale-proc".to_string()),
+            (
+                "SASE_PROC_SESSION_ID".to_string(),
+                "stale-session".to_string(),
+            ),
+        ]);
+        let env = sanitized_proc_env(
+            &base,
+            "proc-current",
+            Path::new("/tmp"),
+            "/opt/sase/bin/python",
+            None,
+            None,
+            None,
+        );
+        assert_eq!(env.get("SASE_PROC_ID").unwrap(), "proc-current");
+        assert!(!env.contains_key("SASE_AGENT"));
+        assert!(!env.contains_key("SASE_AGENT_NAME"));
+        assert!(!env.contains_key("SASE_CHOP_ID"));
+        assert!(!env.contains_key("SASE_ARTIFACTS_DIR"));
+        assert!(!env.contains_key("SASE_PROC_SESSION_ID"));
     }
 
     #[test]
