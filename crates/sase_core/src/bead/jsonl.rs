@@ -467,19 +467,17 @@ fn write_event_store_inner(
     }
 
     fs::create_dir_all(&streams_dir)?;
+    let append_preserving = changed_stream_ids.is_some();
     for stream in &sorted_streams {
         if !selected_for_write(stream, changed_stream_ids) {
             continue;
         }
-        let mut output = String::new();
-        for event in &stream.events {
-            output.push_str(&serde_json::to_string(event)?);
-            output.push('\n');
+        let path = streams_dir.join(format!("{}.jsonl", stream.stream_id));
+        if append_preserving {
+            write_stream_append_preserving(&path, stream)?;
+        } else {
+            write_stream_fully(&path, stream)?;
         }
-        write_file_atomic_if_changed(
-            &streams_dir.join(format!("{}.jsonl", stream.stream_id)),
-            output.as_bytes(),
-        )?;
     }
 
     let manifest = BeadEventStoreManifestWire::from_streams(streams);
@@ -489,6 +487,70 @@ fn write_event_store_inner(
         &manifest_json,
     )?;
     Ok(())
+}
+
+fn write_stream_fully(
+    path: &Path,
+    stream: &BeadEventStreamWire,
+) -> Result<(), BeadError> {
+    let mut output = String::new();
+    for event in &stream.events {
+        output.push_str(&serde_json::to_string(event)?);
+        output.push('\n');
+    }
+    write_file_atomic_if_changed(path, output.as_bytes())?;
+    Ok(())
+}
+
+/// Write a changed stream without reserializing its already-published
+/// prefix. Historical event bytes (including legacy encodings such as a
+/// pre-structured-notes `payload.issue.notes` string) are immutable; a
+/// mutation must only append new tail events, never normalize old ones.
+fn write_stream_append_preserving(
+    path: &Path,
+    stream: &BeadEventStreamWire,
+) -> Result<(), BeadError> {
+    let existing_bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return write_stream_fully(path, stream);
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let existing_events = parse_event_stream_bytes(path, &existing_bytes)?;
+
+    if existing_events.len() > stream.events.len() {
+        return Err(BeadError::validation(format!(
+            "bead event stream {} has {} published events but the new stream only has {}; refusing to rewrite published history",
+            path.display(),
+            existing_events.len(),
+            stream.events.len(),
+        )));
+    }
+
+    let desired_prefix = &stream.events[..existing_events.len()];
+    if existing_events.as_slice() != desired_prefix {
+        return Err(BeadError::validation(format!(
+            "bead event stream {} published events would change; refusing to rewrite history",
+            path.display(),
+        )));
+    }
+
+    let new_tail = &stream.events[existing_events.len()..];
+    if new_tail.is_empty() {
+        return Ok(());
+    }
+
+    let mut output = existing_bytes;
+    if !output.ends_with(b"\n") {
+        output.push(b'\n');
+    }
+    for event in new_tail {
+        output.extend_from_slice(serde_json::to_string(event)?.as_bytes());
+        output.push(b'\n');
+    }
+    write_file_atomic(path, &output)
 }
 
 fn selected_for_write(
@@ -523,9 +585,29 @@ fn read_event_stream_file(
             ))
         })?
         .to_string();
-    let contents = fs::read_to_string(path).map_err(|err| {
+    let contents = fs::read(path).map_err(|err| {
         BeadError::io(format!(
             "failed to read bead event stream {}: {err}",
+            path.display()
+        ))
+    })?;
+    let events = parse_event_stream_bytes(path, &contents)?;
+    let stream = BeadEventStreamWire {
+        stream_id: stream_id.clone(),
+        root_issue_id: stream_id,
+        events,
+    };
+    stream.validate()?;
+    Ok(stream)
+}
+
+fn parse_event_stream_bytes(
+    path: &Path,
+    contents: &[u8],
+) -> Result<Vec<BeadEventRecordWire>, BeadError> {
+    let contents = std::str::from_utf8(contents).map_err(|err| {
+        BeadError::validation(format!(
+            "bead event stream {} is not valid UTF-8: {err}",
             path.display()
         ))
     })?;
@@ -564,13 +646,7 @@ fn read_event_stream_file(
         )?;
         events.push(event);
     }
-    let stream = BeadEventStreamWire {
-        stream_id: stream_id.clone(),
-        root_issue_id: stream_id,
-        events,
-    };
-    stream.validate()?;
-    Ok(stream)
+    Ok(events)
 }
 
 fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), BeadError> {
@@ -810,6 +886,27 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"two\n");
     }
 
+    fn append_note_event(
+        stream: &BeadEventStreamWire,
+        timestamp: &str,
+        entry: &str,
+    ) -> BeadEventStreamWire {
+        let mut stream = stream.clone();
+        let event_number = stream.events.len() + 1;
+        stream.events.push(BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: format!("{}:{event_number}", stream.stream_id),
+            timestamp: timestamp.to_string(),
+            actor: "test".to_string(),
+            operation: BeadEventOperationWire::NoteAppended,
+            issue_id: stream.stream_id.clone(),
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: entry.to_string(),
+            },
+        });
+        stream
+    }
+
     #[test]
     fn write_event_store_changed_writes_selected_streams_and_reloads() {
         let temp = tempdir().unwrap();
@@ -828,7 +925,8 @@ mod tests {
             fs::metadata(&alpha_path).unwrap().modified().unwrap();
 
         let alpha_changed = event_stream("alpha", "Alpha changed");
-        let beta_changed = event_stream("beta", "Beta changed");
+        let beta_changed =
+            append_note_event(&beta, "2026-01-02T00:00:00Z", "a note");
         let gamma = event_stream("gamma", "Gamma");
         let changed_stream_ids =
             BTreeSet::from(["beta".to_string(), "gamma".to_string()]);
@@ -844,7 +942,12 @@ mod tests {
             fs::metadata(&alpha_path).unwrap().modified().unwrap(),
             alpha_modified_before
         );
-        assert_ne!(fs::read(&beta_path).unwrap(), beta_before);
+        let beta_after = fs::read(&beta_path).unwrap();
+        assert_ne!(beta_after, beta_before);
+        assert!(
+            beta_after.starts_with(&beta_before),
+            "the published beta prefix must be byte-identical"
+        );
         assert!(gamma_path.exists());
 
         let (manifest, streams) = read_event_store(beads_dir).unwrap();
@@ -999,5 +1102,110 @@ mod tests {
         assert!(error.message.contains("future_operation"));
         assert!(error.message.contains(path.to_string_lossy().as_ref()));
         assert!(error.message.contains("just install"));
+    }
+
+    #[test]
+    fn write_event_store_changed_rejects_a_shortened_ancestor_stream() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let two_events = append_note_event(
+            &event_stream("sase-lg", "Legacy"),
+            "2026-01-02T00:00:00Z",
+            "first note",
+        );
+        write_event_store(beads_dir, &[two_events]).unwrap();
+
+        let stream_path = event_streams_dir(beads_dir).join("sase-lg.jsonl");
+        let before = fs::read(&stream_path).unwrap();
+
+        let shortened = event_stream("sase-lg", "Legacy");
+        let changed_stream_ids = BTreeSet::from(["sase-lg".to_string()]);
+        let error = write_event_store_changed(
+            beads_dir,
+            &[shortened],
+            &changed_stream_ids,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("published events"));
+        assert_eq!(fs::read(&stream_path).unwrap(), before);
+    }
+
+    #[test]
+    fn write_event_store_changed_rejects_a_changed_ancestor_event() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let original = event_stream("sase-lg", "Legacy");
+        write_event_store(beads_dir, &[original]).unwrap();
+
+        let stream_path = event_streams_dir(beads_dir).join("sase-lg.jsonl");
+        let before = fs::read(&stream_path).unwrap();
+
+        let rewritten = event_stream("sase-lg", "Legacy renamed");
+        let changed_stream_ids = BTreeSet::from(["sase-lg".to_string()]);
+        let error = write_event_store_changed(
+            beads_dir,
+            &[rewritten],
+            &changed_stream_ids,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("would change"));
+        assert_eq!(fs::read(&stream_path).unwrap(), before);
+    }
+
+    #[test]
+    fn write_event_store_changed_appends_to_legacy_stream_without_rewriting_prefix_bytes(
+    ) {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let streams_dir = event_streams_dir(beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+
+        let stream_path = streams_dir.join("sase-lg.jsonl");
+        // A pre-structured-notes event: `payload.issue.notes` is a literal
+        // (empty) string rather than the current `Vec<BeadNoteWire>` shape.
+        // Deliberately has no trailing newline to exercise that edge case.
+        let legacy_line = r#"{"schema_version":1,"event_id":"sase-lg:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-lg","payload":{"kind":"issue_created","issue":{"id":"sase-lg","title":"Legacy","status":"open","issue_type":"plan","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","notes":""}}}"#;
+        fs::write(&stream_path, legacy_line).unwrap();
+
+        let existing_events =
+            parse_event_stream_bytes(&stream_path, legacy_line.as_bytes())
+                .unwrap();
+        assert_eq!(existing_events.len(), 1);
+
+        let mut stream = BeadEventStreamWire {
+            stream_id: "sase-lg".to_string(),
+            root_issue_id: "sase-lg".to_string(),
+            events: existing_events,
+        };
+        stream.events.push(BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "sase-lg:2".to_string(),
+            timestamp: "2026-01-02T00:00:00Z".to_string(),
+            actor: "test".to_string(),
+            operation: BeadEventOperationWire::NoteAppended,
+            issue_id: "sase-lg".to_string(),
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: "a new note".to_string(),
+            },
+        });
+
+        let changed_stream_ids = BTreeSet::from(["sase-lg".to_string()]);
+        write_event_store_changed(beads_dir, &[stream], &changed_stream_ids)
+            .unwrap();
+
+        let after = fs::read_to_string(&stream_path).unwrap();
+        assert!(
+            after.starts_with(legacy_line),
+            "legacy prefix bytes must be preserved exactly byte-for-byte"
+        );
+        assert_eq!(after.lines().count(), 2);
+
+        let (_manifest, streams) = read_event_store(beads_dir).unwrap();
+        let issues = reduce_event_streams(&streams).unwrap();
+        let issue = issues.iter().find(|issue| issue.id == "sase-lg").unwrap();
+        assert_eq!(issue.notes.len(), 1);
+        assert_eq!(issue.notes[0].text, "a new note");
     }
 }

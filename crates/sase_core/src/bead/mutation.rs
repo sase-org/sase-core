@@ -3114,7 +3114,9 @@ mod tests {
     use std::time::{Instant, SystemTime};
     use tempfile::tempdir;
 
-    use super::super::jsonl::write_event_store;
+    use super::super::jsonl::{
+        event_streams_dir, repair_event_store_manifest, write_event_store,
+    };
     use super::super::read::read_store_issues;
     use super::super::wire::notes_text;
 
@@ -8305,6 +8307,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["sase-1", "sase-2", "sase-3"]
         );
+    }
+
+    #[test]
+    fn append_note_preserves_legacy_issue_created_prefix_and_projects_structured_note(
+    ) {
+        // Regression for the sase-t2.2 failure: an `issue_created` event
+        // published before the structured-note rollout encodes
+        // `payload.issue.notes` as a literal string, not the current
+        // `Vec<BeadNoteWire>` shape. A later mutation must append its new
+        // event without reserializing (and thereby rewriting) that
+        // already-published line.
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+
+        let streams_dir = event_streams_dir(&beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+        let stream_path = streams_dir.join("sase-1.jsonl");
+        let legacy_issue = issue(
+            "sase-1",
+            "Legacy",
+            "plan",
+            None,
+            "open",
+            "2026-01-01T00:00:00Z",
+        );
+        let legacy_line = format!(
+            r#"{{"schema_version":1,"event_id":"sase-1:1","timestamp":"2026-01-01T00:00:00Z","actor":"owner@example.com","operation":"issue_created","issue_id":"sase-1","payload":{{"kind":"issue_created","issue":{legacy_issue}}}}}"#
+        );
+        fs::write(&stream_path, format!("{legacy_line}\n")).unwrap();
+        repair_event_store_manifest(&beads_dir).unwrap();
+
+        append_issue_note(
+            &beads_dir,
+            "sase-1",
+            "a new note",
+            Some("owner@example.com".to_string()),
+            Some("2026-01-02T00:00:00Z".to_string()),
+        )
+        .unwrap();
+
+        let after = fs::read_to_string(&stream_path).unwrap();
+        assert!(
+            after.starts_with(&legacy_line),
+            "the published legacy issue_created line must be byte-identical"
+        );
+        assert_eq!(after.lines().count(), 2);
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let issues = reduce_event_streams(&streams).unwrap();
+        let issue = issues.iter().find(|issue| issue.id == "sase-1").unwrap();
+        assert_eq!(issue.notes.len(), 1);
+        assert_eq!(issue.notes[0].text, "a new note");
     }
 
     #[test]
