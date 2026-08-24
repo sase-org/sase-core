@@ -307,7 +307,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: String::new(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs: Vec::new(),
             links: Vec::new(),

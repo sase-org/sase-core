@@ -18,8 +18,9 @@ use crate::artifact_link::{
 use crate::serde_option::deserialize_present_option;
 
 use super::wire::{
-    parse_task_plus_one_observed_since, validate_unique_external_refs,
-    BeadCloseRecordWire, BeadError, BeadReopenCauseWire, BeadResolutionWire,
+    parse_legacy_note_blob, parse_task_plus_one_observed_since,
+    rekey_legacy_note_ids, validate_unique_external_refs, BeadCloseRecordWire,
+    BeadError, BeadNoteWire, BeadReopenCauseWire, BeadResolutionWire,
     BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
     PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
 };
@@ -1455,6 +1456,7 @@ pub(super) fn apply_event(
                 )));
             }
             let mut issue = issue.clone();
+            rekey_legacy_note_ids(&mut issue.notes, &event.event_id);
             issue.dependencies.clear();
             issue.refs.clear();
             issue.links.clear();
@@ -1464,18 +1466,20 @@ pub(super) fn apply_event(
         }
         BeadEventPayloadWire::IssueUpdated { fields } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
-            apply_update_event_fields(issue, fields, &event.timestamp);
+            apply_update_event_fields(issue, fields, event);
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
         BeadEventPayloadWire::NoteAppended { entry } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
-            issue.notes = appended_note_text(
-                &issue.notes,
+            if let Some(note) = BeadNoteWire::from_event(
+                &event.event_id,
                 &event.timestamp,
                 &event.actor,
                 entry,
-            );
+            ) {
+                issue.notes.push(note);
+            }
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
@@ -1685,7 +1689,7 @@ pub(super) fn apply_event(
 fn apply_update_event_fields(
     issue: &mut IssueWire,
     fields: &BeadIssueUpdateEventFieldsWire,
-    timestamp: &str,
+    event: &BeadEventRecordWire,
 ) {
     if let Some(value) = &fields.title {
         issue.title = value.clone();
@@ -1703,7 +1707,12 @@ fn apply_update_event_fields(
         issue.description = value.clone();
     }
     if let Some(value) = &fields.notes {
-        issue.notes = value.clone();
+        issue.notes = parse_legacy_note_blob(
+            value,
+            &event.event_id,
+            &event.timestamp,
+            &event.actor,
+        );
     }
     if let Some(value) = &fields.design {
         issue.design = value.clone();
@@ -1748,7 +1757,7 @@ fn apply_update_event_fields(
     {
         archive_close_metadata(
             issue,
-            timestamp,
+            &event.timestamp,
             BeadReopenCauseWire::Update,
             None,
         );
@@ -1833,20 +1842,6 @@ pub(super) fn task_plus_one_reopen_decision(
 /// refuses to store.  Clearing an issue that was never snoozed is a no-op.
 pub(super) fn clear_snooze_record(issue: &mut IssueWire) {
     issue.snooze = None;
-}
-
-pub(super) fn appended_note_text(
-    existing: &str,
-    timestamp: &str,
-    actor: &str,
-    entry: &str,
-) -> String {
-    let appended = format!("[{timestamp} · {actor}] {}", entry.trim());
-    if existing.trim().is_empty() {
-        appended
-    } else {
-        format!("{}\n\n{appended}", existing.trim_end())
-    }
 }
 
 fn existing_issue_mut<'a>(
@@ -2040,6 +2035,7 @@ fn event_timestamp(primary: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::wire::notes_text;
     use super::*;
 
     fn issue_with_refs(refs: Vec<String>) -> IssueWire {
@@ -2060,7 +2056,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: String::new(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs,
             links: Vec::new(),
@@ -2226,8 +2222,13 @@ mod tests {
 
         apply_event(&mut issues, &note).unwrap();
 
+        assert_eq!(issues["sase-1"].notes.len(), 1);
+        assert_eq!(issues["sase-1"].notes[0].id, "note");
+        assert_eq!(issues["sase-1"].notes[0].timestamp, note.timestamp);
+        assert_eq!(issues["sase-1"].notes[0].author, note.actor);
+        assert_eq!(issues["sase-1"].notes[0].text, "verified");
         assert_eq!(
-            issues["sase-1"].notes,
+            notes_text(&issues["sase-1"].notes),
             "[2026-01-01T00:01:00Z · agent-1] verified"
         );
         assert_eq!(issues["sase-1"].updated_at, "2026-01-01T00:01:00Z");
@@ -2242,6 +2243,126 @@ mod tests {
             blank.validate().unwrap_err().message,
             "note_appended entry cannot be empty or blank"
         );
+    }
+
+    #[test]
+    fn legacy_note_parser_recovers_pure_appended_blob() {
+        let notes = parse_legacy_note_blob(
+            "[2026-01-01T00:00:00Z · alpha] first\n\n[2026-01-02T00:00:00Z · beta] second",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].id, "legacy-event#1");
+        assert_eq!(notes[0].timestamp, "2026-01-01T00:00:00Z");
+        assert_eq!(notes[0].author, "alpha");
+        assert_eq!(notes[0].text, "first");
+        assert_eq!(notes[1].id, "legacy-event#2");
+        assert_eq!(notes[1].timestamp, "2026-01-02T00:00:00Z");
+        assert_eq!(notes[1].author, "beta");
+        assert_eq!(notes[1].text, "second");
+        assert_eq!(
+            notes_text(&notes),
+            "[2026-01-01T00:00:00Z · alpha] first\n\n[2026-01-02T00:00:00Z · beta] second"
+        );
+    }
+
+    #[test]
+    fn legacy_note_parser_attributes_bare_prose_to_update_event() {
+        let notes = parse_legacy_note_blob(
+            "first paragraph\n\nsecond paragraph",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].timestamp, "2026-01-03T00:00:00Z");
+        assert_eq!(notes[0].author, "fallback");
+        assert_eq!(notes[0].text, "first paragraph\n\nsecond paragraph");
+    }
+
+    #[test]
+    fn legacy_note_parser_keeps_prose_before_first_marker_as_one_record() {
+        let notes = parse_legacy_note_blob(
+            "context before marker\n\n[2026-01-04T00:00:00Z · beta] marked",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].timestamp, "2026-01-03T00:00:00Z");
+        assert_eq!(notes[0].author, "fallback");
+        assert_eq!(notes[0].text, "context before marker");
+        assert_eq!(notes[1].timestamp, "2026-01-04T00:00:00Z");
+        assert_eq!(notes[1].author, "beta");
+        assert_eq!(notes[1].text, "marked");
+    }
+
+    #[test]
+    fn legacy_note_parser_does_not_promote_unparseable_timestamp_marker() {
+        let notes = parse_legacy_note_blob(
+            "[not-a-date · beta] stays prose",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].timestamp, "2026-01-03T00:00:00Z");
+        assert_eq!(notes[0].author, "fallback");
+        assert_eq!(notes[0].text, "[not-a-date · beta] stays prose");
+    }
+
+    #[test]
+    fn legacy_note_parser_does_not_promote_marker_looking_line_mid_paragraph() {
+        let notes = parse_legacy_note_blob(
+            "intro\n[2026-01-04T00:00:00Z · beta] not a header",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            notes[0].text,
+            "intro\n[2026-01-04T00:00:00Z · beta] not a header"
+        );
+    }
+
+    #[test]
+    fn legacy_note_parser_ignores_empty_and_whitespace_only_blobs() {
+        assert!(parse_legacy_note_blob(
+            "",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback"
+        )
+        .is_empty());
+        assert!(parse_legacy_note_blob(
+            " \n\t\n ",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn legacy_note_parser_accepts_crlf_input() {
+        let notes = parse_legacy_note_blob(
+            "[2026-01-01T00:00:00Z · alpha] first\r\n\r\ncontinued\r\n\r\n[2026-01-02T00:00:00Z · beta] second",
+            "legacy-event",
+            "2026-01-03T00:00:00Z",
+            "fallback",
+        );
+
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].text, "first\n\ncontinued");
+        assert_eq!(notes[1].text, "second");
     }
 
     #[test]

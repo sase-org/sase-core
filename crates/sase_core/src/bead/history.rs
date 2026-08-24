@@ -11,7 +11,7 @@ use super::events::{
     BeadEventOperationWire, BeadEventStreamWire,
 };
 use super::jsonl::read_event_store;
-use super::wire::{BeadError, IssueWire};
+use super::wire::{notes_text, parse_legacy_note_blob, BeadError, IssueWire};
 
 pub const BEAD_HISTORY_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -124,10 +124,11 @@ fn lost_notes_from_streams(
     for event in merge_stream_events(&streams) {
         let before_notes = issues
             .get(&event.issue_id)
-            .map(|issue: &IssueWire| issue.notes.clone());
+            .map(|issue: &IssueWire| notes_text(&issue.notes));
         apply_event(&mut issues, event)?;
-        let after_notes =
-            issues.get(&event.issue_id).map(|issue| issue.notes.clone());
+        let after_notes = issues
+            .get(&event.issue_id)
+            .map(|issue| notes_text(&issue.notes));
 
         match after_notes {
             Some(notes) if before_notes.as_ref() != Some(&notes) => {
@@ -165,12 +166,13 @@ fn lost_notes_from_streams(
             .flatten()
             .filter_map(|revision| {
                 let text = revision.text.trim();
-                (!text.is_empty() && !issue.notes.contains(text)).then(|| {
-                    BeadLostNoteRevisionWire {
-                        timestamp: revision.timestamp.clone(),
-                        actor: revision.actor.clone(),
-                        text: text.to_string(),
-                    }
+                let current_notes = notes_text(&issue.notes);
+                (!text.is_empty()
+                    && !revision_still_present(text, &current_notes, issue))
+                .then(|| BeadLostNoteRevisionWire {
+                    timestamp: revision.timestamp.clone(),
+                    actor: revision.actor.clone(),
+                    text: text.to_string(),
                 })
             })
             .collect::<Vec<_>>();
@@ -179,11 +181,41 @@ fn lost_notes_from_streams(
         }
         findings.push(BeadLostNotesWire {
             issue_id: candidate_id.clone(),
-            current_notes: issue.notes.clone(),
+            current_notes: notes_text(&issue.notes),
             dropped_revisions,
         });
     }
     Ok(findings)
+}
+
+fn revision_still_present(
+    revision_text: &str,
+    current_notes: &str,
+    issue: &IssueWire,
+) -> bool {
+    if current_notes.contains(revision_text) {
+        return true;
+    }
+    let revision_body = parse_legacy_note_blob(
+        revision_text,
+        "lost-note-revision",
+        "1970-01-01T00:00:00Z",
+        "unknown",
+    )
+    .into_iter()
+    .map(|note| note.text)
+    .collect::<Vec<_>>()
+    .join("\n\n");
+    if revision_body.is_empty() {
+        return false;
+    }
+    let current_body = issue
+        .notes
+        .iter()
+        .map(|note| note.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    current_body.contains(&revision_body)
 }
 
 fn issue_changes(
@@ -234,11 +266,12 @@ fn issue_fields(
     let Some(issue) = issue else {
         return Ok(BTreeMap::new());
     };
-    let Value::Object(fields) = serde_json::to_value(issue)? else {
+    let Value::Object(mut fields) = serde_json::to_value(issue)? else {
         return Err(BeadError::validation(
             "serialized bead issue is not an object",
         ));
     };
+    fields.insert("notes".to_string(), Value::String(notes_text(&issue.notes)));
     Ok(fields.into_iter().collect())
 }
 
@@ -264,7 +297,19 @@ mod tests {
         BeadEventPayloadWire, BeadEventRecordWire,
         BeadIssueUpdateEventFieldsWire, BEAD_EVENT_SCHEMA_VERSION,
     };
-    use crate::bead::wire::{BeadTierWire, IssueTypeWire, StatusWire};
+    use crate::bead::wire::{
+        parse_legacy_note_blob, BeadNoteWire, BeadTierWire, IssueTypeWire,
+        StatusWire,
+    };
+
+    fn legacy_notes(text: &str) -> Vec<BeadNoteWire> {
+        parse_legacy_note_blob(
+            text,
+            "seed-notes",
+            "2026-01-01T00:00:00Z",
+            "agent",
+        )
+    }
 
     fn issue(
         id: &str,
@@ -289,7 +334,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: String::new(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs: Vec::new(),
             links: Vec::new(),
@@ -468,7 +513,7 @@ mod tests {
     #[test]
     fn notes_history_preserves_each_revision_pair() {
         let mut issue = issue("beads-1", IssueTypeWire::Plan, None);
-        issue.notes = "first".to_string();
+        issue.notes = legacy_notes("first");
         let streams = vec![stream(
             "beads-1",
             vec![
@@ -506,12 +551,20 @@ mod tests {
             revisions,
             vec![
                 (
-                    Some(Value::String("first".to_string())),
-                    Some(Value::String("second".to_string()))
+                    Some(Value::String(
+                        "[2026-01-01T00:00:00Z · agent] first".to_string()
+                    )),
+                    Some(Value::String(
+                        "[2026-01-02T00:00:00Z · agent] second".to_string()
+                    ))
                 ),
                 (
-                    Some(Value::String("second".to_string())),
-                    Some(Value::String("third".to_string()))
+                    Some(Value::String(
+                        "[2026-01-02T00:00:00Z · agent] second".to_string()
+                    )),
+                    Some(Value::String(
+                        "[2026-01-03T00:00:00Z · agent] third".to_string()
+                    ))
                 ),
             ]
         );
@@ -520,7 +573,7 @@ mod tests {
     #[test]
     fn lost_notes_reports_overwritten_nonempty_revisions() {
         let mut issue = issue("beads-1", IssueTypeWire::Plan, None);
-        issue.notes = "first".to_string();
+        issue.notes = legacy_notes("first");
         let streams = vec![stream(
             "beads-1",
             vec![
@@ -550,14 +603,20 @@ mod tests {
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].issue_id, "beads-1");
-        assert_eq!(findings[0].current_notes, "third");
+        assert_eq!(
+            findings[0].current_notes,
+            "[2026-01-03T00:00:00Z · agent] third"
+        );
         assert_eq!(
             findings[0]
                 .dropped_revisions
                 .iter()
                 .map(|revision| revision.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["first", "second"]
+            vec![
+                "[2026-01-01T00:00:00Z · agent] first",
+                "[2026-01-02T00:00:00Z · agent] second"
+            ]
         );
         assert_eq!(
             findings[0].dropped_revisions[0].timestamp,
@@ -569,7 +628,7 @@ mod tests {
     #[test]
     fn lost_notes_ignores_append_only_revision_chains() {
         let mut issue = issue("beads-1", IssueTypeWire::Plan, None);
-        issue.notes = "first".to_string();
+        issue.notes = legacy_notes("first");
         let streams = vec![stream(
             "beads-1",
             vec![
@@ -592,9 +651,9 @@ mod tests {
     #[test]
     fn lost_notes_are_stable_by_issue_id_and_support_one_issue() {
         let mut second = issue("beads-2", IssueTypeWire::Plan, None);
-        second.notes = "old two".to_string();
+        second.notes = legacy_notes("old two");
         let mut first = issue("beads-1", IssueTypeWire::Plan, None);
-        first.notes = "old one".to_string();
+        first.notes = legacy_notes("old one");
         let streams = vec![
             stream(
                 "beads-2",

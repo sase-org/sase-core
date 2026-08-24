@@ -21,7 +21,7 @@ use crate::store_lock::{
 
 use super::config::{default_config, load_config, save_config, BeadConfigWire};
 use super::events::{
-    appended_note_text, archive_close_metadata, clear_snooze_record,
+    archive_close_metadata, clear_snooze_record,
     import_issues_to_event_streams, mint_bead_event_id, reduce_event_streams,
     task_plus_one_reopen_decision, BeadEventOperationWire,
     BeadEventPayloadWire, BeadEventRecordWire, BeadEventStreamWire,
@@ -258,6 +258,7 @@ pub fn create_issue(
             }
         };
 
+        let initial_note = request.notes;
         let issue = IssueWire {
             id: issue_id,
             title: request.title,
@@ -275,7 +276,7 @@ pub fn create_issue(
             resolution: None,
             close_history: Vec::new(),
             description: request.description,
-            notes: request.notes,
+            notes: Vec::new(),
             design: request.design,
             refs: references.clone(),
             links: Vec::new(),
@@ -318,6 +319,18 @@ pub fn create_issue(
                 &issue.created_by,
             )?;
         }
+        let issue = if initial_note.trim().is_empty() {
+            issue
+        } else {
+            let index = store.issue_index(&issue.id)?;
+            append_note_to_store(
+                &mut store,
+                index,
+                &initial_note,
+                &issue.created_by,
+                &issue.created_at,
+            )?
+        };
         store.save()?;
 
         let mut result = outcome("create", true, vec![issue.id.clone()]);
@@ -744,6 +757,11 @@ pub fn update_issues(
             "is_ready_to_work cannot be set via update(); use mark_ready_to_work() instead.",
         ));
     }
+    if fields.notes.is_some() {
+        return Err(BeadError::validation(
+            "notes cannot be replaced via update(); use append_issue_note() instead.",
+        ));
+    }
     with_bead_mutation_lock(beads_dir, "update", || {
         let mut store = MutableStore::load(beads_dir)?;
 
@@ -873,17 +891,7 @@ fn append_note_to_store(
     now: &str,
 ) -> Result<IssueWire, BeadError> {
     let issue_id = store.issues[issue_index].id.clone();
-    let new_notes = appended_note_text(
-        &store.issues[issue_index].notes,
-        now,
-        author,
-        entry,
-    );
-    store.issues[issue_index].notes = new_notes.clone();
-    store.issues[issue_index].updated_at = now.to_string();
-    let issue = store.issues[issue_index].clone();
-    issue.validate()?;
-    store.append_issue_event(
+    let event_id = store.append_issue_event(
         &issue_id,
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
@@ -892,6 +900,14 @@ fn append_note_to_store(
         now,
         author,
     )?;
+    if let Some(note) =
+        super::wire::BeadNoteWire::from_event(&event_id, now, author, entry)
+    {
+        store.issues[issue_index].notes.push(note);
+    }
+    store.issues[issue_index].updated_at = now.to_string();
+    let issue = store.issues[issue_index].clone();
+    issue.validate()?;
     Ok(issue)
 }
 
@@ -2466,9 +2482,6 @@ fn apply_update_fields(
     if let Some(value) = fields.description {
         issue.description = value;
     }
-    if let Some(value) = fields.notes {
-        issue.notes = value;
-    }
     if let Some(value) = fields.design {
         issue.design = value;
     }
@@ -2737,7 +2750,7 @@ impl MutableStore {
         payload: BeadEventPayloadWire,
         timestamp: &str,
         actor: &str,
-    ) -> Result<(), BeadError> {
+    ) -> Result<String, BeadError> {
         let stream_id = self.stream_id_for_issue(issue_id)?;
         let stream = self.stream_for_mut(&stream_id)?;
         let ordinal = stream.events.len() + 1;
@@ -2755,8 +2768,9 @@ impl MutableStore {
             payload,
         };
         event.validate()?;
+        let event_id = event.event_id.clone();
         stream.events.push(event);
-        Ok(())
+        Ok(event_id)
     }
 
     fn stream_for_mut(
@@ -3102,6 +3116,11 @@ mod tests {
 
     use super::super::jsonl::write_event_store;
     use super::super::read::read_store_issues;
+    use super::super::wire::notes_text;
+
+    fn note_text(issue: &IssueWire) -> String {
+        notes_text(&issue.notes)
+    }
 
     fn task_plus_one_fixture(
         status: StatusWire,
@@ -3255,7 +3274,7 @@ mod tests {
         // value the ladder actually produces rather than reverse-engineering
         // it to read `3d`.
         assert_eq!(
-            issue.notes,
+            note_text(&issue),
             "[2026-01-01T00:02:00Z · bryanbugyi34@gmail.com] Snoozed until 2026-01-04T09:00:00-05:00 (in 4d). Also wakes at 2 more +1s. Reason: needs the upstream fix first"
         );
 
@@ -3286,7 +3305,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            issue.notes,
+            note_text(&issue),
             "[2026-01-01T00:02:00Z · owner] Snoozed until 2026-01-01T00:32:00Z (in 30m)."
         );
     }
@@ -3320,7 +3339,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(issue.status, StatusWire::Snoozed);
-        let notes: Vec<&str> = issue.notes.split("\n\n").collect();
+        let note_blob = note_text(&issue);
+        let notes: Vec<&str> = note_blob.split("\n\n").collect();
         assert_eq!(notes.len(), 2);
         assert!(notes[0].contains("Snoozed until 2026-01-04T00:00:00Z"));
         assert_eq!(
@@ -3700,10 +3720,11 @@ mod tests {
         .unwrap();
         assert_eq!(issue.status, StatusWire::Ready);
         assert_eq!(issue.snooze, None);
-        assert!(issue.notes.contains(
+        let note_text = note_text(&issue);
+        assert!(note_text.contains(
             "Reopened by +1 threshold: reached 2 +1s while snoozed until 2026-01-04T00:00:00Z."
         ));
-        assert!(issue.notes.contains("reporter-two"));
+        assert!(note_text.contains("reporter-two"));
         assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
     }
 
@@ -5231,7 +5252,7 @@ mod tests {
             .clone();
         assert_eq!(issue.closed_at.as_deref(), Some("2026-01-02T00:00:00Z"));
         assert_eq!(issue.close_reason.as_deref(), Some("verified"));
-        assert!(issue.notes.contains("extra evidence"));
+        assert!(note_text(&issue).contains("extra evidence"));
         let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
         assert_eq!(
             streams
@@ -7127,8 +7148,11 @@ mod tests {
 
         assert_eq!(first.operation, "note");
         assert_eq!(first.issue_ids, vec![issue.id.clone()]);
+        assert_eq!(second.notes.len(), 2);
+        assert_eq!(second.notes[0].text, "first note");
+        assert_eq!(second.notes[1].text, "second note");
         assert_eq!(
-            second.notes,
+            note_text(&second),
             "[2026-01-01T00:01:00Z · agent-1] first note\n\n[2026-01-01T00:02:00Z · agent-1] second note"
         );
         assert_eq!(second.updated_at, "2026-01-01T00:02:00Z");
@@ -7188,8 +7212,10 @@ mod tests {
         .issue
         .unwrap();
 
+        assert_eq!(noted.notes.len(), 1);
+        assert_eq!(noted.notes[0].author, "owner@example.com");
         assert_eq!(
-            noted.notes,
+            note_text(&noted),
             "[2026-01-01T00:01:00Z · owner@example.com] owner note"
         );
         let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
@@ -7279,11 +7305,11 @@ mod tests {
         assert_eq!(result.issues.len(), 2);
         let store = MutableStore::load(&beads_dir).unwrap();
         assert_eq!(
-            store.get_issue(&first.id).unwrap().notes,
-            "Existing context\n\n[2026-01-01T00:02:00Z · agent-1] verified with cargo test"
+            note_text(store.get_issue(&first.id).unwrap()),
+            "[2026-01-01T00:00:00Z · owner@example.com] Existing context\n\n[2026-01-01T00:02:00Z · agent-1] verified with cargo test"
         );
         assert_eq!(
-            store.get_issue(&second.id).unwrap().notes,
+            note_text(store.get_issue(&second.id).unwrap()),
             "[2026-01-01T00:02:00Z · agent-1] verified with cargo test"
         );
         for issue_id in [&first.id, &second.id] {

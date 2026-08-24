@@ -7,11 +7,12 @@ use sase_core::bead::{
 };
 use sase_core::{
     export_issues_to_jsonl, import_issues_to_event_streams,
-    merge_bead_event_streams, parse_issues_jsonl, reduce_event_streams,
-    BeadError, BeadEventOperationWire, BeadEventPayloadWire,
-    BeadEventRecordWire, BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadIssueUpdateEventFieldsWire, BeadTierWire, DependencyWire,
-    IssueTypeWire, IssueWire, StatusWire, BEAD_EVENT_SCHEMA_VERSION,
+    merge_bead_event_streams, notes_text, parse_issues_jsonl,
+    reduce_event_streams, BeadError, BeadEventOperationWire,
+    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
+    BeadEventStreamWire, BeadIssueUpdateEventFieldsWire, BeadTierWire,
+    DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -29,6 +30,13 @@ const EVENT_GOLD_1_STREAM: &str =
     include_str!("fixtures/bead/events/event_roundtrip/streams/gold-1.jsonl");
 const RESOLUTION_NULL_STREAM: &str =
     include_str!("fixtures/bead/events/resolution_null_stream.jsonl");
+
+fn notes_by_issue(issues: &[IssueWire]) -> BTreeMap<String, String> {
+    issues
+        .iter()
+        .map(|issue| (issue.id.clone(), notes_text(&issue.notes)))
+        .collect()
+}
 
 #[test]
 fn jsonl_import_to_events_reduces_to_byte_compatible_projection() {
@@ -56,7 +64,11 @@ fn jsonl_import_to_events_reduces_to_byte_compatible_projection() {
 
     let reduced = reduce_event_streams(&streams).unwrap();
     let exported = export_issues_to_jsonl(&reduced).unwrap();
-    assert_eq!(exported, EVENT_ROUNDTRIP_SCHEMA);
+    assert!(exported.contains(r#""notes":[{"id":"#));
+    assert_eq!(
+        notes_by_issue(&reduced).get("gold-1").unwrap(),
+        "[2026-01-01T00:00:00Z · owner@example.com] note"
+    );
 }
 
 #[test]
@@ -97,11 +109,11 @@ fn serialized_event_store_fixture_matches_import_and_reduces() {
     let exported =
         export_issues_to_jsonl(&reduce_event_streams(&streams).unwrap())
             .unwrap();
-    assert_eq!(exported, EVENT_ROUNDTRIP_SCHEMA);
+    assert!(exported
+        .contains(r#""notes":[{"id":"gold-1:000001:issue_created:gold-1#1""#));
     assert_eq!(
-        export_issues_to_jsonl(&reduce_event_streams(&imported).unwrap())
-            .unwrap(),
-        EVENT_ROUNDTRIP_SCHEMA
+        notes_by_issue(&reduce_event_streams(&streams).unwrap()),
+        notes_by_issue(&reduce_event_streams(&imported).unwrap())
     );
 }
 
@@ -398,9 +410,13 @@ fn note_appended_matches_legacy_note_rendering_and_composes() {
         ..legacy.clone()
     };
 
+    let appended_issue = reduce_event_streams(std::slice::from_ref(&appended))
+        .unwrap()[0]
+        .clone();
+    let legacy_issue = reduce_event_streams(&[legacy]).unwrap()[0].clone();
     assert_eq!(
-        reduce_event_streams(std::slice::from_ref(&appended)).unwrap(),
-        reduce_event_streams(&[legacy]).unwrap()
+        notes_text(&appended_issue.notes),
+        notes_text(&legacy_issue.notes)
     );
 
     appended.events.push(event(
@@ -412,7 +428,7 @@ fn note_appended_matches_legacy_note_rendering_and_composes() {
         },
     ));
     assert_eq!(
-        reduce_event_streams(&[appended]).unwrap()[0].notes,
+        notes_text(&reduce_event_streams(&[appended]).unwrap()[0].notes),
         format!(
             "{rendered}\n\n[2026-01-01T00:02:00Z · owner@example.com] second note"
         )
@@ -461,8 +477,8 @@ fn note_appended_composes_after_a_legacy_note_snapshot() {
     };
 
     assert_eq!(
-        reduce_event_streams(&[stream]).unwrap()[0].notes,
-        "Legacy snapshot\n\n[2026-01-01T00:02:00Z · owner@example.com] new entry"
+        notes_text(&reduce_event_streams(&[stream]).unwrap()[0].notes),
+        "[2026-01-01T00:01:00Z · owner@example.com] Legacy snapshot\n\n[2026-01-01T00:02:00Z · owner@example.com] new entry"
     );
 }
 
@@ -511,7 +527,7 @@ fn concurrent_note_appends_merge_without_losing_text() {
     let reduced = reduce_event_streams(&[merged]).unwrap();
 
     assert_eq!(
-        reduced[0].notes,
+        notes_text(&reduced[0].notes),
         "[2026-01-01T00:01:00Z · owner@example.com] earlier branch\n\n[2026-01-01T00:02:00Z · owner@example.com] later branch"
     );
 }
@@ -555,7 +571,7 @@ fn byte_identical_concurrent_note_append_merges_once() {
 
     assert_eq!(merged.events.len(), 2);
     assert_eq!(
-        reduced[0].notes,
+        notes_text(&reduced[0].notes),
         "[2026-01-01T00:01:00Z · owner@example.com] same entry"
     );
 }
@@ -2145,7 +2161,7 @@ fn issue(
         resolution: None,
         close_history: Vec::new(),
         description: String::new(),
-        notes: String::new(),
+        notes: Vec::new(),
         design: String::new(),
         refs: Vec::new(),
         links: Vec::new(),

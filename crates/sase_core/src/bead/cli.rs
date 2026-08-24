@@ -29,8 +29,8 @@ use super::read::{
 };
 use super::search::{search_issues_in_issues_with_matcher, SearchMatcher};
 use super::wire::{
-    BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
-    DependencyWire, IssueTypeWire, IssueWire, StatusWire,
+    notes_text, BeadError, BeadResolutionWire, BeadSearchMatchWire,
+    BeadTierWire, DependencyWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::plan::refs::{parse_plan_reference, resolve_plan_reference};
 
@@ -313,8 +313,9 @@ fn handle_show(
         write!(stdout, "\nDESCRIPTION\n  {}\n", issue.description)
             .expect("writing to String cannot fail");
     }
-    if !issue.notes.is_empty() {
-        write!(stdout, "\nNOTES\n  {}\n", issue.notes)
+    let note_text = notes_text(&issue.notes);
+    if !note_text.is_empty() {
+        write!(stdout, "\nNOTES\n  {}\n", note_text)
             .expect("writing to String cannot fail");
     }
     if issue.issue_type == IssueTypeWire::Plan
@@ -2111,7 +2112,7 @@ fn search_field_display_value(
         "id" => Some(issue.id.clone()),
         "title" => Some(issue.title.clone()),
         "description" => Some(issue.description.clone()),
-        "notes" => Some(issue.notes.clone()),
+        "notes" => Some(notes_text(&issue.notes)),
         "design" => Some(issue.design.clone()),
         "refs" => Some(issue.refs.join("\n")),
         "owner" => Some(issue.owner.clone()),
@@ -3731,7 +3732,9 @@ mod tests {
             .find(|issue| issue.id == "beads-1.1")
             .unwrap();
         assert_eq!(issue.status, StatusWire::Closed);
-        assert!(issue.notes.ends_with("] verified with cargo test"));
+        assert!(
+            notes_text(&issue.notes).ends_with("] verified with cargo test")
+        );
         let (_manifest, streams) =
             super::super::jsonl::read_event_store(&store.beads_dir).unwrap();
         let operations = streams[0]
@@ -4181,7 +4184,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: description.to_string(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs: Vec::new(),
             links: Vec::new(),

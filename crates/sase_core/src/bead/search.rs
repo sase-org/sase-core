@@ -7,8 +7,8 @@ use regex::{Regex, RegexBuilder};
 
 use super::read::{list_issues_in_issues, read_store_issues};
 use super::wire::{
-    BeadError, BeadResolutionWire, BeadSearchMatchWire, BeadTierWire,
-    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    notes_text, BeadError, BeadResolutionWire, BeadSearchMatchWire,
+    BeadTierWire, IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
 };
 
 pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
@@ -268,7 +268,7 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("id", issue.id.as_str()),
         field("title", issue.title.as_str()),
         field("description", issue.description.as_str()),
-        field("notes", issue.notes.as_str()),
+        field("notes", notes_text(&issue.notes)),
         field("design", issue.design.as_str()),
         field("refs", issue.refs.join("\n")),
         field(
@@ -410,7 +410,12 @@ mod tests {
             (
                 "notes",
                 phase_issue_with(|issue| {
-                    issue.notes = "Needle notes".to_string()
+                    issue.notes = crate::bead::wire::parse_legacy_note_blob(
+                        "Needle notes",
+                        "seed-notes",
+                        "2026-01-01T00:00:00Z",
+                        "agent",
+                    )
                 }),
                 "needle",
             ),
@@ -1032,7 +1037,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: String::new(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs: Vec::new(),
             links: Vec::new(),

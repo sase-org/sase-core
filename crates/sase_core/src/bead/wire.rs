@@ -261,6 +261,219 @@ impl TaskPlusOneEvidenceWire {
     }
 }
 
+const LEGACY_NOTE_ID_PREFIX: &str = "__legacy_note__";
+
+/// One timestamped, attributed note in a bead's append-only work log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadNoteWire {
+    pub id: String,
+    pub timestamp: String,
+    pub author: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_by: Option<String>,
+}
+
+impl BeadNoteWire {
+    pub fn validate(&self) -> Result<(), BeadError> {
+        if self.id.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead note id cannot be empty or blank",
+            ));
+        }
+        if self.timestamp.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead note timestamp cannot be empty or blank",
+            ));
+        }
+        if self.author.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead note author cannot be empty or blank",
+            ));
+        }
+        if self.text.trim().is_empty() {
+            return Err(BeadError::validation(
+                "bead note text cannot be empty or blank",
+            ));
+        }
+        match (&self.edited_at, &self.edited_by) {
+            (None, None) => {}
+            (Some(edited_at), Some(edited_by)) => {
+                if edited_at.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "bead note edited_at cannot be empty or blank",
+                    ));
+                }
+                if edited_by.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "bead note edited_by cannot be empty or blank",
+                    ));
+                }
+            }
+            _ => {
+                return Err(BeadError::validation(
+                    "bead note edited_at and edited_by must both be present or both be absent",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn from_event(
+        event_id: &str,
+        timestamp: &str,
+        actor: &str,
+        text: &str,
+    ) -> Option<Self> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        Some(Self {
+            id: event_id.to_string(),
+            timestamp: note_fallback_value(timestamp),
+            author: note_fallback_value(actor),
+            text: text.to_string(),
+            edited_at: None,
+            edited_by: None,
+        })
+    }
+}
+
+pub fn notes_text(notes: &[BeadNoteWire]) -> String {
+    notes
+        .iter()
+        .map(|note| {
+            format!(
+                "[{} · {}] {}",
+                note.timestamp,
+                note.author,
+                note.text.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+pub(crate) fn parse_legacy_note_blob(
+    text: &str,
+    event_id: &str,
+    timestamp: &str,
+    actor: &str,
+) -> Vec<BeadNoteWire> {
+    let fallback_timestamp = note_fallback_value(timestamp);
+    let fallback_actor = note_fallback_value(actor);
+    let mut records = Vec::new();
+    let mut current: Option<BeadNoteWire> = None;
+
+    for paragraph in legacy_note_paragraphs(text) {
+        if let Some((header_timestamp, header_actor, body)) =
+            legacy_note_header(&paragraph)
+        {
+            if let Some(record) = current.take() {
+                records.push(record);
+            }
+            current = Some(BeadNoteWire {
+                id: legacy_note_id(event_id, records.len() + 1),
+                timestamp: header_timestamp,
+                author: header_actor,
+                text: body,
+                edited_at: None,
+                edited_by: None,
+            });
+            continue;
+        }
+
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() {
+            continue;
+        }
+        if let Some(record) = current.as_mut() {
+            if !record.text.is_empty() {
+                record.text.push_str("\n\n");
+            }
+            record.text.push_str(paragraph);
+        } else {
+            current = Some(BeadNoteWire {
+                id: legacy_note_id(event_id, records.len() + 1),
+                timestamp: fallback_timestamp.clone(),
+                author: fallback_actor.clone(),
+                text: paragraph.to_string(),
+                edited_at: None,
+                edited_by: None,
+            });
+        }
+    }
+
+    if let Some(record) = current {
+        records.push(record);
+    }
+    records
+}
+
+pub(crate) fn rekey_legacy_note_ids(
+    notes: &mut [BeadNoteWire],
+    event_id: &str,
+) {
+    for (index, note) in notes.iter_mut().enumerate() {
+        if note.id.starts_with(LEGACY_NOTE_ID_PREFIX) {
+            note.id = legacy_note_id(event_id, index + 1);
+        }
+    }
+}
+
+fn legacy_note_id(event_id: &str, index: usize) -> String {
+    format!("{event_id}#{index}")
+}
+
+fn note_fallback_value(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "unknown".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn legacy_note_paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = Vec::new();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join("\n"));
+                current.clear();
+            }
+        } else {
+            current.push(line);
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join("\n"));
+    }
+    paragraphs
+}
+
+fn legacy_note_header(paragraph: &str) -> Option<(String, String, String)> {
+    let rest = paragraph.strip_prefix('[')?;
+    let (header, body) = rest.split_once("] ")?;
+    let (timestamp, actor) = header.split_once(" · ")?;
+    DateTime::parse_from_rfc3339(timestamp.trim()).ok()?;
+    let actor = actor.trim();
+    let body = body.trim();
+    if actor.is_empty() || body.is_empty() {
+        return None;
+    }
+    Some((
+        timestamp.trim().to_string(),
+        actor.to_string(),
+        body.to_string(),
+    ))
+}
+
 pub(crate) fn parse_task_plus_one_observed_since(
     value: &str,
 ) -> Result<DateTime<FixedOffset>, BeadError> {
@@ -528,7 +741,7 @@ fn is_snake_case_key(value: &str) -> bool {
     !prev_underscore
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IssueWire {
     pub id: String,
     pub title: String,
@@ -576,11 +789,8 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub description: String,
-    #[serde(
-        default = "empty_string",
-        deserialize_with = "deserialize_string_default_empty"
-    )]
-    pub notes: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<BeadNoteWire>,
     #[serde(
         default = "empty_string",
         deserialize_with = "deserialize_string_default_empty"
@@ -633,6 +843,162 @@ pub struct IssueWire {
     pub external_ref: String,
     #[serde(default)]
     pub dependencies: Vec<DependencyWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IssueNotesInput {
+    Records(Vec<BeadNoteWire>),
+    LegacyText(String),
+}
+
+#[derive(Deserialize)]
+struct IssueWireRaw {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub status: StatusWire,
+    #[serde(default)]
+    pub issue_type: IssueTypeWire,
+    #[serde(default)]
+    pub tier: Option<BeadTierWire>,
+    #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
+    pub parent_id: Option<String>,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub owner: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub assignee: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub created_at: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub created_by: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub updated_at: String,
+    #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
+    pub closed_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
+    pub close_reason: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<BeadResolutionWire>,
+    #[serde(default)]
+    pub close_history: Vec<BeadCloseRecordWire>,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub description: String,
+    #[serde(default)]
+    pub notes: Option<IssueNotesInput>,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub design: String,
+    #[serde(default)]
+    pub refs: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<crate::artifact_link::BeadLinkWire>,
+    #[serde(default)]
+    pub plus_one_evidence: Vec<TaskPlusOneEvidenceWire>,
+    #[serde(default)]
+    pub snooze: Option<BeadSnoozeWire>,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub model: String,
+    #[serde(default, deserialize_with = "deserialize_option_phase_size")]
+    pub size: Option<PhaseSizeWire>,
+    #[serde(default, deserialize_with = "deserialize_option_non_empty_string")]
+    pub task_type: Option<String>,
+    #[serde(default)]
+    pub task_type_fields: BTreeMap<String, String>,
+    #[serde(default = "false_value")]
+    pub is_ready_to_work: bool,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub changespec_name: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub changespec_bug_id: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub external_ref: String,
+    #[serde(default)]
+    pub dependencies: Vec<DependencyWire>,
+}
+
+impl<'de> Deserialize<'de> for IssueWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = IssueWireRaw::deserialize(deserializer)?;
+        let notes = match raw.notes {
+            Some(IssueNotesInput::Records(notes)) => notes,
+            Some(IssueNotesInput::LegacyText(text)) => parse_legacy_note_blob(
+                &text,
+                LEGACY_NOTE_ID_PREFIX,
+                &raw.created_at,
+                &raw.created_by,
+            ),
+            None => Vec::new(),
+        };
+        Ok(Self {
+            id: raw.id,
+            title: raw.title,
+            status: raw.status,
+            issue_type: raw.issue_type,
+            tier: raw.tier,
+            parent_id: raw.parent_id,
+            owner: raw.owner,
+            assignee: raw.assignee,
+            created_at: raw.created_at,
+            created_by: raw.created_by,
+            updated_at: raw.updated_at,
+            closed_at: raw.closed_at,
+            close_reason: raw.close_reason,
+            resolution: raw.resolution,
+            close_history: raw.close_history,
+            description: raw.description,
+            notes,
+            design: raw.design,
+            refs: raw.refs,
+            links: raw.links,
+            plus_one_evidence: raw.plus_one_evidence,
+            snooze: raw.snooze,
+            model: raw.model,
+            size: raw.size,
+            task_type: raw.task_type,
+            task_type_fields: raw.task_type_fields,
+            is_ready_to_work: raw.is_ready_to_work,
+            changespec_name: raw.changespec_name,
+            changespec_bug_id: raw.changespec_bug_id,
+            external_ref: raw.external_ref,
+            dependencies: raw.dependencies,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,6 +1138,9 @@ impl IssueWire {
         for record in &self.close_history {
             record.validate()?;
         }
+        for note in &self.notes {
+            note.validate()?;
+        }
         validate_model_value(&self.model)?;
         Ok(())
     }
@@ -838,7 +1207,7 @@ mod tests {
             resolution: None,
             close_history: Vec::new(),
             description: String::new(),
-            notes: String::new(),
+            notes: Vec::new(),
             design: String::new(),
             refs: Vec::new(),
             links: Vec::new(),
