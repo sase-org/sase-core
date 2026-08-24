@@ -254,13 +254,36 @@ pub enum LaunchUnitPayloadWire {
     Proc(ProcUnitWire),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AgentUnitWire {
     pub prompt: String,
+    /// Positional `%id` member id, or the explicit full name for a plain
+    /// `%id:<name>` / clan-declarer form. Joiners keep the member id here and
+    /// put the clan on [`Self::clan`] so dispatch can rebuild
+    /// `%id(<member>, clan=<clan>)` without treating the member as the
+    /// complete agent name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     #[serde(default)]
     pub identity_explicit: bool,
+    #[serde(default, skip_serializing_if = "skip_if_false")]
+    pub identity_force_reuse: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan: Option<String>,
+    #[serde(default, skip_serializing_if = "skip_if_false")]
+    pub clan_declared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan_tribe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clan_summary_script: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_attach_parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_attach_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tribe: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +302,132 @@ pub struct AgentUnitWire {
     pub wait_runners: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_priority: Option<i32>,
+}
+
+fn skip_if_false(value: &bool) -> bool {
+    !*value
+}
+
+impl AgentUnitWire {
+    /// Return the launch identity used for waits and collision checks.
+    ///
+    /// Clan joiners compose `<clan>.<member>`; family attachments compose
+    /// `<parent>--<suffix>` when the suffix is already concrete. Auto-named
+    /// units, including `%id(@, family=...)`, have no durable name yet.
+    pub fn effective_identity(&self) -> Option<String> {
+        if let (Some(parent), Some(suffix)) = (
+            self.family_attach_parent.as_deref(),
+            self.family_attach_suffix.as_deref(),
+        ) {
+            if suffix == "@" {
+                return None;
+            }
+            return Some(format!("{parent}--{suffix}"));
+        }
+        if !self.clan_declared {
+            if let (Some(clan), Some(member)) =
+                (self.clan.as_deref(), self.identity.as_deref())
+            {
+                return Some(format!("{clan}.{member}"));
+            }
+        }
+        self.identity.clone()
+    }
+
+    pub(crate) fn identity_directive_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(line) = self.format_id_directive() {
+            lines.push(line);
+        }
+        if let Some(line) = self.format_clan_directive() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    fn format_id_directive(&self) -> Option<String> {
+        let bead = self.bead_id.as_deref();
+        let bang = |value: &str| {
+            if self.identity_force_reuse {
+                format!("!{value}")
+            } else {
+                value.to_string()
+            }
+        };
+        let bead_suffix = |prefix_comma: bool| match bead {
+            Some(bead_id) if prefix_comma => format!(", bead={bead_id}"),
+            Some(bead_id) => format!("bead={bead_id}"),
+            None => String::new(),
+        };
+        if let (Some(parent), Some(suffix)) = (
+            self.family_attach_parent.as_deref(),
+            self.family_attach_suffix.as_deref(),
+        ) {
+            return Some(format!(
+                "%id({}, family={parent}{})",
+                bang(suffix),
+                bead_suffix(true)
+            ));
+        }
+        if let (Some(clan), Some(member)) =
+            (self.clan.as_deref(), self.identity.as_deref())
+        {
+            if !self.clan_declared {
+                return Some(format!(
+                    "%id({}, clan={clan}{})",
+                    bang(member),
+                    bead_suffix(true)
+                ));
+            }
+        }
+        if let Some(tribe) = self.tribe.as_deref() {
+            return Some(match self.identity.as_deref() {
+                Some(identity) => format!(
+                    "%id({}, tribe={tribe}{})",
+                    bang(identity),
+                    bead_suffix(true)
+                ),
+                None if bead.is_some() => {
+                    format!("%id(tribe={tribe}{})", bead_suffix(true))
+                }
+                None => format!("%id(tribe={tribe})"),
+            });
+        }
+        if self.identity_explicit {
+            let identity = self.identity.as_deref()?;
+            if bead.is_some() || self.identity_force_reuse {
+                return Some(format!(
+                    "%id({}{})",
+                    bang(identity),
+                    bead_suffix(true)
+                ));
+            }
+            return Some(format!("%id:{identity}"));
+        }
+        bead.map(|bead_id| format!("%id(bead={bead_id})"))
+    }
+
+    fn format_clan_directive(&self) -> Option<String> {
+        if !self.clan_declared {
+            return None;
+        }
+        let clan = self.clan.as_deref()?;
+        let mut args = Vec::new();
+        if let Some(tribe) = self.clan_tribe.as_deref() {
+            args.push(format!("tribe={tribe}"));
+        }
+        if let Some(summary) = self.clan_summary.as_deref() {
+            args.push(format!("summary=[[{summary}]]"));
+        }
+        if let Some(script) = self.clan_summary_script.as_deref() {
+            args.push(format!("summary_script={script}"));
+        }
+        if args.is_empty() {
+            Some(format!("%clan:{clan}"))
+        } else {
+            Some(format!("%clan({clan}, {})", args.join(", ")))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -748,6 +897,17 @@ fn classify_typed_launch_unit(
     let mut raw_waits = Vec::new();
     let mut agent_identity = slot.repeat_name.clone();
     let mut agent_identity_explicit = agent_identity.is_some();
+    let mut agent_identity_force_reuse = false;
+    let mut agent_clan: Option<String> = None;
+    let mut agent_clan_declared = false;
+    let mut agent_clan_tribe: Option<String> = None;
+    let mut agent_clan_summary: Option<String> = None;
+    let mut agent_clan_summary_script: Option<String> = None;
+    let mut agent_family_parent: Option<String> = None;
+    let mut agent_family_suffix: Option<String> = None;
+    let mut agent_tribe: Option<String> = None;
+    let mut parsed_id: Option<ParsedIdDirective> = None;
+    let mut parsed_clan: Option<ParsedClanDirective> = None;
     let mut agent_model = slot.model.clone();
     let mut agent_effort: Option<String> = None;
     let mut agent_bead_id = slot.bead_id.clone();
@@ -885,17 +1045,26 @@ fn classify_typed_launch_unit(
             }
             "id" => {
                 regions_to_remove.push((directive.start, directive.end));
-                let parsed = parse_id_directive(&directive);
-                if let Some(identity) = parsed.identity {
-                    agent_identity = Some(identity);
-                    agent_identity_explicit = true;
-                }
-                if let Some(bead_id) = parsed.bead_id {
-                    agent_bead_id = Some(bead_id);
-                }
-                if parsed.unsupported_on_proc {
-                    proc_forbidden_directives
-                        .push("%id(..., bead=...)".to_string());
+                if parsed_id.is_some() {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-id",
+                        "Duplicate directive '%id' in prompt; use %id(<id>, tribe=<tribe>) to assign a tribe to an explicitly named agent, and add bead=<bead> to that same directive when needed.",
+                        &logical_id,
+                        Some(span),
+                    ));
+                } else {
+                    let parsed = parse_id_directive(
+                        &directive,
+                        &logical_id,
+                        diagnostics,
+                    );
+                    if parsed.unsupported_on_proc {
+                        proc_forbidden_directives.push(
+                            "%id(..., clan=|family=|tribe=|bead=...)"
+                                .to_string(),
+                        );
+                    }
+                    parsed_id = Some(parsed);
                 }
             }
             "model" => {
@@ -945,8 +1114,27 @@ fn classify_typed_launch_unit(
                 );
             }
             "clan" => {
-                regions_to_remove.push((directive.start, directive.end));
                 proc_forbidden_directives.push("%clan".to_string());
+                if parsed_clan.is_some() {
+                    regions_to_remove.push((directive.start, directive.end));
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-clan",
+                        "Duplicate directive '%clan' in prompt.",
+                        &logical_id,
+                        Some(span),
+                    ));
+                } else {
+                    let parsed = parse_clan_directive(
+                        prompt,
+                        &directive,
+                        &logical_id,
+                        &ignored_ranges,
+                        diagnostics,
+                    );
+                    regions_to_remove
+                        .push((directive.start, parsed.region_end));
+                    parsed_clan = Some(parsed);
+                }
             }
             "hide" => {
                 regions_to_remove.push((directive.start, directive.end));
@@ -959,6 +1147,25 @@ fn classify_typed_launch_unit(
             _ => {}
         }
     }
+
+    apply_parsed_identity(
+        parsed_id.as_ref(),
+        parsed_clan.as_ref(),
+        &logical_id,
+        &mut agent_identity,
+        &mut agent_identity_explicit,
+        &mut agent_identity_force_reuse,
+        &mut agent_clan,
+        &mut agent_clan_declared,
+        &mut agent_clan_tribe,
+        &mut agent_clan_summary,
+        &mut agent_clan_summary_script,
+        &mut agent_family_parent,
+        &mut agent_family_suffix,
+        &mut agent_tribe,
+        &mut agent_bead_id,
+        diagnostics,
+    );
 
     let cleaned_prompt = strip_prompt_regions(prompt, &regions_to_remove)
         .trim()
@@ -1034,6 +1241,15 @@ fn classify_typed_launch_unit(
             prompt: cleaned_prompt,
             identity: agent_identity,
             identity_explicit: agent_identity_explicit,
+            identity_force_reuse: agent_identity_force_reuse,
+            clan: agent_clan,
+            clan_declared: agent_clan_declared,
+            clan_tribe: agent_clan_tribe,
+            clan_summary: agent_clan_summary,
+            clan_summary_script: agent_clan_summary_script,
+            family_attach_parent: agent_family_parent,
+            family_attach_suffix: agent_family_suffix,
+            tribe: agent_tribe,
             model: agent_model,
             reasoning_effort: agent_effort,
             bead_id: agent_bead_id,
@@ -1285,29 +1501,612 @@ fn raw_wait(
 struct ParsedIdDirective {
     identity: Option<String>,
     bead_id: Option<String>,
+    clan: Option<String>,
+    tribe: Option<String>,
+    family_parent: Option<String>,
+    family_suffix: Option<String>,
+    force_reuse: bool,
     unsupported_on_proc: bool,
 }
 
-fn parse_id_directive(directive: &DirectiveOccurrence) -> ParsedIdDirective {
+#[derive(Debug, Default)]
+struct ParsedClanDirective {
+    clan: Option<String>,
+    tribe: Option<String>,
+    summary: Option<String>,
+    summary_script: Option<String>,
+    region_end: usize,
+}
+
+fn parse_id_directive(
+    directive: &DirectiveOccurrence,
+    logical_id: &str,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) -> ParsedIdDirective {
     let mut parsed = ParsedIdDirective::default();
+    let span = [directive.start, directive.end];
+    if let Some(keys) = duplicate_named_args(&directive.args) {
+        diagnostics.push(typed_unit_diagnostic(
+            "duplicate-id-keyword",
+            &format!("Duplicate keyword argument '{keys}' on %id."),
+            logical_id,
+            Some(span),
+        ));
+        parsed.unsupported_on_proc = true;
+        return parsed;
+    }
+
+    let mut positional: Vec<String> = Vec::new();
+    let mut named: BTreeMap<String, String> = BTreeMap::new();
     for (index, arg) in directive.args.iter().enumerate() {
         let (name, value_raw) = split_named_directive_arg(arg);
         let value = unquote_directive_arg_value(value_raw.trim());
         match name.as_deref() {
-            Some("bead") => {
-                parsed.bead_id = Some(value);
+            Some("bead") | Some("clan") | Some("family") | Some("tribe") => {
                 parsed.unsupported_on_proc = true;
+                named.insert(name.unwrap(), value);
             }
-            None if index == 0 && !value.is_empty() => {
-                parsed.identity = Some(value);
-            }
-            Some(_) => {
+            Some(other) => {
                 parsed.unsupported_on_proc = true;
+                diagnostics.push(typed_unit_diagnostic(
+                    "invalid-id-keyword",
+                    &format!(
+                        "Unsupported keyword on %id: {other}=. Only bead=, clan=, family=, and tribe= are supported."
+                    ),
+                    logical_id,
+                    Some(span),
+                ));
             }
+            None if index == 0 || !value.is_empty() => positional.push(value),
             None => {}
         }
     }
+
+    let membership: Vec<&str> = ["clan", "family", "tribe"]
+        .into_iter()
+        .filter(|key| named.contains_key(*key))
+        .collect();
+    if membership.len() > 1 {
+        diagnostics.push(typed_unit_diagnostic(
+            "id-keyword-conflict",
+            "The clan=, family=, and tribe= keywords on %id are mutually exclusive; set at most one.",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    if positional.len() > 1 {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-id-form",
+            "The positional family form on %id is no longer supported; use %id(<suffix>, family=<parent>) instead.",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+
+    if let Some(bead_id) = named.get("bead") {
+        if bead_id.is_empty() || bead_id.chars().any(char::is_whitespace) {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-bead",
+                "The bead= keyword on %id requires a non-empty, whitespace-free bead ID.",
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            parsed.bead_id = Some(bead_id.clone());
+        }
+    }
+
+    if let Some(clan) = named.get("clan") {
+        if positional.len() != 1 {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-clan",
+                "The clan= keyword on %id requires exactly one positional member id, e.g. %id(worker, clan=research).",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        let (force_reuse, member_id) = strip_force_reuse(&positional[0]);
+        if member_id.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-clan",
+                "The clan= keyword on %id requires a non-empty member id.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if clan.trim().is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-clan",
+                "The clan= keyword on %id requires a non-empty clan name.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        parsed.identity = Some(member_id);
+        parsed.clan = Some(clan.clone());
+        parsed.force_reuse = force_reuse;
+        return parsed;
+    }
+
+    if let Some(family) = named.get("family") {
+        if positional.len() != 1 {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-family",
+                "The family= keyword on %id requires exactly one positional suffix; use %id(<suffix>, family=<family>) or %id(@, family=<family>).",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        let (force_reuse, suffix) = strip_force_reuse(&positional[0]);
+        let parent = family.trim();
+        if parent.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-family",
+                "The family= keyword on %id requires a non-empty family name.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if suffix.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-family",
+                "The family= keyword on %id requires a non-empty suffix.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if let Some(message) = invalid_family_suffix_reason(&suffix) {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-family",
+                &message,
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        parsed.family_parent = Some(parent.to_string());
+        parsed.family_suffix = Some(suffix);
+        parsed.force_reuse = force_reuse;
+        return parsed;
+    }
+
+    if let Some(tribe) = named.get("tribe") {
+        let raw = positional.first().cloned().unwrap_or_default();
+        let (force_reuse, identity) = strip_force_reuse(&raw);
+        if !positional.is_empty() && identity.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-tribe",
+                "The tribe= keyword on %id requires a non-empty id when a positional id is supplied.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if tribe.trim().is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-tribe",
+                "The tribe= keyword on %id requires a non-empty tribe name.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if let Some(message) = invalid_tribe_reason(tribe, "%id") {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-tribe",
+                &message,
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        parsed.identity = if identity.is_empty() {
+            None
+        } else {
+            Some(identity)
+        };
+        parsed.tribe = Some(tribe.clone());
+        parsed.force_reuse = force_reuse;
+        return parsed;
+    }
+
+    if let Some(raw) = positional.first() {
+        let (force_reuse, identity) = strip_force_reuse(raw);
+        if !identity.is_empty() {
+            parsed.identity = Some(identity);
+            parsed.force_reuse = force_reuse;
+        } else if force_reuse {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-form",
+                "The tribe= keyword on %id requires a non-empty id when a positional id is supplied.",
+                logical_id,
+                Some(span),
+            ));
+        }
+    }
     parsed
+}
+
+fn parse_clan_directive(
+    prompt: &str,
+    directive: &DirectiveOccurrence,
+    logical_id: &str,
+    ignored_ranges: &[(usize, usize)],
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) -> ParsedClanDirective {
+    let mut parsed = ParsedClanDirective {
+        region_end: directive.end,
+        ..ParsedClanDirective::default()
+    };
+    let span = [directive.start, directive.end];
+    if directive.has_plus_suffix {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-clan-form",
+            "%clan does not support '+'; use %clan:<name> or %clan(<name>, tribe=<tribe>).",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    if let Some(keys) = duplicate_named_args(&directive.args) {
+        diagnostics.push(typed_unit_diagnostic(
+            "duplicate-clan-keyword",
+            &format!("Duplicate keyword argument '{keys}' on %clan."),
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+
+    let mut positional: Vec<String> = Vec::new();
+    let mut named: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    for (index, arg) in directive.args.iter().enumerate() {
+        let (name, value_raw) = split_named_directive_arg(arg);
+        let trimmed_raw = value_raw.trim();
+        let from_text_block = trimmed_raw.starts_with("[[");
+        let value = unquote_directive_arg_value(trimmed_raw);
+        match name.as_deref() {
+            Some("tribe") | Some("summary") | Some("summary_script") => {
+                named.insert(name.unwrap(), (value, from_text_block));
+            }
+            Some(other) => {
+                diagnostics.push(typed_unit_diagnostic(
+                    "invalid-clan-keyword",
+                    &format!(
+                        "Unsupported keyword on %clan: {other}=. Only summary=, summary_script=, and tribe= are supported."
+                    ),
+                    logical_id,
+                    Some(span),
+                ));
+            }
+            None if index == 0 || !value.is_empty() => positional.push(value),
+            None => {}
+        }
+    }
+    if positional.len() > 1 {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-clan-form",
+            "%clan accepts exactly one positional clan name argument.",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    let clan = positional.first().cloned().unwrap_or_default();
+    if clan.trim().is_empty() {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-clan-form",
+            "'%clan' directive requires a clan name argument (e.g., %clan:research.@).",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    parsed.clan = Some(clan);
+
+    if named.contains_key("summary") && named.contains_key("summary_script") {
+        diagnostics.push(typed_unit_diagnostic(
+            "clan-summary-conflict",
+            "'%clan' summary= and summary_script= are mutually exclusive.",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    if let Some((tribe, _)) = named.get("tribe") {
+        if tribe.trim().is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-clan-tribe",
+                "'%clan(..., tribe=...)' requires a non-empty tribe name.",
+                logical_id,
+                Some(span),
+            ));
+        } else if let Some(message) = invalid_tribe_reason(tribe, "%clan") {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-clan-tribe",
+                &message,
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            parsed.tribe = Some(tribe.clone());
+        }
+    }
+    if let Some((summary, from_text_block)) = named.get("summary") {
+        if summary.trim().is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-clan-summary",
+                "'%clan(..., summary=...)' requires a non-empty value.",
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            parsed.summary =
+                Some(normalize_clan_summary(summary, *from_text_block));
+        }
+    }
+    if let Some((script, _)) = named.get("summary_script") {
+        if script.trim().is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-clan-summary-script",
+                "'%clan(..., summary_script=...)' requires a non-empty value.",
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            parsed.summary_script = Some(script.trim().to_string());
+        }
+    }
+
+    if prompt[directive.end..].starts_with(":: ") {
+        if parsed.summary.is_some() || parsed.summary_script.is_some() {
+            diagnostics.push(typed_unit_diagnostic(
+                "clan-shorthand-conflict",
+                "Cannot combine %clan(...):: shorthand with explicit summary= or summary_script=.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        let text_start = directive.end + 3;
+        let text_end =
+            clan_double_colon_text_end(prompt, text_start, ignored_ranges);
+        let text = prompt[text_start..text_end].trim_end();
+        if text.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-clan-summary",
+                "'%clan(..., summary=...)' requires a non-empty value.",
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            parsed.summary = Some(normalize_clan_summary(text, true));
+            parsed.region_end = text_end;
+        }
+    }
+    parsed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_parsed_identity(
+    parsed_id: Option<&ParsedIdDirective>,
+    parsed_clan: Option<&ParsedClanDirective>,
+    logical_id: &str,
+    agent_identity: &mut Option<String>,
+    agent_identity_explicit: &mut bool,
+    agent_identity_force_reuse: &mut bool,
+    agent_clan: &mut Option<String>,
+    agent_clan_declared: &mut bool,
+    agent_clan_tribe: &mut Option<String>,
+    agent_clan_summary: &mut Option<String>,
+    agent_clan_summary_script: &mut Option<String>,
+    agent_family_parent: &mut Option<String>,
+    agent_family_suffix: &mut Option<String>,
+    agent_tribe: &mut Option<String>,
+    agent_bead_id: &mut Option<String>,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    if let Some(id) = parsed_id {
+        if id.family_parent.is_some() {
+            *agent_identity = None;
+            *agent_identity_explicit = false;
+            *agent_family_parent = id.family_parent.clone();
+            *agent_family_suffix = id.family_suffix.clone();
+        } else if let Some(identity) = id.identity.as_ref() {
+            *agent_identity = Some(identity.clone());
+            *agent_identity_explicit = true;
+        }
+        if let Some(bead_id) = id.bead_id.as_ref() {
+            *agent_bead_id = Some(bead_id.clone());
+        }
+        if let Some(clan) = id.clan.as_ref() {
+            *agent_clan = Some(clan.clone());
+        }
+        *agent_tribe = id.tribe.clone();
+        *agent_identity_force_reuse = id.force_reuse;
+    }
+    if let Some(clan) = parsed_clan {
+        *agent_clan = clan.clan.clone();
+        *agent_clan_declared = clan.clan.is_some();
+        *agent_clan_tribe = clan.tribe.clone();
+        *agent_clan_summary = clan.summary.clone();
+        *agent_clan_summary_script = clan.summary_script.clone();
+    }
+
+    let join_clan = parsed_id.and_then(|id| id.clan.as_ref());
+    let family = parsed_id.and_then(|id| id.family_parent.as_ref());
+    let id_tribe = parsed_id.and_then(|id| id.tribe.as_ref());
+    if parsed_clan.is_some() && join_clan.is_some() {
+        diagnostics.push(typed_unit_diagnostic(
+            "clan-id-conflict",
+            "Cannot combine %clan with %id(..., clan=...); a declaring prompt uses %clan(<clan>, tribe=<tribe>) with a full %id:<clan>.<id>, while a joining prompt uses only %id(<id>, clan=<clan>).",
+            logical_id,
+            None,
+        ));
+    }
+    if parsed_clan.is_some() && id_tribe.is_some() {
+        diagnostics.push(typed_unit_diagnostic(
+            "clan-id-conflict",
+            "Cannot combine %clan with %id(..., tribe=...); use %clan(<clan>, tribe=<tribe>) to set the clan's tribe.",
+            logical_id,
+            None,
+        ));
+    }
+    if parsed_clan.is_some() && family.is_some() {
+        diagnostics.push(typed_unit_diagnostic(
+            "clan-id-conflict",
+            "Cannot combine %clan with %id(..., family=...); choose clan membership or serial family attachment.",
+            logical_id,
+            None,
+        ));
+    }
+}
+
+fn duplicate_named_args(args: &[String]) -> Option<String> {
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+    for arg in args {
+        if let Some(name) = split_named_directive_arg(arg).0 {
+            if !seen.insert(name.clone()) {
+                duplicates.insert(name);
+            }
+        }
+    }
+    if duplicates.is_empty() {
+        None
+    } else {
+        Some(duplicates.into_iter().collect::<Vec<_>>().join(", "))
+    }
+}
+
+fn strip_force_reuse(raw: &str) -> (bool, String) {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('!') {
+        (true, rest.to_string())
+    } else {
+        (false, trimmed.to_string())
+    }
+}
+
+fn invalid_family_suffix_reason(suffix: &str) -> Option<String> {
+    if suffix == "@" {
+        return None;
+    }
+    if suffix.starts_with('.')
+        || suffix.starts_with('-')
+        || suffix.contains("--")
+    {
+        return Some(format!(
+            "Invalid %i family suffix '{suffix}'. Pass the bare suffix without a family separator, e.g. %i(reviewer, family=parent)."
+        ));
+    }
+    if !suffix
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Some(format!(
+            "Invalid %i family suffix '{suffix}'. Use letters, numbers, and underscores only, or @ to allocate the next free suffix."
+        ));
+    }
+    None
+}
+
+fn invalid_tribe_reason(tribe: &str, directive: &str) -> Option<String> {
+    if tribe.starts_with('@') {
+        return Some(format!(
+            "Invalid '{directive}' tribe= value: tribe name {tribe:?} must not start with '@' (the '@' is added on display only — drop it from the input)"
+        ));
+    }
+    if !tribe
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    {
+        return Some(format!(
+            "Invalid '{directive}' tribe= value: tribe name {tribe:?} must match ^[A-Za-z0-9_.-]+$ (letters, digits, underscore, dot, dash)"
+        ));
+    }
+    None
+}
+
+fn normalize_clan_summary(raw: &str, from_text_block: bool) -> String {
+    if !from_text_block {
+        return raw.trim().to_string();
+    }
+    let lines: Vec<&str> = raw.split('\n').collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let first = lines[0].trim_start();
+    let continuation = &lines[1..];
+    let min_indent = continuation
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = vec![first.to_string()];
+    for line in continuation {
+        if line.trim().is_empty() {
+            out.push(String::new());
+        } else {
+            out.push(line[min_indent.min(line.len())..].to_string());
+        }
+    }
+    out.join("\n").trim().to_string()
+}
+
+fn clan_double_colon_text_end(
+    prompt: &str,
+    start: usize,
+    ignored_ranges: &[(usize, usize)],
+) -> usize {
+    let bytes = prompt.as_bytes();
+    let mut idx = start;
+    while idx < bytes.len() {
+        if bytes[idx] == b'\n' {
+            let item_start = idx + 1;
+            if item_start < bytes.len()
+                && !position_in_ranges(item_start, ignored_ranges)
+                && is_prompt_item_start(&prompt[item_start..])
+            {
+                return idx;
+            }
+        }
+        idx += 1;
+    }
+    prompt.len()
+}
+
+fn is_prompt_item_start(text: &str) -> bool {
+    let rest = match text.as_bytes().first() {
+        Some(b'%') => &text[1..],
+        Some(b'#') => &text[1..],
+        _ => return false,
+    };
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    let mut consumed = first.len_utf8();
+    for ch in chars {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '/' {
+            consumed += ch.len_utf8();
+            continue;
+        }
+        return ch.is_whitespace() || matches!(ch, '(' | ':' | '+' | '[');
+    }
+    consumed == rest.len()
 }
 
 fn validate_typed_unit_identities(
@@ -1317,16 +2116,16 @@ fn validate_typed_unit_identities(
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for raw in raw_units {
         let identity = match &raw.unit.payload {
-            LaunchUnitPayloadWire::Agent(agent) => agent.identity.as_deref(),
+            LaunchUnitPayloadWire::Agent(agent) => agent.effective_identity(),
             LaunchUnitPayloadWire::Proc(proc_unit) => {
-                proc_unit.shell_name.as_deref()
+                proc_unit.shell_name.clone()
             }
         };
         let Some(identity) = identity else {
             continue;
         };
         if let Some(first) =
-            seen.insert(identity.to_string(), raw.unit.logical_id.clone())
+            seen.insert(identity.clone(), raw.unit.logical_id.clone())
         {
             diagnostics.push(typed_unit_diagnostic(
                 "identity-collision",
@@ -1354,9 +2153,8 @@ fn resolve_typed_waits(
     for raw in raw_units.iter() {
         match &raw.unit.payload {
             LaunchUnitPayloadWire::Agent(agent) => {
-                if let Some(identity) = agent.identity.as_ref() {
-                    agent_names
-                        .insert(identity.clone(), raw.unit.logical_id.clone());
+                if let Some(identity) = agent.effective_identity() {
+                    agent_names.insert(identity, raw.unit.logical_id.clone());
                 }
             }
             LaunchUnitPayloadWire::Proc(proc_unit) => {
@@ -1699,7 +2497,10 @@ fn render_launch_approval_preview(
             LaunchUnitPayloadWire::Agent(agent) => lines.push(format!(
                 "{} agent identity={} model={} waits={}{} prompt={:?}",
                 unit.logical_id,
-                agent.identity.as_deref().unwrap_or("auto"),
+                agent
+                    .effective_identity()
+                    .as_deref()
+                    .unwrap_or("auto"),
                 agent.model.as_deref().unwrap_or("default"),
                 waits,
                 condition,
@@ -3964,6 +4765,225 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("requires an explicit cwd"));
+    }
+
+    #[test]
+    fn agent_unit_legacy_json_defaults_to_plain_identity() {
+        let value = json!({
+            "prompt": "Review",
+            "identity": "reviewer",
+            "identity_explicit": true,
+        });
+        let agent: AgentUnitWire = serde_json::from_value(value).unwrap();
+        assert_eq!(agent.identity.as_deref(), Some("reviewer"));
+        assert!(agent.identity_explicit);
+        assert!(!agent.identity_force_reuse);
+        assert!(agent.clan.is_none());
+        assert!(!agent.clan_declared);
+        assert!(agent.clan_tribe.is_none());
+        assert!(agent.clan_summary.is_none());
+        assert!(agent.clan_summary_script.is_none());
+        assert!(agent.family_attach_parent.is_none());
+        assert!(agent.family_attach_suffix.is_none());
+        assert!(agent.tribe.is_none());
+        let serialized = serde_json::to_value(&agent).unwrap();
+        assert!(serialized.get("clan").is_none());
+        assert!(serialized.get("clan_declared").is_none());
+        assert!(serialized.get("tribe").is_none());
+    }
+
+    #[test]
+    fn agent_unit_identity_forms_round_trip_json() {
+        let cases = [
+            AgentUnitWire {
+                prompt: "plain".to_string(),
+                identity: Some("reviewer".to_string()),
+                identity_explicit: true,
+                ..Default::default()
+            },
+            AgentUnitWire {
+                prompt: "join".to_string(),
+                identity: Some("worker".to_string()),
+                identity_explicit: true,
+                clan: Some("research".to_string()),
+                ..Default::default()
+            },
+            AgentUnitWire {
+                prompt: "declare".to_string(),
+                identity: Some("research.worker".to_string()),
+                identity_explicit: true,
+                clan: Some("research".to_string()),
+                clan_declared: true,
+                clan_tribe: Some("study".to_string()),
+                clan_summary: Some("[bold]Research[/bold]".to_string()),
+                clan_summary_script: None,
+                ..Default::default()
+            },
+            AgentUnitWire {
+                prompt: "family".to_string(),
+                family_attach_parent: Some("parent".to_string()),
+                family_attach_suffix: Some("reviewer".to_string()),
+                ..Default::default()
+            },
+            AgentUnitWire {
+                prompt: "tribe".to_string(),
+                identity: Some("worker".to_string()),
+                identity_explicit: true,
+                tribe: Some("review".to_string()),
+                ..Default::default()
+            },
+            AgentUnitWire {
+                prompt: "auto-tribe".to_string(),
+                tribe: Some("review".to_string()),
+                ..Default::default()
+            },
+        ];
+        for agent in cases {
+            let value = serde_json::to_value(&agent).unwrap();
+            let back: AgentUnitWire = serde_json::from_value(value).unwrap();
+            assert_eq!(back, agent);
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_preserves_clan_declaration_and_join() {
+        let prompt = "%id:toobig-3j.foo.0\n%clan(toobig-3j, tribe=chop, summary=[[ [bold]Large[/bold]\n  Split safely. ]])\nLead\n---\n%id(bar.0, clan=toobig-3j)\n%wait:toobig-3j.foo.0\nJoin";
+
+        let plan =
+            plan_typed_launch_units(prompt, Some("multi_prompt"), Some("sase"))
+                .unwrap();
+
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.identity.as_deref(), Some("toobig-3j.foo.0"));
+                assert!(agent.identity_explicit);
+                assert_eq!(agent.clan.as_deref(), Some("toobig-3j"));
+                assert!(agent.clan_declared);
+                assert_eq!(agent.clan_tribe.as_deref(), Some("chop"));
+                assert_eq!(
+                    agent.clan_summary.as_deref(),
+                    Some("[bold]Large[/bold]\nSplit safely.")
+                );
+                assert_eq!(agent.prompt, "Lead");
+                assert_eq!(
+                    agent.effective_identity().as_deref(),
+                    Some("toobig-3j.foo.0")
+                );
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        match &plan.units[1].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.identity.as_deref(), Some("bar.0"));
+                assert_eq!(agent.clan.as_deref(), Some("toobig-3j"));
+                assert!(!agent.clan_declared);
+                assert_eq!(
+                    agent.effective_identity().as_deref(),
+                    Some("toobig-3j.bar.0")
+                );
+                assert_eq!(agent.prompt, "Join");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert_eq!(
+            plan.units[1].waits,
+            vec![WaitTargetWire::Logical {
+                logical_id: "unit-1".to_string(),
+                source: Some("%wait:toobig-3j.foo.0".to_string())
+            }]
+        );
+        let reconstructed =
+            agent_unit_dispatch_prompt(match &plan.units[0].payload {
+                LaunchUnitPayloadWire::Agent(agent) => agent,
+                other => panic!("expected agent payload, got {other:?}"),
+            });
+        assert!(reconstructed.contains("%id:toobig-3j.foo.0"));
+        assert!(reconstructed.contains("%clan(toobig-3j, tribe=chop"));
+        assert!(!reconstructed.contains("%wait:"));
+    }
+
+    #[test]
+    fn typed_launch_plan_preserves_family_and_direct_tribe() {
+        let family = plan_typed_launch_units(
+            "%id(reviewer, family=parent)\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &family.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(
+                    agent.family_attach_parent.as_deref(),
+                    Some("parent")
+                );
+                assert_eq!(
+                    agent.family_attach_suffix.as_deref(),
+                    Some("reviewer")
+                );
+                assert!(agent.identity.is_none());
+                assert_eq!(
+                    agent.effective_identity().as_deref(),
+                    Some("parent--reviewer")
+                );
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+
+        let named_tribe = plan_typed_launch_units(
+            "%id(worker, tribe=review)\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &named_tribe.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.identity.as_deref(), Some("worker"));
+                assert_eq!(agent.tribe.as_deref(), Some("review"));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+
+        let auto_tribe = plan_typed_launch_units(
+            "%id(tribe=review)\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &auto_tribe.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert!(agent.identity.is_none());
+                assert!(!agent.identity_explicit);
+                assert_eq!(agent.tribe.as_deref(), Some("review"));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_rejects_conflicting_identity_forms() {
+        let err = plan_typed_launch_units(
+            "%clan:research\n%id(worker, clan=research)\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Cannot combine %clan with %id"));
+
+        let err = plan_typed_launch_units(
+            "%id(worker, clan=research, tribe=review)\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let err = plan_typed_launch_units(
+            "%clan(foo, color=blue)\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unsupported keyword on %clan"));
     }
 
     #[test]

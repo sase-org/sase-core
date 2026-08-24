@@ -346,18 +346,7 @@ pub fn admission_unit_results(
 }
 
 pub fn agent_unit_dispatch_prompt(agent: &AgentUnitWire) -> String {
-    let mut lines = Vec::new();
-    if agent.identity_explicit {
-        if let Some(identity) = &agent.identity {
-            if let Some(bead_id) = &agent.bead_id {
-                lines.push(format!("%id({identity}, bead={bead_id})"));
-            } else {
-                lines.push(format!("%id:{identity}"));
-            }
-        }
-    } else if let Some(bead_id) = &agent.bead_id {
-        lines.push(format!("%id(bead={bead_id})"));
-    }
+    let mut lines = agent.identity_directive_lines();
     match (&agent.model, &agent.reasoning_effort) {
         (Some(model), Some(effort)) => {
             lines.push(format!("%model:{model}@{effort}"));
@@ -480,14 +469,7 @@ mod tests {
                 identity: Some("reviewer".to_string()),
                 identity_explicit: true,
                 model: Some("opus".to_string()),
-                reasoning_effort: None,
-                bead_id: None,
-                hidden: false,
-                auto_enabled: false,
-                auto_mode: None,
-                finalizers: Vec::new(),
-                wait_runners: None,
-                wait_priority: None,
+                ..Default::default()
             }),
         }
     }
@@ -526,17 +508,7 @@ mod tests {
     fn dispatch_fingerprint_is_stable_for_same_payload() {
         let payload = LaunchUnitPayloadWire::Agent(AgentUnitWire {
             prompt: "Review".to_string(),
-            identity: None,
-            identity_explicit: false,
-            model: None,
-            reasoning_effort: None,
-            bead_id: None,
-            hidden: false,
-            auto_enabled: false,
-            auto_mode: None,
-            finalizers: Vec::new(),
-            wait_runners: None,
-            wait_priority: None,
+            ..Default::default()
         });
         let first = dispatch_fingerprint("abc", "unit-1", &payload);
         let second = dispatch_fingerprint("abc", "unit-1", &payload);
@@ -857,6 +829,7 @@ mod tests {
             finalizers: vec!["commit".to_string()],
             wait_runners: Some(2),
             wait_priority: Some(1),
+            ..Default::default()
         });
         assert!(prompt.contains("%id(reviewer, bead=sase-1)"));
         assert!(prompt.contains("%model:opus@high"));
@@ -868,6 +841,64 @@ mod tests {
         assert!(prompt.contains("Review the diff"));
         assert!(!prompt.contains("%wait:"));
         assert!(!prompt.contains("%if"));
+    }
+
+    #[test]
+    fn agent_dispatch_prompt_restores_clan_declaration_and_join() {
+        let declaration = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Lead the split".to_string(),
+            identity: Some("toobig-3j.foo.0".to_string()),
+            identity_explicit: true,
+            clan: Some("toobig-3j".to_string()),
+            clan_declared: true,
+            clan_tribe: Some("chop".to_string()),
+            clan_summary: Some("[bold]Large modules[/bold]".to_string()),
+            ..Default::default()
+        });
+        assert!(declaration.contains("%id:toobig-3j.foo.0"));
+        assert!(declaration.contains(
+            "%clan(toobig-3j, tribe=chop, summary=[[[bold]Large modules[/bold]]])"
+        ));
+        assert!(!declaration.contains("%if"));
+
+        let join = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Join the split".to_string(),
+            identity: Some("bar.0".to_string()),
+            identity_explicit: true,
+            clan: Some("toobig-3j".to_string()),
+            ..Default::default()
+        });
+        assert!(join.contains("%id(bar.0, clan=toobig-3j)"));
+        assert!(!join.contains("%clan"));
+    }
+
+    #[test]
+    fn agent_dispatch_prompt_restores_family_and_direct_tribe() {
+        let family = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review".to_string(),
+            family_attach_parent: Some("parent".to_string()),
+            family_attach_suffix: Some("reviewer".to_string()),
+            bead_id: Some("sase-1".to_string()),
+            ..Default::default()
+        });
+        assert!(family.contains("%id(reviewer, family=parent, bead=sase-1)"));
+
+        let named_tribe = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review".to_string(),
+            identity: Some("worker".to_string()),
+            identity_explicit: true,
+            tribe: Some("review".to_string()),
+            ..Default::default()
+        });
+        assert!(named_tribe.contains("%id(worker, tribe=review)"));
+
+        let auto_tribe = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review".to_string(),
+            tribe: Some("review".to_string()),
+            ..Default::default()
+        });
+        assert!(auto_tribe.contains("%id(tribe=review)"));
+        assert!(!auto_tribe.contains("%id:"));
     }
 
     #[test]

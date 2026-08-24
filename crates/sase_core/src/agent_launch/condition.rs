@@ -1012,15 +1012,7 @@ raise SystemExit(1)
                 prompt: "Do work".to_string(),
                 identity: Some("reviewer".to_string()),
                 identity_explicit: true,
-                model: None,
-                reasoning_effort: None,
-                bead_id: None,
-                hidden: false,
-                auto_enabled: false,
-                auto_mode: None,
-                finalizers: Vec::new(),
-                wait_runners: None,
-                wait_priority: None,
+                ..Default::default()
             }),
         };
         let mut inputs = BTreeMap::new();

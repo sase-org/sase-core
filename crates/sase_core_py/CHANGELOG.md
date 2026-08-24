@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(agent-launch)* preserve `%id` grouping keywords and `%clan` through typed planning
+
 ## [0.31.8](https://github.com/sase-org/sase-core/compare/v0.31.7...v0.31.8) - 2026-08-23
 
 ### Added
