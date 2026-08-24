@@ -333,7 +333,12 @@ jobs:
     name: twine check
     needs: [publish-plan, linux, macos, windows, sdist]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # This job's own commands run in seconds, but the timeout must also cover
+    # runner-queue starvation, not just command runtime. Keep it matched to
+    # the longest wheel job (60m) so a busy runner queue can't strand a
+    # built-and-ready release short of PyPI publish; do not shrink this back
+    # down to a "fast job" budget like 15m.
+    timeout-minutes: 60
     if: ${{ github.repository_owner == 'sase-org' && ((github.event_name != 'workflow_dispatch' && needs.publish-plan.outputs.needs_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.build_wheels)) }}
     steps:
       - uses: actions/download-artifact@v4
