@@ -738,10 +738,11 @@ pub struct MobileXpromptCatalogEntryWire {
     /// that predate the split simply omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
-    /// Tier of the SASE memory note behind an xprompt memory (`short` or
-    /// `long`), absent for every other entry. A non-null value is the
-    /// authoritative marker that `kind` is `memory`; older payloads that
-    /// predate xprompt memories simply omit the field.
+    /// Tier of the SASE memory note behind an xprompt memory (`core` or
+    /// `reference`; legacy `short`/`long` payloads still accepted), absent for
+    /// every other entry. A non-null value is the authoritative marker that
+    /// `kind` is `memory`; older payloads that predate xprompt memories simply
+    /// omit the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_type: Option<MemoryTierWire>,
     pub content_preview: Option<String>,

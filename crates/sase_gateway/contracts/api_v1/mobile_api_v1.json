@@ -493,7 +493,7 @@
       "insertion": "string|null; fallback to #<name> when absent",
       "is_skill": "bool",
       "kind": "string|null",
-      "memory_type": "string|null; `short` or `long` for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
+      "memory_type": "string|null; `core` or `reference` (legacy `short`/`long` still accepted) for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
       "name": "string",
       "project": "string|null",
       "reference_prefix": "string|null",

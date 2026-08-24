@@ -257,7 +257,7 @@ mod tests {
             definition_range: None,
             is_skill: false,
             skill_name: None,
-            memory_type: Some(MemoryTierWire::Long),
+            memory_type: Some(MemoryTierWire::Reference),
         }];
         let at = |text: &str, character: u32| {
             hover_at_position(
@@ -269,7 +269,11 @@ mod tests {
 
         let hover = at("#memory/glossary", 3).unwrap();
         assert!(hover.markdown.contains("memory"), "{}", hover.markdown);
-        assert!(hover.markdown.contains("tier `long`"), "{}", hover.markdown);
+        assert!(
+            hover.markdown.contains("tier `reference`"),
+            "{}",
+            hover.markdown
+        );
         assert!(hover.markdown.contains("SASE terms"));
         // No bare alias and no slash form.
         assert!(at("#glossary", 3).is_none());

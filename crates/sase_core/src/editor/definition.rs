@@ -187,7 +187,8 @@ mod tests {
             Some(note_path.to_string_lossy().into_owned()),
             false,
         );
-        memory.memory_type = Some(crate::content_layout::MemoryTierWire::Long);
+        memory.memory_type =
+            Some(crate::content_layout::MemoryTierWire::Reference);
         let entries = vec![memory];
 
         let target = definition_at_position(

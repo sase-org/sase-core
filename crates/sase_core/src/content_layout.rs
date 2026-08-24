@@ -162,30 +162,32 @@ pub struct SkillSourceWire {
     pub ordering: Option<String>,
 }
 
-/// Tier declared by a memory note's `type:` frontmatter.
+/// Rendering tier declared by a memory note's `type:` frontmatter.
 ///
-/// A note that declares neither tier is not a memory note at all, so it is
-/// never an xprompt memory either.
+/// A note that declares neither core nor reference memory is not a memory note
+/// at all, so it is never an xprompt memory either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryTierWire {
-    Short,
-    Long,
+    #[serde(alias = "short")]
+    Core,
+    #[serde(alias = "long")]
+    Reference,
 }
 
 impl MemoryTierWire {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
-            "short" => Some(Self::Short),
-            "long" => Some(Self::Long),
+            "core" | "short" => Some(Self::Core),
+            "reference" | "long" => Some(Self::Reference),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Short => "short",
-            Self::Long => "long",
+            Self::Core => "core",
+            Self::Reference => "reference",
         }
     }
 }
@@ -230,7 +232,7 @@ pub enum MemoryXpromptRuleWire {
     ReservedNamespace,
     /// A memory note's filename stem cannot appear in an xprompt reference.
     InvalidStem,
-    /// A file in a memory root declares no valid `type: short|long`.
+    /// A file in a memory root declares no valid `type: core|reference`.
     InvalidNoteType,
 }
 
@@ -309,7 +311,7 @@ pub fn memory_note_issue(
             rule: MemoryXpromptRuleWire::InvalidNoteType,
             message: format!(
                 "{source} declares {declared}; a SASE memory note must declare \
-                 `type: short` or `type: long` to be an xprompt memory"
+                 `type: core` or `type: reference` to be an xprompt memory"
             ),
         });
     }
@@ -1458,33 +1460,71 @@ mod tests {
             memory_note_issue(
                 "sase/memory/glossary.md",
                 "glossary",
+                Some("core")
+            ),
+            None
+        );
+        assert_eq!(
+            memory_note_issue(
+                "sase/memory/glossary.md",
+                "glossary",
                 Some("short")
             ),
             None
         );
         assert_eq!(
-            memory_note_issue("sase/memory/sase.md", "sase", Some("long")),
+            memory_note_issue("sase/memory/sase.md", "sase", Some("reference")),
             None
         );
         let bad_type =
-            memory_note_issue("sase/memory/notes.md", "notes", Some("medium"))
+            memory_note_issue("sase/memory/notes.md", "notes", Some("dynamic"))
                 .unwrap();
         assert_eq!(bad_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
+        assert!(
+            bad_type.message.contains("`type: core`")
+                && bad_type.message.contains("`type: reference`"),
+            "{bad_type:?}"
+        );
         let missing_type =
             memory_note_issue("sase/memory/notes.md", "notes", None).unwrap();
         assert_eq!(missing_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
         let bad_stem =
-            memory_note_issue("sase/memory/a-b.md", "a-b", Some("long"))
+            memory_note_issue("sase/memory/a-b.md", "a-b", Some("reference"))
                 .unwrap();
         assert_eq!(bad_stem.rule, MemoryXpromptRuleWire::InvalidStem);
         assert!(bad_stem.message.contains("#memory/a-b"), "{bad_stem:?}");
     }
 
     #[test]
-    fn memory_tier_parses_only_the_two_supported_note_types() {
-        assert_eq!(MemoryTierWire::parse("short"), Some(MemoryTierWire::Short));
-        assert_eq!(MemoryTierWire::parse(" long "), Some(MemoryTierWire::Long));
+    fn memory_tier_parses_current_and_legacy_note_types() {
+        assert_eq!(MemoryTierWire::parse("core"), Some(MemoryTierWire::Core));
+        assert_eq!(
+            MemoryTierWire::parse("reference"),
+            Some(MemoryTierWire::Reference)
+        );
+        assert_eq!(MemoryTierWire::parse("short"), Some(MemoryTierWire::Core));
+        assert_eq!(
+            MemoryTierWire::parse(" long "),
+            Some(MemoryTierWire::Reference)
+        );
         assert_eq!(MemoryTierWire::parse("dynamic"), None);
-        assert_eq!(MemoryTierWire::Long.as_str(), "long");
+        assert_eq!(MemoryTierWire::Reference.as_str(), "reference");
+        assert_eq!(MemoryTierWire::Core.as_str(), "core");
+    }
+
+    #[test]
+    fn memory_tier_serializes_current_names_and_deserializes_legacy_names() {
+        assert_eq!(
+            serde_json::to_string(&MemoryTierWire::Core).unwrap(),
+            "\"core\""
+        );
+        assert_eq!(
+            serde_json::from_str::<MemoryTierWire>("\"short\"").unwrap(),
+            MemoryTierWire::Core
+        );
+        assert_eq!(
+            serde_json::from_str::<MemoryTierWire>("\"long\"").unwrap(),
+            MemoryTierWire::Reference
+        );
     }
 }

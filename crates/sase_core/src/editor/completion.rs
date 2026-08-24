@@ -3440,7 +3440,7 @@ mod tests {
                 inputs: vec![],
                 is_skill: false,
                 skill_name: None,
-                memory_type: Some(MemoryTierWire::Short),
+                memory_type: Some(MemoryTierWire::Core),
                 content_preview: Some("Glossary body".to_string()),
                 source_path_display: Some(
                     "sase/memory/glossary.md".to_string(),
@@ -5284,7 +5284,7 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "memory/glossary")
             .unwrap();
-        assert_eq!(entry.memory_type, Some(MemoryTierWire::Short));
+        assert_eq!(entry.memory_type, Some(MemoryTierWire::Core));
     }
 
     #[test]

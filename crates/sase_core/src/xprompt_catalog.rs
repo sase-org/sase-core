@@ -2786,12 +2786,12 @@ mod tests {
         // xprompt memory takes no arguments.
         assert_eq!(glossary.content, "Glossary body");
         assert_eq!(glossary.description.as_deref(), Some("SASE terms"));
-        assert_eq!(glossary.memory_type, Some(MemoryTierWire::Short));
+        assert_eq!(glossary.memory_type, Some(MemoryTierWire::Core));
         assert!(glossary.inputs.is_empty());
         assert!(!glossary.is_skill && glossary.skill_name.is_none());
         assert_eq!(
             xprompts["memory/tui_perf"].memory_type,
-            Some(MemoryTierWire::Long)
+            Some(MemoryTierWire::Reference)
         );
         // The `memory/` prefix is mandatory: there is no bare alias.
         assert!(!xprompts.contains_key("glossary"));
@@ -2820,7 +2820,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(entry.kind.as_deref(), Some("memory"));
-        assert_eq!(entry.memory_type, Some(MemoryTierWire::Long));
+        assert_eq!(entry.memory_type, Some(MemoryTierWire::Reference));
         assert_eq!(entry.insertion.as_deref(), Some("#memory/glossary"));
         assert_eq!(entry.input_signature, None);
         // A memory entry is never a slash skill.
@@ -3041,13 +3041,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stats.memory_count, 0);
-        // A memory entry serializes its tier as the note's `type:` value.
+        // A memory entry serializes its tier as the current canonical value.
         let rendered = serde_json::to_value(MobileXpromptCatalogEntryWire {
-            memory_type: Some(MemoryTierWire::Long),
+            memory_type: Some(MemoryTierWire::Reference),
             ..entry
         })
         .unwrap();
-        assert_eq!(rendered["memory_type"], "long");
+        assert_eq!(rendered["memory_type"], "reference");
     }
 
     #[test]
