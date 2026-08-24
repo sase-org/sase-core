@@ -5017,30 +5017,22 @@ Keep this comma, and the rest of the prose in the summary.";
 
     #[test]
     fn parse_directive_args_text_block_corpus_matches_python() {
-        assert_eq!(
-            parse_directive_args("[[a]], [[b]]"),
-            vec!["a".to_string(), "b".to_string()]
-        );
-        let named = parse_directive_args_with_names("foo=[[a]], bar=1", ',');
-        assert_eq!(named[0].name.as_deref(), Some("foo"));
-        assert_eq!(named[0].value, "a");
-        assert_eq!(named[1].name.as_deref(), Some("bar"));
-        assert_eq!(named[1].value, "1");
-        assert_eq!(parse_directive_args("[[x, y]]"), vec!["x, y".to_string()]);
-        assert_eq!(
-            parse_directive_args("[[a [b [c]] d, e]]"),
-            vec!["a [b [c]] d, e".to_string()]
-        );
-        let clan = parse_directive_args_with_names(
-            "research, tribe=study, summary=[[note: use ]] here, and more]]",
-            ',',
-        );
-        assert_eq!(clan.len(), 3, "{clan:?}");
-        assert_eq!(clan[0].value, "research");
-        assert_eq!(clan[1].name.as_deref(), Some("tribe"));
-        assert_eq!(clan[1].value, "study");
-        assert_eq!(clan[2].name.as_deref(), Some("summary"));
-        assert_eq!(clan[2].value, "note: use ]] here, and more");
+        use std::collections::BTreeMap;
+
+        for case in crate::xprompt_text_block::xprompt_args_corpus() {
+            let parsed = parse_directive_args_with_names(&case.source, ',');
+            let mut positional = Vec::new();
+            let mut named = BTreeMap::new();
+            for arg in parsed {
+                if let Some(name) = arg.name {
+                    named.insert(name, arg.value);
+                } else {
+                    positional.push(arg.value);
+                }
+            }
+            assert_eq!(positional, case.positional, "{}", case.id);
+            assert_eq!(named, case.named, "{}", case.id);
+        }
     }
 
     #[test]

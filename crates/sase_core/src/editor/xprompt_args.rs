@@ -626,6 +626,24 @@ mod tests {
     }
 
     #[test]
+    fn shared_corpus_matches_python_parse_args() {
+        for case in crate::xprompt_text_block::xprompt_args_corpus() {
+            let call = one(&format!("#foo({})", case.source));
+            let mut positional = Vec::new();
+            let mut named = BTreeMap::new();
+            for arg in &call.args {
+                if let Some(name) = &arg.name {
+                    named.insert(name.value.clone(), arg.value.clone());
+                } else {
+                    positional.push(arg.value.clone());
+                }
+            }
+            assert_eq!(positional, case.positional, "{}", case.id);
+            assert_eq!(named, case.named, "{}", case.id);
+        }
+    }
+
+    #[test]
     fn plus_decodes_only_on_bare_colon_arguments() {
         assert_eq!(
             one("#foo:Application+Support").args[0].value,

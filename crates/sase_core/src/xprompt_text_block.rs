@@ -53,6 +53,37 @@ pub(crate) fn find_text_block_close_for_args_bytes(
 }
 
 #[cfg(test)]
+use serde::Deserialize;
+
+#[cfg(test)]
+#[derive(Debug, Deserialize)]
+pub(crate) struct XpromptArgsCorpusCase {
+    pub id: String,
+    pub source: String,
+    pub positional: Vec<String>,
+    #[serde(default)]
+    pub named: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Deserialize)]
+struct XpromptArgsCorpusFile {
+    schema_version: u32,
+    cases: Vec<XpromptArgsCorpusCase>,
+}
+
+#[cfg(test)]
+pub(crate) fn xprompt_args_corpus() -> Vec<XpromptArgsCorpusCase> {
+    let file: XpromptArgsCorpusFile = serde_json::from_str(include_str!(
+        "../tests/fixtures/xprompt_args_corpus.json"
+    ))
+    .expect("xprompt args corpus must parse");
+    assert_eq!(file.schema_version, 1, "unexpected corpus schema_version");
+    assert!(!file.cases.is_empty(), "corpus must not be empty");
+    file.cases
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -101,5 +132,10 @@ mod tests {
         // `[[foo]]]])` closes at the last terminator-position `]]`.
         let text = "[[foo]]]])";
         assert_eq!(close_in(text), Some(7));
+    }
+
+    #[test]
+    fn shared_corpus_loads() {
+        assert!(!xprompt_args_corpus().is_empty());
     }
 }
