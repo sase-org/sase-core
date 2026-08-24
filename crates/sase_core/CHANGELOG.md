@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(xprompt)* close `[[...]]` argument text blocks at terminator-position `]]` in the editor, directive, and agent-launch scanners
+- *(xprompt)* decode `+` to a space only for bare colon arguments
 - *(agent-launch)* preserve `%id` grouping keywords and `%clan` through typed planning
 
 ## [0.31.9](https://github.com/sase-org/sase-core/compare/v0.31.8...v0.31.9) - 2026-08-23

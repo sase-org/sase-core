@@ -1,6 +1,8 @@
 use regex::Regex;
 use std::{collections::BTreeMap, sync::OnceLock};
 
+use crate::xprompt_text_block::find_text_block_close_for_args;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XpromptArgSyntax {
     None,
@@ -49,11 +51,10 @@ pub(crate) fn parse_xprompt_reference_body(
     let mut positional_args = Vec::new();
     let mut named_args = BTreeMap::new();
     for arg in call.args {
-        let value = decode_xprompt_arg_value(&arg.value);
         if let Some(name) = arg.name {
-            named_args.insert(name.value, value);
+            named_args.insert(name.value, arg.value);
         } else {
-            positional_args.push(value);
+            positional_args.push(arg.value);
         }
     }
     Some(ParsedXpromptReference {
@@ -147,7 +148,7 @@ fn parse_parenthesized(
     } else if after.starts_with(':') && after.len() > 1 {
         let value_start = after_close + 1;
         let value_end = token_end(text, value_start);
-        push_text_arg(text, value_start, value_end, call);
+        push_value_arg(text, value_start, value_end, None, true, call);
     }
 }
 
@@ -190,13 +191,13 @@ fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
         call.is_open = true;
         return;
     }
-    if text[value_start..value_end].contains(['+', '(', ')']) {
+    if text[value_start..value_end].contains(['(', ')']) {
         call.syntax = XpromptArgSyntax::Malformed;
         call.malformed_span = Some((value_start, value_end));
         return;
     }
     for (start, end) in split_commas(text, value_start, value_end) {
-        push_value_arg(text, start, end, None, call);
+        push_value_arg(text, start, end, None, true, call);
     }
 }
 
@@ -223,9 +224,16 @@ fn parse_arg_body(
                 value: text[name_start..name_end].to_string(),
                 span: (name_start, name_end),
             };
-            push_value_arg(text, value_start, value_end, Some(name), call);
+            push_value_arg(
+                text,
+                value_start,
+                value_end,
+                Some(name),
+                false,
+                call,
+            );
         } else {
-            push_value_arg(text, token_start, token_end, None, call);
+            push_value_arg(text, token_start, token_end, None, false, call);
         }
     }
 }
@@ -252,9 +260,10 @@ fn push_value_arg(
     start: usize,
     end: usize,
     name: Option<ParsedXpromptArgName>,
+    decode_plus: bool,
     call: &mut ParsedXpromptCall,
 ) {
-    let value = decoded_value(text, start, end);
+    let value = decoded_value(text, start, end, decode_plus);
     call.args.push(ParsedXpromptArg {
         name,
         value,
@@ -262,7 +271,12 @@ fn push_value_arg(
     });
 }
 
-fn decoded_value(text: &str, start: usize, end: usize) -> String {
+fn decoded_value(
+    text: &str,
+    start: usize,
+    end: usize,
+    decode_plus: bool,
+) -> String {
     if start >= end {
         return String::new();
     }
@@ -278,7 +292,11 @@ fn decoded_value(text: &str, start: usize, end: usize) -> String {
     if value.starts_with("[[") && value.ends_with("]]") {
         return value[2..value.len() - 2].to_string();
     }
-    value.to_string()
+    if decode_plus {
+        decode_xprompt_arg_value(value)
+    } else {
+        value.to_string()
+    }
 }
 
 fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
@@ -288,10 +306,16 @@ fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut scan = ArgScanner::default();
     let mut i = start;
     while i < end {
-        if scan.step(text, i) {
-            i += 2;
-            continue;
+        if scan.is_top_level() && text.as_bytes().get(i..i + 2) == Some(b"[[") {
+            match find_text_block_close_for_args(text, i, end) {
+                Some(close) => {
+                    i = close + 2;
+                    continue;
+                }
+                None => break,
+            }
         }
+        scan.consume_quote(text, i);
         if text.as_bytes()[i] == b',' && scan.is_top_level() {
             let trimmed = trim_span(text, token_start, i);
             spans.push(trimmed);
@@ -311,10 +335,16 @@ fn find_top_level_equal(text: &str, start: usize, end: usize) -> Option<usize> {
     let mut scan = ArgScanner::default();
     let mut i = start;
     while i < end {
-        if scan.step(text, i) {
-            i += 2;
-            continue;
+        if scan.is_top_level() && text.as_bytes().get(i..i + 2) == Some(b"[[") {
+            match find_text_block_close_for_args(text, i, end) {
+                Some(close) => {
+                    i = close + 2;
+                    continue;
+                }
+                None => break,
+            }
         }
+        scan.consume_quote(text, i);
         if text.as_bytes()[i] == b'=' && scan.is_top_level() {
             return Some(i);
         }
@@ -347,10 +377,11 @@ fn find_matching_delimiter_for_args(
     let mut depth = 1usize;
     let mut i = open_idx + 1;
     while i < text.len() {
-        if scan.step(text, i) {
-            i += 2;
+        if scan.is_top_level() && text.as_bytes().get(i..i + 2) == Some(b"[[") {
+            i = find_text_block_close_for_args(text, i, text.len())? + 2;
             continue;
         }
+        scan.consume_quote(text, i);
         if scan.is_top_level() {
             match text.as_bytes()[i] {
                 ch if ch == open => depth += 1,
@@ -375,36 +406,20 @@ fn decode_xprompt_arg_value(value: &str) -> String {
 #[derive(Default)]
 struct ArgScanner {
     quote: Option<u8>,
-    in_text_block: bool,
 }
 
 impl ArgScanner {
     fn is_top_level(&self) -> bool {
-        self.quote.is_none() && !self.in_text_block
+        self.quote.is_none()
     }
 
-    fn step(&mut self, text: &str, idx: usize) -> bool {
+    fn consume_quote(&mut self, text: &str, idx: usize) {
         let bytes = text.as_bytes();
-        if self.quote.is_none()
-            && !self.in_text_block
-            && bytes.get(idx..idx + 2) == Some(b"[[")
-        {
-            self.in_text_block = true;
-            return true;
-        }
-        if self.in_text_block && bytes.get(idx..idx + 2) == Some(b"]]") {
-            self.in_text_block = false;
-            return true;
-        }
-        if self.in_text_block {
-            return false;
-        }
         match (self.quote, bytes[idx]) {
             (None, b'"' | b'\'') => self.quote = Some(bytes[idx]),
             (Some(quote), ch) if ch == quote => self.quote = None,
             _ => {}
         }
-        false
     }
 }
 
@@ -575,5 +590,86 @@ mod tests {
         assert!(one("#foo(").is_open);
         assert!(one("#foo(arg=").is_open);
         assert!(one("#foo:").is_open);
+    }
+
+    #[test]
+    fn text_block_closes_at_terminator_not_first_marker() {
+        let call = one("#foo([[a [b [c]] d, e]])");
+        assert_eq!(call.args.len(), 1);
+        assert_eq!(call.args[0].value, "a [b [c]] d, e");
+
+        let named = one("#foo(summary=[[note: use ]] here, and more]])");
+        assert_eq!(named.args.len(), 1);
+        assert_eq!(named.args[0].name.as_ref().unwrap().value, "summary");
+        assert_eq!(named.args[0].value, "note: use ]] here, and more");
+    }
+
+    #[test]
+    fn text_block_compatibility_shapes_keep_parsing() {
+        let two = one("#foo([[a]], [[b]])");
+        assert_eq!(
+            two.args
+                .iter()
+                .map(|arg| arg.value.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+
+        let named = one("#foo(foo=[[a]], bar=1)");
+        assert_eq!(named.args[0].name.as_ref().unwrap().value, "foo");
+        assert_eq!(named.args[0].value, "a");
+        assert_eq!(named.args[1].name.as_ref().unwrap().value, "bar");
+        assert_eq!(named.args[1].value, "1");
+
+        let commas = one("#foo([[x, y]])");
+        assert_eq!(commas.args[0].value, "x, y");
+    }
+
+    #[test]
+    fn plus_decodes_only_on_bare_colon_arguments() {
+        assert_eq!(
+            one("#foo:Application+Support").args[0].value,
+            "Application Support"
+        );
+        assert_eq!(
+            one("#foo(Application+Support)").args[0].value,
+            "Application+Support"
+        );
+        assert_eq!(one("#foo([[C++]])").args[0].value, "C++");
+        assert_eq!(
+            one("#foo:: Compare C++ and Rust").args[0].value,
+            "Compare C++ and Rust"
+        );
+        assert_eq!(
+            one("#foo: Compare C++ and Rust").args[0].value,
+            "Compare C++ and Rust"
+        );
+        assert_eq!(one("#foo(`Compare C++`)").args[0].value, "`Compare C++`");
+
+        let reference =
+            parse_xprompt_reference_body("foo:Application+Support").unwrap();
+        assert_eq!(
+            reference.positional_args,
+            vec!["Application Support".to_string()]
+        );
+        let paren =
+            parse_xprompt_reference_body("foo(Application+Support)").unwrap();
+        assert_eq!(
+            paren.positional_args,
+            vec!["Application+Support".to_string()]
+        );
+    }
+
+    #[test]
+    fn research_swarm_inner_marker_stays_one_argument() {
+        let prose = "Use `[<web>:<keyword> [...]]` for example, then keep \
+                     the following comma inside the same argument.";
+        let source = format!("#research_swarm([[{prose}]], wait=ready)");
+        let call = one(&source);
+        assert!(!call.is_open);
+        assert_eq!(call.args.len(), 2);
+        assert_eq!(call.args[0].value, prose);
+        assert_eq!(call.args[1].name.as_ref().unwrap().value, "wait");
+        assert_eq!(call.args[1].value, "ready");
     }
 }

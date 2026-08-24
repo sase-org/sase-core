@@ -1172,7 +1172,8 @@ mod tests {
                 "#typed(path=src/main.rs, count=nope)",
                 "invalid_xprompt_arg_type",
             ),
-            ("#typed:path+ ", "malformed_xprompt_argument"),
+            ("#typed:path(x)", "malformed_xprompt_argument"),
+            ("#typed:path+ ", "invalid_xprompt_arg_type"),
         ] {
             let doc = DocumentSnapshot::new(text);
             let diagnostics = analyze_document(&doc, &catalog());

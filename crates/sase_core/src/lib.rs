@@ -77,6 +77,7 @@ pub mod vcs_log;
 pub mod wire;
 pub mod workspace_lease;
 pub mod xprompt_catalog;
+mod xprompt_text_block;
 
 /// Return launch-inert literal zones as UTF-8 byte ranges.
 ///

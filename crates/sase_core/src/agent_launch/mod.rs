@@ -40,6 +40,7 @@ use crate::fenced_code::{
     scan_directive_owned_fences, CodeLanguage, CodeValue, CodeValueWire,
 };
 use crate::prompt_literals::inline_code_ranges;
+use crate::xprompt_text_block::find_text_block_close_for_args;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -3418,16 +3419,28 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
     let mut depth = 0_i32;
     let mut in_backticks = false;
     let mut in_double_quotes = false;
-    for (idx, ch) in inner.char_indices() {
+    let mut idx = 0;
+    while idx < inner.len() {
+        if !in_backticks && !in_double_quotes {
+            if let Some(next) = skip_directive_text_block(inner, idx) {
+                idx = next;
+                continue;
+            }
+        }
+        let ch = inner[idx..].chars().next().expect("char boundary");
+        let ch_len = ch.len_utf8();
         if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
+            idx += ch_len;
             continue;
         }
         if ch == '"' && !in_backticks {
             in_double_quotes = !in_double_quotes;
+            idx += ch_len;
             continue;
         }
         if in_backticks || in_double_quotes {
+            idx += ch_len;
             continue;
         }
         match ch {
@@ -3435,10 +3448,11 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
             ')' | ']' | '}' if depth > 0 => depth -= 1,
             ',' if depth == 0 => {
                 push_arg(&mut args, &inner[start..idx]);
-                start = idx + ch.len_utf8();
+                start = idx + ch_len;
             }
             _ => {}
         }
+        idx += ch_len;
     }
     push_arg(&mut args, &inner[start..]);
     args.into_iter().filter(|arg| !arg.is_empty()).collect()
@@ -3453,16 +3467,28 @@ fn parse_directive_args_with_names(
     let mut depth = 0_i32;
     let mut in_backticks = false;
     let mut in_double_quotes = false;
-    for (idx, ch) in inner.char_indices() {
+    let mut idx = 0;
+    while idx < inner.len() {
+        if !in_backticks && !in_double_quotes {
+            if let Some(next) = skip_directive_text_block(inner, idx) {
+                idx = next;
+                continue;
+            }
+        }
+        let ch = inner[idx..].chars().next().expect("char boundary");
+        let ch_len = ch.len_utf8();
         if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
+            idx += ch_len;
             continue;
         }
         if ch == '"' && !in_backticks {
             in_double_quotes = !in_double_quotes;
+            idx += ch_len;
             continue;
         }
         if in_backticks || in_double_quotes {
+            idx += ch_len;
             continue;
         }
         match ch {
@@ -3470,10 +3496,11 @@ fn parse_directive_args_with_names(
             ')' | ']' | '}' if depth > 0 => depth -= 1,
             _ if ch == separator && depth == 0 => {
                 push_directive_arg(&mut args, &inner[start..idx]);
-                start = idx + ch.len_utf8();
+                start = idx + ch_len;
             }
             _ => {}
         }
+        idx += ch_len;
     }
     push_directive_arg(&mut args, &inner[start..]);
     args.into_iter()
@@ -3498,16 +3525,28 @@ fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
     let mut depth = 0_i32;
     let mut in_backticks = false;
     let mut in_double_quotes = false;
-    for (idx, ch) in raw.char_indices() {
+    let mut idx = 0;
+    while idx < raw.len() {
+        if !in_backticks && !in_double_quotes {
+            if let Some(next) = skip_directive_text_block(raw, idx) {
+                idx = next;
+                continue;
+            }
+        }
+        let ch = raw[idx..].chars().next().expect("char boundary");
+        let ch_len = ch.len_utf8();
         if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
+            idx += ch_len;
             continue;
         }
         if ch == '"' && !in_backticks {
             in_double_quotes = !in_double_quotes;
+            idx += ch_len;
             continue;
         }
         if in_backticks || in_double_quotes {
+            idx += ch_len;
             continue;
         }
         match ch {
@@ -3515,7 +3554,7 @@ fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
             ')' | ']' | '}' if depth > 0 => depth -= 1,
             '=' if depth == 0 => {
                 let name = raw[..idx].trim();
-                let value = &raw[idx + ch.len_utf8()..];
+                let value = &raw[idx + ch_len..];
                 if !name.is_empty() {
                     return (Some(unquote_backticks(name)), value);
                 }
@@ -3523,6 +3562,7 @@ fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
             }
             _ => {}
         }
+        idx += ch_len;
     }
     (None, raw)
 }
@@ -3594,17 +3634,29 @@ fn find_matching_delimiter(
     let mut depth = 0_i32;
     let mut in_backticks = false;
     let mut in_double_quotes = false;
-    for (rel_idx, ch) in text[open_start..].char_indices() {
-        let idx = open_start + rel_idx;
+    let mut idx = open_start;
+    while idx < text.len() {
+        if !in_backticks
+            && !in_double_quotes
+            && text.as_bytes().get(idx..idx + 2) == Some(b"[[")
+        {
+            idx = find_text_block_close_for_args(text, idx, text.len())? + 2;
+            continue;
+        }
+        let ch = text[idx..].chars().next().expect("char boundary");
+        let ch_len = ch.len_utf8();
         if ch == '`' && !in_double_quotes {
             in_backticks = !in_backticks;
+            idx += ch_len;
             continue;
         }
         if ch == '"' && !in_backticks {
             in_double_quotes = !in_double_quotes;
+            idx += ch_len;
             continue;
         }
         if in_backticks || in_double_quotes {
+            idx += ch_len;
             continue;
         }
         if ch == open {
@@ -3615,8 +3667,22 @@ fn find_matching_delimiter(
                 return Some(idx);
             }
         }
+        idx += ch_len;
     }
     None
+}
+
+/// Skip a `[[...]]` argument text block at `idx`, or the rest of `text` when
+/// the block is unterminated. Returns `None` when `idx` is not a block opener.
+fn skip_directive_text_block(text: &str, idx: usize) -> Option<usize> {
+    if text.as_bytes().get(idx..idx + 2) != Some(b"[[") {
+        return None;
+    }
+    Some(
+        find_text_block_close_for_args(text, idx, text.len())
+            .map(|close| close + 2)
+            .unwrap_or(text.len()),
+    )
 }
 
 fn cartesian_product<T: Clone>(
@@ -4900,6 +4966,81 @@ mod tests {
         assert!(reconstructed.contains("%id:toobig-3j.foo.0"));
         assert!(reconstructed.contains("%clan(toobig-3j, tribe=chop"));
         assert!(!reconstructed.contains("%wait:"));
+    }
+
+    #[test]
+    fn typed_launch_clan_summary_ignores_inner_text_block_marker() {
+        let summary =
+            "Use `[<web>:<keyword> [...]]` for example, then continue.\n\
+Keep this comma, and the rest of the prose in the summary.";
+        let prompt = format!(
+            "%clan(research, tribe=study, summary=[[{summary}]])\nDo work"
+        );
+        let plan = plan_typed_launch_units(
+            &prompt,
+            Some("multi_prompt"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.clan.as_deref(), Some("research"));
+                assert_eq!(agent.clan_tribe.as_deref(), Some("study"));
+                assert_eq!(agent.clan_summary.as_deref(), Some(summary));
+                assert_eq!(agent.prompt, "Do work");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_clan_summary_keeps_unbalanced_inner_closer() {
+        let summary = "note: use ]] here, and more";
+        let prompt = format!(
+            "%clan(research, tribe=study, summary=[[{summary}]])\nDo work"
+        );
+        let plan = plan_typed_launch_units(
+            &prompt,
+            Some("multi_prompt"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.clan.as_deref(), Some("research"));
+                assert_eq!(agent.clan_tribe.as_deref(), Some("study"));
+                assert_eq!(agent.clan_summary.as_deref(), Some(summary));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_directive_args_text_block_corpus_matches_python() {
+        assert_eq!(
+            parse_directive_args("[[a]], [[b]]"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        let named = parse_directive_args_with_names("foo=[[a]], bar=1", ',');
+        assert_eq!(named[0].name.as_deref(), Some("foo"));
+        assert_eq!(named[0].value, "a");
+        assert_eq!(named[1].name.as_deref(), Some("bar"));
+        assert_eq!(named[1].value, "1");
+        assert_eq!(parse_directive_args("[[x, y]]"), vec!["x, y".to_string()]);
+        assert_eq!(
+            parse_directive_args("[[a [b [c]] d, e]]"),
+            vec!["a [b [c]] d, e".to_string()]
+        );
+        let clan = parse_directive_args_with_names(
+            "research, tribe=study, summary=[[note: use ]] here, and more]]",
+            ',',
+        );
+        assert_eq!(clan.len(), 3, "{clan:?}");
+        assert_eq!(clan[0].value, "research");
+        assert_eq!(clan[1].name.as_deref(), Some("tribe"));
+        assert_eq!(clan[1].value, "study");
+        assert_eq!(clan[2].name.as_deref(), Some("summary"));
+        assert_eq!(clan[2].value, "note: use ]] here, and more");
     }
 
     #[test]

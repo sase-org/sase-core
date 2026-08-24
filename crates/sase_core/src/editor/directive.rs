@@ -1,3 +1,5 @@
+use crate::xprompt_text_block::find_text_block_close_for_args_bytes;
+
 use super::token::DocumentSnapshot;
 use super::wire::{
     directive_feature_flag, BeadCompletionEntry, CompletionCandidate,
@@ -1289,7 +1291,7 @@ fn split_top_level_clauses(body: &str) -> Vec<(usize, usize)> {
     let mut state = QuoteState::default();
     while index < bytes.len() {
         let consumed = state.consume(bytes, index);
-        if !state.in_quotes() && !state.in_text_block && bytes[index] == b',' {
+        if !state.in_quotes() && bytes[index] == b',' {
             clauses.push((start, index));
             start = index + 1;
         }
@@ -1305,7 +1307,7 @@ fn find_top_level_equals(text: &str) -> Option<usize> {
     let mut state = QuoteState::default();
     while index < bytes.len() {
         let consumed = state.consume(bytes, index);
-        if !state.in_quotes() && !state.in_text_block && bytes[index] == b'=' {
+        if !state.in_quotes() && bytes[index] == b'=' {
             return Some(index);
         }
         index += consumed;
@@ -1323,7 +1325,7 @@ fn find_matching_paren_quoted(text: &str, open: usize) -> Option<usize> {
     let mut state = QuoteState::default();
     while index < bytes.len() {
         let consumed = state.consume(bytes, index);
-        if !state.in_quotes() && !state.in_text_block {
+        if !state.in_quotes() {
             match bytes[index] {
                 b'(' => depth += 1,
                 b')' => {
@@ -1343,7 +1345,6 @@ fn find_matching_paren_quoted(text: &str, open: usize) -> Option<usize> {
 #[derive(Default)]
 struct QuoteState {
     quote: Option<u8>,
-    in_text_block: bool,
 }
 
 impl QuoteState {
@@ -1352,16 +1353,15 @@ impl QuoteState {
     }
 
     fn consume(&mut self, bytes: &[u8], index: usize) -> usize {
-        if self.in_text_block {
-            if bytes.get(index..index + 2) == Some(b"]]") {
-                self.in_text_block = false;
-                return 2;
-            }
-            return 1;
-        }
         if self.quote.is_none() && bytes.get(index..index + 2) == Some(b"[[") {
-            self.in_text_block = true;
-            return 2;
+            return match find_text_block_close_for_args_bytes(
+                bytes,
+                index,
+                bytes.len(),
+            ) {
+                Some(close) => close + 2 - index,
+                None => bytes.len() - index,
+            };
         }
         let byte = bytes[index];
         match self.quote {
@@ -2059,6 +2059,19 @@ mod tests {
             block.selected_keywords(),
             ["summary".to_string()].as_slice()
         );
+
+        let inner =
+            "%clan(research, summary=[[note: use ]] here, and more]], tr";
+        let inner_block = classify(inner, inner.len() as u32);
+        assert_eq!(
+            inner_block.kind,
+            CompletionContextKind::DirectiveArgumentKeyword
+        );
+        assert_eq!(
+            inner_block.selected_keywords(),
+            ["summary".to_string()].as_slice()
+        );
+        assert_eq!(inner_block.token.as_ref().unwrap().text, "tr");
     }
 
     #[test]
