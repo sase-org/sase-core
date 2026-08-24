@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.13](https://github.com/sase-org/sase-core/compare/v0.31.12...v0.31.13) - 2026-08-24
+
+### Added
+
+- *(agent-launch)* add base_env to proc runtime wire contract
+
 ## [0.31.12](https://github.com/sase-org/sase-core/compare/v0.31.11...v0.31.12) - 2026-08-24
 
 ### Added
