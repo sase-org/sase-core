@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.10](https://github.com/sase-org/sase-core/compare/v0.31.9...v0.31.10) - 2026-08-24
+
+### Added
+
+- *(agent-launch)* preserve grouped identity on typed AgentUnitWire
+
 ### Fixed
 
 - *(agent-launch)* preserve `%id` grouping keywords and `%clan` through typed planning
