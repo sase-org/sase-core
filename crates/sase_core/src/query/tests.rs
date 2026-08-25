@@ -41,6 +41,14 @@ fn tokenize_bare_word_with_numbers() {
     assert_eq!(toks[0].kind, QueryTokenKind::String);
     assert_eq!(toks[0].value, "foo123");
     assert_eq!(toks[1].kind, QueryTokenKind::Eof);
+
+    let toks = tok("9lives");
+    assert_eq!(toks[0].kind, QueryTokenKind::String);
+    assert_eq!(toks[0].value, "9lives");
+
+    let toks = tok("sase-r8.9.land");
+    assert_eq!(toks[0].kind, QueryTokenKind::String);
+    assert_eq!(toks[0].value, "sase-r8.9.land");
 }
 
 #[test]
@@ -210,6 +218,14 @@ fn tokenize_property_shorthands() {
     let toks = tok("&my_name");
     assert_eq!(toks[0].property_key.as_deref(), Some("name"));
     assert_eq!(toks[0].value, "my_name");
+
+    let toks = tok("&0b4");
+    assert_eq!(toks[0].property_key.as_deref(), Some("name"));
+    assert_eq!(toks[0].value, "0b4");
+
+    let toks = tok("&sase-r8.9.land");
+    assert_eq!(toks[0].property_key.as_deref(), Some("name"));
+    assert_eq!(toks[0].value, "sase-r8.9.land");
 }
 
 #[test]
@@ -460,6 +476,15 @@ fn parse_property_match() {
         }
         other => panic!("unexpected: {:?}", other),
     }
+
+    let expr = parse("name:sase-r8.9.land");
+    match expr {
+        QueryExprWire::PropertyMatch { key, value } => {
+            assert_eq!(key, "name");
+            assert_eq!(value, "sase-r8.9.land");
+        }
+        other => panic!("unexpected: {:?}", other),
+    }
 }
 
 #[test]
@@ -563,6 +588,29 @@ fn canonical_property_filter_shorthands() {
     assert_eq!(canonicalize_query(&parse("^parent")), "ancestor:parent");
     assert_eq!(canonicalize_query(&parse("~sib")), "sibling:sib");
     assert_eq!(canonicalize_query(&parse("&nm")), "name:nm");
+    assert_eq!(canonicalize_query(&parse("&0b4")), "name:0b4");
+    assert_eq!(
+        canonicalize_query(&parse("&sase-r8.9.land")),
+        "name:sase-r8.9.land"
+    );
+}
+
+#[test]
+fn canonical_widened_boolean_value_shapes_round_trip() {
+    for (input, canonical) in [
+        ("name:sase-r8.9.land", "name:sase-r8.9.land"),
+        ("name:0b4", "name:0b4"),
+        ("name:001--2", "name:001--2"),
+        ("project:research.12", "project:research.12"),
+        ("9lives", "\"9lives\""),
+    ] {
+        assert_eq!(canonicalize_query(&parse(input)), canonical, "{input}");
+        assert_eq!(
+            canonicalize_query(&parse(canonical)),
+            canonical,
+            "{canonical}"
+        );
+    }
 }
 
 #[test]
@@ -857,6 +905,29 @@ fn boolean_custom_profile() -> CompiledQueryProfile {
     .expect("custom boolean profile")
 }
 
+fn boolean_value_profile() -> CompiledQueryProfile {
+    profile_from_parts(
+        "values",
+        true,
+        vec![
+            string_field("name", true, true),
+            string_field("family", true, false),
+            typed_field("since", FieldValueKind::Date, false),
+            typed_field("until", FieldValueKind::Date, false),
+            typed_field("min", FieldValueKind::Int, false),
+            typed_field("attempt", FieldValueKind::Int, false),
+        ],
+        vec![QuerySigilSpec {
+            sigil: "&".into(),
+            field: "name".into(),
+        }],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("boolean value profile")
+}
+
 #[test]
 fn tokenize_uses_profile_fields_and_sigils() {
     let profile = boolean_custom_profile();
@@ -868,6 +939,35 @@ fn tokenize_uses_profile_fields_and_sigils() {
     assert_eq!(toks[1].value, "urgent");
     assert_eq!(toks[2].property_key.as_deref(), Some("label"));
     assert_eq!(toks[2].value, "ship");
+}
+
+#[test]
+fn boolean_profile_accepts_widened_values_and_normalizes_typed_literals() {
+    let profile = boolean_value_profile();
+    for (input, canonical) in [
+        ("name:sase-r8.9.land", "name:sase-r8.9.land"),
+        ("name:0b4", "name:0b4"),
+        ("name:001--2", "name:001--2"),
+        ("family:research.12", "family:research.12"),
+        ("&0b4", "name:0b4"),
+        ("since:2h", "since:2h"),
+        ("since:2026-08-01", "since:2026-08-01"),
+        ("until:7d", "until:7d"),
+        ("min:5m", "min:300"),
+        ("attempt:002", "attempt:2"),
+        ("9lives", "\"9lives\""),
+    ] {
+        assert_eq!(
+            canonicalize_query_with_profile(input, &profile).unwrap(),
+            canonical,
+            "{input}"
+        );
+        assert_eq!(
+            canonicalize_query_with_profile(canonical, &profile).unwrap(),
+            canonical,
+            "{canonical}"
+        );
+    }
 }
 
 #[test]

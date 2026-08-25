@@ -6,7 +6,8 @@
 //! verbatim in the resulting `Token.value`).
 
 use crate::query::profile::{
-    join_shorthand_list, patch_query_profile, CompiledQueryProfile,
+    host_duration_bound_direction, join_shorthand_list, patch_query_profile,
+    CompiledQueryProfile, FieldValueKind, QueryFieldSpec,
 };
 use crate::query::types::{
     QueryErrorWire, QueryTokenKind, QueryTokenWire, VALID_PROPERTY_KEYS,
@@ -16,12 +17,12 @@ fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-fn is_bare_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+fn is_bare_word_start_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn is_alpha_or_underscore(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_'
+fn is_bare_word_byte(b: u8) -> bool {
+    is_bare_word_start_byte(b) || b == b'-' || b == b'.'
 }
 
 struct Tokenizer<'a> {
@@ -132,9 +133,13 @@ impl<'a> Tokenizer<'a> {
             return self.parse_quoted();
         }
         let start = self.pos;
-        while self.pos < self.src.len() && is_bare_word_byte(self.src[self.pos])
-        {
+        if is_bare_word_start_byte(self.src[self.pos]) {
             self.pos += 1;
+            while self.pos < self.src.len()
+                && is_bare_word_byte(self.src[self.pos])
+            {
+                self.pos += 1;
+            }
         }
         if self.pos == start {
             return Err(QueryErrorWire::tokenizer(
@@ -319,17 +324,36 @@ impl<'a> Tokenizer<'a> {
             // Macro shorthand, e.g. %d
             if let Some(field_value) = self.try_macro(b as char, start)? {
                 let (field, value) = field_value;
-                self.emit_property(&field, value, start);
+                let spec = self.profile.field(&field).ok_or_else(|| {
+                    QueryErrorWire::tokenizer(
+                        unknown_property_message(&field, self.profile),
+                        start,
+                    )
+                })?;
+                let normalized =
+                    normalize_boolean_property_value(spec, &value, start)?;
+                self.emit_property(&field, normalized, start);
                 continue;
             }
             // Field sigil, e.g. +project
             if let Some(field) = self.profile.sigil_field(b as char) {
                 let field = field.to_string();
                 self.pos += 1;
-                if self.peek_at(0).map(is_alpha_or_underscore).unwrap_or(false)
+                if self
+                    .peek_at(0)
+                    .map(is_bare_word_start_byte)
+                    .unwrap_or(false)
                 {
                     let value = self.parse_property_value()?;
-                    self.emit_property(&field, value, start);
+                    let spec = self.profile.field(&field).ok_or_else(|| {
+                        QueryErrorWire::tokenizer(
+                            unknown_property_message(&field, self.profile),
+                            start,
+                        )
+                    })?;
+                    let normalized =
+                        normalize_boolean_property_value(spec, &value, start)?;
+                    self.emit_property(&field, normalized, start);
                     continue;
                 }
                 return Err(QueryErrorWire::tokenizer(
@@ -338,7 +362,7 @@ impl<'a> Tokenizer<'a> {
                 ));
             }
             // Bare word, keyword, or property filter (key:value)
-            if b.is_ascii_alphabetic() || b == b'_' {
+            if is_bare_word_start_byte(b) {
                 let word_start = self.pos;
                 while self.pos < self.src.len()
                     && is_bare_word_byte(self.src[self.pos])
@@ -372,11 +396,15 @@ impl<'a> Tokenizer<'a> {
                 // property filter syntax
                 if self.peek_at(0) == Some(b':') {
                     if let Some(field) = self.profile.field(&lower) {
+                        let field = field.clone();
                         if field.filterable {
                             let key = field.key.clone();
                             self.pos += 1; // skip ':'
                             let value = self.parse_property_value()?;
-                            self.emit_property(&key, value, word_start);
+                            let normalized = normalize_boolean_property_value(
+                                &field, &value, word_start,
+                            )?;
+                            self.emit_property(&key, normalized, word_start);
                             continue;
                         }
                     }
@@ -514,4 +542,132 @@ fn invalid_macro_message(
         "Invalid {field} shorthand (use {})",
         join_shorthand_list(&tokens)
     )
+}
+
+fn normalize_boolean_property_value(
+    field: &QueryFieldSpec,
+    value: &str,
+    position: usize,
+) -> Result<String, QueryErrorWire> {
+    match field.value_kind {
+        FieldValueKind::Enum => field
+            .static_values
+            .iter()
+            .find(|item| item.eq_ignore_ascii_case(value))
+            .cloned()
+            .ok_or_else(|| {
+                QueryErrorWire::tokenizer(
+                    format!(
+                        "{}: value '{}' must be one of {}",
+                        field.key,
+                        value,
+                        field.static_values.join(", ")
+                    ),
+                    position,
+                )
+            }),
+        FieldValueKind::Bool => {
+            if value.eq_ignore_ascii_case("true") {
+                Ok("true".to_string())
+            } else if value.eq_ignore_ascii_case("false") {
+                Ok("false".to_string())
+            } else {
+                Err(QueryErrorWire::tokenizer(
+                    format!("{}: must be 'true' or 'false'", field.key),
+                    position,
+                ))
+            }
+        }
+        FieldValueKind::Int => {
+            if host_duration_bound_direction(&field.key).is_some() {
+                return parse_duration_bound_value(&field.key, value, position);
+            }
+            let parsed = value.parse::<i64>().map_err(|_| {
+                QueryErrorWire::tokenizer(
+                    format!("{}: must be an integer", field.key),
+                    position,
+                )
+            })?;
+            Ok(parsed.to_string())
+        }
+        // Date text is host-normalized before Rust evaluates profile queries.
+        FieldValueKind::Date | FieldValueKind::String => Ok(value.to_string()),
+    }
+}
+
+fn parse_duration_bound_value(
+    key: &str,
+    value: &str,
+    position: usize,
+) -> Result<String, QueryErrorWire> {
+    if let Some(seconds) = parse_whole_unit_duration(value) {
+        return Ok(seconds.to_string());
+    }
+    if is_composite_duration(value) {
+        return Err(QueryErrorWire::tokenizer(
+            format!(
+                "{key}: composite durations are not supported; use seconds \
+                 or one whole-unit literal such as 90m"
+            ),
+            position,
+        ));
+    }
+    Err(QueryErrorWire::tokenizer(
+        format!("{key}: must be seconds or a whole-unit duration like 5m"),
+        position,
+    ))
+}
+
+fn parse_whole_unit_duration(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx == 0 {
+        return None;
+    }
+    let amount = value[..idx].parse::<i64>().ok()?;
+    let unit = match bytes.get(idx).copied() {
+        None => 1,
+        Some(b's') | Some(b'S') => 1,
+        Some(b'm') | Some(b'M') => 60,
+        Some(b'h') | Some(b'H') => 60 * 60,
+        Some(b'd') | Some(b'D') => 24 * 60 * 60,
+        _ => return None,
+    };
+    if idx + usize::from(bytes.get(idx).is_some()) != bytes.len() {
+        return None;
+    }
+    Some(amount * unit)
+}
+
+fn is_composite_duration(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut idx = 0usize;
+    let mut groups = 0usize;
+    while idx < bytes.len() {
+        let digit_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if idx == digit_start {
+            return false;
+        }
+        let Some(unit) = bytes.get(idx).copied() else {
+            return false;
+        };
+        if !matches!(
+            unit,
+            b's' | b'S' | b'm' | b'M' | b'h' | b'H' | b'd' | b'D'
+        ) {
+            return false;
+        }
+        idx += 1;
+        groups += 1;
+    }
+    groups > 1
 }
