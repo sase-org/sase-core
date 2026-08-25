@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.5](https://github.com/sase-org/sase-core/compare/v0.32.4...v0.32.5) - 2026-08-25
+
+### Added
+
+- *(artifact-link)* add relation module for link relation queries
+
 ## [0.32.4](https://github.com/sase-org/sase-core/compare/v0.32.3...v0.32.4) - 2026-08-25
 
 ### Added
