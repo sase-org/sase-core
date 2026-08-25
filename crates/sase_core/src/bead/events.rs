@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::artifact_link::{
     canonicalize_artifact_link_ref, lookup_artifact_relation,
     validate_artifact_link_description, ArtifactLinkOriginWire,
-    ArtifactLinkRowWire, BeadLinkWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ArtifactLinkRowWire, BeadLinkDirectionWire, BeadLinkWire,
+    ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use crate::serde_option::deserialize_present_option;
 
@@ -216,10 +217,16 @@ pub enum BeadEventPayloadWire {
         relation: String,
         description: String,
         origin: crate::artifact_link::ArtifactLinkOriginWire,
+        #[serde(default)]
+        direction: crate::artifact_link::BeadLinkDirectionWire,
+        #[serde(default = "default_bead_link_uses")]
+        uses: u64,
     },
     LinkRemoved {
         target_ref: String,
         relation: String,
+        #[serde(default)]
+        direction: crate::artifact_link::BeadLinkDirectionWire,
     },
     ReadyMarked,
     ReadyUnmarked,
@@ -377,6 +384,7 @@ impl BeadEventPayloadWire {
                 BeadEventPayloadWire::LinkRemoved {
                     target_ref,
                     relation,
+                    ..
                 },
             ) => validate_link_removed_payload(target_ref, relation),
             (
@@ -427,6 +435,10 @@ fn link_error(error: crate::artifact_link::ArtifactLinkError) -> BeadError {
 
 fn canonical_bead_source_ref(issue_id: &str) -> String {
     format!("bead:{issue_id}")
+}
+
+fn default_bead_link_uses() -> u64 {
+    1
 }
 
 fn remap_link_target_ref(
@@ -638,6 +650,7 @@ pub(super) struct StoredLinkIdentity {
     pub source_issue_id: String,
     pub relation: String,
     pub target_ref: String,
+    pub direction: BeadLinkDirectionWire,
 }
 
 /// Winning `LinkAdded` provenance for one currently active stored link.
@@ -648,6 +661,8 @@ pub(super) struct ActiveLinkProvenance {
     pub relation: String,
     pub description: String,
     pub origin: ArtifactLinkOriginWire,
+    pub direction: BeadLinkDirectionWire,
+    pub uses: u64,
     pub actor: String,
     pub timestamp: String,
 }
@@ -707,6 +722,8 @@ fn apply_link_provenance(
             relation,
             description,
             origin,
+            direction,
+            uses,
         } => {
             let target_ref = canonicalize_artifact_link_ref(target_ref)
                 .map_err(link_error)?;
@@ -714,6 +731,7 @@ fn apply_link_provenance(
                 source_issue_id: event.issue_id.clone(),
                 relation: relation.clone(),
                 target_ref: target_ref.clone(),
+                direction: *direction,
             };
             provenance.insert(
                 identity,
@@ -723,6 +741,8 @@ fn apply_link_provenance(
                     relation: relation.clone(),
                     description: description.clone(),
                     origin: *origin,
+                    direction: *direction,
+                    uses: *uses,
                     actor: event.actor.clone(),
                     timestamp: event.timestamp.clone(),
                 },
@@ -731,12 +751,14 @@ fn apply_link_provenance(
         BeadEventPayloadWire::LinkRemoved {
             target_ref,
             relation,
+            direction,
         } => {
             if let Ok(target_ref) = canonicalize_artifact_link_ref(target_ref) {
                 provenance.remove(&StoredLinkIdentity {
                     source_issue_id: event.issue_id.clone(),
                     relation: relation.clone(),
                     target_ref,
+                    direction: *direction,
                 });
             }
         }
@@ -763,16 +785,21 @@ fn apply_link_provenance(
 pub(super) fn artifact_link_row_from_provenance(
     link: &ActiveLinkProvenance,
 ) -> ArtifactLinkRowWire {
+    let bead_ref = canonical_bead_source_ref(&link.source_issue_id);
+    let (source_ref, target_ref) = match link.direction {
+        BeadLinkDirectionWire::Out => (bead_ref, link.target_ref.clone()),
+        BeadLinkDirectionWire::In => (link.target_ref.clone(), bead_ref),
+    };
     ArtifactLinkRowWire {
         schema_version: ARTIFACT_LINK_ROW_SCHEMA_VERSION,
-        source_ref: canonical_bead_source_ref(&link.source_issue_id),
+        source_ref,
         relation: link.relation.clone(),
-        target_ref: link.target_ref.clone(),
+        target_ref,
         description: link.description.clone(),
         origin: link.origin,
         created_by: link.actor.clone(),
         created_at: link.timestamp.clone(),
-        uses: 1,
+        uses: link.uses,
     }
 }
 
@@ -1638,6 +1665,8 @@ pub(super) fn apply_event(
             relation,
             description,
             origin,
+            direction,
+            uses,
         } => {
             apply_link_added(
                 issues,
@@ -1646,11 +1675,14 @@ pub(super) fn apply_event(
                 relation,
                 description,
                 *origin,
+                *direction,
+                *uses,
             )?;
         }
         BeadEventPayloadWire::LinkRemoved {
             target_ref,
             relation,
+            direction,
         } => {
             if let Some(issue) = issues.get_mut(&event.issue_id) {
                 let canonical = canonicalize_artifact_link_ref(target_ref)
@@ -1658,6 +1690,7 @@ pub(super) fn apply_event(
                 issue.links.retain(|existing| {
                     existing.target_ref != canonical
                         || existing.relation != *relation
+                        || existing.direction != *direction
                 });
                 issue.validate()?;
             }
@@ -2007,6 +2040,8 @@ impl PendingEvent {
                 relation: link.relation,
                 description: link.description,
                 origin: link.origin,
+                direction: link.direction,
+                uses: link.uses,
             },
         }
     }
@@ -2057,6 +2092,8 @@ fn apply_link_added(
     relation: &str,
     description: &str,
     origin: ArtifactLinkOriginWire,
+    direction: BeadLinkDirectionWire,
+    uses: u64,
 ) -> Result<(), BeadError> {
     let canonical =
         canonicalize_artifact_link_ref(target_ref).map_err(link_error)?;
@@ -2069,19 +2106,22 @@ fn apply_link_added(
         ));
     }
     let issue = existing_issue_mut(issues, issue_id)?;
-    if let Some(existing) = issue
-        .links
-        .iter_mut()
-        .find(|link| link.target_ref == canonical && link.relation == relation)
-    {
+    if let Some(existing) = issue.links.iter_mut().find(|link| {
+        link.target_ref == canonical
+            && link.relation == relation
+            && link.direction == direction
+    }) {
         existing.description = description;
         existing.origin = origin;
+        existing.uses = uses;
     } else {
         issue.links.push(BeadLinkWire {
             target_ref: canonical,
             relation: relation.to_string(),
             description,
             origin,
+            direction,
+            uses,
         });
     }
     issue.validate()?;
@@ -2610,12 +2650,15 @@ mod tests {
                     relation: relation.to_string(),
                     description: description.to_string(),
                     origin: ArtifactLinkOriginWire::Manual,
+                    direction: BeadLinkDirectionWire::Out,
+                    uses: 1,
                 }
             }
             BeadEventOperationWire::LinkRemoved => {
                 BeadEventPayloadWire::LinkRemoved {
                     target_ref: target_ref.to_string(),
                     relation: relation.to_string(),
+                    direction: BeadLinkDirectionWire::Out,
                 }
             }
             _ => panic!("link_event requires a link operation"),
@@ -2639,6 +2682,8 @@ mod tests {
             relation: "related".to_string(),
             description: "shares the ACE-TUI flake root cause".to_string(),
             origin: ArtifactLinkOriginWire::Manual,
+            direction: BeadLinkDirectionWire::Out,
+            uses: 1,
         }];
         let mut streams =
             import_issues_to_event_streams(std::slice::from_ref(&issue))
@@ -2772,6 +2817,56 @@ mod tests {
         assert_eq!(row.actor, "carol");
         assert_eq!(row.timestamp, "2026-01-04T00:00:00Z");
         assert_eq!(row.description, "third why");
+    }
+
+    #[test]
+    fn inbound_link_provenance_projects_bead_as_target() {
+        let issue = issue_with_refs(Vec::new());
+        let mut streams =
+            import_issues_to_event_streams(std::slice::from_ref(&issue))
+                .unwrap();
+
+        let mut inbound = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "inbound".to_string(),
+            timestamp: "2026-01-02T00:00:00Z".to_string(),
+            actor: "alice".to_string(),
+            operation: BeadEventOperationWire::LinkAdded,
+            issue_id: issue.id.clone(),
+            payload: BeadEventPayloadWire::LinkAdded {
+                target_ref: "plan:202608/a.md".to_string(),
+                relation: "implements".to_string(),
+                description: "the plan implements this bead".to_string(),
+                origin: ArtifactLinkOriginWire::Manual,
+                direction: BeadLinkDirectionWire::In,
+                uses: 1,
+            },
+        };
+        inbound.event_id = mint_bead_event_id(
+            &issue.id,
+            2,
+            &inbound.timestamp,
+            &inbound.actor,
+            inbound.operation,
+            &inbound.issue_id,
+            &inbound.payload,
+        )
+        .unwrap();
+        streams[0].events.push(inbound);
+
+        let (issues, provenance) =
+            reduce_event_streams_with_link_provenance(&streams).unwrap();
+        assert_eq!(issues[0].links.len(), 1);
+        assert_eq!(issues[0].links[0].direction, BeadLinkDirectionWire::In);
+        assert_eq!(issues[0].links[0].target_ref, "plan:202608/a.md");
+
+        assert_eq!(provenance.len(), 1);
+        let row = artifact_link_row_from_provenance(
+            provenance.values().next().unwrap(),
+        );
+        assert_eq!(row.source_ref, "plan:202608/a.md");
+        assert_eq!(row.target_ref, format!("bead:{}", issue.id));
+        assert_eq!(row.relation, "implements");
     }
 
     fn created_stream(issue: &IssueWire) -> BeadEventStreamWire {

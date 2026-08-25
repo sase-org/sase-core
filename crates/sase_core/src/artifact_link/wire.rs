@@ -127,15 +127,62 @@ pub struct ArtifactLinkAggregateWire {
     pub rows: Vec<ArtifactLinkRowWire>,
 }
 
+/// Which endpoint of a projected bead link the owning bead occupies.
+///
+/// `Out` means the owning bead is the row's `source_ref`; `In` means it is
+/// the row's `target_ref`. `target_ref` on [`BeadLinkWire`] always names the
+/// *other* endpoint regardless of direction.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadLinkDirectionWire {
+    #[default]
+    Out,
+    In,
+}
+
+impl BeadLinkDirectionWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Out => "out",
+            Self::In => "in",
+        }
+    }
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value.trim() {
+            "out" => Some(Self::Out),
+            "in" => Some(Self::In),
+            _ => None,
+        }
+    }
+}
+
 /// Projected bead-page / `IssueWire.links` row.
 ///
-/// The bead itself is the source; events carry `target_ref`.
+/// `target_ref` always names the endpoint other than the owning bead;
+/// `direction` says whether the owning bead is that row's source (`out`,
+/// the historical and default shape) or target (`in`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadLinkWire {
     pub target_ref: String,
     pub relation: String,
     pub description: String,
     pub origin: ArtifactLinkOriginWire,
+    #[serde(default)]
+    pub direction: BeadLinkDirectionWire,
+    #[serde(default = "default_uses")]
+    pub uses: u64,
 }
 
 /// Directed vs undirected identity for one stored edge.

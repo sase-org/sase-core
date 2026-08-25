@@ -43,5 +43,6 @@ pub use wire::{
     validate_artifact_link_row, ArtifactLinkAggregateWire,
     ArtifactLinkDedupKeyWire, ArtifactLinkError, ArtifactLinkIndexWire,
     ArtifactLinkOriginWire, ArtifactLinkRowWire, ArtifactLinkUpsertKindWire,
-    ArtifactLinkUpsertWire, BeadLinkWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ArtifactLinkUpsertWire, BeadLinkDirectionWire, BeadLinkWire,
+    ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::artifact_link::{
     canonicalize_artifact_link_ref, lookup_artifact_relation,
-    validate_artifact_link_description, ArtifactLinkOriginWire, BeadLinkWire,
+    validate_artifact_link_description, ArtifactLinkOriginWire,
+    BeadLinkDirectionWire, BeadLinkWire,
 };
 use crate::artifact_ref::normalize_artifact_ref_list;
 use crate::serde_option::deserialize_present_option;
@@ -2194,6 +2195,20 @@ pub fn remove_bead_references(
     })
 }
 
+/// Write one `LinkAdded` event on the bead identified by `issue_id`.
+///
+/// `direction` says which role `issue_id` plays in the row being recorded:
+/// `Out` (the historical shape) when `issue_id` is the row's source, `In`
+/// when it is the target. `target_ref` always names the *other* endpoint,
+/// regardless of direction.
+///
+/// `Out` preserves the original undirected-relation consolidation: writing
+/// the same undirected edge from either bead updates the one bead that
+/// already holds it rather than creating a second stored copy.
+/// `In` always writes directly on `issue_id`'s own stream — the caller
+/// already knows which bead is which endpoint, so no holder redirection
+/// applies.
+#[allow(clippy::too_many_arguments)]
 pub fn add_bead_link(
     beads_dir: &Path,
     issue_id: &str,
@@ -2201,6 +2216,8 @@ pub fn add_bead_link(
     relation: &str,
     description: &str,
     origin: ArtifactLinkOriginWire,
+    direction: BeadLinkDirectionWire,
+    uses: u64,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, "add_link", || {
@@ -2217,18 +2234,33 @@ pub fn add_bead_link(
                 "artifact link cannot target itself",
             ));
         }
-        let holder_id = undirected_holder_issue_id(
-            &store.issues,
-            &source_id,
-            &source_ref,
-            &target_ref,
-            relation,
-        )?;
+        let holder_id = match direction {
+            BeadLinkDirectionWire::Out => undirected_holder_issue_id(
+                &store.issues,
+                &source_id,
+                &source_ref,
+                &target_ref,
+                relation,
+            )?,
+            BeadLinkDirectionWire::In => source_id.clone(),
+        };
         let holder_index = store.issue_index(&holder_id)?;
+        let stored_direction = if holder_id == source_id {
+            direction
+        } else {
+            BeadLinkDirectionWire::Out
+        };
         let existing =
             store.issues[holder_index].links.iter().position(|link| {
-                link_matches(link, relation, &target_ref, &source_ref)
+                link_matches(
+                    link,
+                    relation,
+                    &target_ref,
+                    &source_ref,
+                    stored_direction,
+                )
             });
+        let stored_uses;
         if let Some(index) = existing {
             let current = &store.issues[holder_index].links[index];
             if current.description == description && current.origin == origin {
@@ -2238,20 +2270,29 @@ pub fn add_bead_link(
                     Some(store.issues[store.issue_index(&source_id)?].clone());
                 return Ok(result);
             }
+            stored_uses = if origin.increments_uses() {
+                current.uses.saturating_add(1)
+            } else {
+                current.uses
+            };
             store.issues[holder_index].links[index].description =
                 description.clone();
             store.issues[holder_index].links[index].origin = origin;
+            store.issues[holder_index].links[index].uses = stored_uses;
         } else {
             let stored_target = if holder_id == source_id {
                 target_ref.clone()
             } else {
                 source_ref.clone()
             };
+            stored_uses = if uses == 0 { 1 } else { uses };
             store.issues[holder_index].links.push(BeadLinkWire {
                 target_ref: stored_target,
                 relation: relation.to_string(),
                 description: description.clone(),
                 origin,
+                direction: stored_direction,
+                uses: stored_uses,
             });
         }
         let added_at = now.unwrap_or_else(now_utc);
@@ -2270,6 +2311,8 @@ pub fn add_bead_link(
                 relation: relation.to_string(),
                 description,
                 origin,
+                direction: stored_direction,
+                uses: stored_uses,
             },
             &added_at,
             &actor,
@@ -2285,11 +2328,18 @@ pub fn add_bead_link(
     })
 }
 
+/// Remove one stored bead link, identified the same way it was added.
+///
+/// See [`add_bead_link`] for the meaning of `direction`. `Out` preserves the
+/// original peer-scan that lets removing an undirected edge from either
+/// bead find the single holder that actually stores it. `In` only ever
+/// looks at `issue_id`'s own stream.
 pub fn remove_bead_link(
     beads_dir: &Path,
     issue_id: &str,
     target_ref: &str,
     relation: Option<&str>,
+    direction: BeadLinkDirectionWire,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     if let Some(relation) = relation {
@@ -2303,13 +2353,15 @@ pub fn remove_bead_link(
         let source_ref = canonical_bead_source_ref(&source_id);
         let removed_at = now.unwrap_or_else(now_utc);
         let actor = store.config.owner.clone();
-        let mut removed: Vec<(String, String, String)> = Vec::new();
+        let mut removed: Vec<(String, String, String, BeadLinkDirectionWire)> =
+            Vec::new();
         collect_removable_bead_links(
             &store.issues,
             &source_id,
             &source_ref,
             &target_ref,
             relation,
+            direction,
             &mut removed,
         )?;
         if removed.is_empty() {
@@ -2319,11 +2371,14 @@ pub fn remove_bead_link(
             return Ok(result);
         }
         let mut touched: Vec<String> = Vec::new();
-        for (holder_id, stored_target, stored_relation) in &removed {
+        for (holder_id, stored_target, stored_relation, stored_direction) in
+            &removed
+        {
             let index = store.issue_index(holder_id)?;
             store.issues[index].links.retain(|link| {
                 !(link.target_ref == *stored_target
-                    && link.relation == *stored_relation)
+                    && link.relation == *stored_relation
+                    && link.direction == *stored_direction)
             });
             store.issues[index].updated_at = removed_at.clone();
             store.append_issue_event(
@@ -2332,6 +2387,7 @@ pub fn remove_bead_link(
                 BeadEventPayloadWire::LinkRemoved {
                     target_ref: stored_target.clone(),
                     relation: stored_relation.clone(),
+                    direction: *stored_direction,
                 },
                 &removed_at,
                 &actor,
@@ -2407,20 +2463,23 @@ fn link_matches(
     relation: &str,
     target_ref: &str,
     source_ref: &str,
+    direction: BeadLinkDirectionWire,
 ) -> bool {
-    if link.relation != relation {
+    if link.relation != relation || link.direction != direction {
         return false;
     }
     link.target_ref == target_ref || link.target_ref == source_ref
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_removable_bead_links(
     issues: &[IssueWire],
     source_id: &str,
     source_ref: &str,
     target_ref: &str,
     relation: Option<&str>,
-    removed: &mut Vec<(String, String, String)>,
+    direction: BeadLinkDirectionWire,
+    removed: &mut Vec<(String, String, String, BeadLinkDirectionWire)>,
 ) -> Result<(), BeadError> {
     let source = issues
         .iter()
@@ -2428,6 +2487,7 @@ fn collect_removable_bead_links(
         .ok_or_else(|| not_found(source_id))?;
     for link in &source.links {
         if link.target_ref == *target_ref
+            && link.direction == direction
             && relation
                 .map(|wanted| link.relation == wanted)
                 .unwrap_or(true)
@@ -2436,8 +2496,12 @@ fn collect_removable_bead_links(
                 source_id.to_string(),
                 link.target_ref.clone(),
                 link.relation.clone(),
+                link.direction,
             ));
         }
+    }
+    if direction != BeadLinkDirectionWire::Out {
+        return Ok(());
     }
     let Some(target_id) = target_ref.strip_prefix("bead:") else {
         return Ok(());
@@ -2467,6 +2531,7 @@ fn collect_removable_bead_links(
                 resolved.clone(),
                 link.target_ref.clone(),
                 link.relation.clone(),
+                link.direction,
             ));
         }
     }
@@ -4409,6 +4474,8 @@ mod tests {
             "related",
             "shares the ACE-TUI flake root cause",
             ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::Out,
+            1,
             Some("2026-01-01T00:01:00Z".to_string()),
         )
         .unwrap();
@@ -4426,6 +4493,8 @@ mod tests {
             "related",
             "shares the ACE-TUI flake root cause",
             ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::Out,
+            1,
             Some("2026-01-01T00:02:00Z".to_string()),
         )
         .unwrap();
@@ -4445,6 +4514,8 @@ mod tests {
             "related",
             "updated rationale",
             ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::Out,
+            1,
             Some("2026-01-01T00:03:00Z".to_string()),
         )
         .unwrap();
@@ -4461,6 +4532,8 @@ mod tests {
             "blocks",
             "scheduling",
             ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::Out,
+            1,
             None,
         )
         .unwrap_err();
@@ -4472,6 +4545,7 @@ mod tests {
             &right.id,
             &format!("bead:{}", left.id),
             Some("related"),
+            BeadLinkDirectionWire::Out,
             Some("2026-01-01T00:04:00Z".to_string()),
         )
         .unwrap();
@@ -4490,6 +4564,159 @@ mod tests {
             .collect();
         assert!(ops.contains(&BeadEventOperationWire::LinkAdded));
         assert!(ops.contains(&BeadEventOperationWire::LinkRemoved));
+    }
+
+    #[test]
+    fn inbound_direction_link_add_and_remove_round_trip() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let target = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Target".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        let added = add_bead_link(
+            &beads_dir,
+            &target.id,
+            "plan:202608/a.md",
+            "implements",
+            "the plan implements this bead",
+            ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::In,
+            1,
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(added.changed);
+        let issue = added.issue.unwrap();
+        assert_eq!(issue.links.len(), 1);
+        assert_eq!(issue.links[0].target_ref, "plan:202608/a.md");
+        assert_eq!(issue.links[0].direction, BeadLinkDirectionWire::In);
+
+        let unchanged = add_bead_link(
+            &beads_dir,
+            &target.id,
+            "plan:202608/a.md",
+            "implements",
+            "the plan implements this bead",
+            ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::In,
+            1,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(!unchanged.changed);
+
+        let removed = remove_bead_link(
+            &beads_dir,
+            &target.id,
+            "plan:202608/a.md",
+            Some("implements"),
+            BeadLinkDirectionWire::In,
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        assert!(removed.changed);
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let target_issue =
+            issues.iter().find(|issue| issue.id == target.id).unwrap();
+        assert!(target_issue.links.is_empty());
+    }
+
+    #[test]
+    fn out_and_in_direction_links_to_same_target_do_not_collide() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let left = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Left".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let right = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Right".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        // left implements right: stored on left as an outbound link.
+        add_bead_link(
+            &beads_dir,
+            &left.id,
+            &format!("bead:{}", right.id),
+            "implements",
+            "left implements right",
+            ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::Out,
+            1,
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap();
+        // right implements left: left is the target of that separate edge,
+        // so it is stored on left as an inbound link with the same peer and
+        // relation as the outbound one above.
+        add_bead_link(
+            &beads_dir,
+            &left.id,
+            &format!("bead:{}", right.id),
+            "implements",
+            "right implements left",
+            ArtifactLinkOriginWire::Manual,
+            BeadLinkDirectionWire::In,
+            1,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let left_issue =
+            issues.iter().find(|issue| issue.id == left.id).unwrap();
+        assert_eq!(left_issue.links.len(), 2);
+        assert!(left_issue
+            .links
+            .iter()
+            .any(|link| link.direction == BeadLinkDirectionWire::Out
+                && link.description == "left implements right"));
+        assert!(left_issue
+            .links
+            .iter()
+            .any(|link| link.direction == BeadLinkDirectionWire::In
+                && link.description == "right implements left"));
+
+        remove_bead_link(
+            &beads_dir,
+            &left.id,
+            &format!("bead:{}", right.id),
+            Some("implements"),
+            BeadLinkDirectionWire::In,
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let left_issue =
+            issues.iter().find(|issue| issue.id == left.id).unwrap();
+        assert_eq!(left_issue.links.len(), 1);
+        assert_eq!(left_issue.links[0].direction, BeadLinkDirectionWire::Out);
     }
 
     #[test]

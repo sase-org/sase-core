@@ -21,7 +21,7 @@ use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::artifact_link::{
-    ArtifactLinkRowWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ArtifactLinkRowWire, BeadLinkDirectionWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
@@ -805,14 +805,10 @@ fn fallback_neighborhood_from_issues(
 ) -> Vec<ArtifactLinkRowWire> {
     let mut rows = Vec::new();
     for issue in issues {
-        let source_ref = canonical_bead_ref(&issue.id);
+        let own_ref = canonical_bead_ref(&issue.id);
         for link in &issue.links {
-            if !row_touches_bead(
-                &source_ref,
-                &link.target_ref,
-                issue_id,
-                issues,
-            ) {
+            if !row_touches_bead(&own_ref, &link.target_ref, issue_id, issues)
+            {
                 continue;
             }
             let created_by = if !issue.owner.is_empty() {
@@ -829,16 +825,24 @@ fn fallback_neighborhood_from_issues(
             } else {
                 "1970-01-01T00:00:00Z".to_string()
             };
+            let (source_ref, target_ref) = match link.direction {
+                BeadLinkDirectionWire::Out => {
+                    (own_ref.clone(), link.target_ref.clone())
+                }
+                BeadLinkDirectionWire::In => {
+                    (link.target_ref.clone(), own_ref.clone())
+                }
+            };
             rows.push(ArtifactLinkRowWire {
                 schema_version: ARTIFACT_LINK_ROW_SCHEMA_VERSION,
-                source_ref: source_ref.clone(),
+                source_ref,
                 relation: link.relation.clone(),
-                target_ref: link.target_ref.clone(),
+                target_ref,
                 description: link.description.clone(),
                 origin: link.origin,
                 created_by,
                 created_at,
-                uses: 1,
+                uses: link.uses,
             });
         }
     }

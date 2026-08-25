@@ -442,6 +442,8 @@ mod tests {
                         description: "shares a root cause".to_string(),
                         origin:
                             crate::artifact_link::ArtifactLinkOriginWire::Manual,
+                        direction: crate::artifact_link::BeadLinkDirectionWire::Out,
+                        uses: 1,
                     }];
                 }),
                 "needle",

@@ -10,11 +10,11 @@ use sase_core::{
     bead_show_issue_detail, bead_show_issue_detail_with_options, bead_stats,
     bead_update_issue, import_issues_from_jsonl,
     import_issues_to_event_streams, remove_bead_link,
-    repair_event_store_manifest, ArtifactLinkOriginWire, BeadCreateRequestWire,
-    BeadEventManifestRepairStatusWire, BeadEventOperationWire,
-    BeadEventPayloadWire, BeadEventRecordWire, BeadEventStoreManifestWire,
-    BeadEventStreamWire, BeadUpdateFieldsWire, IssueTypeWire,
-    BEAD_EVENT_SCHEMA_VERSION,
+    repair_event_store_manifest, ArtifactLinkOriginWire,
+    BeadCreateRequestWire, BeadEventManifestRepairStatusWire,
+    BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
+    BeadEventStoreManifestWire, BeadEventStreamWire, BeadLinkDirectionWire,
+    BeadUpdateFieldsWire, IssueTypeWire, BEAD_EVENT_SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -662,6 +662,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "implements",
         "lands the approved CLI design",
         ArtifactLinkOriginWire::Manual,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-22T14:10:00Z".to_string()),
     )
     .unwrap();
@@ -672,6 +674,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "implements",
         "right implements left",
         ArtifactLinkOriginWire::Manual,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-22T14:11:00Z".to_string()),
     )
     .unwrap();
@@ -682,6 +686,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "related",
         "shares the same rendering contract",
         ArtifactLinkOriginWire::Migrated,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-20T09:00:00Z".to_string()),
     )
     .unwrap();
@@ -692,6 +698,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "cites",
         "prompt citation of the left bead",
         ArtifactLinkOriginWire::PromptRef,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-22T15:00:00Z".to_string()),
     )
     .unwrap();
@@ -779,6 +787,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "implements",
         "rewritten why",
         ArtifactLinkOriginWire::Manual,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-24T12:00:00Z".to_string()),
     )
     .unwrap();
@@ -801,6 +811,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         &left.id,
         &format!("bead:{}", right.id),
         Some("related"),
+        BeadLinkDirectionWire::Out,
         Some("2026-08-24T13:00:00Z".to_string()),
     )
     .unwrap();
@@ -819,6 +830,8 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         "related",
         "re-added related",
         ArtifactLinkOriginWire::Manual,
+        BeadLinkDirectionWire::Out,
+        1,
         Some("2026-08-24T14:00:00Z".to_string()),
     )
     .unwrap();
