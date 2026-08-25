@@ -23,6 +23,7 @@ const HEADER_BLOCK_REMEDY: &str = "SASE owns the plan header block: a link-shape
 
 const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
 const TALE_FIELDS: &[&str] = &["size"];
+const TRANSIENT_FIELDS: &[&str] = &["links"];
 const SYSTEM_FIELDS: &[&str] = &[
     "create_time",
     "status",
@@ -301,6 +302,18 @@ pub fn plan_frontmatter_schema(
         ]);
     }
 
+    fields.push(field_spec(
+        "links",
+        "list of {ref, relation, description} mappings",
+        false,
+        "`sase plan propose` consumes this transient authoring inlet into typed artifact links and removes it from archived frontmatter.",
+        json!([{
+            "ref": "research:202608/source.md",
+            "relation": "derives-from",
+            "description": "uses its measurements"
+        }]),
+    ));
+
     fields.extend([
         field_spec(
             "create_time",
@@ -566,7 +579,10 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
-            if COMMON_FIELDS.contains(&key) || SYSTEM_FIELDS.contains(&key) {
+            if COMMON_FIELDS.contains(&key)
+                || TRANSIENT_FIELDS.contains(&key)
+                || SYSTEM_FIELDS.contains(&key)
+            {
                 continue;
             }
             if TALE_FIELDS.contains(&key) {
@@ -1468,6 +1484,25 @@ mod tests {
     }
 
     #[test]
+    fn links_frontmatter_is_accepted_as_a_transient_authoring_inlet() {
+        let content = concat!(
+            "---\n",
+            "tier: tale\n",
+            "title: Plan title\n",
+            "goal: Plan goal\n",
+            "size: small\n",
+            "links:\n",
+            "  - ref: research:202608/source.md\n",
+            "    relation: derives-from\n",
+            "    description: uses its measurements\n",
+            "---\n",
+            "# Plan\n",
+        );
+        let result = plan_validate(content, "tale").unwrap();
+        assert!(result.ok, "{:?}", result.diagnostics);
+    }
+
+    #[test]
     fn missing_wrong_type_and_invalid_tier_are_distinct() {
         let content = "---\ntier: story\ntitle: Plan title\ngoal: [not, text]\nsize: small\n---\nbody\n";
         let result = plan_validate(content, "tale").unwrap();
@@ -1964,6 +1999,7 @@ mod tests {
                 "goal",
                 "size",
                 "model",
+                "links",
                 "create_time",
                 "status",
                 "bead",
@@ -1992,6 +2028,7 @@ mod tests {
                 "patch",
                 "bug_id",
                 "parent_bead",
+                "links",
                 "create_time",
                 "status",
                 "bead",
