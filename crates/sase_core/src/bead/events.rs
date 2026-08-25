@@ -127,6 +127,8 @@ pub enum BeadEventOperationWire {
     IssueCreated,
     IssueUpdated,
     NoteAppended,
+    NoteEdited,
+    NoteRemoved,
     IssueOpened,
     IssueClosed,
     IssueRemoved,
@@ -177,6 +179,13 @@ pub enum BeadEventPayloadWire {
     },
     NoteAppended {
         entry: String,
+    },
+    NoteEdited {
+        note_id: String,
+        text: String,
+    },
+    NoteRemoved {
+        note_id: String,
     },
     IssueOpened,
     IssueClosed {
@@ -259,6 +268,33 @@ impl BeadEventPayloadWire {
                 if entry.trim().is_empty() {
                     return Err(BeadError::validation(
                         "note_appended entry cannot be empty or blank",
+                    ));
+                }
+                Ok(())
+            }
+            (
+                BeadEventOperationWire::NoteEdited,
+                BeadEventPayloadWire::NoteEdited { note_id, text },
+            ) => {
+                if note_id.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "note_edited note_id cannot be empty or blank",
+                    ));
+                }
+                if text.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "note_edited text cannot be empty or blank",
+                    ));
+                }
+                Ok(())
+            }
+            (
+                BeadEventOperationWire::NoteRemoved,
+                BeadEventPayloadWire::NoteRemoved { note_id },
+            ) => {
+                if note_id.trim().is_empty() {
+                    return Err(BeadError::validation(
+                        "note_removed note_id cannot be empty or blank",
                     ));
                 }
                 Ok(())
@@ -1483,6 +1519,35 @@ pub(super) fn apply_event(
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
+        BeadEventPayloadWire::NoteEdited { note_id, text } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            let note = issue
+                .notes
+                .iter_mut()
+                .find(|note| note.id == *note_id)
+                .ok_or_else(|| {
+                    BeadError::validation(format!(
+                        "event references unknown note: {note_id}"
+                    ))
+                })?;
+            note.text = text.trim().to_string();
+            note.edited_at = Some(event.timestamp.clone());
+            note.edited_by = Some(event.actor.clone());
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
+        BeadEventPayloadWire::NoteRemoved { note_id } => {
+            let issue = existing_issue_mut(issues, &event.issue_id)?;
+            let before = issue.notes.len();
+            issue.notes.retain(|note| note.id != *note_id);
+            if issue.notes.len() == before {
+                return Err(BeadError::validation(format!(
+                    "event references unknown note: {note_id}"
+                )));
+            }
+            issue.updated_at = event.timestamp.clone();
+            issue.validate()?;
+        }
         BeadEventPayloadWire::IssueOpened => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             issue.status = StatusWire::Open;
@@ -2242,6 +2307,119 @@ mod tests {
         assert_eq!(
             blank.validate().unwrap_err().message,
             "note_appended entry cannot be empty or blank"
+        );
+    }
+
+    #[test]
+    fn note_edited_rewrites_text_and_stamps_editor() {
+        let mut issues = BTreeMap::from([(
+            "sase-1".to_string(),
+            issue_with_refs(Vec::new()),
+        )]);
+        let appended = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "note".to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "agent-1".to_string(),
+            operation: BeadEventOperationWire::NoteAppended,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: "first draft".to_string(),
+            },
+        };
+        apply_event(&mut issues, &appended).unwrap();
+
+        let edited = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "edit".to_string(),
+            timestamp: "2026-01-01T00:02:00Z".to_string(),
+            actor: "agent-2".to_string(),
+            operation: BeadEventOperationWire::NoteEdited,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::NoteEdited {
+                note_id: "note".to_string(),
+                text: " corrected ".to_string(),
+            },
+        };
+        apply_event(&mut issues, &edited).unwrap();
+
+        let note = &issues["sase-1"].notes[0];
+        assert_eq!(note.text, "corrected");
+        assert_eq!(note.timestamp, "2026-01-01T00:01:00Z");
+        assert_eq!(note.author, "agent-1");
+        assert_eq!(note.edited_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+        assert_eq!(note.edited_by.as_deref(), Some("agent-2"));
+        assert_eq!(issues["sase-1"].updated_at, "2026-01-01T00:02:00Z");
+
+        let unknown = BeadEventRecordWire {
+            payload: BeadEventPayloadWire::NoteEdited {
+                note_id: "does-not-exist".to_string(),
+                text: "x".to_string(),
+            },
+            ..edited.clone()
+        };
+        assert_eq!(
+            apply_event(&mut issues, &unknown).unwrap_err().message,
+            "event references unknown note: does-not-exist"
+        );
+
+        let blank = BeadEventRecordWire {
+            payload: BeadEventPayloadWire::NoteEdited {
+                note_id: "note".to_string(),
+                text: " \t ".to_string(),
+            },
+            ..edited
+        };
+        assert_eq!(
+            blank.validate().unwrap_err().message,
+            "note_edited text cannot be empty or blank"
+        );
+    }
+
+    #[test]
+    fn note_removed_retracts_the_record() {
+        let mut issues = BTreeMap::from([(
+            "sase-1".to_string(),
+            issue_with_refs(Vec::new()),
+        )]);
+        let appended = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "note".to_string(),
+            timestamp: "2026-01-01T00:01:00Z".to_string(),
+            actor: "agent-1".to_string(),
+            operation: BeadEventOperationWire::NoteAppended,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::NoteAppended {
+                entry: "retract me".to_string(),
+            },
+        };
+        apply_event(&mut issues, &appended).unwrap();
+
+        let removed = BeadEventRecordWire {
+            schema_version: BEAD_EVENT_SCHEMA_VERSION,
+            event_id: "remove".to_string(),
+            timestamp: "2026-01-01T00:02:00Z".to_string(),
+            actor: "agent-2".to_string(),
+            operation: BeadEventOperationWire::NoteRemoved,
+            issue_id: "sase-1".to_string(),
+            payload: BeadEventPayloadWire::NoteRemoved {
+                note_id: "note".to_string(),
+            },
+        };
+        apply_event(&mut issues, &removed).unwrap();
+
+        assert!(issues["sase-1"].notes.is_empty());
+        assert_eq!(issues["sase-1"].updated_at, "2026-01-01T00:02:00Z");
+
+        let unknown = BeadEventRecordWire {
+            payload: BeadEventPayloadWire::NoteRemoved {
+                note_id: "does-not-exist".to_string(),
+            },
+            ..removed
+        };
+        assert_eq!(
+            apply_event(&mut issues, &unknown).unwrap_err().message,
+            "event references unknown note: does-not-exist"
         );
     }
 

@@ -911,6 +911,145 @@ fn append_note_to_store(
     Ok(issue)
 }
 
+pub fn edit_issue_note(
+    beads_dir: &Path,
+    issue_id: &str,
+    note_id: &str,
+    text: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let note_id = note_id.trim();
+    if note_id.is_empty() {
+        return Err(BeadError::validation("note id cannot be empty or blank"));
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(BeadError::validation(
+            "note text cannot be empty or blank",
+        ));
+    }
+
+    with_bead_mutation_lock(beads_dir, "note_edit", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let now = now.unwrap_or_else(now_utc);
+        let author = author
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| store.config.owner.clone());
+        let issue = edit_note_in_store(
+            &mut store, index, note_id, text, &author, &now,
+        )?;
+        store.save()?;
+
+        let mut result = outcome("note_edit", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
+fn edit_note_in_store(
+    store: &mut MutableStore,
+    issue_index: usize,
+    note_id: &str,
+    text: &str,
+    author: &str,
+    now: &str,
+) -> Result<IssueWire, BeadError> {
+    if !store.issues[issue_index]
+        .notes
+        .iter()
+        .any(|note| note.id == note_id)
+    {
+        return Err(note_not_found(note_id));
+    }
+    let issue_id = store.issues[issue_index].id.clone();
+    store.append_issue_event(
+        &issue_id,
+        BeadEventOperationWire::NoteEdited,
+        BeadEventPayloadWire::NoteEdited {
+            note_id: note_id.to_string(),
+            text: text.to_string(),
+        },
+        now,
+        author,
+    )?;
+    let note = store.issues[issue_index]
+        .notes
+        .iter_mut()
+        .find(|note| note.id == note_id)
+        .ok_or_else(|| note_not_found(note_id))?;
+    note.text = text.to_string();
+    note.edited_at = Some(now.to_string());
+    note.edited_by = Some(author.to_string());
+    store.issues[issue_index].updated_at = now.to_string();
+    let issue = store.issues[issue_index].clone();
+    issue.validate()?;
+    Ok(issue)
+}
+
+pub fn remove_issue_note(
+    beads_dir: &Path,
+    issue_id: &str,
+    note_id: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let note_id = note_id.trim();
+    if note_id.is_empty() {
+        return Err(BeadError::validation("note id cannot be empty or blank"));
+    }
+
+    with_bead_mutation_lock(beads_dir, "note_remove", || {
+        let mut store = MutableStore::load(beads_dir)?;
+        let index = store.issue_index(issue_id)?;
+        let now = now.unwrap_or_else(now_utc);
+        let author = author
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| store.config.owner.clone());
+        let issue =
+            remove_note_from_store(&mut store, index, note_id, &author, &now)?;
+        store.save()?;
+
+        let mut result = outcome("note_remove", true, vec![issue.id.clone()]);
+        result.issue = Some(issue);
+        Ok(result)
+    })
+}
+
+fn remove_note_from_store(
+    store: &mut MutableStore,
+    issue_index: usize,
+    note_id: &str,
+    author: &str,
+    now: &str,
+) -> Result<IssueWire, BeadError> {
+    if !store.issues[issue_index]
+        .notes
+        .iter()
+        .any(|note| note.id == note_id)
+    {
+        return Err(note_not_found(note_id));
+    }
+    let issue_id = store.issues[issue_index].id.clone();
+    store.append_issue_event(
+        &issue_id,
+        BeadEventOperationWire::NoteRemoved,
+        BeadEventPayloadWire::NoteRemoved {
+            note_id: note_id.to_string(),
+        },
+        now,
+        author,
+    )?;
+    store.issues[issue_index]
+        .notes
+        .retain(|note| note.id != note_id);
+    store.issues[issue_index].updated_at = now.to_string();
+    let issue = store.issues[issue_index].clone();
+    issue.validate()?;
+    Ok(issue)
+}
+
 pub fn claim_for_agent_launch(
     beads_dir: &Path,
     issue_id: &str,
@@ -2976,6 +3115,13 @@ fn not_found(issue_id: &str) -> BeadError {
     BeadError {
         kind: "not_found".to_string(),
         message: format!("Issue not found: {issue_id}"),
+    }
+}
+
+fn note_not_found(note_id: &str) -> BeadError {
+    BeadError {
+        kind: "not_found".to_string(),
+        message: format!("Note not found: {note_id}"),
     }
 }
 
@@ -7253,6 +7399,275 @@ mod tests {
 
         assert_eq!(error.kind, "validation");
         assert_eq!(error.message, "note entry cannot be empty or blank");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn edit_issue_note_rewrites_text_and_preserves_original_authorship() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let noted = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "first draft",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let note_id = noted.notes[0].id.clone();
+
+        let edited = edit_issue_note(
+            &beads_dir,
+            &issue.id,
+            &note_id,
+            " corrected ",
+            Some("agent-2".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert_eq!(edited.notes.len(), 1);
+        assert_eq!(edited.notes[0].id, note_id);
+        assert_eq!(edited.notes[0].text, "corrected");
+        assert_eq!(edited.notes[0].timestamp, "2026-01-01T00:01:00Z");
+        assert_eq!(edited.notes[0].author, "agent-1");
+        assert_eq!(
+            edited.notes[0].edited_at.as_deref(),
+            Some("2026-01-01T00:02:00Z")
+        );
+        assert_eq!(edited.notes[0].edited_by.as_deref(), Some("agent-2"));
+        assert_eq!(edited.updated_at, "2026-01-01T00:02:00Z");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let operations: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| event.issue_id == issue.id)
+            .map(|event| event.operation)
+            .collect();
+        assert_eq!(
+            operations,
+            vec![
+                BeadEventOperationWire::IssueCreated,
+                BeadEventOperationWire::NoteAppended,
+                BeadEventOperationWire::NoteEdited,
+            ]
+        );
+
+        let reduced = reduce_event_streams(&streams).unwrap();
+        let reduced_issue =
+            reduced.iter().find(|found| found.id == issue.id).unwrap();
+        assert_eq!(reduced_issue.notes, edited.notes);
+    }
+
+    #[test]
+    fn edit_issue_note_rejects_unknown_note_id_without_writing() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = edit_issue_note(
+            &beads_dir,
+            &issue.id,
+            "does-not-exist",
+            "text",
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "not_found");
+        assert_eq!(error.message, "Note not found: does-not-exist");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn edit_issue_note_rejects_blank_text_without_writing() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let noted = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "first draft",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = edit_issue_note(
+            &beads_dir,
+            &issue.id,
+            &noted.notes[0].id,
+            " \t ",
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "validation");
+        assert_eq!(error.message, "note text cannot be empty or blank");
+        assert_eq!(persisted_claim_state(&beads_dir), before);
+    }
+
+    #[test]
+    fn remove_issue_note_retracts_the_record_and_history_still_replays_it() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let noted = append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "retract me",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let note_id = noted.notes[0].id.clone();
+
+        let removed = remove_issue_note(
+            &beads_dir,
+            &issue.id,
+            &note_id,
+            Some("agent-2".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        assert!(removed.notes.is_empty());
+        assert_eq!(removed.updated_at, "2026-01-01T00:02:00Z");
+        assert_eq!(note_text(&removed), "");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let events: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .filter(|event| event.issue_id == issue.id)
+            .collect();
+        let removed_event = events
+            .iter()
+            .find(|event| {
+                event.operation == BeadEventOperationWire::NoteRemoved
+            })
+            .unwrap();
+        assert!(matches!(
+            &removed_event.payload,
+            BeadEventPayloadWire::NoteRemoved { note_id: removed_id }
+                if *removed_id == note_id
+        ));
+
+        let reduced = reduce_event_streams(&streams).unwrap();
+        let reduced_issue =
+            reduced.iter().find(|found| found.id == issue.id).unwrap();
+        assert!(reduced_issue.notes.is_empty());
+    }
+
+    #[test]
+    fn remove_issue_note_rejects_unknown_note_id_without_writing() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path().join("sdd/beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+            .unwrap();
+        fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let before = persisted_claim_state(&beads_dir);
+
+        let error = remove_issue_note(
+            &beads_dir,
+            &issue.id,
+            "does-not-exist",
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, "not_found");
+        assert_eq!(error.message, "Note not found: does-not-exist");
         assert_eq!(persisted_claim_state(&beads_dir), before);
     }
 

@@ -259,6 +259,8 @@
 //! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", now: str | None = None) -> dict`
 //! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, now: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict` (`issue["notes"]` is a list of note records)
+//! - `bead_note_edit(beads_dir: str, issue_id: str, note_id: str, text: str, author: str | None = None, now: str | None = None) -> dict`
+//! - `bead_note_remove(beads_dir: str, issue_id: str, note_id: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None, observed_since: str | None = None) -> dict`
 //! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
 //! - `bead_snooze_cancel(beads_dir: str, issue_id: str, actor: str = "", now: str | None = None) -> dict`
@@ -675,6 +677,7 @@ use sase_core::bead::{
     doctor_report_with_contexts as core_bead_doctor_report_with_contexts,
     doctor_with_contexts as core_bead_doctor_with_contexts,
     drop_flag_type_migration_sql as core_bead_drop_flag_type_migration_sql,
+    edit_issue_note as core_bead_edit_issue_note,
     execute_bead_cli as core_execute_bead_cli,
     export_jsonl as core_bead_export_jsonl,
     external_ref_migration_sql as core_bead_external_ref_migration_sql,
@@ -706,6 +709,7 @@ use sase_core::bead::{
     remove_bead_link as core_bead_remove_link,
     remove_dependencies as core_bead_remove_dependencies,
     remove_issue as core_bead_remove_issue,
+    remove_issue_note as core_bead_remove_issue_note,
     remove_issues as core_bead_remove_issues,
     repair_event_store_manifest as core_repair_event_store_manifest,
     resolution_migration_sql as core_bead_resolution_migration_sql,
@@ -5835,6 +5839,51 @@ fn py_bead_append_note<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_note_edit")]
+#[pyo3(signature = (beads_dir, issue_id, note_id, text, author=None, now=None))]
+fn py_bead_note_edit<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    note_id: &str,
+    text: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_edit_issue_note(
+                &beads_dir, issue_id, note_id, text, author, now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_note_remove")]
+#[pyo3(signature = (beads_dir, issue_id, note_id, author=None, now=None))]
+fn py_bead_note_remove<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    note_id: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_remove_issue_note(
+                &beads_dir, issue_id, note_id, author, now,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None, observed_since=None))]
 // The argument list mirrors the exported Python binding signature; grouping it
 // locally would add a wrapper type the caller could not use directly.
@@ -10732,6 +10781,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_update_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_append_note, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_note_edit, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_note_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_plus_one, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_snooze, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_snooze_cancel, m)?)?;
@@ -11517,6 +11568,84 @@ mod tests {
                 result["issue"]["plus_one_evidence"][0]["reporter"],
                 "reporter-agent"
             );
+        });
+    }
+
+    #[test]
+    fn bead_note_edit_and_remove_bindings_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Notes".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let noted = core_bead_append_issue_note(
+            &beads_dir,
+            &issue.id,
+            "first draft",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let note_id = noted.notes[0].id.clone();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_note_edit").is_ok());
+            assert!(module.getattr("bead_note_remove").is_ok());
+
+            let edited = py_bead_note_edit(
+                py,
+                beads_dir.to_str().unwrap(),
+                &issue.id,
+                &note_id,
+                "corrected",
+                Some("agent-2".to_string()),
+                Some("2026-01-01T00:02:00Z".to_string()),
+            )
+            .unwrap();
+            let edited = py_to_json_value(edited.bind(py)).unwrap();
+            assert_eq!(edited["issue"]["notes"][0]["text"], "corrected");
+            assert_eq!(edited["issue"]["notes"][0]["edited_by"], "agent-2");
+
+            let removed = py_bead_note_remove(
+                py,
+                beads_dir.to_str().unwrap(),
+                &issue.id,
+                &note_id,
+                Some("agent-2".to_string()),
+                Some("2026-01-01T00:03:00Z".to_string()),
+            )
+            .unwrap();
+            let removed = py_to_json_value(removed.bind(py)).unwrap();
+            assert!(removed["issue"]["notes"]
+                .as_array()
+                .map(|notes| notes.is_empty())
+                .unwrap_or(true));
+
+            let missing = py_bead_note_edit(
+                py,
+                beads_dir.to_str().unwrap(),
+                &issue.id,
+                &note_id,
+                "too late",
+                None,
+                None,
+            );
+            assert!(missing.is_err());
         });
     }
 
