@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.4](https://github.com/sase-org/sase-core/compare/v0.32.3...v0.32.4) - 2026-08-25
+
+### Added
+
+- *(bead)* add NoteEdited/NoteRemoved events and note edit/remove mutations
+
 ## [0.32.0](https://github.com/sase-org/sase-core/compare/v0.31.14...v0.32.0) - 2026-08-24
 
 ### Added
