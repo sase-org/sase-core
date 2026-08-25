@@ -919,8 +919,8 @@ use sase_core::query::{
     parse_query_with_profile as core_parse_query_with_profile,
     tokenize_query_with_profile as core_tokenize_query_with_profile,
     try_evaluate_query_many_in_corpus as core_try_evaluate_query_many_in_corpus,
-    CompiledQueryProfile, QueryCorpus as CoreQueryCorpus,
-    QueryProgram as CoreQueryProgram, QueryRow,
+    CompiledQueryProfile, QueryCorpus as CoreQueryCorpus, QueryFieldValues,
+    QueryPredicateFacts, QueryProgram as CoreQueryProgram, QueryRow,
 };
 use sase_core::referenced_by::{
     parse_referenced_by_block as core_parse_referenced_by_block,
@@ -1781,7 +1781,10 @@ fn py_compile_query_with_profile<'py>(
 /// Compile a generic corpus from a compiled profile and precomputed rows.
 ///
 /// Profile and row conversion happens while holding the GIL. Indexing
-/// runs without it.
+/// runs without it. Rows are read directly from each `PyDict` into a
+/// `QueryRow` — no `serde_json::Value` intermediate — since this loop runs
+/// once per corpus row and the JSON tree was otherwise a full second
+/// materialization of data the caller already built as a Python dict.
 #[pyfunction]
 #[pyo3(name = "compile_corpus_with_profile")]
 fn py_compile_corpus_with_profile<'py>(
@@ -1792,8 +1795,7 @@ fn py_compile_corpus_with_profile<'py>(
     let profile = profile_from_pydict(profile)?;
     let mut wire_rows = Vec::with_capacity(rows.len());
     for (idx, item) in rows.iter().enumerate() {
-        let json = py_to_json_value(&item)?;
-        let row = QueryRow::from_wire(&json, &profile).map_err(|error| {
+        let row = query_row_from_py_row(&item, &profile).map_err(|error| {
             PyValueError::new_err(format!("rows[{idx}]: {error}"))
         })?;
         wire_rows.push(row);
@@ -1801,6 +1803,197 @@ fn py_compile_corpus_with_profile<'py>(
     let corpus =
         py.allow_threads(|| CoreQueryCorpus::from_rows(&profile, wire_rows));
     Ok(PyQueryCorpusHandle { corpus })
+}
+
+/// Build one `QueryRow` directly from a Python row mapping.
+///
+/// Mirrors `QueryRow::from_wire`'s accepted shape and validation exactly,
+/// but reads scalars and containers straight off the `PyAny` tree instead
+/// of first converting the whole row to a `serde_json::Value`.
+fn query_row_from_py_row(
+    item: &Bound<'_, PyAny>,
+    profile: &CompiledQueryProfile,
+) -> Result<QueryRow, String> {
+    let dict = item
+        .downcast::<PyDict>()
+        .map_err(|_| "row must be a mapping".to_string())?;
+
+    let mut fields: BTreeMap<String, QueryFieldValues> = BTreeMap::new();
+    if let Some(raw_fields) = py_dict_item(dict, "fields")? {
+        let raw_fields = raw_fields
+            .downcast::<PyDict>()
+            .map_err(|_| "fields must be a mapping".to_string())?;
+        for (key, value) in raw_fields.iter() {
+            let key = py_dict_key_as_string(&key)?;
+            let strings = py_query_row_field_strings(&value)?;
+            fields.insert(key, QueryFieldValues { strings });
+        }
+    }
+
+    let mut searchable: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Some(raw_searchable) = py_dict_item(dict, "searchable")? {
+        let raw_searchable = raw_searchable
+            .downcast::<PyDict>()
+            .map_err(|_| "searchable must be a mapping".to_string())?;
+        for (key, value) in raw_searchable.iter() {
+            let key = py_dict_key_as_string(&key)?;
+            searchable.insert(key, py_query_row_field_strings(&value)?);
+        }
+    }
+
+    let mut searchable_values: Vec<String> = Vec::new();
+    if let Some(raw_values) = py_dict_item(dict, "searchable_values")? {
+        let raw_values = raw_values.downcast::<PyList>().map_err(|_| {
+            "searchable_values must be a list of strings".to_string()
+        })?;
+        for (idx, value) in raw_values.iter().enumerate() {
+            searchable_values.push(value.extract::<String>().map_err(
+                |_| format!("searchable_values[{idx}] must be a string"),
+            )?);
+        }
+    }
+
+    let searchable_text = match py_dict_item(dict, "searchable_text")? {
+        Some(value) if !value.is_none() => Some(
+            value
+                .extract::<String>()
+                .map_err(|_| "searchable_text must be a string".to_string())?,
+        ),
+        _ => None,
+    };
+
+    let mut predicates = QueryPredicateFacts::default();
+    if let Some(raw_predicates) = py_dict_item(dict, "predicates")? {
+        let raw_predicates = raw_predicates
+            .downcast::<PyDict>()
+            .map_err(|_| "predicates must be a mapping".to_string())?;
+        predicates.error_suffix =
+            py_predicate_flag(raw_predicates, "error_suffix")?;
+        predicates.running_agent =
+            py_predicate_flag(raw_predicates, "running_agent")?;
+        predicates.running_process =
+            py_predicate_flag(raw_predicates, "running_process")?;
+    }
+
+    let mut searchable_parts: Vec<String> = Vec::new();
+    if !searchable.is_empty() {
+        for key in profile.searchable_keys() {
+            if let Some(values) = searchable.get(key) {
+                searchable_parts.extend(values.iter().cloned());
+            }
+        }
+        for (key, values) in &searchable {
+            if profile.field(key).is_none() {
+                searchable_parts.extend(values.iter().cloned());
+            }
+        }
+    }
+    searchable_parts.extend(searchable_values);
+
+    let searchable_text = match searchable_text {
+        Some(text) => text,
+        None if !searchable_parts.is_empty() => searchable_parts.join("\n"),
+        None => {
+            let mut parts = Vec::new();
+            for key in profile.searchable_keys() {
+                if let Some(values) = fields.get(key).or_else(|| {
+                    fields.iter().find_map(|(candidate, values)| {
+                        if candidate.eq_ignore_ascii_case(key) {
+                            Some(values)
+                        } else {
+                            None
+                        }
+                    })
+                }) {
+                    parts.extend(values.strings.iter().cloned());
+                }
+            }
+            parts.join("\n")
+        }
+    };
+
+    Ok(QueryRow {
+        fields,
+        searchable_text,
+        predicates,
+    })
+}
+
+fn py_dict_item<'py>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> Result<Option<Bound<'py, PyAny>>, String> {
+    dict.get_item(key)
+        .map_err(|_| format!("{key} lookup failed"))
+}
+
+fn py_dict_key_as_string(key: &Bound<'_, PyAny>) -> Result<String, String> {
+    key.extract::<String>()
+        .map_err(|_| "dict keys must be strings".to_string())
+}
+
+fn py_predicate_flag(
+    predicates: &Bound<'_, PyDict>,
+    key: &str,
+) -> Result<bool, String> {
+    match py_dict_item(predicates, key)? {
+        Some(value) if !value.is_none() => value
+            .extract::<bool>()
+            .map_err(|_| format!("predicates.{key} must be a bool")),
+        _ => Ok(false),
+    }
+}
+
+/// Extract a query row field/searchable value's strings directly from a
+/// `PyAny`, matching `strings_from_json`'s scalar-or-nested-list contract
+/// without building a `serde_json::Value` first.
+fn py_query_row_field_strings(
+    value: &Bound<'_, PyAny>,
+) -> Result<Vec<String>, String> {
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    if let Ok(flag) = value.extract::<bool>() {
+        return Ok(vec![if flag {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }]);
+    }
+    if let Ok(i) = value.extract::<i64>() {
+        return Ok(vec![i.to_string()]);
+    }
+    if let Ok(u) = value.extract::<u64>() {
+        return Ok(vec![u.to_string()]);
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return match serde_json::Number::from_f64(f) {
+            Some(number) => Ok(vec![number.to_string()]),
+            None => Err(format!("non-finite float: {f}")),
+        };
+    }
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![text]
+        });
+    }
+    if let Ok(list) = value.downcast::<PyList>() {
+        let mut out = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            out.extend(py_query_row_field_strings(&item)?);
+        }
+        return Ok(out);
+    }
+    if let Ok(tuple) = value.downcast::<PyTuple>() {
+        let mut out = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            out.extend(py_query_row_field_strings(&item)?);
+        }
+        return Ok(out);
+    }
+    Err("query row field values must be a scalar or list".to_string())
 }
 
 /// Return the schema version for commit-footer binding payloads.
@@ -16774,6 +16967,172 @@ MENTORS:
             let err =
                 py_evaluate_many(py, &patch_program, &corpus).unwrap_err();
             assert!(err.to_string().contains("digest"), "{err}");
+        });
+    }
+
+    #[test]
+    fn query_row_from_py_row_matches_json_wire_conversion_for_mixed_value_types(
+    ) {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let profile = profile_from_pydict(&notes_profile_dict(py)).unwrap();
+
+            let row = PyDict::new_bound(py);
+            let fields = PyDict::new_bound(py);
+            fields.set_item("kind", "note").unwrap();
+            fields.set_item("count", 3_i64).unwrap();
+            fields.set_item("score", 1.5_f64).unwrap();
+            fields.set_item("active", true).unwrap();
+            fields.set_item("empty", "").unwrap();
+            fields
+                .set_item("tags", PyList::new_bound(py, ["alpha", "beta"]))
+                .unwrap();
+            row.set_item("fields", &fields).unwrap();
+            row.set_item("searchable_text", "alpha hello").unwrap();
+            let predicates = PyDict::new_bound(py);
+            predicates.set_item("error_suffix", false).unwrap();
+            predicates.set_item("running_agent", true).unwrap();
+            predicates.set_item("running_process", false).unwrap();
+            row.set_item("predicates", predicates).unwrap();
+
+            let direct = query_row_from_py_row(row.as_any(), &profile).unwrap();
+
+            let json_value = json!({
+                "fields": {
+                    "kind": "note",
+                    "count": 3,
+                    "score": 1.5,
+                    "active": true,
+                    "empty": "",
+                    "tags": ["alpha", "beta"]
+                },
+                "searchable_text": "alpha hello",
+                "predicates": {
+                    "error_suffix": false,
+                    "running_agent": true,
+                    "running_process": false
+                }
+            });
+            let via_json = QueryRow::from_wire(&json_value, &profile).unwrap();
+
+            assert_eq!(direct, via_json);
+        });
+    }
+
+    #[test]
+    fn compile_corpus_with_profile_rejects_object_shaped_field_value_directly()
+    {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let profile = notes_profile_dict(py);
+            let rows = PyList::empty_bound(py);
+            let row = PyDict::new_bound(py);
+            let fields = PyDict::new_bound(py);
+            let nested = PyDict::new_bound(py);
+            nested.set_item("bad", "shape").unwrap();
+            fields.set_item("kind", nested).unwrap();
+            row.set_item("fields", fields).unwrap();
+            rows.append(row).unwrap();
+
+            let err = py_compile_corpus_with_profile(py, &profile, &rows)
+                .unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("rows[0]"), "{err}");
+            assert!(err.to_string().contains("scalar or list"), "{err}");
+        });
+    }
+
+    /// Manual perf check for the core-corpus phase of
+    /// `plan:202608/artifacts_query_performance.md`. Not run by `cargo
+    /// test`/`./scripts/check.sh test`; run explicitly with:
+    ///
+    /// ```sh
+    /// cargo test -p sase_core_py --release -- --ignored --nocapture \
+    ///     bench_compile_corpus_with_profile_over_agent_scale_corpus
+    /// ```
+    ///
+    /// Baseline before this phase (measured on the Python side, 11,783
+    /// Agent-pane rows through the old `py_to_json_value` +
+    /// `QueryRow::from_wire` path): ~716ms. This synthetic corpus matches
+    /// that row/field order (~12k rows, ~20 fields) so the two numbers are
+    /// comparable.
+    #[test]
+    #[ignore = "manual perf check, not part of the default test run"]
+    fn bench_compile_corpus_with_profile_over_agent_scale_corpus() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            const ROW_COUNT: usize = 12_000;
+            const FIELD_COUNT: usize = 20;
+
+            let profile_fields = PyList::empty_bound(py);
+            for i in 0..FIELD_COUNT {
+                let field = PyDict::new_bound(py);
+                field.set_item("key", format!("field_{i}")).unwrap();
+                field.set_item("value_kind", "string").unwrap();
+                field.set_item("filterable", true).unwrap();
+                field.set_item("searchable", i % 4 == 0).unwrap();
+                field.set_item("repeatable", false).unwrap();
+                field.set_item("negatable", false).unwrap();
+                field
+                    .set_item("static_values", PyList::empty_bound(py))
+                    .unwrap();
+                field.set_item("hint", "").unwrap();
+                profile_fields.append(field).unwrap();
+            }
+            let profile = PyDict::new_bound(py);
+            profile.set_item("pane_id", "bench").unwrap();
+            profile.set_item("boolean", false).unwrap();
+            profile.set_item("fields", profile_fields).unwrap();
+            profile.set_item("sigils", PyList::empty_bound(py)).unwrap();
+            profile
+                .set_item("predicates", PyList::empty_bound(py))
+                .unwrap();
+            profile.set_item("any_special", false).unwrap();
+            profile.set_item("macros", PyList::empty_bound(py)).unwrap();
+            profile.set_item("free_text_hint", "field_0").unwrap();
+
+            let rows = PyList::empty_bound(py);
+            for r in 0..ROW_COUNT {
+                let row = PyDict::new_bound(py);
+                let fields = PyDict::new_bound(py);
+                for f in 0..FIELD_COUNT {
+                    fields
+                        .set_item(
+                            format!("field_{f}"),
+                            format!("value_{r}_{f}"),
+                        )
+                        .unwrap();
+                }
+                row.set_item("fields", fields).unwrap();
+                row.set_item(
+                    "searchable_text",
+                    format!("row {r} synthetic agent bench text"),
+                )
+                .unwrap();
+                let predicates = PyDict::new_bound(py);
+                predicates.set_item("error_suffix", false).unwrap();
+                predicates.set_item("running_agent", r % 10 == 0).unwrap();
+                predicates.set_item("running_process", false).unwrap();
+                row.set_item("predicates", predicates).unwrap();
+                rows.append(row).unwrap();
+            }
+
+            const RUNS: usize = 10;
+            let mut samples_ms = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                let start = Instant::now();
+                let _ = py_compile_corpus_with_profile(py, &profile, &rows)
+                    .unwrap();
+                samples_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+            }
+            samples_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let median = samples_ms[samples_ms.len() / 2];
+            println!(
+                "compile_corpus_with_profile: {ROW_COUNT} rows x {FIELD_COUNT} fields -> \
+                 median {median:.2}ms over {RUNS} runs (min {:.2}ms, max {:.2}ms)",
+                samples_ms.first().unwrap(),
+                samples_ms.last().unwrap(),
+            );
         });
     }
 
