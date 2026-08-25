@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::wire::{reserved_relation_message, ArtifactLinkError};
 
-pub const ARTIFACT_RELATION_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_RELATION_WIRE_SCHEMA_VERSION: u64 = 2;
 
 /// Slugs that error with a pointer to `sase bead dep` and are never stored.
 pub const RESERVED_ARTIFACT_RELATION_SLUGS: &[&str] = &["blocks", "depends-on"];
@@ -18,14 +18,30 @@ pub struct ArtifactRelationWire {
     pub directed: bool,
     /// Who is allowed to write this slug in v1 (`prompt_ref`, `read`, `cli`).
     pub written_by: String,
+    /// One sentence naming what the source and target endpoints mean.
+    pub direction_note: String,
+    /// A correctly-directed worked example, written `source relation target`.
+    pub positive_example: String,
+    /// The same pair inverted (or otherwise misused), to disambiguate direction.
+    pub negative_example: String,
+    /// Guidance only, not a validation gate. Empty means no recommendation.
+    pub recommended_source_kinds: Vec<String>,
+    /// Guidance only, not a validation gate. Empty means no recommendation.
+    pub recommended_target_kinds: Vec<String>,
 }
 
 impl ArtifactRelationWire {
+    #[allow(clippy::too_many_arguments)]
     fn builtin(
         slug: &str,
         inverse: &str,
         directed: bool,
         written_by: &str,
+        direction_note: &str,
+        positive_example: &str,
+        negative_example: &str,
+        recommended_source_kinds: &[&str],
+        recommended_target_kinds: &[&str],
     ) -> Self {
         Self {
             schema_version: ARTIFACT_RELATION_WIRE_SCHEMA_VERSION,
@@ -33,6 +49,17 @@ impl ArtifactRelationWire {
             inverse: inverse.to_string(),
             directed,
             written_by: written_by.to_string(),
+            direction_note: direction_note.to_string(),
+            positive_example: positive_example.to_string(),
+            negative_example: negative_example.to_string(),
+            recommended_source_kinds: recommended_source_kinds
+                .iter()
+                .map(|kind| (*kind).to_string())
+                .collect(),
+            recommended_target_kinds: recommended_target_kinds
+                .iter()
+                .map(|kind| (*kind).to_string())
+                .collect(),
         }
     }
 }
@@ -40,26 +67,80 @@ impl ArtifactRelationWire {
 /// v1 builtin relations. Callers may concatenate plugins later.
 pub fn builtin_artifact_relations() -> Vec<ArtifactRelationWire> {
     vec![
-        ArtifactRelationWire::builtin("cites", "cited-by", true, "prompt_ref"),
-        ArtifactRelationWire::builtin("read", "read-by", true, "read"),
-        ArtifactRelationWire::builtin("related", "related", false, "cli"),
+        ArtifactRelationWire::builtin(
+            "cites",
+            "cited-by",
+            true,
+            "prompt_ref",
+            "The citing agent is the source; the cited artifact is the target.",
+            "agent:sase-tj.land cites plan:202608/artifact_link_durability_and_derivation.md",
+            "plan:202608/artifact_link_durability_and_derivation.md cites agent:sase-tj.land",
+            &["agent"],
+            &["plan", "research"],
+        ),
+        ArtifactRelationWire::builtin(
+            "read",
+            "read-by",
+            true,
+            "read",
+            "The reading agent is the source; the artifact it read is the target.",
+            "agent:sase-tj.land read research:202608/artifact_link_derivation.md",
+            "research:202608/artifact_link_derivation.md read agent:sase-tj.land",
+            &["agent"],
+            &[],
+        ),
+        ArtifactRelationWire::builtin(
+            "related",
+            "related",
+            false,
+            "cli",
+            "Undirected: the same fact either way, so source and target are \
+             interchangeable.",
+            "plan:202608/a.md related plan:202608/b.md",
+            "plan:202608/a.md related bead:sase-tw (imprecise -- prefer `implements` \
+             when a plan implements a bead's requirements)",
+            &[],
+            &[],
+        ),
         ArtifactRelationWire::builtin(
             "supersedes",
             "superseded-by",
             true,
             "cli",
+            "The replacement artifact is the source; the artifact it replaces is the \
+             target.",
+            "plan:202608/v2_design.md supersedes plan:202608/v1_design.md",
+            "plan:202608/v1_design.md supersedes plan:202608/v2_design.md",
+            &[],
+            &[],
         ),
         ArtifactRelationWire::builtin(
             "implements",
             "implemented-by",
             true,
             "cli",
+            "A plan implements a bead's requirements: the plan is the source, the \
+             bead is the target.",
+            "plan:202608/artifact_link_durability_and_derivation.md implements \
+             bead:sase-tw",
+            "bead:sase-tw implements \
+             plan:202608/artifact_link_durability_and_derivation.md",
+            &["plan"],
+            &["bead"],
         ),
         ArtifactRelationWire::builtin(
             "derives-from",
             "derived-into",
             true,
             "cli",
+            "The derived artifact is the source; the artifact it was derived from is \
+             the target.",
+            "research:202608/artifact_link_derivation.md derives-from \
+             research:202608/artifact_link_derivation__a.md",
+            "research:202608/artifact_link_derivation__a.md derives-from \
+             research:202608/artifact_link_derivation.md",
+            &["plan", "research"],
+            &["plan", "research"],
         ),
     ]
 }
@@ -148,6 +229,44 @@ mod tests {
         let cites = lookup_artifact_relation("cites").unwrap();
         assert!(cites.directed);
         assert_eq!(cites.inverse, "cited-by");
+    }
+
+    #[test]
+    fn every_builtin_documents_direction_and_examples() {
+        for relation in builtin_artifact_relations() {
+            assert!(
+                !relation.direction_note.is_empty(),
+                "{} is missing a direction note",
+                relation.slug
+            );
+            assert!(
+                !relation.positive_example.is_empty(),
+                "{} is missing a positive example",
+                relation.slug
+            );
+            assert!(
+                !relation.negative_example.is_empty(),
+                "{} is missing a negative example",
+                relation.slug
+            );
+            assert!(
+                relation.positive_example.contains(&relation.slug),
+                "{} positive example does not use its own slug",
+                relation.slug
+            );
+        }
+    }
+
+    #[test]
+    fn implements_settles_the_plan_bead_direction() {
+        let implements = lookup_artifact_relation("implements").unwrap();
+        assert_eq!(implements.inverse, "implemented-by");
+        assert_eq!(implements.recommended_source_kinds, ["plan"]);
+        assert_eq!(implements.recommended_target_kinds, ["bead"]);
+        assert!(implements.positive_example.starts_with("plan:"));
+        assert!(implements.positive_example.contains("implements bead:"));
+        assert!(implements.negative_example.starts_with("bead:"));
+        assert!(implements.negative_example.contains("implements plan:"));
     }
 
     #[test]
