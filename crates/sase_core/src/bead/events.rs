@@ -2085,6 +2085,7 @@ impl PendingEvent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_link_added(
     issues: &mut BTreeMap<String, IssueWire>,
     issue_id: &str,

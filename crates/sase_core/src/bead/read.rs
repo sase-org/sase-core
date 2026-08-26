@@ -21,7 +21,8 @@ use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, StatusWire,
 };
 use crate::artifact_link::{
-    ArtifactLinkRowWire, BeadLinkDirectionWire, ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ArtifactLinkRowWire, BeadLinkDirectionWire,
+    ARTIFACT_LINK_ROW_SCHEMA_VERSION,
 };
 use crate::artifact_ref::{resolve_artifact_ref_list, ArtifactRefContextWire};
 use crate::plan::resolve_plan_reference;
@@ -807,8 +808,7 @@ fn fallback_neighborhood_from_issues(
     for issue in issues {
         let own_ref = canonical_bead_ref(&issue.id);
         for link in &issue.links {
-            if !row_touches_bead(&own_ref, &link.target_ref, issue_id, issues)
-            {
+            if !row_touches_bead(&own_ref, &link.target_ref, issue_id, issues) {
                 continue;
             }
             let created_by = if !issue.owner.is_empty() {
