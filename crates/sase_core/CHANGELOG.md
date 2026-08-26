@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.7](https://github.com/sase-org/sase-core/compare/v0.32.6...v0.32.7) - 2026-08-26
+
+### Added
+
+- scan gate shell read metadata
+
 ## [0.32.6](https://github.com/sase-org/sase-core/compare/v0.32.5...v0.32.6) - 2026-08-26
 
 ### Added
