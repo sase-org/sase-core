@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.8](https://github.com/sase-org/sase-core/compare/v0.32.7...v0.32.8) - 2026-08-26
+
+### Added
+
+- *(artifact-links)* add projection relation builtins
+
 ## [0.32.7](https://github.com/sase-org/sase-core/compare/v0.32.6...v0.32.7) - 2026-08-26
 
 ### Added
