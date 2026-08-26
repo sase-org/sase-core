@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.6](https://github.com/sase-org/sase-core/compare/v0.32.5...v0.32.6) - 2026-08-26
+
+### Added
+
+- *(plan)* allow transient links frontmatter
+- *(bead-links)* track link direction and uses count in bead-owned link events
+
+### Fixed
+
+- restore sase-core check gate
+
 ## [0.32.5](https://github.com/sase-org/sase-core/compare/v0.32.4...v0.32.5) - 2026-08-25
 
 ### Added
