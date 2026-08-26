@@ -62,6 +62,7 @@ pub enum ArtifactLinkOriginWire {
     PromptRef,
     Read,
     Derived,
+    Projected,
 }
 
 impl ArtifactLinkOriginWire {
@@ -72,6 +73,7 @@ impl ArtifactLinkOriginWire {
             Self::PromptRef => "prompt_ref",
             Self::Read => "read",
             Self::Derived => "derived",
+            Self::Projected => "projected",
         }
     }
 
@@ -86,6 +88,7 @@ impl ArtifactLinkOriginWire {
             "prompt_ref" => Some(Self::PromptRef),
             "read" => Some(Self::Read),
             "derived" => Some(Self::Derived),
+            "projected" => Some(Self::Projected),
             _ => None,
         }
     }

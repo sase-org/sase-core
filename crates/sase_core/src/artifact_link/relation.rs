@@ -142,6 +142,30 @@ pub fn builtin_artifact_relations() -> Vec<ArtifactRelationWire> {
             &["plan", "research"],
             &["plan", "research"],
         ),
+        ArtifactRelationWire::builtin(
+            "produced-by",
+            "produced",
+            true,
+            "projection",
+            "The stitch is the source; the agent that produced it is the target.",
+            "stitch:sase@0123456789abcdef0123456789abcdef01234567 produced-by \
+             agent:sase-tj.land",
+            "agent:sase-tj.land produced-by \
+             stitch:sase@0123456789abcdef0123456789abcdef01234567",
+            &["stitch"],
+            &["agent"],
+        ),
+        ArtifactRelationWire::builtin(
+            "launched",
+            "launched-by",
+            true,
+            "projection",
+            "The chop is the source; the agent it launched is the target.",
+            "chop:refresh_docs/refresh_docs launched agent:sase-tj.land",
+            "agent:sase-tj.land launched chop:refresh_docs/refresh_docs",
+            &["chop"],
+            &["agent"],
+        ),
     ]
 }
 
@@ -221,6 +245,8 @@ mod tests {
                 "supersedes",
                 "implements",
                 "derives-from",
+                "produced-by",
+                "launched",
             ]
         );
         let related = lookup_artifact_relation("related").unwrap();
@@ -299,6 +325,26 @@ mod tests {
         assert_eq!(
             relation_label_from_perspective("related", false).unwrap(),
             "related"
+        );
+    }
+
+    #[test]
+    fn produced_by_and_launched_round_trip() {
+        assert_eq!(
+            relation_label_from_perspective("produced-by", true).unwrap(),
+            "produced-by"
+        );
+        assert_eq!(
+            relation_label_from_perspective("produced-by", false).unwrap(),
+            "produced"
+        );
+        assert_eq!(
+            relation_label_from_perspective("launched", true).unwrap(),
+            "launched"
+        );
+        assert_eq!(
+            relation_label_from_perspective("launched", false).unwrap(),
+            "launched-by"
         );
     }
 }
