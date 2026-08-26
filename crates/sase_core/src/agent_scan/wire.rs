@@ -191,6 +191,36 @@ pub struct DoneMarkerWire {
     /// mirroring `agent_meta.json`.
     #[serde(default)]
     pub monitor_followup_error: Option<String>,
+    /// Why a launched follow-up landed in a degraded workspace.
+    #[serde(default)]
+    pub monitor_followup_degraded_reason: Option<String>,
+    /// Durable artifact path the composed follow-up prompt was persisted to.
+    #[serde(default)]
+    pub monitor_followup_prompt_path: Option<String>,
+    #[serde(default)]
+    pub gate_id: Option<String>,
+    #[serde(default)]
+    pub gate_kind: Option<String>,
+    #[serde(default)]
+    pub gate_state: Option<String>,
+    #[serde(default)]
+    pub gate_elapsed_seconds: Option<f64>,
+    #[serde(default)]
+    pub gate_output_path: Option<String>,
+    #[serde(default)]
+    pub gate_output_truncated: bool,
+    #[serde(default)]
+    pub gate_bundle_path: Option<String>,
+    #[serde(default)]
+    pub gate_notification_id: Option<String>,
+    #[serde(default)]
+    pub gate_followup_outcome: Option<String>,
+    #[serde(default)]
+    pub gate_followup_error: Option<String>,
+    #[serde(default)]
+    pub gate_followup_degraded_reason: Option<String>,
+    #[serde(default)]
+    pub gate_followup_prompt_path: Option<String>,
 }
 
 /// Bounded JSON value stored under `agent_meta.json::output_variables`.
@@ -624,6 +654,64 @@ pub struct AgentMetaWire {
     /// when it could not be launched.
     #[serde(default)]
     pub monitor_followup_prompt_path: Option<String>,
+    #[serde(default)]
+    pub gate_id: Option<String>,
+    #[serde(default)]
+    pub gate_kind: Option<String>,
+    #[serde(default)]
+    pub gate_state: Option<String>,
+    #[serde(default)]
+    pub gate_start_status: Option<String>,
+    #[serde(default)]
+    pub gate_stop_status: Option<String>,
+    #[serde(default)]
+    pub gate_accent: Option<String>,
+    #[serde(default)]
+    pub gate_output_path: Option<String>,
+    #[serde(default)]
+    pub gate_output_truncated: bool,
+    #[serde(default)]
+    pub gate_creator_agent: Option<String>,
+    #[serde(default)]
+    pub gate_followup_agent: Option<String>,
+    #[serde(default)]
+    pub gate_next_action: Option<String>,
+    #[serde(default)]
+    pub gate_next_fork: Option<String>,
+    #[serde(default)]
+    pub gate_next_output: Option<String>,
+    #[serde(default)]
+    pub gate_next_model: Option<String>,
+    #[serde(default)]
+    pub gate_followup_outcome: Option<String>,
+    #[serde(default)]
+    pub gate_followup_error: Option<String>,
+    #[serde(default)]
+    pub gate_followup_degraded_reason: Option<String>,
+    #[serde(default)]
+    pub gate_followup_prompt_path: Option<String>,
+    #[serde(default)]
+    pub gate_elapsed_seconds: Option<f64>,
+    #[serde(default)]
+    pub gate_label: Option<String>,
+    #[serde(default)]
+    pub gate_reason: Option<String>,
+    #[serde(default)]
+    pub gate_timeout_seconds: Option<f64>,
+    #[serde(default)]
+    pub gate_request_fingerprint: Option<String>,
+    #[serde(default)]
+    pub gate_workspace_policy: Option<String>,
+    #[serde(default)]
+    pub gate_bundle_path: Option<String>,
+    #[serde(default)]
+    pub gate_notification_id: Option<String>,
+    #[serde(default)]
+    pub gate_decision_path: Option<String>,
+    #[serde(default)]
+    pub shell_kind: Option<String>,
+    #[serde(default)]
+    pub proc_id: Option<String>,
 }
 
 /// Compact projection of `running.json`.
@@ -1006,6 +1094,72 @@ mod tests {
     }
 
     #[test]
+    fn agent_meta_wire_round_trips_every_gate_field() {
+        let meta = AgentMetaWire {
+            name: Some("acme--gate".to_string()),
+            gate_id: Some("gate-1".to_string()),
+            gate_kind: Some("approval".to_string()),
+            gate_state: Some("pending".to_string()),
+            gate_start_status: Some("WAITING".to_string()),
+            gate_stop_status: Some("ANSWERED".to_string()),
+            gate_accent: Some("#0BCDEC".to_string()),
+            gate_output_path: Some("gate.out".to_string()),
+            gate_output_truncated: true,
+            gate_creator_agent: Some("acme--0".to_string()),
+            gate_followup_agent: Some("acme--1".to_string()),
+            gate_next_action: Some("Resume after gate.".to_string()),
+            gate_next_fork: Some("family".to_string()),
+            gate_next_output: Some("summary,details".to_string()),
+            gate_next_model: Some("@large".to_string()),
+            gate_followup_outcome: Some("launched".to_string()),
+            gate_followup_error: Some("claim moved late".to_string()),
+            gate_followup_degraded_reason: Some(
+                "workspace claim unavailable".to_string(),
+            ),
+            gate_followup_prompt_path: Some(
+                "artifacts/gate_followup.md".to_string(),
+            ),
+            gate_elapsed_seconds: Some(12.5),
+            gate_label: Some("approval/gate-1".to_string()),
+            gate_reason: Some("Need owner approval".to_string()),
+            gate_timeout_seconds: Some(600.0),
+            gate_request_fingerprint: Some("sha256:cafe".to_string()),
+            gate_workspace_policy: Some("inherit".to_string()),
+            gate_bundle_path: Some("gate_bundle.json".to_string()),
+            gate_notification_id: Some("notif-1".to_string()),
+            gate_decision_path: Some("gate_decision.md".to_string()),
+            shell_kind: Some("gate".to_string()),
+            proc_id: Some("proc-gate".to_string()),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&meta).unwrap();
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn agent_meta_wire_without_gate_fields_still_parses() {
+        let old_record = serde_json::json!({
+            "name": "pre-gate-agent",
+            "cl_name": "cl_alpha",
+        });
+
+        let decoded: AgentMetaWire =
+            serde_json::from_value(old_record).unwrap();
+
+        assert_eq!(decoded.name.as_deref(), Some("pre-gate-agent"));
+        assert_eq!(decoded.gate_id, None);
+        assert_eq!(decoded.gate_state, None);
+        assert!(!decoded.gate_output_truncated);
+        assert_eq!(decoded.gate_next_model, None);
+        assert_eq!(decoded.gate_followup_prompt_path, None);
+        assert_eq!(decoded.gate_decision_path, None);
+        assert_eq!(decoded.shell_kind, None);
+        assert_eq!(decoded.proc_id, None);
+    }
+
+    #[test]
     fn agent_meta_wire_round_trips_alias_trail_and_origin() {
         let meta = AgentMetaWire {
             name: Some("trail-agent".to_string()),
@@ -1091,6 +1245,41 @@ mod tests {
             status_label: Some("MONITORED".to_string()),
             monitor_followup_outcome: Some("not-launchable".to_string()),
             monitor_followup_error: Some("no lane to launch into".to_string()),
+            monitor_followup_degraded_reason: Some(
+                "claim transfer failed".to_string(),
+            ),
+            monitor_followup_prompt_path: Some(
+                "artifacts/monitor_followup.md".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&done).unwrap();
+        let decoded: DoneMarkerWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, done);
+    }
+
+    #[test]
+    fn done_marker_wire_round_trips_every_gate_field() {
+        let done = DoneMarkerWire {
+            outcome: Some("gated".to_string()),
+            gate_id: Some("gate-1".to_string()),
+            gate_kind: Some("approval".to_string()),
+            gate_state: Some("answered".to_string()),
+            gate_elapsed_seconds: Some(5.25),
+            status_label: Some("ANSWERED".to_string()),
+            gate_output_path: Some("gate.out".to_string()),
+            gate_output_truncated: true,
+            gate_bundle_path: Some("gate_bundle.json".to_string()),
+            gate_notification_id: Some("notif-1".to_string()),
+            gate_followup_outcome: Some("launched-degraded".to_string()),
+            gate_followup_error: Some("claim transfer failed".to_string()),
+            gate_followup_degraded_reason: Some(
+                "workspace already reclaimed".to_string(),
+            ),
+            gate_followup_prompt_path: Some(
+                "artifacts/gate_followup.md".to_string(),
+            ),
             ..Default::default()
         };
 
@@ -1113,5 +1302,11 @@ mod tests {
         assert_eq!(decoded.monitor_state, None);
         assert_eq!(decoded.monitor_exit_code, None);
         assert_eq!(decoded.status_label, None);
+        assert_eq!(decoded.monitor_followup_degraded_reason, None);
+        assert_eq!(decoded.monitor_followup_prompt_path, None);
+        assert_eq!(decoded.gate_id, None);
+        assert_eq!(decoded.gate_state, None);
+        assert!(!decoded.gate_output_truncated);
+        assert_eq!(decoded.gate_followup_prompt_path, None);
     }
 }

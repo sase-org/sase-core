@@ -1127,6 +1127,43 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         monitor_followup_prompt_path: coerce_str(
             data.get("monitor_followup_prompt_path"),
         ),
+        gate_id: coerce_str(data.get("gate_id")),
+        gate_kind: coerce_str(data.get("gate_kind")),
+        gate_state: coerce_str(data.get("gate_state")),
+        gate_start_status: coerce_str(data.get("gate_start_status")),
+        gate_stop_status: coerce_str(data.get("gate_stop_status")),
+        gate_accent: coerce_str(data.get("gate_accent")),
+        gate_output_path: coerce_str(data.get("gate_output_path")),
+        gate_output_truncated: coerce_bool_truthy(
+            data.get("gate_output_truncated"),
+        ),
+        gate_creator_agent: coerce_str(data.get("gate_creator_agent")),
+        gate_followup_agent: coerce_str(data.get("gate_followup_agent")),
+        gate_next_action: coerce_str(data.get("gate_next_action")),
+        gate_next_fork: coerce_str(data.get("gate_next_fork")),
+        gate_next_output: coerce_str(data.get("gate_next_output")),
+        gate_next_model: coerce_str(data.get("gate_next_model")),
+        gate_followup_outcome: coerce_str(data.get("gate_followup_outcome")),
+        gate_followup_error: coerce_str(data.get("gate_followup_error")),
+        gate_followup_degraded_reason: coerce_str(
+            data.get("gate_followup_degraded_reason"),
+        ),
+        gate_followup_prompt_path: coerce_str(
+            data.get("gate_followup_prompt_path"),
+        ),
+        gate_elapsed_seconds: coerce_float(data.get("gate_elapsed_seconds")),
+        gate_label: coerce_str(data.get("gate_label")),
+        gate_reason: coerce_str(data.get("gate_reason")),
+        gate_timeout_seconds: coerce_float(data.get("gate_timeout_seconds")),
+        gate_request_fingerprint: coerce_str(
+            data.get("gate_request_fingerprint"),
+        ),
+        gate_workspace_policy: coerce_str(data.get("gate_workspace_policy")),
+        gate_bundle_path: coerce_str(data.get("gate_bundle_path")),
+        gate_notification_id: coerce_str(data.get("gate_notification_id")),
+        gate_decision_path: coerce_str(data.get("gate_decision_path")),
+        shell_kind: coerce_str(data.get("shell_kind")),
+        proc_id: coerce_str(data.get("proc_id")),
     }
 }
 
@@ -1178,6 +1215,30 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
             data.get("monitor_followup_outcome"),
         ),
         monitor_followup_error: coerce_str(data.get("monitor_followup_error")),
+        monitor_followup_degraded_reason: coerce_str(
+            data.get("monitor_followup_degraded_reason"),
+        ),
+        monitor_followup_prompt_path: coerce_str(
+            data.get("monitor_followup_prompt_path"),
+        ),
+        gate_id: coerce_str(data.get("gate_id")),
+        gate_kind: coerce_str(data.get("gate_kind")),
+        gate_state: coerce_str(data.get("gate_state")),
+        gate_elapsed_seconds: coerce_float(data.get("gate_elapsed_seconds")),
+        gate_output_path: coerce_str(data.get("gate_output_path")),
+        gate_output_truncated: coerce_bool_truthy(
+            data.get("gate_output_truncated"),
+        ),
+        gate_bundle_path: coerce_str(data.get("gate_bundle_path")),
+        gate_notification_id: coerce_str(data.get("gate_notification_id")),
+        gate_followup_outcome: coerce_str(data.get("gate_followup_outcome")),
+        gate_followup_error: coerce_str(data.get("gate_followup_error")),
+        gate_followup_degraded_reason: coerce_str(
+            data.get("gate_followup_degraded_reason"),
+        ),
+        gate_followup_prompt_path: coerce_str(
+            data.get("gate_followup_prompt_path"),
+        ),
     }
 }
 
@@ -1389,6 +1450,98 @@ mod tests {
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
         assert_eq!(meta.monitor_id.as_deref(), Some("oldmon"));
         assert_eq!(meta.monitor_next_model, None);
+    }
+
+    #[test]
+    fn scanner_round_trips_gate_shell_metadata() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120200");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "acme--gate",
+                "agent_family": "acme",
+                "agent_family_role": "gate",
+                "gate_id": "gate-1",
+                "gate_kind": "approval",
+                "gate_state": "pending",
+                "gate_start_status": "WAITING",
+                "gate_stop_status": "ANSWERED",
+                "gate_accent": "#0BCDEC",
+                "gate_output_path": "gate.out",
+                "gate_output_truncated": true,
+                "gate_creator_agent": "acme--0",
+                "gate_followup_agent": "acme--1",
+                "gate_next_action": "Resume after gate.",
+                "gate_next_fork": "family",
+                "gate_next_output": "summary",
+                "gate_next_model": "@large",
+                "gate_followup_outcome": "launched",
+                "gate_followup_error": "claim moved late",
+                "gate_followup_degraded_reason": "workspace unavailable",
+                "gate_followup_prompt_path": "gate_followup.md",
+                "gate_elapsed_seconds": 2.5,
+                "gate_label": "approval/gate-1",
+                "gate_reason": "Need owner approval",
+                "gate_timeout_seconds": 600.0,
+                "gate_request_fingerprint": "sha256:cafe",
+                "gate_workspace_policy": "inherit",
+                "gate_bundle_path": "gate_bundle.json",
+                "gate_notification_id": "notif-1",
+                "gate_decision_path": "gate_decision.md",
+                "shell_kind": "gate",
+                "proc_id": "proc-gate"
+            }),
+        );
+        write_json(
+            &artifact.join("done.json"),
+            json!({
+                "outcome": "gated",
+                "gate_id": "gate-1",
+                "gate_kind": "approval",
+                "gate_state": "answered",
+                "gate_elapsed_seconds": 2.5,
+                "status_label": "ANSWERED",
+                "gate_output_path": "gate.out",
+                "gate_output_truncated": true,
+                "gate_bundle_path": "gate_bundle.json",
+                "gate_notification_id": "notif-1",
+                "gate_followup_outcome": "launched",
+                "gate_followup_error": "claim moved late",
+                "gate_followup_degraded_reason": "workspace unavailable",
+                "gate_followup_prompt_path": "gate_followup.md"
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let record = &snapshot.records[0];
+        let meta = record.agent_meta.as_ref().unwrap();
+        assert_eq!(meta.gate_id.as_deref(), Some("gate-1"));
+        assert_eq!(meta.gate_state.as_deref(), Some("pending"));
+        assert_eq!(meta.gate_next_model.as_deref(), Some("@large"));
+        assert!(meta.gate_output_truncated);
+        assert_eq!(
+            meta.gate_decision_path.as_deref(),
+            Some("gate_decision.md")
+        );
+        assert_eq!(meta.shell_kind.as_deref(), Some("gate"));
+        let done = record.done.as_ref().unwrap();
+        assert_eq!(done.gate_state.as_deref(), Some("answered"));
+        assert_eq!(done.gate_elapsed_seconds, Some(2.5));
+        assert!(done.gate_output_truncated);
+        assert_eq!(
+            done.gate_followup_prompt_path.as_deref(),
+            Some("gate_followup.md")
+        );
     }
 
     #[test]

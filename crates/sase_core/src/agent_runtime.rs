@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_scan::{AgentArtifactRecordWire, ACE_RUN_WORKFLOW_DIR};
 
 const MONITOR_FAMILY_ROLE: &str = "monitor";
+const GATE_FAMILY_ROLE: &str = "gate";
 
 /// Runtime-relevant projection of one agent artifact record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -277,6 +278,25 @@ pub(crate) fn is_real_monitor_member_record(
             .is_some_and(|id| !id.trim().is_empty())
 }
 
+/// Return whether *record* is the durable gate-shell member for its family.
+///
+/// `gate_id` may be inherited by later gate-associated follow-ups, so a real
+/// gate member must carry both the explicit gate role and a durable gate id.
+pub(crate) fn is_real_gate_member_record(
+    record: &AgentArtifactRecordWire,
+) -> bool {
+    let Some(meta) = record.agent_meta.as_ref() else {
+        return false;
+    };
+    meta.agent_family_role
+        .as_deref()
+        .is_some_and(|role| role.trim() == GATE_FAMILY_ROLE)
+        && meta
+            .gate_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+}
+
 fn is_runner_user_agent_kind(record: &AgentArtifactRecordWire) -> bool {
     if record.workflow_dir_name != ACE_RUN_WORKFLOW_DIR {
         return false;
@@ -327,6 +347,15 @@ pub fn is_runner_slot_occupying_record(
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
+    let gate = is_real_gate_member_record(record);
+    if gate
+        && meta
+            .gate_state
+            .as_deref()
+            .is_some_and(|state| state.trim() == "pending")
+    {
+        return false;
+    }
     let monitor = is_real_monitor_member_record(record);
     let started = if monitor {
         meta.pid.is_some()
@@ -1141,6 +1170,40 @@ mod tests {
     }
 
     #[test]
+    fn pending_gate_member_frees_its_runner_slot() {
+        let records = [occupancy_record(
+            "/gate",
+            serde_json::json!({
+                "agent_family": "fam",
+                "agent_family_role": "gate",
+                "gate_id": "gate-1",
+                "gate_state": "pending"
+            }),
+        )];
+
+        assert!(is_real_gate_member_record(&records[0]));
+        assert!(!is_runner_slot_occupying_record(&records[0], always_live));
+        assert_eq!(running_agent_slot_count(&records, always_live), 0);
+    }
+
+    #[test]
+    fn settled_gate_member_uses_ordinary_started_rule() {
+        let records = [occupancy_record(
+            "/gate",
+            serde_json::json!({
+                "agent_family": "fam",
+                "agent_family_role": "gate",
+                "gate_id": "gate-1",
+                "gate_state": "answered",
+                "run_started_at": serde_json::Value::Null
+            }),
+        )];
+
+        assert!(is_real_gate_member_record(&records[0]));
+        assert_eq!(running_agent_slot_count(&records, always_live), 0);
+    }
+
+    #[test]
     fn done_marker_and_dead_pid_members_do_not_occupy() {
         let mut records = [
             occupancy_record(
@@ -1194,6 +1257,22 @@ mod tests {
 
         assert!(!is_real_monitor_member_record(&records[0]));
         assert!(!is_real_monitor_member_record(&records[1]));
+        assert_eq!(running_agent_slot_count(&records, always_live), 0);
+    }
+
+    #[test]
+    fn inherited_gate_id_without_gate_role_uses_ordinary_started_rule() {
+        let records = [occupancy_record(
+            "/followup",
+            serde_json::json!({
+                "agent_family_role": "code",
+                "gate_id": "gate-1",
+                "gate_state": "pending",
+                "run_started_at": serde_json::Value::Null
+            }),
+        )];
+
+        assert!(!is_real_gate_member_record(&records[0]));
         assert_eq!(running_agent_slot_count(&records, always_live), 0);
     }
 

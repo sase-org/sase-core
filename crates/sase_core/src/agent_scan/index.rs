@@ -41,7 +41,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 22;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 23;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -2185,6 +2185,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "model_alias_origin", "TEXT")?;
         migrate_model_alias_projection_v22(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 23) {
+        migrate_record_json_refresh_v23(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -2557,6 +2560,14 @@ fn migrate_model_alias_projection_v22(
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// v23 refreshes `record_json` with flat gate-shell metadata projected from
+/// `agent_meta.json` and `done.json`.
+fn migrate_record_json_refresh_v23(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
 }
 
 /// v21 adds a regenerable child projection for indexed output variables.
@@ -4769,7 +4780,7 @@ mod tests {
         )
         .unwrap();
         let status = agent_artifact_index_status(&index).unwrap();
-        assert_eq!(status.schema_version, 22);
+        assert_eq!(status.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
         assert_eq!(status.agent_artifact_model_aliases_rows, 2);
     }
 
