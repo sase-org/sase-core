@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.10](https://github.com/sase-org/sase-core/compare/v0.32.9...v0.32.10) - 2026-08-27
+
+### Added
+
+- *(agent-scan)* add read-only index opens and a VACUUM binding
+
+### Other
+
+- *(agent-scan)* marshal artifact index directly to Python
+
 ## [0.32.9](https://github.com/sase-org/sase-core/compare/v0.32.8...v0.32.9) - 2026-08-27
 
 ### Added
