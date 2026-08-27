@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_clan_tribe::ClanTribeMemberWire;
@@ -257,6 +257,24 @@ pub struct AgentArtifactIndexStatusWire {
     pub hidden_terminal_rows_retained: u64,
     #[serde(default)]
     pub hidden_terminal_rows_prunable: u64,
+    /// Free pages left behind by deletes; never reclaimed without a VACUUM.
+    #[serde(default)]
+    pub freelist_pages: u64,
+    #[serde(default)]
+    pub freelist_bytes: u64,
+    #[serde(default)]
+    pub file_size_bytes: u64,
+}
+
+/// Outcome of one `VACUUM` compaction pass over the artifact index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexVacuumWire {
+    pub index_path: String,
+    pub freelist_pages_before: u64,
+    pub freelist_pages_after: u64,
+    pub file_size_bytes_before: u64,
+    pub file_size_bytes_after: u64,
+    pub bytes_reclaimed: u64,
 }
 
 /// Rebuild the index from the canonical artifact tree.
@@ -810,7 +828,7 @@ pub fn read_agent_artifact_index_meta(
     index_path: &Path,
     key: &str,
 ) -> Result<Option<String>, String> {
-    let conn = open_index(index_path)?;
+    let conn = open_index_read_only(index_path)?;
     conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
         row.get::<_, String>(0)
     })
@@ -833,15 +851,34 @@ pub fn write_agent_artifact_index_meta(
     Ok(())
 }
 
+/// Return `(page_count, freelist_count, page_size)` for *conn*.
+fn index_page_stats(conn: &Connection) -> Result<(u64, u64, u64), String> {
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let freelist_count: i64 = conn
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok((
+        page_count.max(0) as u64,
+        freelist_count.max(0) as u64,
+        page_size.max(0) as u64,
+    ))
+}
+
 /// Return lightweight row counts for the artifact index.
 pub fn agent_artifact_index_status(
     index_path: &Path,
 ) -> Result<AgentArtifactIndexStatusWire, String> {
-    let conn = open_index(index_path)?;
+    let conn = open_index_read_only(index_path)?;
     let retention = plan_hidden_terminal_retention(
         &conn,
         DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
     )?;
+    let (page_count, freelist_count, page_size) = index_page_stats(&conn)?;
     Ok(AgentArtifactIndexStatusWire {
         schema_version: read_index_schema_version(&conn)?,
         index_path: index_path.to_string_lossy().into_owned(),
@@ -863,6 +900,36 @@ pub fn agent_artifact_index_status(
             as u64,
         hidden_terminal_rows_retained: retention.retained_rows,
         hidden_terminal_rows_prunable: retention.prunable_rows,
+        freelist_pages: freelist_count,
+        freelist_bytes: freelist_count * page_size,
+        file_size_bytes: page_count * page_size,
+    })
+}
+
+/// Reclaim freelist pages left behind by deletes via `VACUUM`.
+///
+/// `VACUUM` rebuilds the database file into a fresh copy with no free
+/// pages; it does not remove or alter any row. Tooling only: nothing in
+/// this codebase calls this automatically, so running it against a live
+/// index is always an explicit, user-initiated action.
+pub fn vacuum_agent_artifact_index(
+    index_path: &Path,
+) -> Result<AgentArtifactIndexVacuumWire, String> {
+    let conn = open_index(index_path)?;
+    let (page_count_before, freelist_count_before, page_size) =
+        index_page_stats(&conn)?;
+    conn.execute_batch("VACUUM;").map_err(|e| e.to_string())?;
+    let (page_count_after, freelist_count_after, _) = index_page_stats(&conn)?;
+    let file_size_bytes_before = page_count_before * page_size;
+    let file_size_bytes_after = page_count_after * page_size;
+    Ok(AgentArtifactIndexVacuumWire {
+        index_path: index_path.to_string_lossy().into_owned(),
+        freelist_pages_before: freelist_count_before,
+        freelist_pages_after: freelist_count_after,
+        file_size_bytes_before,
+        file_size_bytes_after,
+        bytes_reclaimed: file_size_bytes_before
+            .saturating_sub(file_size_bytes_after),
     })
 }
 
@@ -873,7 +940,13 @@ pub fn query_agent_artifact_index(
     query: AgentArtifactIndexQueryWire,
     options: AgentArtifactScanOptionsWire,
 ) -> Result<AgentArtifactScanWire, String> {
-    let conn = open_index(index_path)?;
+    // Revalidate may write repaired rows back through repair_stale_rows_for_query;
+    // Cached never writes, so it can use the cheaper read-only open.
+    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+        open_index(index_path)?
+    } else {
+        open_index_read_only(index_path)?
+    };
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
     let project_filter = project_filter_for_scan(projects_root, &options);
@@ -987,7 +1060,7 @@ pub fn query_agent_output_variable_history(
         );
     }
 
-    let conn = open_index(index_path)?;
+    let conn = open_index_read_only(index_path)?;
     let exact_value_json = query
         .value_json
         .iter()
@@ -1051,7 +1124,13 @@ pub fn query_agent_alias_history(
         return Err("aliases must be a non-empty list".to_string());
     }
 
-    let conn = open_index(index_path)?;
+    // Revalidate may write refreshed rows back via refresh_alias_history_candidates;
+    // Cached never writes, so it can use the cheaper read-only open.
+    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+        open_index(index_path)?
+    } else {
+        open_index_read_only(index_path)?
+    };
     if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
         refresh_alias_history_candidates(
             &conn,
@@ -1396,7 +1475,7 @@ pub(crate) fn load_output_variable_occurrences(
         value_limit: 0,
         ..AgentOutputVariableHistoryQueryWire::default()
     };
-    let conn = open_index(index_path)?;
+    let conn = open_index_read_only(index_path)?;
     let rows =
         select_output_variable_occurrences(&conn, &query, &BTreeSet::new())?;
     let mut occurrences = Vec::new();
@@ -1904,7 +1983,7 @@ pub fn query_related_agent_artifact_dirs(
     artifact_dir: &Path,
     seed_timestamps: &[String],
 ) -> Result<Vec<String>, String> {
-    let conn = open_index(index_path)?;
+    let conn = open_index_read_only(index_path)?;
     let current_path =
         resolve_index_artifact_dir(&conn, &artifact_dir.to_string_lossy())?;
     let Some(current) =
@@ -2196,11 +2275,49 @@ fn open_index_with_busy_timeout(
     )
     .map_err(|e| e.to_string())?;
 
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
-        [AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()],
-    )
-    .map_err(|e| e.to_string())?;
+    // Every open used to rewrite this row unconditionally, including opens
+    // from callers that only ever read. Skip the write once the stored
+    // version already matches so a no-op open is actually a no-op.
+    if prior_version != Some(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION) {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+            [AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string()],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(conn)
+}
+
+/// Open the index for a query path that never writes.
+///
+/// `open_index` unconditionally opens READ_WRITE|CREATE, replays every
+/// `CREATE TABLE/INDEX IF NOT EXISTS` statement, and re-writes the
+/// `schema_version` row on every call, even for a logically read-only
+/// query. None of that belongs on a read path. Callers that only ever
+/// select rows should use this instead; callers that may revalidate or
+/// otherwise write must keep using `open_index`.
+///
+/// Falls back to `open_index` when the index file does not exist yet,
+/// since a read-only connection cannot create it and the first caller
+/// needs a valid (empty) schema to query against.
+fn open_index_read_only(index_path: &Path) -> Result<Connection, String> {
+    if !index_path.exists() {
+        return open_index(index_path);
+    }
+    let conn = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(DEFAULT_INDEX_BUSY_TIMEOUT)
+        .map_err(|e| e.to_string())?;
+    // A read-only connection cannot run migrations. If the on-disk schema
+    // is anything other than current (stale, corrupt, or not yet
+    // created), fall back to the migrating read-write open so a query
+    // path never reads against an un-migrated schema.
+    if read_index_schema_version(&conn).ok()
+        != Some(AGENT_ARTIFACT_INDEX_SCHEMA_VERSION)
+    {
+        drop(conn);
+        return open_index(index_path);
+    }
     Ok(conn)
 }
 
@@ -4783,6 +4900,111 @@ mod tests {
         let status = agent_artifact_index_status(&index).unwrap();
         assert_eq!(status.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
         assert_eq!(status.agent_artifact_model_aliases_rows, 2);
+    }
+
+    #[test]
+    fn read_only_open_falls_back_when_index_missing() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        assert!(!index.exists());
+
+        let conn = open_index_read_only(&index).unwrap();
+        assert_eq!(
+            read_index_schema_version(&conn).unwrap(),
+            AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+        );
+    }
+
+    #[test]
+    fn read_only_open_cannot_write() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        drop(open_index(&index).unwrap());
+
+        let conn = open_index_read_only(&index).unwrap();
+        let result = conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('probe', 'x')",
+            [],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_reports_freelist_and_file_size() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260827090000");
+        write_json(&dir.join("agent_meta.json"), json!({"name": "sized"}));
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let status = agent_artifact_index_status(&index).unwrap();
+        assert!(status.file_size_bytes > 0);
+        assert_eq!(
+            status.file_size_bytes,
+            std::fs::metadata(&index).unwrap().len(),
+        );
+    }
+
+    #[test]
+    fn vacuum_reclaims_freelist_pages_and_preserves_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        let padding = "x".repeat(4096);
+        let mut dirs = Vec::new();
+        for n in 0..50 {
+            let dir = artifact(&projects, &format!("202608270900{n:02}"));
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": format!("agent-{n}-{padding}")}),
+            );
+            dirs.push(dir);
+        }
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        // Remove all but one artifact dir from disk, then rebuild so the
+        // index reconciles away the missing rows, leaving real freelist
+        // pages behind for VACUUM to reclaim.
+        for dir in &dirs[1..] {
+            fs::remove_dir_all(dir).unwrap();
+        }
+        let reconciled = rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(reconciled.rows_indexed, 1);
+
+        let before = agent_artifact_index_status(&index).unwrap();
+        assert!(before.freelist_pages > 0);
+
+        let update = vacuum_agent_artifact_index(&index).unwrap();
+
+        assert_eq!(update.freelist_pages_before, before.freelist_pages);
+        assert_eq!(update.freelist_pages_after, 0);
+        assert!(update.file_size_bytes_after < update.file_size_bytes_before);
+        assert_eq!(
+            update.bytes_reclaimed,
+            update.file_size_bytes_before - update.file_size_bytes_after,
+        );
+
+        let after = agent_artifact_index_status(&index).unwrap();
+        assert_eq!(after.freelist_pages, 0);
+        // VACUUM never removes or alters surviving rows.
+        assert_eq!(after.agent_artifacts_rows, before.agent_artifacts_rows);
+        assert_eq!(after.agent_artifacts_rows, 1);
     }
 
     #[test]

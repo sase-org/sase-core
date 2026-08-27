@@ -30,6 +30,7 @@
 //! - `read_agent_artifact_index_meta(index_path: str, key: str) -> str | None`
 //! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
 //! - `agent_artifact_index_status(index_path: str) -> dict`
+//! - `vacuum_agent_artifact_index(index_path: str) -> dict`
 //! - `query_agent_artifact_index(index_path: str, projects_root: str, query: dict | None = None, options: dict | None = None) -> dict`
 //! - `agent_output_variable_history_wire_schema_version() -> int`
 //! - `query_agent_output_variable_history(index_path: str, query: dict | None = None) -> dict`
@@ -532,6 +533,7 @@ use sase_core::agent_scan::{
     scan_agent_artifacts as core_scan_agent_artifacts,
     terminalize_stale_active_agent_artifact_index_rows as core_terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row as core_upsert_agent_artifact_index_row,
+    vacuum_agent_artifact_index as core_vacuum_agent_artifact_index,
     write_agent_artifact_index_meta as core_write_agent_artifact_index_meta,
     AgentAliasHistoryQueryWire, AgentArtifactIndexQueryWire,
     AgentArtifactScanOptionsWire, AgentOutputVariableHistoryQueryWire,
@@ -2592,6 +2594,23 @@ fn py_agent_artifact_index_status<'py>(
         .allow_threads(|| core_agent_artifact_index_status(&index))
         .map_err(PyRuntimeError::new_err)?;
     let value = serde_json::to_value(&status).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Reclaim freelist pages in the persistent artifact index via `VACUUM`.
+#[pyfunction]
+#[pyo3(name = "vacuum_agent_artifact_index")]
+fn py_vacuum_agent_artifact_index<'py>(
+    py: Python<'py>,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let update = py
+        .allow_threads(|| core_vacuum_agent_artifact_index(&index))
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
@@ -10663,6 +10682,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_read_agent_artifact_index_meta, m)?)?;
     m.add_function(wrap_pyfunction!(py_write_agent_artifact_index_meta, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
+    m.add_function(wrap_pyfunction!(py_vacuum_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
