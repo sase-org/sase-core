@@ -991,6 +991,11 @@ use sase_core::{
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
     XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
+use serde::ser::{
+    self, Impossible, SerializeMap, SerializeSeq, SerializeStruct,
+    SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
+    SerializeTupleVariant, Serializer,
+};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[pyclass(name = "QueryCorpusHandle", module = "sase_core_rs")]
@@ -2652,10 +2657,7 @@ fn py_query_agent_artifact_index<'py>(
             core_query_agent_artifact_index(&index, &root, query_wire, opts)
         })
         .map_err(PyRuntimeError::new_err)?;
-    let value = serde_json::to_value(&snapshot).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
+    serialize_to_py(py, &snapshot)
 }
 
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
@@ -7925,6 +7927,697 @@ fn json_object_to_py<'py>(
     Ok(dict.into())
 }
 
+#[derive(Debug)]
+struct PySerializeError(String);
+
+impl std::fmt::Display for PySerializeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PySerializeError {}
+
+impl ser::Error for PySerializeError {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self(msg.to_string())
+    }
+}
+
+impl From<PyErr> for PySerializeError {
+    fn from(error: PyErr) -> Self {
+        Self(error.to_string())
+    }
+}
+
+fn serialize_to_py<'py, T>(py: Python<'py>, value: &T) -> PyResult<PyObject>
+where
+    T: serde::Serialize + ?Sized,
+{
+    value.serialize(PySerializer { py }).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })
+}
+
+#[derive(Clone, Copy)]
+struct PySerializer<'py> {
+    py: Python<'py>,
+}
+
+impl<'py> Serializer for PySerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+    type SerializeSeq = PyListSerializer<'py>;
+    type SerializeTuple = PyListSerializer<'py>;
+    type SerializeTupleStruct = PyListSerializer<'py>;
+    type SerializeTupleVariant = PyTupleVariantSerializer<'py>;
+    type SerializeMap = PyDictSerializer<'py>;
+    type SerializeStruct = PyDictSerializer<'py>;
+    type SerializeStructVariant = PyStructVariantSerializer<'py>;
+
+    fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
+        Ok(v.into_py(self.py))
+    }
+
+    fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
+        self.serialize_i64(i64::from(v))
+    }
+
+    fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
+        self.serialize_i64(i64::from(v))
+    }
+
+    fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
+        self.serialize_i64(i64::from(v))
+    }
+
+    fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
+        Ok(v.into_py(self.py))
+    }
+
+    fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
+        let narrowed = i64::try_from(v).map_err(|_| {
+            <PySerializeError as ser::Error>::custom(format!(
+                "integer out of JSON range: {v}"
+            ))
+        })?;
+        self.serialize_i64(narrowed)
+    }
+
+    fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
+        self.serialize_u64(u64::from(v))
+    }
+
+    fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
+        self.serialize_u64(u64::from(v))
+    }
+
+    fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
+        self.serialize_u64(u64::from(v))
+    }
+
+    fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
+        Ok(v.into_py(self.py))
+    }
+
+    fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
+        let narrowed = u64::try_from(v).map_err(|_| {
+            <PySerializeError as ser::Error>::custom(format!(
+                "integer out of JSON range: {v}"
+            ))
+        })?;
+        self.serialize_u64(narrowed)
+    }
+
+    fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
+        self.serialize_f64(f64::from(v))
+    }
+
+    fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
+        if v.is_finite() {
+            Ok(v.into_py(self.py))
+        } else {
+            Ok(self.py.None())
+        }
+    }
+
+    fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
+        self.serialize_str(&v.to_string())
+    }
+
+    fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
+        Ok(v.into_py(self.py))
+    }
+
+    fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok, Self::Error> {
+        let list = PyList::empty_bound(self.py);
+        for byte in v {
+            list.append(*byte).map_err(PySerializeError::from)?;
+        }
+        Ok(list.into())
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Ok(self.py.None())
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Ok(self.py.None())
+    }
+
+    fn serialize_unit_struct(
+        self,
+        _name: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Ok(self.py.None())
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.serialize_str(variant)
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        let dict = PyDict::new_bound(self.py);
+        dict.set_item(variant, value.serialize(self)?)
+            .map_err(PySerializeError::from)?;
+        Ok(dict.into())
+    }
+
+    fn serialize_seq(
+        self,
+        _len: Option<usize>,
+    ) -> Result<Self::SerializeSeq, Self::Error> {
+        Ok(PyListSerializer {
+            py: self.py,
+            list: PyList::empty_bound(self.py),
+        })
+    }
+
+    fn serialize_tuple(
+        self,
+        len: usize,
+    ) -> Result<Self::SerializeTuple, Self::Error> {
+        self.serialize_seq(Some(len))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        self.serialize_seq(Some(len))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Ok(PyTupleVariantSerializer {
+            py: self.py,
+            variant,
+            list: PyList::empty_bound(self.py),
+        })
+    }
+
+    fn serialize_map(
+        self,
+        _len: Option<usize>,
+    ) -> Result<Self::SerializeMap, Self::Error> {
+        Ok(PyDictSerializer {
+            py: self.py,
+            dict: PyDict::new_bound(self.py),
+            next_key: None,
+        })
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Ok(PyDictSerializer {
+            py: self.py,
+            dict: PyDict::new_bound(self.py),
+            next_key: None,
+        })
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Ok(PyStructVariantSerializer {
+            py: self.py,
+            variant,
+            dict: PyDict::new_bound(self.py),
+        })
+    }
+}
+
+struct PyListSerializer<'py> {
+    py: Python<'py>,
+    list: Bound<'py, PyList>,
+}
+
+impl<'py> SerializeSeq for PyListSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        self.list
+            .append(value.serialize(PySerializer { py: self.py })?)
+            .map_err(PySerializeError::from)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(self.list.into())
+    }
+}
+
+impl<'py> SerializeTuple for PyListSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        SerializeSeq::end(self)
+    }
+}
+
+impl<'py> SerializeTupleStruct for PyListSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        SerializeSeq::end(self)
+    }
+}
+
+struct PyTupleVariantSerializer<'py> {
+    py: Python<'py>,
+    variant: &'static str,
+    list: Bound<'py, PyList>,
+}
+
+impl<'py> SerializeTupleVariant for PyTupleVariantSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        self.list
+            .append(value.serialize(PySerializer { py: self.py })?)
+            .map_err(PySerializeError::from)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let dict = PyDict::new_bound(self.py);
+        dict.set_item(self.variant, self.list)
+            .map_err(PySerializeError::from)?;
+        Ok(dict.into())
+    }
+}
+
+struct PyDictSerializer<'py> {
+    py: Python<'py>,
+    dict: Bound<'py, PyDict>,
+    next_key: Option<String>,
+}
+
+impl<'py> SerializeMap for PyDictSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_key<T>(&mut self, key: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        if self.next_key.is_some() {
+            return Err(<PySerializeError as ser::Error>::custom(
+                "map key serialized before previous value",
+            ));
+        }
+        self.next_key = Some(key.serialize(PyMapKeySerializer)?);
+        Ok(())
+    }
+
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        let key = self.next_key.take().ok_or_else(|| {
+            <PySerializeError as ser::Error>::custom(
+                "map value serialized before key",
+            )
+        })?;
+        self.dict
+            .set_item(key, value.serialize(PySerializer { py: self.py })?)
+            .map_err(PySerializeError::from)
+    }
+
+    fn serialize_entry<K, V>(
+        &mut self,
+        key: &K,
+        value: &V,
+    ) -> Result<(), Self::Error>
+    where
+        K: ?Sized + serde::Serialize,
+        V: ?Sized + serde::Serialize,
+    {
+        self.dict
+            .set_item(
+                key.serialize(PyMapKeySerializer)?,
+                value.serialize(PySerializer { py: self.py })?,
+            )
+            .map_err(PySerializeError::from)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        if self.next_key.is_some() {
+            return Err(<PySerializeError as ser::Error>::custom(
+                "map key serialized without value",
+            ));
+        }
+        Ok(self.dict.into())
+    }
+}
+
+impl<'py> SerializeStruct for PyDictSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_field<T>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        self.dict
+            .set_item(key, value.serialize(PySerializer { py: self.py })?)
+            .map_err(PySerializeError::from)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        Ok(self.dict.into())
+    }
+}
+
+struct PyStructVariantSerializer<'py> {
+    py: Python<'py>,
+    variant: &'static str,
+    dict: Bound<'py, PyDict>,
+}
+
+impl<'py> SerializeStructVariant for PyStructVariantSerializer<'py> {
+    type Ok = PyObject;
+    type Error = PySerializeError;
+
+    fn serialize_field<T>(
+        &mut self,
+        key: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        self.dict
+            .set_item(key, value.serialize(PySerializer { py: self.py })?)
+            .map_err(PySerializeError::from)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let outer = PyDict::new_bound(self.py);
+        outer
+            .set_item(self.variant, self.dict)
+            .map_err(PySerializeError::from)?;
+        Ok(outer.into())
+    }
+}
+
+struct PyMapKeySerializer;
+
+impl Serializer for PyMapKeySerializer {
+    type Ok = String;
+    type Error = PySerializeError;
+    type SerializeSeq = Impossible<String, PySerializeError>;
+    type SerializeTuple = Impossible<String, PySerializeError>;
+    type SerializeTupleStruct = Impossible<String, PySerializeError>;
+    type SerializeTupleVariant = Impossible<String, PySerializeError>;
+    type SerializeMap = Impossible<String, PySerializeError>;
+    type SerializeStruct = Impossible<String, PySerializeError>;
+    type SerializeStructVariant = Impossible<String, PySerializeError>;
+
+    fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error> {
+        Ok(if v { "true" } else { "false" }.to_string())
+    }
+
+    fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_i16(self, v: i16) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_i32(self, v: i32) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_i64(self, v: i64) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_i128(self, v: i128) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_u8(self, v: u8) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_u16(self, v: u16) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_u32(self, v: u32) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_u128(self, v: u128) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
+        self.serialize_f64(f64::from(v))
+    }
+
+    fn serialize_f64(self, v: f64) -> Result<Self::Ok, Self::Error> {
+        if v.is_finite() {
+            Ok(serde_json::Number::from_f64(v)
+                .ok_or_else(|| {
+                    <PySerializeError as ser::Error>::custom(
+                        "non-finite map key",
+                    )
+                })?
+                .to_string())
+        } else {
+            Err(<PySerializeError as ser::Error>::custom(
+                "non-finite map key",
+            ))
+        }
+    }
+
+    fn serialize_char(self, v: char) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_str(self, v: &str) -> Result<Self::Ok, Self::Error> {
+        Ok(v.to_string())
+    }
+
+    fn serialize_bytes(self, _v: &[u8]) -> Result<Self::Ok, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_some<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_unit_struct(
+        self,
+        _name: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        Ok(variant.to_string())
+    }
+
+    fn serialize_newtype_struct<T>(
+        self,
+        _name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: ?Sized + serde::Serialize,
+    {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_seq(
+        self,
+        _len: Option<usize>,
+    ) -> Result<Self::SerializeSeq, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_tuple(
+        self,
+        _len: usize,
+    ) -> Result<Self::SerializeTuple, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_map(
+        self,
+        _len: Option<usize>,
+    ) -> Result<Self::SerializeMap, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        Err(<PySerializeError as ser::Error>::custom(
+            "map keys must serialize as strings",
+        ))
+    }
+}
+
 // --- Prompt frontmatter panel: schema & validation surface ---
 //
 // These four bindings expose the panel-oriented frontmatter API from
@@ -11268,6 +11961,62 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    fn py_dict_keys(dict: &Bound<'_, PyDict>) -> Vec<String> {
+        dict.keys()
+            .iter()
+            .map(|key| key.extract::<String>().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn direct_serializer_matches_json_bridge_for_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let value = json!({
+                "schema_version": 7,
+                "name": "agent",
+                "done": null,
+                "active": true,
+                "ratio": 1.25,
+                "records": [
+                    {"timestamp": "20260827120000", "tags": ["a", "b"]},
+                    {"timestamp": "20260827120100", "output": {"k": 1}},
+                ],
+            });
+            let legacy = json_value_to_py(py, &value).unwrap();
+            let direct = serialize_to_py(py, &value).unwrap();
+            assert_eq!(
+                py_to_json_value(legacy.bind(py)).unwrap(),
+                py_to_json_value(direct.bind(py)).unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn direct_serializer_matches_json_bridge_for_agent_scan_snapshot() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("projects");
+            fs::create_dir_all(&root).unwrap();
+            let snapshot = core_scan_agent_artifacts(
+                &root,
+                AgentArtifactScanOptionsWire::default(),
+            );
+            let value = serde_json::to_value(&snapshot).unwrap();
+            let legacy = json_value_to_py(py, &value).unwrap();
+            let direct = serialize_to_py(py, &snapshot).unwrap();
+            assert_eq!(
+                py_to_json_value(legacy.bind(py)).unwrap(),
+                py_to_json_value(direct.bind(py)).unwrap()
+            );
+
+            let legacy_dict = legacy.bind(py).downcast::<PyDict>().unwrap();
+            let direct_dict = direct.bind(py).downcast::<PyDict>().unwrap();
+            assert_eq!(py_dict_keys(direct_dict), py_dict_keys(legacy_dict));
+        });
     }
 
     fn git(repo: &Path, args: &[&str]) -> String {

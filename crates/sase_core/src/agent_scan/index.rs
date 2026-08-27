@@ -13,7 +13,9 @@ use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, Connection, OpenFlags, OptionalExtension,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_clan_tribe::ClanTribeMemberWire;
@@ -942,7 +944,8 @@ pub fn query_agent_artifact_index(
 ) -> Result<AgentArtifactScanWire, String> {
     // Revalidate may write repaired rows back through repair_stale_rows_for_query;
     // Cached never writes, so it can use the cheaper read-only open.
-    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
+    {
         open_index(index_path)?
     } else {
         open_index_read_only(index_path)?
@@ -1126,7 +1129,8 @@ pub fn query_agent_alias_history(
 
     // Revalidate may write refreshed rows back via refresh_alias_history_candidates;
     // Cached never writes, so it can use the cheaper read-only open.
-    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+    let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
+    {
         open_index(index_path)?
     } else {
         open_index_read_only(index_path)?
@@ -2304,8 +2308,11 @@ fn open_index_read_only(index_path: &Path) -> Result<Connection, String> {
     if !index_path.exists() {
         return open_index(index_path);
     }
-    let conn = Connection::open_with_flags(index_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| e.to_string())?;
+    let conn = Connection::open_with_flags(
+        index_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| e.to_string())?;
     conn.busy_timeout(DEFAULT_INDEX_BUSY_TIMEOUT)
         .map_err(|e| e.to_string())?;
     // A read-only connection cannot run migrations. If the on-disk schema
