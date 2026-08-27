@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.9](https://github.com/sase-org/sase-core/compare/v0.32.8...v0.32.9) - 2026-08-27
+
+### Added
+
+- *(agent-scan)* fold monitor_*/gate_* wire fields into nested family_shell at schema v7
+
 ## [0.32.8](https://github.com/sase-org/sase-core/compare/v0.32.7...v0.32.8) - 2026-08-26
 
 ### Added
