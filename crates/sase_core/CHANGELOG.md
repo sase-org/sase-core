@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.12](https://github.com/sase-org/sase-core/compare/v0.32.11...v0.32.12) - 2026-08-27
+
+### Added
+
+- *(agent-scan)* support windowed index reads
+
 ## [0.32.11](https://github.com/sase-org/sase-core/compare/v0.32.10...v0.32.11) - 2026-08-27
 
 ### Added
