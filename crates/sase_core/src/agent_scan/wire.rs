@@ -870,6 +870,23 @@ pub struct UsedXPromptWire {
     pub references: u64,
 }
 
+/// Payload shape for an indexed artifact record.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentArtifactRecordShapeWire {
+    #[default]
+    Full,
+    List,
+}
+
+impl AgentArtifactRecordShapeWire {
+    pub fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
+}
+
 /// One artifact directory's parsed markers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentArtifactRecordWire {
@@ -901,6 +918,11 @@ pub struct AgentArtifactRecordWire {
     pub used_xprompts: Vec<UsedXPromptWire>,
     #[serde(default)]
     pub has_done_marker: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "AgentArtifactRecordShapeWire::is_full"
+    )]
+    pub record_shape: AgentArtifactRecordShapeWire,
 }
 
 /// Authoritative resolved attributes for one represented clan generation.

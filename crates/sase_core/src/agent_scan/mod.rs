@@ -21,6 +21,7 @@ pub mod wire;
 pub use index::{
     agent_artifact_index_status, delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout,
+    load_agent_artifact_records,
     prune_hidden_terminal_agent_artifact_index_rows, query_agent_alias_history,
     query_agent_artifact_index, query_agent_output_variable_history,
     query_related_agent_artifact_dirs, read_agent_artifact_index_meta,
@@ -52,13 +53,13 @@ pub use selector::{
     OutputVariableSelectorError,
 };
 pub use wire::{
-    is_supported_workflow_dir, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentClanContextWire, AgentMetaWire,
-    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
-    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
-    AgentOutputVariableOccurrenceWire, AgentOutputVariableSelectorMatchWire,
-    AgentOutputVariableSelectorQueryWire,
+    is_supported_workflow_dir, AgentArtifactRecordShapeWire,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentClanContextWire,
+    AgentMetaWire, AgentOutputVariableHistoryQueryWire,
+    AgentOutputVariableHistoryWire, AgentOutputVariableKeyGroupWire,
+    AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
+    AgentOutputVariableSelectorMatchWire, AgentOutputVariableSelectorQueryWire,
     AgentOutputVariableSelectorResultWire, AgentOutputVariableValueGroupWire,
     DoneMarkerWire, FamilyShellGateWire, FamilyShellMonitorWire,
     FamilyShellWire, OutputVariableSelectorPathWire,

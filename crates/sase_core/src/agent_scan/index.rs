@@ -33,17 +33,17 @@ use super::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
 };
 use super::wire::{
-    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
-    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
-    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
-    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
-    DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
-    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
+    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
+    AgentArtifactScanWire, AgentMetaWire, AgentOutputVariableHistoryQueryWire,
+    AgentOutputVariableHistoryWire, AgentOutputVariableKeyGroupWire,
+    AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
+    AgentOutputVariableValueGroupWire, DoneMarkerWire, OutputVariableValue,
+    UsedXPromptWire, AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 23;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 24;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -211,6 +211,8 @@ pub struct AgentArtifactIndexQueryWire {
     /// `agent_meta.family_shell.id` on a `"monitor"`-kind shell).
     #[serde(default)]
     pub only_monitors: bool,
+    #[serde(default)]
+    pub record_shape: AgentArtifactRecordShapeWire,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -224,6 +226,7 @@ impl Default for AgentArtifactIndexQueryWire {
             include_hidden: false,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
+            record_shape: AgentArtifactRecordShapeWire::Full,
         }
     }
 }
@@ -705,25 +708,18 @@ fn repair_abandoned_agent_artifact_index_rows(
     conn: &mut Connection,
 ) -> Result<u64, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let pattern = format!("%\"outcome\":\"{ABANDONED_DONE_OUTCOME}\"%");
     let updates: Vec<(String, AgentArtifactRecordWire)> = {
         let mut stmt = tx
             .prepare(
                 "SELECT projects_root, hidden, cl_name, record_json \
                  FROM agent_artifacts \
                  WHERE has_done_marker = 1 \
-                   AND record_json LIKE ?1 \
-                   AND ( \
-                       hidden = 0 \
-                       OR record_json LIKE '%\"done\":{%\"hidden\":false%' \
-                       OR ( \
-                           (cl_name IS NULL OR cl_name = '' OR cl_name = 'unknown') \
-                           AND record_json LIKE '%\"agent_meta\":{%\"cl_name\":\"%' \
-                       ) \
-                   )",
+                   AND done_outcome = ?1",
             )
             .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([pattern]).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query([ABANDONED_DONE_OUTCOME])
+            .map_err(|e| e.to_string())?;
         let mut updates = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let projects_root: String =
@@ -851,6 +847,56 @@ pub fn write_agent_artifact_index_meta(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Load full indexed artifact records by canonical or alias artifact dir.
+pub fn load_agent_artifact_records(
+    index_path: &Path,
+    artifact_dirs: &[String],
+) -> Result<Vec<AgentArtifactRecordWire>, String> {
+    if artifact_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = open_index_read_only(index_path)?;
+    let mut resolved_dirs = Vec::new();
+    let mut unique_dirs = BTreeSet::new();
+    for artifact_dir in artifact_dirs {
+        let resolved = resolve_index_artifact_dir(&conn, artifact_dir)?;
+        resolved_dirs.push(resolved.clone());
+        unique_dirs.insert(resolved);
+    }
+
+    let unique_dirs: Vec<String> = unique_dirs.into_iter().collect();
+    let mut records_by_dir = BTreeMap::new();
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    for chunk in unique_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT artifact_dir, record_json FROM agent_artifacts \
+             WHERE artifact_dir IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let Ok(mut record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            record.record_shape = AgentArtifactRecordShapeWire::Full;
+            records_by_dir.insert(artifact_dir, record);
+        }
+    }
+
+    Ok(resolved_dirs
+        .into_iter()
+        .filter_map(|dir| records_by_dir.get(&dir).cloned())
+        .collect())
 }
 
 /// Return `(page_count, freelist_count, page_size)` for *conn*.
@@ -1040,6 +1086,11 @@ pub fn query_agent_artifact_index(
             ))
     });
     stats.artifact_dirs_visited = records.len() as u64;
+    if query.record_shape == AgentArtifactRecordShapeWire::List {
+        for record in &mut records {
+            project_record_for_list(record);
+        }
+    }
     let clan_context = select_clan_context(&conn, &records)?;
 
     Ok(AgentArtifactScanWire {
@@ -1050,6 +1101,37 @@ pub fn query_agent_artifact_index(
         records,
         clan_context,
     })
+}
+
+fn project_record_for_list(record: &mut AgentArtifactRecordWire) {
+    if let Some(meta) = record.agent_meta.as_mut() {
+        meta.linked_repos.clear();
+    }
+    if let Some(done) = record.done.as_mut() {
+        if let Some(output) = done.step_output.as_mut() {
+            project_output_for_list(output);
+        }
+    }
+    for step in &mut record.prompt_steps {
+        if let Some(output) = step.output.as_mut() {
+            project_output_for_list(output);
+        }
+    }
+    if let Some(workflow_state) = record.workflow_state.as_mut() {
+        for step in &mut workflow_state.steps {
+            if let Some(output) = step.output.as_mut() {
+                project_output_for_list(output);
+            }
+        }
+    }
+    record.record_shape = AgentArtifactRecordShapeWire::List;
+}
+
+fn project_output_for_list(
+    output: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    output.remove("_raw");
+    output.remove("_data");
 }
 
 /// Query grouped output-variable history from the persistent artifact index.
@@ -2084,6 +2166,7 @@ fn open_index_with_busy_timeout(
             llm_provider TEXT,
             started_at TEXT,
             finished_at REAL,
+            done_outcome TEXT,
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
@@ -2271,9 +2354,15 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 23) {
         migrate_record_json_refresh_v23(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 24) {
+        ensure_agent_artifacts_column(&conn, "done_outcome", "TEXT")?;
+        migrate_done_outcome_projection_v24(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_done_outcome \
+         ON agent_artifacts(done_outcome); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
          ON agent_artifacts(agent_clan, agent_clan_generation, timestamp);",
     )
@@ -2694,6 +2783,43 @@ fn migrate_record_json_refresh_v23(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v24 adds the scalar `done_outcome` projection for abandoned-row repair.
+fn migrate_done_outcome_projection_v24(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>)> = {
+        let mut stmt = tx
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut outcomes = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let Ok(record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                continue;
+            };
+            let outcome =
+                record.done.as_ref().and_then(|done| done.outcome.clone());
+            outcomes.push((artifact_dir, outcome));
+        }
+        outcomes
+    };
+    for (artifact_dir, outcome) in rows {
+        tx.execute(
+            "UPDATE agent_artifacts SET done_outcome = ?1 \
+             WHERE artifact_dir = ?2",
+            params![outcome, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -2738,6 +2864,10 @@ fn upsert_record(
 ) -> Result<(), String> {
     let summary = RecordSummary::from_record(record);
     let signatures = MarkerSignatures::from_artifact_dir(&record.artifact_dir);
+    let done_outcome = record
+        .done
+        .as_ref()
+        .and_then(|done| done.outcome.as_deref());
     let record_json =
         serde_json::to_string(record).map_err(|e| e.to_string())?;
     conn.execute(
@@ -2754,13 +2884,13 @@ fn upsert_record(
             running_sig, waiting_sig, pending_question_sig,
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
-            model_alias_origin, indexed_at
+            model_alias_origin, done_outcome, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, ?46, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -2807,6 +2937,7 @@ fn upsert_record(
             clan_summary = excluded.clan_summary,
             record_json = excluded.record_json,
             model_alias_origin = excluded.model_alias_origin,
+            done_outcome = excluded.done_outcome,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -2855,6 +2986,7 @@ fn upsert_record(
             summary.clan_summary,
             record_json,
             summary.model_alias_origin,
+            done_outcome,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -3224,12 +3356,7 @@ fn refresh_stale_rows(
     where_sql: &str,
     options: &AgentArtifactScanOptionsWire,
 ) -> Result<(), String> {
-    let sql = format!(
-        "SELECT artifact_dir, projects_root, \
-         agent_meta_sig, done_sig, running_sig, waiting_sig, \
-         pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig FROM agent_artifacts {where_sql}"
-    );
+    let sql = refresh_stale_rows_sql(where_sql);
     let mut pending: Vec<PendingRefreshRow> = Vec::new();
     {
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -3253,6 +3380,15 @@ fn refresh_stale_rows(
         }
     }
     Ok(())
+}
+
+fn refresh_stale_rows_sql(where_sql: &str) -> String {
+    format!(
+        "SELECT artifact_dir, projects_root, \
+         agent_meta_sig, done_sig, running_sig, waiting_sig, \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig, xprompts_sig FROM agent_artifacts {where_sql}"
+    )
 }
 
 fn select_records(
@@ -4094,6 +4230,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4146,6 +4283,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: true,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4160,6 +4298,284 @@ mod tests {
                 .and_then(|shell| shell.id.as_deref()),
             Some("m4kq")
         );
+    }
+
+    #[test]
+    fn list_record_shape_projects_only_heavy_leaves() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827110000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "projected",
+                "cl_name": "cl_projected",
+                "linked_repos": [
+                    {"name": "core", "workspace_dir": "/tmp/core"}
+                ]
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "projected",
+                "cl_name": "cl_projected",
+                "step_output": {
+                    "_raw": "done raw",
+                    "_data": {"body": "done data"},
+                    "meta_commit_message": "keep",
+                    "meta_commits": [{"sha": "abc123"}]
+                }
+            }),
+        );
+        write_json(
+            &artifact_dir.join("workflow_state.json"),
+            json!({
+                "workflow_name": "projected",
+                "status": "completed",
+                "steps": [
+                    {
+                        "name": "build",
+                        "status": "completed",
+                        "output": {
+                            "_raw": "workflow raw",
+                            "_data": "workflow data",
+                            "meta_workflow": "keep"
+                        }
+                    }
+                ]
+            }),
+        );
+        write_json(
+            &artifact_dir.join("prompt_step_001.json"),
+            json!({
+                "workflow_name": "projected",
+                "step_name": "build",
+                "step_type": "exec",
+                "status": "completed",
+                "output": {
+                    "_raw": "prompt raw",
+                    "_data": "prompt data",
+                    "meta_prompt": "keep"
+                }
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let full = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: true,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let list = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                record_shape: AgentArtifactRecordShapeWire::List,
+                ..AgentArtifactIndexQueryWire::default()
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(full.records.len(), 1);
+        assert_eq!(list.records.len(), 1);
+        let full_record = &full.records[0];
+        let list_record = &list.records[0];
+        assert_eq!(
+            full_record.record_shape,
+            AgentArtifactRecordShapeWire::Full
+        );
+        assert_eq!(
+            list_record.record_shape,
+            AgentArtifactRecordShapeWire::List
+        );
+        assert!(serde_json::to_value(full_record)
+            .unwrap()
+            .get("record_shape")
+            .is_none());
+        assert_eq!(
+            serde_json::to_value(list_record).unwrap()["record_shape"],
+            json!("list")
+        );
+
+        let mut expected = full_record.clone();
+        project_record_for_list(&mut expected);
+        assert_eq!(list_record, &expected);
+        assert_eq!(
+            list_record.prompt_steps.len(),
+            full_record.prompt_steps.len()
+        );
+        assert_eq!(
+            list_record.workflow_state.as_ref().unwrap().steps.len(),
+            full_record.workflow_state.as_ref().unwrap().steps.len()
+        );
+        assert_eq!(
+            list_record
+                .done
+                .as_ref()
+                .unwrap()
+                .step_output
+                .as_ref()
+                .unwrap()
+                .get("meta_commit_message"),
+            Some(&json!("keep"))
+        );
+        assert!(list_record
+            .done
+            .as_ref()
+            .unwrap()
+            .step_output
+            .as_ref()
+            .unwrap()
+            .get("_raw")
+            .is_none());
+        assert!(list_record
+            .agent_meta
+            .as_ref()
+            .unwrap()
+            .linked_repos
+            .is_empty());
+
+        let stored_json: String = Connection::open(&index)
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_value: serde_json::Value =
+            serde_json::from_str(&stored_json).unwrap();
+        assert!(stored_value.get("record_shape").is_none());
+        let stored_record: AgentArtifactRecordWire =
+            serde_json::from_str(&stored_json).unwrap();
+        assert_eq!(serde_json::to_string(&stored_record).unwrap(), stored_json);
+    }
+
+    #[test]
+    fn load_agent_artifact_records_returns_full_records_for_dirs_and_aliases() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827111500");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "hydrate",
+                "linked_repos": [{"name": "core"}]
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": "hydrate",
+                "step_output": {"_raw": "full body", "meta_key": "keep"}
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let alias = "/tmp/alias/hydrate";
+        Connection::open(&index)
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_artifact_aliases(alias_path, artifact_dir) \
+                 VALUES (?1, ?2)",
+                params![alias, artifact_dir.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let projected = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::List,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(projected.records.len(), 1);
+        assert!(projected.records[0]
+            .done
+            .as_ref()
+            .unwrap()
+            .step_output
+            .as_ref()
+            .unwrap()
+            .get("_raw")
+            .is_none());
+
+        let loaded = load_agent_artifact_records(
+            &index,
+            &[
+                artifact_dir.to_string_lossy().into_owned(),
+                alias.to_string(),
+                "/tmp/missing".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(loaded.len(), 2);
+        for record in loaded {
+            assert_eq!(record.record_shape, AgentArtifactRecordShapeWire::Full);
+            assert_eq!(record.artifact_dir, artifact_dir.to_string_lossy());
+            assert_eq!(
+                record
+                    .done
+                    .as_ref()
+                    .unwrap()
+                    .step_output
+                    .as_ref()
+                    .unwrap()
+                    .get("_raw"),
+                Some(&json!("full body"))
+            );
+            assert_eq!(
+                record.agent_meta.as_ref().unwrap().linked_repos.len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_stale_rows_signature_query_does_not_select_record_json() {
+        let sql = refresh_stale_rows_sql("WHERE hidden = 1");
+        assert!(sql.contains("agent_meta_sig"));
+        assert!(sql.contains("prompt_steps_sig"));
+        assert!(!sql.contains("record_json"));
     }
 
     #[test]
@@ -5759,6 +6175,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -5805,6 +6222,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -5857,6 +6275,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -5945,6 +6364,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6002,6 +6422,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6053,6 +6474,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6071,6 +6493,7 @@ mod tests {
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6170,6 +6593,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire {
                 only_projects: vec!["proj".to_string()],
@@ -6210,6 +6634,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6285,6 +6710,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6342,6 +6768,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6386,6 +6813,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6442,6 +6870,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6497,6 +6926,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6673,6 +7103,59 @@ mod tests {
     }
 
     #[test]
+    fn schema_v24_upgrade_backfills_done_outcome_projection() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827113000");
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "abandoned",
+                "finished_at": 1779999999.0,
+                "name": "abandoned"
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_agent_artifacts_done_outcome;
+                 ALTER TABLE agent_artifacts DROP COLUMN done_outcome;
+                 INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '23');",
+            )
+            .unwrap();
+        }
+
+        drop(open_index(&index).unwrap());
+
+        let conn = Connection::open(&index).unwrap();
+        let outcome: Option<String> = conn
+            .query_row(
+                "SELECT done_outcome FROM agent_artifacts \
+                 WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome.as_deref(), Some("abandoned"));
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+    }
+
+    #[test]
     fn terminalize_stale_active_rows_hides_abandoned_record() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
@@ -6712,6 +7195,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6730,6 +7214,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6748,6 +7233,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6766,6 +7252,7 @@ mod tests {
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6904,6 +7391,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6922,6 +7410,7 @@ mod tests {
                 include_hidden: true,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6984,6 +7473,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7036,6 +7526,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7093,6 +7584,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7110,6 +7602,7 @@ mod tests {
             include_hidden: false,
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
+            record_shape: AgentArtifactRecordShapeWire::Full,
         }
     }
 
@@ -7328,6 +7821,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7371,6 +7865,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7398,6 +7893,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7445,6 +7941,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7503,6 +8000,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7528,6 +8026,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7578,6 +8077,7 @@ mod tests {
                 include_hidden: false,
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
             },
             AgentArtifactScanOptionsWire::default(),
         )

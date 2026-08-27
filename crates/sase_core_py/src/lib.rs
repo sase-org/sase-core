@@ -516,6 +516,7 @@ use sase_core::agent_scan::{
     collect_workflow_artifact_candidates as core_collect_workflow_artifact_candidates,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
+    load_agent_artifact_records as core_load_agent_artifact_records,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     parse_output_variable_selector as core_parse_output_variable_selector,
     prune_hidden_terminal_agent_artifact_index_rows as core_prune_hidden_terminal_agent_artifact_index_rows,
@@ -2658,6 +2659,23 @@ fn py_query_agent_artifact_index<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     serialize_to_py(py, &snapshot)
+}
+
+/// Load full scanner-shaped artifact records by artifact dir.
+#[pyfunction]
+#[pyo3(name = "load_agent_artifact_records")]
+fn py_load_agent_artifact_records<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    artifact_dirs: Vec<String>,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let records = py
+        .allow_threads(|| {
+            core_load_agent_artifact_records(&index, &artifact_dirs)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    serialize_to_py(py, &records)
 }
 
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
@@ -11377,6 +11395,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_vacuum_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

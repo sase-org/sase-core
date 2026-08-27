@@ -27,12 +27,13 @@ use super::layout::{
     resolve_agent_artifact_path,
 };
 use super::wire::{
-    is_supported_workflow_dir, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, FamilyShellGateWire,
-    FamilyShellMonitorWire, FamilyShellWire, OutputVariableValue,
-    PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
+    is_supported_workflow_dir, AgentArtifactRecordShapeWire,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
+    DoneMarkerWire, FamilyShellGateWire, FamilyShellMonitorWire,
+    FamilyShellWire, OutputVariableValue, PendingQuestionMarkerWire,
+    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
+    UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
@@ -625,6 +626,7 @@ fn scan_artifact_dir(
         raw_prompt_snippet,
         used_xprompts,
         has_done_marker,
+        record_shape: AgentArtifactRecordShapeWire::Full,
     }
 }
 
